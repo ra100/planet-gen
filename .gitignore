@@ -1,0 +1,41 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Rust
+target/
+*.rs.bk
+
+# C++
+build/
+cmake-build-*/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+
+# Node (if WebGPU/TypeScript)
+node_modules/
+dist/
+
+# GPU shader compiled artifacts
+*.spv
+
+# Generated textures / output
+output/
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Environment
+.env
+.env.*
