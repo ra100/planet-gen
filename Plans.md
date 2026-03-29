@@ -11,10 +11,10 @@ Bootstrap the Rust project, get wgpu device initialization working, and prove co
 
 | Task | 内容 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
-| 1.1 | Rust project init: `cargo init`, add wgpu, egui/eframe, bytemuck, image, exr crate dependencies | `cargo build` succeeds with all deps | - | cc:TODO |
-| 1.2 | wgpu device singleton: init adapter + device + queue at startup, store in app state | Unit test: device initializes and reports adapter name | 1.1 | cc:TODO |
-| 1.3 | Minimal compute shader: WGSL shader that writes a gradient to a 256×256 storage texture | Test: shader dispatches, readback buffer contains expected gradient values | 1.2 | cc:TODO |
-| 1.4 | egui app shell: eframe window with a sidebar panel (placeholder sliders) and a main area displaying the compute shader output as a texture | App launches, shows gradient texture in main area and sliders in sidebar | 1.3 | cc:TODO |
+| 1.1 | Rust project init: `cargo init`, add wgpu, egui/eframe, bytemuck, image, exr crate dependencies | `cargo build` succeeds with all deps | - | cc:完了 [9d4314e] |
+| 1.2 | wgpu device singleton: init adapter + device + queue at startup, store in app state | Unit test: device initializes and reports adapter name | 1.1 | cc:完了 [7a188d2] |
+| 1.3 | Minimal compute shader: WGSL shader that writes a gradient to a 256×256 storage texture | Test: shader dispatches, readback buffer contains expected gradient values | 1.2 | cc:完了 [35931ad] |
+| 1.4 | egui app shell: eframe window with a sidebar panel (placeholder sliders) and a main area displaying the compute shader output as a texture | App launches, shows gradient texture in main area and sliders in sidebar | 1.3 | cc:完了 [516a8d7] |
 
 ---
 
