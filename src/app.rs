@@ -2,7 +2,7 @@ use eframe::egui;
 use std::sync::Arc;
 
 use crate::gpu::GpuContext;
-use crate::planet::{DerivedProperties, PlanetParams};
+use crate::planet::{DerivedProperties, PlanetParams, TectonicRegime};
 use crate::preview::PreviewRenderer;
 use crate::terrain::{self, TerrainParams};
 
@@ -13,6 +13,7 @@ pub struct PlanetGenApp {
     params: PlanetParams,
     derived: DerivedProperties,
     rotation_y: f32,
+    rotation_x: f32,
     needs_regenerate: bool,
 }
 
@@ -28,22 +29,54 @@ impl PlanetGenApp {
             params,
             derived,
             rotation_y: 0.0,
+            rotation_x: 0.0,
             needs_regenerate: true,
         }
     }
 
-    fn generate_preview(&mut self, ctx: &egui::Context) {
-        let terrain_params = TerrainParams {
-            resolution: 256,
-            seed: self.params.seed,
-            ..Default::default()
+    fn terrain_params_from_planet(&self) -> TerrainParams {
+        // Map derived planet properties to terrain generation parameters
+        let frequency = match self.derived.tectonic_regime {
+            TectonicRegime::PlateTectonics => 1.5, // More varied terrain
+            TectonicRegime::StagnantLid => 0.8,    // Smoother, older surface
         };
 
-        let terrain_data = terrain::generate_terrain(&self.gpu, &terrain_params);
+        // Heavier planets → slightly higher amplitude (more relief)
+        let amplitude = 0.8 + 0.4 * self.params.mass_earth.min(3.0) / 3.0;
+
+        // More octaves for active surfaces
+        let octaves = match self.derived.tectonic_regime {
+            TectonicRegime::PlateTectonics => 8,
+            TectonicRegime::StagnantLid => 6,
+        };
+
+        TerrainParams {
+            resolution: 256,
+            seed: self.params.seed,
+            frequency,
+            amplitude,
+            octaves,
+            lacunarity: 2.0,
+            gain: 0.5,
+            face: 0,
+        }
+    }
+
+    fn generate_preview(&mut self, ctx: &egui::Context) {
+        let terrain_params = self.terrain_params_from_planet();
+        let mut terrain_data = terrain::generate_terrain(&self.gpu, &terrain_params);
+
+        // Normalize heights to [-1, 1] so color mapping works for any seed/params
+        normalize_terrain(&mut terrain_data);
+
         let size = self.preview_renderer.size;
-        let pixels =
-            self.preview_renderer
-                .render(&self.gpu, &terrain_data, self.rotation_y);
+        let pixels = self.preview_renderer.render(
+            &self.gpu,
+            &terrain_data,
+            self.rotation_y,
+            self.rotation_x,
+            self.derived.ocean_fraction,
+        );
 
         let image =
             egui::ColorImage::from_rgba_unmultiplied([size as usize, size as usize], &pixels);
@@ -59,6 +92,30 @@ impl PlanetGenApp {
 
     fn update_derived(&mut self) {
         self.derived = DerivedProperties::from_params(&self.params);
+    }
+}
+
+/// Normalize all face heightmaps to [-1, 1] range.
+fn normalize_terrain(terrain: &mut terrain::TerrainData) {
+    let mut global_min = f32::INFINITY;
+    let mut global_max = f32::NEG_INFINITY;
+
+    for face in &terrain.faces {
+        for &v in face {
+            global_min = global_min.min(v);
+            global_max = global_max.max(v);
+        }
+    }
+
+    let range = global_max - global_min;
+    if range < 1e-6 {
+        return;
+    }
+
+    for face in &mut terrain.faces {
+        for v in face.iter_mut() {
+            *v = (*v - global_min) / range * 2.0 - 1.0;
+        }
     }
 }
 
@@ -179,31 +236,42 @@ impl eframe::App for PlanetGenApp {
                     });
 
                 ui.separator();
-
-                if ui
-                    .add(
-                        egui::Slider::new(&mut self.rotation_y, 0.0..=std::f32::consts::TAU)
-                            .text("View rotation"),
-                    )
-                    .changed()
-                {
-                    self.needs_regenerate = true;
-                }
-
-                ui.separator();
                 ui.small(format!("GPU: {}", self.gpu.adapter_name()));
+                ui.small("Drag preview to rotate");
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some(ref tex) = self.texture_handle {
                 let available = ui.available_size();
-                let size = available.x.min(available.y).min(512.0);
-                ui.centered_and_justified(|ui| {
-                    ui.image(egui::load::SizedTexture::new(
-                        tex.id(),
-                        egui::Vec2::splat(size),
-                    ));
-                });
+                let size = available.x.min(available.y);
+
+                // Allocate interactive area for drag-to-rotate
+                let (response, painter) = ui.allocate_painter(
+                    egui::Vec2::splat(size),
+                    egui::Sense::click_and_drag(),
+                );
+
+                // Draw the planet texture centered in the allocated area
+                let rect = response.rect;
+                painter.image(
+                    tex.id(),
+                    rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+
+                // Handle drag rotation
+                if response.dragged() {
+                    let delta = response.drag_delta();
+                    self.rotation_y += delta.x * 0.01;
+                    self.rotation_x -= delta.y * 0.01;
+                    // Clamp vertical rotation
+                    self.rotation_x = self.rotation_x.clamp(
+                        -std::f32::consts::FRAC_PI_2 + 0.1,
+                        std::f32::consts::FRAC_PI_2 - 0.1,
+                    );
+                    self.needs_regenerate = true;
+                }
             } else {
                 ui.centered_and_justified(|ui| {
                     ui.label("Generating preview...");

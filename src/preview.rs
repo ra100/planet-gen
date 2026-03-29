@@ -3,14 +3,14 @@ use crate::terrain::TerrainData;
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
-const PREVIEW_SIZE: u32 = 512;
+const PREVIEW_SIZE: u32 = 768;
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 struct PreviewUniforms {
     rotation: [[f32; 4]; 4],
     light_dir: [f32; 3],
-    _pad: f32,
+    ocean_level: f32,
 }
 
 pub struct PreviewRenderer {
@@ -125,6 +125,8 @@ impl PreviewRenderer {
         gpu: &GpuContext,
         terrain: &TerrainData,
         rotation_y: f32,
+        rotation_x: f32,
+        ocean_fraction: f32,
     ) -> Vec<u8> {
         let res = terrain.resolution;
 
@@ -176,18 +178,23 @@ impl PreviewRenderer {
             ..Default::default()
         });
 
-        // Rotation matrix (Y-axis rotation)
-        let cos_r = rotation_y.cos();
-        let sin_r = rotation_y.sin();
+        // Combined Y then X rotation matrix
+        let cy = rotation_y.cos();
+        let sy = rotation_y.sin();
+        let cx = rotation_x.cos();
+        let sx = rotation_x.sin();
+        // Ry * Rx
         let uniforms = PreviewUniforms {
             rotation: [
-                [cos_r, 0.0, sin_r, 0.0],
-                [0.0, 1.0, 0.0, 0.0],
-                [-sin_r, 0.0, cos_r, 0.0],
+                [cy, sy * sx, sy * cx, 0.0],
+                [0.0, cx, -sx, 0.0],
+                [-sy, cy * sx, cy * cx, 0.0],
                 [0.0, 0.0, 0.0, 1.0],
             ],
             light_dir: [0.5, 0.7, -1.0],
-            _pad: 0.0,
+            // Map ocean_fraction to a height threshold: more ocean → higher sea level
+            // Normalized terrain is [-1, 1], so ocean_level near 0 means ~50% coverage
+            ocean_level: -1.0 + 2.0 * ocean_fraction,
         };
 
         let uniform_buffer =
@@ -333,7 +340,7 @@ mod tests {
             },
         );
 
-        let pixels = renderer.render(&gpu, &terrain, 0.0);
+        let pixels = renderer.render(&gpu, &terrain, 0.0, 0.0, 0.7);
         let size = renderer.size;
         assert_eq!(pixels.len(), (size * size * 4) as usize);
 
