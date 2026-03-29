@@ -2906,7 +2906,6 @@ dependencies = [
  "egui",
  "env_logger",
  "exr",
- "half",
  "image",
  "log",
  "pollster",

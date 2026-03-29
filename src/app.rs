@@ -2,9 +2,8 @@ use eframe::egui;
 use std::sync::Arc;
 
 use crate::gpu::GpuContext;
-use crate::planet::{DerivedProperties, PlanetParams, TectonicRegime};
-use crate::preview::PreviewRenderer;
-use crate::terrain::{self, TerrainParams};
+use crate::planet::{DerivedProperties, PlanetParams};
+use crate::preview::{self, PreviewRenderer, PreviewUniforms};
 
 pub struct PlanetGenApp {
     gpu: Arc<GpuContext>,
@@ -34,57 +33,81 @@ impl PlanetGenApp {
         }
     }
 
-    fn terrain_params_from_planet(&self) -> TerrainParams {
-        // Tectonics: active surfaces have more varied, higher-frequency terrain
-        let base_frequency = match self.derived.tectonic_regime {
-            TectonicRegime::PlateTectonics => 1.5,
-            TectonicRegime::StagnantLid => 0.8,
-        };
+    fn build_uniforms(&self) -> PreviewUniforms {
+        // --- Continuous parameter → terrain mapping ---
+        // Based on research spectral exponents:
+        //   Earth β=2.0, Mars β=2.38, Venus β=1.47
+        //   persistence (gain) = 2^(-H) where H = (β-1)/2
+        //   So: Earth H=0.5 → gain=0.707, Mars H=0.69 → gain=0.62, Venus H=0.235 → gain=0.85
 
-        // Metallicity affects terrain roughness (more metals → more geological variety)
-        let frequency = base_frequency * (1.0 + 0.3 * self.params.metallicity);
+        // Distance affects temperature → terrain character continuously
+        // Closer = hotter = more volcanic/smooth (Venus-like, lower β)
+        // Farther = colder = more rugged/cratered (Mars-like, higher β)
+        let dist = self.params.star_distance_au;
+        let dist_factor = (dist.ln() / 3.0_f32.ln()).clamp(0.0, 1.0); // 0 at 1AU, 1 at ~3AU+
 
-        // Mass affects relief amplitude
-        let amplitude = 0.8 + 0.4 * self.params.mass_earth.min(3.0) / 3.0;
+        // Base spectral exponent: interpolate Venus(1.47) → Earth(2.0) → Mars(2.38)
+        let base_beta = 1.47 + 0.91 * dist_factor; // 1.47 → 2.38
 
-        // Tilt affects terrain detail (higher tilt → more varied erosion patterns)
-        let gain = 0.45 + 0.1 * (self.params.axial_tilt_deg / 90.0);
+        // Metallicity shifts β: more metals → rougher terrain (higher β)
+        let beta = (base_beta + 0.3 * self.params.metallicity).clamp(1.2, 3.0);
 
-        // Rotation period affects lacunarity (faster rotation → more banding-like features)
-        let lacunarity = 1.8 + 0.4 * (24.0 / self.params.rotation_period_h).min(2.0);
+        // Convert β to fBm gain (persistence): gain = 2^(-H), H = (β-1)/2
+        let hurst = (beta - 1.0) / 2.0;
+        let gain = 2.0_f32.powf(-hurst); // Earth: 0.707, Mars: 0.62, Venus: 0.85
 
-        let octaves = match self.derived.tectonic_regime {
-            TectonicRegime::PlateTectonics => 8,
-            TectonicRegime::StagnantLid => 6,
-        };
+        // Mass affects amplitude continuously via gravity scaling
+        // g ∝ M^0.46, more gravity → more relief but compressed
+        let mass = self.params.mass_earth;
+        let amplitude = 0.6 + 0.6 * mass.powf(0.3).min(2.0);
 
-        TerrainParams {
-            resolution: 256,
-            seed: self.params.seed,
+        // Frequency: smaller planets have relatively larger features
+        // Larger planets have finer detail relative to their size
+        let frequency = 1.0 + 0.5 * mass.powf(0.2);
+
+        // Lacunarity: rotation period affects banding tendency
+        // Fast rotation → slight banding (higher lacunarity)
+        let rotation_factor = (24.0 / self.params.rotation_period_h).clamp(0.5, 2.0);
+        let lacunarity = 1.9 + 0.2 * rotation_factor;
+
+        // Axial tilt affects detail at different scales
+        // High tilt → more seasonal erosion → more octaves
+        let tilt_factor = self.params.axial_tilt_deg / 90.0;
+        let octaves = (6.0 + 3.0 * tilt_factor) as u32; // 6-9 octaves
+
+        // Ocean level from derived properties
+        let ocean_level = -1.0 + 2.0 * self.derived.ocean_fraction;
+
+        // Rotation matrix: Y then X
+        let cy = self.rotation_y.cos();
+        let sy = self.rotation_y.sin();
+        let cx = self.rotation_x.cos();
+        let sx = self.rotation_x.sin();
+
+        PreviewUniforms {
+            rotation: [
+                [cy, sy * sx, sy * cx, 0.0],
+                [0.0, cx, -sx, 0.0],
+                [-sy, cy * sx, cy * cx, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            light_dir: [0.5, 0.7, -1.0],
+            ocean_level,
+            seed_offset: preview::seed_to_offset(self.params.seed),
             frequency,
-            amplitude,
-            octaves,
             lacunarity,
             gain,
-            face: 0,
+            amplitude,
+            octaves,
+            _pad: [0.0; 3],
+            _pad2: 0.0,
         }
     }
 
     fn generate_preview(&mut self, ctx: &egui::Context) {
-        let terrain_params = self.terrain_params_from_planet();
-        let mut terrain_data = terrain::generate_terrain(&self.gpu, &terrain_params);
-
-        // Normalize heights to [-1, 1] so color mapping works for any seed/params
-        normalize_terrain(&mut terrain_data);
-
+        let uniforms = self.build_uniforms();
         let size = self.preview_renderer.size;
-        let pixels = self.preview_renderer.render(
-            &self.gpu,
-            &terrain_data,
-            self.rotation_y,
-            self.rotation_x,
-            self.derived.ocean_fraction,
-        );
+        let pixels = self.preview_renderer.render(&self.gpu, &uniforms);
 
         let image =
             egui::ColorImage::from_rgba_unmultiplied([size as usize, size as usize], &pixels);
@@ -100,30 +123,6 @@ impl PlanetGenApp {
 
     fn update_derived(&mut self) {
         self.derived = DerivedProperties::from_params(&self.params);
-    }
-}
-
-/// Normalize all face heightmaps to [-1, 1] range.
-fn normalize_terrain(terrain: &mut terrain::TerrainData) {
-    let mut global_min = f32::INFINITY;
-    let mut global_max = f32::NEG_INFINITY;
-
-    for face in &terrain.faces {
-        for &v in face {
-            global_min = global_min.min(v);
-            global_max = global_max.max(v);
-        }
-    }
-
-    let range = global_max - global_min;
-    if range < 1e-6 {
-        return;
-    }
-
-    for face in &mut terrain.faces {
-        for v in face.iter_mut() {
-            *v = (*v - global_min) / range * 2.0 - 1.0;
-        }
     }
 }
 
@@ -148,7 +147,7 @@ impl eframe::App for PlanetGenApp {
                             .text("Distance (AU)")
                             .logarithmic(true),
                     )
-                    .on_hover_text("Distance from the star in Astronomical Units")
+                    .on_hover_text("Distance from star. Closer = hotter/smoother (Venus-like), farther = colder/rougher (Mars-like)")
                     .changed();
 
                 changed |= ui
@@ -157,7 +156,7 @@ impl eframe::App for PlanetGenApp {
                             .text("Mass (M⊕)")
                             .logarithmic(true),
                     )
-                    .on_hover_text("Planet mass in Earth masses")
+                    .on_hover_text("Planet mass. Affects gravity, terrain relief, and feature scale")
                     .changed();
 
                 changed |= ui
@@ -166,7 +165,7 @@ impl eframe::App for PlanetGenApp {
                             .text("[Fe/H]"),
                     )
                     .on_hover_text(
-                        "Stellar metallicity in dex. 0 = Sun-like, negative = metal-poor, positive = metal-rich",
+                        "Stellar metallicity. Higher = rougher terrain (more rocky minerals). Affects spectral exponent β",
                     )
                     .changed();
 
@@ -175,7 +174,7 @@ impl eframe::App for PlanetGenApp {
                         egui::Slider::new(&mut self.params.axial_tilt_deg, 0.0..=90.0)
                             .text("Tilt (°)"),
                     )
-                    .on_hover_text("Axial tilt in degrees. Earth = 23.4°")
+                    .on_hover_text("Axial tilt. Higher tilt = more terrain detail (seasonal erosion effects)")
                     .changed();
 
                 changed |= ui
@@ -184,7 +183,7 @@ impl eframe::App for PlanetGenApp {
                             .text("Day (hours)")
                             .logarithmic(true),
                     )
-                    .on_hover_text("Rotation period in hours. Earth = 24h")
+                    .on_hover_text("Rotation period. Faster rotation = slightly more banded features")
                     .changed();
 
                 ui.separator();
@@ -206,7 +205,6 @@ impl eframe::App for PlanetGenApp {
 
                 ui.separator();
 
-                // Derived properties (read-only)
                 ui.heading("Derived Properties");
                 ui.separator();
 
@@ -253,13 +251,11 @@ impl eframe::App for PlanetGenApp {
                 let available = ui.available_size();
                 let size = available.x.min(available.y);
 
-                // Allocate interactive area for drag-to-rotate
                 let (response, painter) = ui.allocate_painter(
                     egui::Vec2::splat(size),
                     egui::Sense::click_and_drag(),
                 );
 
-                // Draw the planet texture centered in the allocated area
                 let rect = response.rect;
                 painter.image(
                     tex.id(),
@@ -268,12 +264,10 @@ impl eframe::App for PlanetGenApp {
                     egui::Color32::WHITE,
                 );
 
-                // Handle drag rotation
                 if response.dragged() {
                     let delta = response.drag_delta();
                     self.rotation_y -= delta.x * 0.01;
                     self.rotation_x += delta.y * 0.01;
-                    // Clamp vertical rotation
                     self.rotation_x = self.rotation_x.clamp(
                         -std::f32::consts::FRAC_PI_2 + 0.1,
                         std::f32::consts::FRAC_PI_2 - 0.1,
