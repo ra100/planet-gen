@@ -37,6 +37,11 @@ fn vs_main(@builtin(vertex_index) idx: u32) -> VertexOutput {
     return out;
 }
 
+fn smooth_step(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
 // Ray-sphere intersection — sphere fills ~85% of viewport
 fn intersect_sphere(uv: vec2<f32>) -> vec3<f32> {
     let ndc = (uv - 0.5) * 2.0 / 0.85;
@@ -65,23 +70,33 @@ fn fbm_preview(pos: vec3<f32>) -> f32 {
 }
 
 // ---- Temperature (research section 13.2) ----
-// baseTemp = 30 - abs(latitude) * 60, then lapse rate + noise
+// Research: baseTemp = 30 - abs(latitude) * 60 for Earth
+// We shift the entire curve by the planet's average temperature offset from Earth
 
 fn compute_temperature(sphere_pos: vec3<f32>, height: f32) -> f32 {
     let latitude = asin(clamp(sphere_pos.y, -1.0, 1.0)); // radians
-    let lat_deg = abs(latitude) * 180.0 / 3.14159;
 
-    // Base temperature from latitude: equator ~30°C, poles ~-30°C
-    // Scaled by planet's base temperature relative to Earth's 15°C
-    let temp_scale = uniforms.base_temp_c / 15.0;
-    let base_temp = 30.0 * temp_scale - lat_deg * (60.0 * temp_scale / 90.0);
+    // Apply axial tilt: shift effective latitude based on longitude and tilt
+    // This creates asymmetric heating patterns (seasons frozen in time)
+    let longitude = atan2(sphere_pos.z, sphere_pos.x);
+    let tilt_effect = sin(longitude) * uniforms.axial_tilt_rad;
+    let effective_lat = clamp(latitude + tilt_effect, -1.5708, 1.5708);
+    let lat_deg = abs(effective_lat) * 180.0 / 3.14159;
 
-    // Lapse rate: -6.5°C per km elevation (normalized height → km estimate)
-    let elevation_km = max(height - uniforms.ocean_level, 0.0) * 8.0; // scale factor
+    // Earth baseline: equator 30°C, poles -30°C (range = 60°C)
+    // For other planets: shift the whole curve by (planet_avg - earth_avg)
+    // Earth avg ≈ 15°C
+    let temp_offset = uniforms.base_temp_c - 15.0;
+    let base_temp = 30.0 - lat_deg * (60.0 / 90.0) + temp_offset;
+
+    // Lapse rate: -6.5°C per km elevation
+    // Normalized height [0, 1] above sea level → ~0-5 km range
+    let land_fraction = max(height - uniforms.ocean_level, 0.0) / max(1.0 - uniforms.ocean_level, 0.01);
+    let elevation_km = land_fraction * 5.0;
     let lapse = -6.5 * elevation_km;
 
-    // Small noise variation
-    let temp_noise = snoise(sphere_pos * 3.0 + uniforms.seed_offset * 0.5) * 5.0;
+    // Small noise variation (±3°C)
+    let temp_noise = snoise(sphere_pos * 3.0 + uniforms.seed_offset * 0.5) * 3.0;
 
     return base_temp + lapse + temp_noise;
 }
@@ -99,12 +114,10 @@ fn compute_moisture(sphere_pos: vec3<f32>, height: f32) -> f32 {
     let ocean_bonus = 100.0 * exp(-dist_from_sea * 5.0);
     moisture += ocean_bonus;
 
-    // Rain shadow: reduce moisture on the leeward side of mountains
-    // Simplified: high terrain blocks moisture
-    let upwind_height = height;
-    if (upwind_height > uniforms.ocean_level + 0.3) {
-        moisture *= 0.3; // Mountains block rain
-    }
+    // Rain shadow: high terrain reduces moisture gradually
+    let land_h = max(height - uniforms.ocean_level, 0.0) / max(1.0 - uniforms.ocean_level, 0.01);
+    let rain_shadow = 1.0 - 0.6 * smooth_step(0.3, 0.7, land_h);
+    moisture *= rain_shadow;
 
     // More ocean = more global moisture
     moisture *= 0.5 + uniforms.ocean_fraction;
