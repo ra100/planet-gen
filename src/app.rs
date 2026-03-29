@@ -1,26 +1,31 @@
 use eframe::egui;
 use std::sync::Arc;
 
-use crate::compute;
 use crate::gpu::GpuContext;
+use crate::preview::PreviewRenderer;
+use crate::terrain::{self, TerrainParams};
 
 pub struct PlanetGenApp {
     gpu: Arc<GpuContext>,
+    preview_renderer: PreviewRenderer,
     texture_handle: Option<egui::TextureHandle>,
-    // Placeholder planet parameters
+    // Planet parameters
     star_distance: f32,
     planet_mass: f32,
     metallicity: f32,
     axial_tilt: f32,
     rotation_period: f32,
     seed: u32,
+    rotation_y: f32,
     needs_regenerate: bool,
 }
 
 impl PlanetGenApp {
     pub fn new(gpu: Arc<GpuContext>) -> Self {
+        let preview_renderer = PreviewRenderer::new(&gpu);
         Self {
             gpu,
+            preview_renderer,
             texture_handle: None,
             star_distance: 1.0,
             planet_mass: 1.0,
@@ -28,14 +33,23 @@ impl PlanetGenApp {
             axial_tilt: 23.4,
             rotation_period: 24.0,
             seed: 42,
+            rotation_y: 0.0,
             needs_regenerate: true,
         }
     }
 
     fn generate_preview(&mut self, ctx: &egui::Context) {
-        let pixels = compute::run_gradient(&self.gpu, 256, 256);
+        let params = TerrainParams {
+            resolution: 256,
+            seed: self.seed,
+            ..Default::default()
+        };
 
-        let image = egui::ColorImage::from_rgba_unmultiplied([256, 256], &pixels);
+        let terrain_data = terrain::generate_terrain(&self.gpu, &params);
+        let size = self.preview_renderer.size;
+        let pixels = self.preview_renderer.render(&self.gpu, &terrain_data, self.rotation_y);
+
+        let image = egui::ColorImage::from_rgba_unmultiplied([size as usize, size as usize], &pixels);
 
         self.texture_handle = Some(ctx.load_texture(
             "planet_preview",
@@ -112,21 +126,35 @@ impl eframe::App for PlanetGenApp {
                     }
                 });
 
+                ui.separator();
+
+                if ui
+                    .add(
+                        egui::Slider::new(&mut self.rotation_y, 0.0..=std::f32::consts::TAU)
+                            .text("Rotation"),
+                    )
+                    .changed()
+                {
+                    self.needs_regenerate = true;
+                }
+
                 if changed {
                     self.needs_regenerate = true;
                 }
 
                 ui.separator();
-
                 ui.label(format!("GPU: {}", self.gpu.adapter_name()));
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some(ref tex) = self.texture_handle {
                 let available = ui.available_size();
-                let size = available.min(egui::Vec2::splat(512.0));
+                let size = available.x.min(available.y).min(512.0);
                 ui.centered_and_justified(|ui| {
-                    ui.image(egui::load::SizedTexture::new(tex.id(), size));
+                    ui.image(egui::load::SizedTexture::new(
+                        tex.id(),
+                        egui::Vec2::splat(size),
+                    ));
                 });
             } else {
                 ui.centered_and_justified(|ui| {
