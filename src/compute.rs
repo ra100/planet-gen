@@ -134,7 +134,7 @@ pub fn run_gradient(gpu: &GpuContext, width: u32, height: u32) -> Vec<u8> {
     // Map and read back
     let buffer_slice = readback_buffer.slice(..);
     buffer_slice.map_async(wgpu::MapMode::Read, |_| {});
-    gpu.device.poll(wgpu::PollType::Wait);
+    let _ = gpu.device.poll(wgpu::PollType::Wait);
 
     let mapped = buffer_slice.get_mapped_range();
 
