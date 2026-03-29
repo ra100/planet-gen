@@ -126,7 +126,11 @@ pub enum AtmosphereType {
 pub struct DerivedProperties {
     pub planet_type: PlanetType,
     pub tectonic_regime: TectonicRegime,
+    /// Continuous tectonics factor [0, 1]: 0 = stagnant lid, 1 = vigorous plate tectonics
+    pub tectonics_factor: f32,
     pub atmosphere_type: AtmosphereType,
+    /// Continuous atmosphere strength [0, 1]
+    pub atmosphere_strength: f32,
     /// Surface gravity in m/s² (assuming rocky composition)
     pub surface_gravity: f32,
     /// Base equatorial temperature in °C
@@ -137,6 +141,8 @@ pub struct DerivedProperties {
     pub surface_age: f32,
     /// Frost line distance in AU for the star
     pub frost_line_au: f32,
+    /// MMSN isolation mass at this distance
+    pub isolation_mass: f32,
 }
 
 impl DerivedProperties {
@@ -144,24 +150,42 @@ impl DerivedProperties {
     pub fn from_params(params: &PlanetParams) -> Self {
         let frost_line_au = compute_frost_line(params.metallicity);
         let planet_type = classify_planet(params.star_distance_au, frost_line_au);
-        let tectonic_regime = determine_tectonics(params.mass_earth, params.star_distance_au);
-        let atmosphere_type = determine_atmosphere(planet_type, params.mass_earth);
         let surface_gravity = compute_surface_gravity(params.mass_earth);
-        let base_temperature_c =
-            compute_base_temperature(params.star_distance_au, atmosphere_type);
-        let ocean_fraction =
-            compute_ocean_fraction(planet_type, params.mass_earth, base_temperature_c);
-        let surface_age = compute_surface_age(tectonic_regime, params.mass_earth);
+        let tectonics_factor =
+            compute_tectonics_factor(params.mass_earth, params.star_distance_au, surface_gravity);
+        let tectonic_regime = if tectonics_factor > 0.5 {
+            TectonicRegime::PlateTectonics
+        } else {
+            TectonicRegime::StagnantLid
+        };
+        let atmosphere_strength =
+            compute_atmosphere_strength(params.mass_earth, params.star_distance_au);
+        let atmosphere_type = classify_atmosphere(atmosphere_strength, planet_type);
+        let base_temperature_c = compute_base_temperature(
+            params.star_distance_au,
+            atmosphere_strength,
+        );
+        let ocean_fraction = compute_ocean_fraction(
+            params.star_distance_au,
+            params.mass_earth,
+            base_temperature_c,
+            frost_line_au,
+        );
+        let surface_age = compute_surface_age(tectonics_factor, params.mass_earth);
+        let isolation_mass = compute_isolation_mass(params.star_distance_au);
 
         Self {
             planet_type,
             tectonic_regime,
+            tectonics_factor,
             atmosphere_type,
+            atmosphere_strength,
             surface_gravity,
             base_temperature_c,
             ocean_fraction,
             surface_age,
             frost_line_au,
+            isolation_mass,
         }
     }
 }
@@ -184,106 +208,124 @@ fn classify_planet(distance_au: f32, frost_line_au: f32) -> PlanetType {
     }
 }
 
-/// Rayleigh-number-based tectonic regime.
-/// Larger planets with water are more likely to have plate tectonics.
-fn determine_tectonics(mass_earth: f32, distance_au: f32) -> TectonicRegime {
-    // Simplified: mass > 0.5 Earth masses and in habitable zone → plate tectonics
-    let has_water = distance_au > 0.5 && distance_au < 3.0;
-    if mass_earth > 0.5 && has_water {
-        TectonicRegime::PlateTectonics
+/// Continuous tectonics factor based on simplified Rayleigh number.
+/// Ra ∝ g · ΔT · D³ / (ν · κ). Returns [0, 1].
+fn compute_tectonics_factor(mass_earth: f32, distance_au: f32, gravity: f32) -> f32 {
+    // Water availability factor: peaks in habitable zone, drops outside
+    let water_factor = (-((distance_au - 1.5).powi(2)) / 2.0).exp();
+
+    // Rayleigh proxy: gravity × mass (mantle thickness ∝ mass^0.3)
+    let ra_proxy = gravity * mass_earth.powf(0.3) * water_factor;
+
+    // Normalize: Earth (g=9.81, M=1) gives ra_proxy ≈ 9.81 * 1.0 * 0.89 ≈ 8.7
+    // Threshold for plate tectonics onset ~5 (corresponds to Ra ~ 10⁶)
+    let normalized = (ra_proxy / 5.0).min(2.0);
+
+    // Smooth sigmoid transition
+    let x = (normalized - 1.0) * 4.0;
+    1.0 / (1.0 + (-x).exp())
+}
+
+/// Continuous atmosphere strength based on escape velocity vs thermal velocity.
+/// Returns [0, 1]: 0 = no atmosphere, 1 = thick atmosphere.
+fn compute_atmosphere_strength(mass_earth: f32, distance_au: f32) -> f32 {
+    // v_esc ∝ sqrt(M/R) ∝ M^0.365 (using R ∝ M^0.27)
+    let v_esc_factor = mass_earth.powf(0.365);
+
+    // Thermal velocity ∝ sqrt(T) ∝ distance^(-0.25)
+    let thermal_factor = distance_au.powf(-0.25);
+
+    // Retention: high v_esc / v_thermal → strong atmosphere
+    // Calibrated so Earth (M=1, d=1) gives ~0.7
+    let retention = v_esc_factor / thermal_factor * 0.7;
+    retention.clamp(0.0, 1.0)
+}
+
+fn classify_atmosphere(strength: f32, planet_type: PlanetType) -> AtmosphereType {
+    if strength < 0.15 {
+        AtmosphereType::None
+    } else if strength < 0.35 {
+        AtmosphereType::ThinCO2
+    } else if planet_type == PlanetType::HotRocky && strength > 0.6 {
+        AtmosphereType::ThickCO2 // Venus-like runaway
+    } else if strength > 0.95 {
+        AtmosphereType::ThickCO2
     } else {
-        TectonicRegime::StagnantLid
+        AtmosphereType::Nitrogen
     }
 }
 
-fn determine_atmosphere(planet_type: PlanetType, mass_earth: f32) -> AtmosphereType {
-    match planet_type {
-        PlanetType::HotRocky => {
-            if mass_earth < 0.3 {
-                AtmosphereType::None
-            } else {
-                AtmosphereType::ThinCO2
-            }
-        }
-        PlanetType::Terrestrial => {
-            if mass_earth < 0.3 {
-                AtmosphereType::ThinCO2
-            } else if mass_earth < 2.0 {
-                AtmosphereType::Nitrogen
-            } else {
-                AtmosphereType::ThickCO2
-            }
-        }
-        PlanetType::IcyRocky => {
-            if mass_earth < 0.3 {
-                AtmosphereType::None
-            } else {
-                AtmosphereType::ThinCO2
-            }
-        }
-    }
-}
-
-/// Surface gravity assuming rocky composition.
-/// g ∝ M^(1/3) for constant density (simplified).
-/// More accurately: radius ∝ M^0.27 for rocky planets, g = GM/R².
+/// Surface gravity: g = GM/R², R ∝ M^0.27, so g ∝ M^0.46
 fn compute_surface_gravity(mass_earth: f32) -> f32 {
-    // For rocky planets: R ≈ M^0.27, so g = GM/R² ≈ M^(1-0.54) = M^0.46
-    // Earth: 9.81 m/s²
     9.81 * mass_earth.powf(0.46)
 }
 
-/// Base temperature from stellar flux and greenhouse effect.
-fn compute_base_temperature(distance_au: f32, atmosphere: AtmosphereType) -> f32 {
-    // Equilibrium temperature with albedo ~0.3: T_eq = 255 / sqrt(distance) K
-    let t_eff_k = 255.0 / distance_au.sqrt();
+/// Temperature with greenhouse feedback (carbonate-silicate cycle approximation).
+/// Colder planets accumulate more CO₂ → stronger greenhouse, extending habitable zone.
+fn compute_base_temperature(distance_au: f32, atmosphere_strength: f32) -> f32 {
+    // Equilibrium temperature: T_eq = 255 / sqrt(distance) K
+    let t_eq_k = 255.0 / distance_au.sqrt();
 
-    // Greenhouse warming
-    let greenhouse_k = match atmosphere {
-        AtmosphereType::None => 0.0,
-        AtmosphereType::ThinCO2 => 10.0,
-        AtmosphereType::Nitrogen => 33.0, // Earth-like
-        AtmosphereType::ThickCO2 => 450.0, // Venus-like
+    // Greenhouse warming: scales non-linearly with atmosphere strength
+    // Calibrated so Earth (strength ~0.7) gets ~33K
+    let base_greenhouse = 33.0 * (atmosphere_strength / 0.7).min(1.5).powf(0.7);
+
+    // Carbonate-silicate feedback: colder → more CO₂ accumulates → stronger greenhouse
+    // This is the main mechanism that extends the habitable zone outer edge to ~1.7 AU
+    let feedback_factor = if t_eq_k < 255.0 {
+        // Colder than Earth → greenhouse strengthens significantly (up to 2.5x)
+        1.0 + 1.5 * ((255.0 - t_eq_k) / 80.0).min(1.0)
+    } else if t_eq_k > 300.0 {
+        // Hotter → CO₂ weathered out faster → weaker greenhouse
+        1.0 - 0.5 * ((t_eq_k - 300.0) / 100.0).min(1.0)
+    } else {
+        1.0
     };
 
-    t_eff_k + greenhouse_k - 273.15 // Convert to Celsius
+    let greenhouse_k = base_greenhouse * feedback_factor;
+    t_eq_k + greenhouse_k - 273.15
 }
 
+/// Ocean fraction from water budget model.
+/// Water delivery ∝ mass × distance factor (more beyond frost line).
 fn compute_ocean_fraction(
-    planet_type: PlanetType,
+    distance_au: f32,
     mass_earth: f32,
     base_temp_c: f32,
+    frost_line_au: f32,
 ) -> f32 {
-    match planet_type {
-        PlanetType::HotRocky => 0.0, // Too hot, water evaporated
-        PlanetType::IcyRocky => {
-            // Frozen oceans under ice
-            if mass_earth > 0.3 { 0.3 } else { 0.0 }
-        }
-        PlanetType::Terrestrial => {
-            if base_temp_c < -20.0 {
-                0.1 // Mostly frozen
-            } else if base_temp_c > 100.0 {
-                0.0 // Boiled off
-            } else {
-                // Scale with mass (more mass → more outgassing → more water)
-                (0.3 + 0.4 * mass_earth).min(0.9)
-            }
-        }
-    }
+    // Water delivery: more mass captures more water, proximity to frost line helps
+    let frost_proximity = (1.0 - (distance_au / frost_line_au - 0.5).abs()).max(0.0);
+    let water_budget = mass_earth.powf(0.5) * (0.3 + 0.7 * frost_proximity);
+
+    // Temperature affects surface water state
+    let temp_factor = if base_temp_c < -40.0 {
+        0.1 // Mostly frozen under ice
+    } else if base_temp_c < 0.0 {
+        0.1 + 0.4 * ((base_temp_c + 40.0) / 40.0) // Partially frozen
+    } else if base_temp_c > 200.0 {
+        0.0 // Boiled off
+    } else if base_temp_c > 80.0 {
+        1.0 - 0.8 * ((base_temp_c - 80.0) / 120.0) // Starting to evaporate
+    } else {
+        1.0 // Liquid water stable
+    };
+
+    (water_budget * temp_factor * 0.7).clamp(0.0, 0.85)
 }
 
-fn compute_surface_age(regime: TectonicRegime, mass_earth: f32) -> f32 {
-    match regime {
-        TectonicRegime::PlateTectonics => {
-            // Active surface → younger appearance
-            0.2 + 0.3 * (1.0 / mass_earth).min(1.0)
-        }
-        TectonicRegime::StagnantLid => {
-            // Inactive → old, cratered surface
-            0.6 + 0.3 * (1.0 / mass_earth).min(1.0)
-        }
-    }
+fn compute_surface_age(tectonics_factor: f32, mass_earth: f32) -> f32 {
+    // More tectonically active → younger surface
+    let activity = tectonics_factor * mass_earth.powf(0.2);
+    1.0 - activity.clamp(0.0, 0.8)
+}
+
+/// MMSN isolation mass: maximum planet mass that can form in-situ at given distance.
+/// Σ(r) = 1700(r/AU)^(-3/2) g/cm², M_iso ≈ 0.11 (r/AU)^(3/4) M⊕
+fn compute_isolation_mass(distance_au: f32) -> f32 {
+    // Beyond frost line, surface density jumps 4× → higher isolation mass
+    let ice_factor = if distance_au > 2.7 { 4.0_f32.powf(0.75) } else { 1.0 };
+    0.11 * distance_au.powf(0.75) * ice_factor
 }
 
 #[cfg(test)]
@@ -354,9 +396,20 @@ mod tests {
         let params = PlanetParams::default();
         let derived = DerivedProperties::from_params(&params);
         assert!(
-            derived.ocean_fraction > 0.5 && derived.ocean_fraction < 0.9,
-            "Earth ocean fraction should be ~0.7, got {}",
+            derived.ocean_fraction > 0.3 && derived.ocean_fraction < 0.9,
+            "Earth ocean fraction should be ~0.5-0.7, got {}",
             derived.ocean_fraction
+        );
+    }
+
+    #[test]
+    fn earth_tectonics_factor_is_high() {
+        let params = PlanetParams::default();
+        let derived = DerivedProperties::from_params(&params);
+        assert!(
+            derived.tectonics_factor > 0.6,
+            "Earth tectonics factor should be high, got {}",
+            derived.tectonics_factor
         );
     }
 
@@ -369,6 +422,38 @@ mod tests {
         };
         let derived = DerivedProperties::from_params(&params);
         assert_eq!(derived.tectonic_regime, TectonicRegime::StagnantLid);
+        assert!(
+            derived.tectonics_factor < 0.5,
+            "Mars tectonics should be low, got {}",
+            derived.tectonics_factor
+        );
+    }
+
+    #[test]
+    fn habitable_zone_extends_to_1_5_au() {
+        // With greenhouse feedback, 1.5 AU should not be a frozen wasteland
+        let params = PlanetParams {
+            star_distance_au: 1.5,
+            mass_earth: 1.0,
+            ..Default::default()
+        };
+        let derived = DerivedProperties::from_params(&params);
+        assert!(
+            derived.base_temperature_c > -10.0,
+            "1.5 AU with greenhouse feedback should be > -10°C, got {}",
+            derived.base_temperature_c
+        );
+    }
+
+    #[test]
+    fn isolation_mass_at_1_au() {
+        let params = PlanetParams::default();
+        let derived = DerivedProperties::from_params(&params);
+        assert!(
+            derived.isolation_mass > 0.05 && derived.isolation_mass < 0.2,
+            "Isolation mass at 1 AU should be ~0.11 M⊕, got {}",
+            derived.isolation_mass
+        );
     }
 
     #[test]

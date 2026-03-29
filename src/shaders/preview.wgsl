@@ -17,7 +17,7 @@ struct Uniforms {
     base_temp_c: f32,
     ocean_fraction: f32,
     axial_tilt_rad: f32,
-    _pad: f32,
+    tectonics_factor: f32, // 0.0 = stagnant lid (unimodal), 1.0 = plate tectonics (bimodal)
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -53,12 +53,35 @@ fn intersect_sphere(uv: vec2<f32>) -> vec3<f32> {
     return vec3<f32>(ndc.x, ndc.y, z);
 }
 
-// ---- Terrain height (fBm) ----
+// ---- Continental structure (research section 7.3) ----
+// Layer 1: Low-frequency noise creates continent-scale landmasses
+// Layer 2: Detail fBm adds terrain features on top
 
-fn fbm_preview(pos: vec3<f32>) -> f32 {
+fn continental_base(pos: vec3<f32>) -> f32 {
+    let p = pos + uniforms.seed_offset;
+
+    // Low-frequency noise for continent shapes (freq ≈ 2-3 per research)
+    let n1 = snoise(p * 2.0);
+    let n2 = snoise(p * 3.5 + vec3<f32>(50.0, 0.0, 0.0)) * 0.5;
+    let n3 = snoise(p * 5.0 + vec3<f32>(0.0, 50.0, 0.0)) * 0.25;
+    var continental = n1 + n2 + n3;
+
+    // Plate tectonics → bimodal elevation (distinct continents + ocean basins)
+    // Stagnant lid → unimodal (smoother, more gradual)
+    let bimodal_strength = uniforms.tectonics_factor;
+
+    // Sharpen the continent/ocean boundary for plate tectonics
+    // This creates the bimodal elevation distribution Earth has
+    let sharpened = sign(continental) * pow(abs(continental), 0.6);
+    continental = mix(continental, sharpened, bimodal_strength * 0.7);
+
+    return continental;
+}
+
+fn detail_fbm(pos: vec3<f32>) -> f32 {
     var value = 0.0;
     var freq = uniforms.frequency;
-    var amp = uniforms.amplitude;
+    var amp = uniforms.amplitude * 0.3; // Detail is smaller than continental scale
     let p = pos + uniforms.seed_offset;
 
     for (var i = 0u; i < uniforms.octaves; i++) {
@@ -67,6 +90,16 @@ fn fbm_preview(pos: vec3<f32>) -> f32 {
         amp *= uniforms.gain;
     }
     return value;
+}
+
+fn fbm_preview(pos: vec3<f32>) -> f32 {
+    // Continental base layer (large-scale landmass structure)
+    let continental = continental_base(pos) * uniforms.amplitude;
+
+    // Detail terrain on top (mountains, hills, valleys)
+    let detail = detail_fbm(pos);
+
+    return continental + detail;
 }
 
 // ---- Temperature (research section 13.2) ----

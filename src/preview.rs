@@ -21,7 +21,7 @@ pub struct PreviewUniforms {
     pub base_temp_c: f32,
     pub ocean_fraction: f32,
     pub axial_tilt_rad: f32,
-    pub _pad: f32,
+    pub tectonics_factor: f32,
 }
 
 pub struct PreviewRenderer {
@@ -264,7 +264,7 @@ mod tests {
             base_temp_c: 15.0,
             ocean_fraction: 0.7,
             axial_tilt_rad: 0.41,
-            _pad: 0.0,
+            tectonics_factor: 0.8,
         };
 
         let pixels = renderer.render(&gpu, &uniforms);

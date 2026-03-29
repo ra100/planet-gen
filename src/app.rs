@@ -70,10 +70,10 @@ impl PlanetGenApp {
         let rotation_factor = (24.0 / self.params.rotation_period_h).clamp(0.5, 2.0);
         let lacunarity = 1.9 + 0.2 * rotation_factor;
 
-        // Axial tilt affects detail at different scales
-        // High tilt → more seasonal erosion → more octaves
+        // Octaves: minimum 8 per research section 7.3, up to 12 for active surfaces
+        // Tilt adds detail (artistic, not physics-based)
         let tilt_factor = self.params.axial_tilt_deg / 90.0;
-        let octaves = (6.0 + 3.0 * tilt_factor) as u32; // 6-9 octaves
+        let octaves = (8.0 + 4.0 * tilt_factor * self.derived.tectonics_factor) as u32; // 8-12
 
         // Ocean level from derived properties
         let ocean_level = -1.0 + 2.0 * self.derived.ocean_fraction;
@@ -102,7 +102,7 @@ impl PlanetGenApp {
             base_temp_c: self.derived.base_temperature_c,
             ocean_fraction: self.derived.ocean_fraction,
             axial_tilt_rad: self.params.axial_tilt_deg.to_radians(),
-            _pad: 0.0,
+            tectonics_factor: self.derived.tectonics_factor,
         }
     }
 
@@ -219,11 +219,11 @@ impl eframe::App for PlanetGenApp {
                         ui.end_row();
 
                         ui.label("Tectonics:");
-                        ui.label(format!("{:?}", self.derived.tectonic_regime));
+                        ui.label(format!("{:?} ({:.0}%)", self.derived.tectonic_regime, self.derived.tectonics_factor * 100.0));
                         ui.end_row();
 
                         ui.label("Atmosphere:");
-                        ui.label(format!("{:?}", self.derived.atmosphere_type));
+                        ui.label(format!("{:?} ({:.0}%)", self.derived.atmosphere_type, self.derived.atmosphere_strength * 100.0));
                         ui.end_row();
 
                         ui.label("Gravity:");
@@ -241,7 +241,22 @@ impl eframe::App for PlanetGenApp {
                         ui.label("Frost line:");
                         ui.label(format!("{:.1} AU", self.derived.frost_line_au));
                         ui.end_row();
+
+                        ui.label("Isolation M:");
+                        ui.label(format!("{:.2} M⊕", self.derived.isolation_mass));
+                        ui.end_row();
                     });
+
+                // MMSN plausibility warning
+                if self.params.mass_earth > self.derived.isolation_mass * 5.0 {
+                    ui.colored_label(
+                        egui::Color32::YELLOW,
+                        format!(
+                            "Mass {:.1} M⊕ exceeds isolation mass {:.2} M⊕ — requires planetary migration",
+                            self.params.mass_earth, self.derived.isolation_mass
+                        ),
+                    );
+                }
 
                 ui.separator();
 
