@@ -33,8 +33,11 @@ dist/
 # Generated textures / output
 output/
 
-# Claude Code local settings
+# Claude Code - ignore ephemeral/personal, keep shared config
 .claude/settings.local.json
+.claude/state/
+.claude/sessions/
+.claude/memory/session-log.md
 
 # Environment
 .env
