@@ -1,0 +1,24 @@
+[package]
+name = "planet-gen"
+version = "0.1.0"
+edition = "2024"
+description = "GPU-accelerated procedural planet generator for VFX"
+license = "MIT"
+
+[dependencies]
+# GPU compute
+wgpu = "26"
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "0.4"
+
+# UI
+eframe = { version = "0.31", features = ["wgpu"] }
+egui = "0.31"
+
+# Image export
+image = "0.25"
+exr = "1"
+
+# Utilities
+log = "0.4"
+env_logger = "0.11"

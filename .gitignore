@@ -42,3 +42,8 @@ output/
 # Environment
 .env
 .env.*
+
+
+# Added by cargo
+
+/target
