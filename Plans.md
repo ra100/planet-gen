@@ -76,6 +76,20 @@ Generate biomes, albedo colors, and surface properties from terrain + planet phy
 
 ---
 
+## Phase 4.5: Research Alignment Fixes
+
+Align physics model with research data. Replace heuristic thresholds with research-backed continuous formulas.
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 4.5.1 | Continuous tectonic regime: replace binary mass/distance threshold with simplified Rayleigh number estimate. Ra ∝ g·ΔT·D³ — use mass→gravity, distance→ΔT, derive Ra continuously. Tectonics factor [0,1] instead of enum for terrain influence | Test: tectonics factor varies smoothly with mass 0.01→10 and distance 0.1→50; Earth params give ~0.8+, Mars ~0.3 | Phase 4 | cc:TODO |
+| 4.5.2 | Continuous atmosphere model: replace discrete mass cutoffs (0.3, 2.0 M⊕) with escape velocity-based retention. v_esc = sqrt(2GM/R), compare to thermal velocity of gas species. Atmosphere density varies continuously | Test: atmosphere strength transitions smoothly across mass range; no abrupt jumps at 0.3 or 2.0 M⊕ | 4.5.1 | cc:TODO |
+| 4.5.3 | MMSN plausibility check: use Σ(r) = 1700(r/AU)^(-3/2) g/cm² to compute isolation mass at given distance. Show warning in UI if user-input mass exceeds isolation mass (physically implausible without migration) | Test: at 1 AU isolation mass ~0.11 M⊕ shown; at 5 AU ~5-10 M⊕; warning appears for mass > isolation mass | 4.5.1 | cc:TODO |
+| 4.5.4 | Fix fBm octave range: minimum 8 octaves per research (currently 6). Range 8-12 driven by surface activity level. Document rotation→lacunarity mapping as artistic (not physics-based) | Test: minimum octaves = 8 for any parameter combination; research reference in code comments | Phase 4 | cc:TODO |
+| 4.5.5 | Physically-derived ocean fraction: replace heuristic (0.3+0.4*mass) with water budget model. Water delivery ∝ mass × distance factor (more water beyond frost line). Plate tectonics redistributes water to surface | Test: Earth params produce 0.65-0.75; Mars (0.1 M⊕) ≈ 0.0; icy world at 5 AU with 1 M⊕ ≈ 0.4+ | 4.5.1 | cc:TODO |
+
+---
+
 ## Phase 5: Tiled Full-Resolution Generation & Export
 
 Scale from preview (256²) to full 8K (8192²) via tiled generation and export to files.
