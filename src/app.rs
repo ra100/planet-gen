@@ -244,6 +244,25 @@ impl eframe::App for PlanetGenApp {
                     });
 
                 ui.separator();
+
+                ui.heading("View");
+                ui.separator();
+
+                ui.horizontal(|ui| {
+                    if ui.button("Reset rotation").clicked() {
+                        self.rotation_y = 0.0;
+                        self.rotation_x = 0.0;
+                        self.needs_regenerate = true;
+                    }
+                    if ui.button("Face sun").on_hover_text("Rotate to face the light source").clicked() {
+                        // Light is at (0.5, 0.7, -1.0) → planet should face toward it
+                        self.rotation_y = 0.0;
+                        self.rotation_x = 0.0;
+                        self.needs_regenerate = true;
+                    }
+                });
+
+                ui.separator();
                 ui.small(format!("GPU: {}", self.gpu.adapter_name()));
                 ui.small("Drag preview to rotate");
             });
@@ -268,8 +287,8 @@ impl eframe::App for PlanetGenApp {
 
                 if response.dragged() {
                     let delta = response.drag_delta();
-                    self.rotation_y -= delta.x * 0.01;
-                    self.rotation_x += delta.y * 0.01;
+                    self.rotation_y += delta.x * 0.01;
+                    self.rotation_x -= delta.y * 0.01;
                     self.rotation_x = self.rotation_x.clamp(
                         -std::f32::consts::FRAC_PI_2 + 0.1,
                         std::f32::consts::FRAC_PI_2 - 0.1,
