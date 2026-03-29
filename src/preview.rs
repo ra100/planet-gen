@@ -17,8 +17,11 @@ pub struct PreviewUniforms {
     pub gain: f32,
     pub amplitude: f32,
     pub octaves: u32,
-    pub _pad: [f32; 3],
-    pub _pad2: f32,
+    // Planet properties
+    pub base_temp_c: f32,
+    pub ocean_fraction: f32,
+    pub axial_tilt_rad: f32,
+    pub _pad: f32,
 }
 
 pub struct PreviewRenderer {
@@ -258,8 +261,10 @@ mod tests {
             gain: 0.5,
             amplitude: 1.0,
             octaves: 8,
-            _pad: [0.0; 3],
-            _pad2: 0.0,
+            base_temp_c: 15.0,
+            ocean_fraction: 0.7,
+            axial_tilt_rad: 0.41,
+            _pad: 0.0,
         };
 
         let pixels = renderer.render(&gpu, &uniforms);

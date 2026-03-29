@@ -99,8 +99,10 @@ impl PlanetGenApp {
             gain,
             amplitude,
             octaves,
-            _pad: [0.0; 3],
-            _pad2: 0.0,
+            base_temp_c: self.derived.base_temperature_c,
+            ocean_fraction: self.derived.ocean_fraction,
+            axial_tilt_rad: self.params.axial_tilt_deg.to_radians(),
+            _pad: 0.0,
         }
     }
 
