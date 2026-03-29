@@ -24,10 +24,10 @@ Implement the core geometry representation and fBm terrain generation on the GPU
 
 | Task | 内容 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
-| 2.1 | Cube-to-sphere mapping: WGSL function `cube_to_sphere(face, uv) → vec3<f32>` with unit tests for all 6 faces | Test: points at face centers and corners map to correct sphere positions; no NaN at edges | Phase 1 | cc:TODO |
-| 2.2 | Simplex/Perlin noise in WGSL: 3D noise function usable in compute shaders | Test: noise output for known seed matches expected range [-1, 1], visually non-uniform | 2.1 | cc:TODO |
-| 2.3 | Multi-octave fBm compute shader: 8 octaves of noise applied to all 6 cube faces at 256×256 (preview res) | Test: generates 6 heightmaps, values in expected range, different faces show continuous terrain across edges | 2.2 | cc:TODO |
-| 2.4 | Preview renderer: render cube-sphere heightmap as a lit sphere in the egui viewport (render-to-texture → `ui.image()`) | Rotating planet preview visible in app, updates when noise seed changes | 2.3 | cc:TODO |
+| 2.1 | Cube-to-sphere mapping: WGSL function `cube_to_sphere(face, uv) → vec3<f32>` with unit tests for all 6 faces | Test: points at face centers and corners map to correct sphere positions; no NaN at edges | Phase 1 | cc:完了 [4a16025] |
+| 2.2 | Simplex/Perlin noise in WGSL: 3D noise function usable in compute shaders | Test: noise output for known seed matches expected range [-1, 1], visually non-uniform | 2.1 | cc:完了 [f905943] |
+| 2.3 | Multi-octave fBm compute shader: 8 octaves of noise applied to all 6 cube faces at 256×256 (preview res) | Test: generates 6 heightmaps, values in expected range, different faces show continuous terrain across edges | 2.2 | cc:完了 [d2a17ec] |
+| 2.4 | Preview renderer: render cube-sphere heightmap as a lit sphere in the egui viewport (render-to-texture → `ui.image()`) | Rotating planet preview visible in app, updates when noise seed changes | 2.3 | cc:完了 [6b2f515] |
 
 ---
 
