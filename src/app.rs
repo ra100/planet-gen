@@ -2,6 +2,7 @@ use eframe::egui;
 use std::sync::Arc;
 
 use crate::gpu::GpuContext;
+use crate::planet::{DerivedProperties, PlanetParams};
 use crate::preview::PreviewRenderer;
 use crate::terrain::{self, TerrainParams};
 
@@ -9,13 +10,8 @@ pub struct PlanetGenApp {
     gpu: Arc<GpuContext>,
     preview_renderer: PreviewRenderer,
     texture_handle: Option<egui::TextureHandle>,
-    // Planet parameters
-    star_distance: f32,
-    planet_mass: f32,
-    metallicity: f32,
-    axial_tilt: f32,
-    rotation_period: f32,
-    seed: u32,
+    params: PlanetParams,
+    derived: DerivedProperties,
     rotation_y: f32,
     needs_regenerate: bool,
 }
@@ -23,33 +19,34 @@ pub struct PlanetGenApp {
 impl PlanetGenApp {
     pub fn new(gpu: Arc<GpuContext>) -> Self {
         let preview_renderer = PreviewRenderer::new(&gpu);
+        let params = PlanetParams::default();
+        let derived = DerivedProperties::from_params(&params);
         Self {
             gpu,
             preview_renderer,
             texture_handle: None,
-            star_distance: 1.0,
-            planet_mass: 1.0,
-            metallicity: 0.0,
-            axial_tilt: 23.4,
-            rotation_period: 24.0,
-            seed: 42,
+            params,
+            derived,
             rotation_y: 0.0,
             needs_regenerate: true,
         }
     }
 
     fn generate_preview(&mut self, ctx: &egui::Context) {
-        let params = TerrainParams {
+        let terrain_params = TerrainParams {
             resolution: 256,
-            seed: self.seed,
+            seed: self.params.seed,
             ..Default::default()
         };
 
-        let terrain_data = terrain::generate_terrain(&self.gpu, &params);
+        let terrain_data = terrain::generate_terrain(&self.gpu, &terrain_params);
         let size = self.preview_renderer.size;
-        let pixels = self.preview_renderer.render(&self.gpu, &terrain_data, self.rotation_y);
+        let pixels =
+            self.preview_renderer
+                .render(&self.gpu, &terrain_data, self.rotation_y);
 
-        let image = egui::ColorImage::from_rgba_unmultiplied([size as usize, size as usize], &pixels);
+        let image =
+            egui::ColorImage::from_rgba_unmultiplied([size as usize, size as usize], &pixels);
 
         self.texture_handle = Some(ctx.load_texture(
             "planet_preview",
@@ -58,6 +55,10 @@ impl PlanetGenApp {
         ));
 
         self.needs_regenerate = false;
+    }
+
+    fn update_derived(&mut self) {
+        self.derived = DerivedProperties::from_params(&self.params);
     }
 }
 
@@ -69,7 +70,7 @@ impl eframe::App for PlanetGenApp {
 
         egui::SidePanel::left("params_panel")
             .resizable(true)
-            .default_width(250.0)
+            .default_width(280.0)
             .show(ctx, |ui| {
                 ui.heading("Planet Parameters");
                 ui.separator();
@@ -78,72 +79,119 @@ impl eframe::App for PlanetGenApp {
 
                 changed |= ui
                     .add(
-                        egui::Slider::new(&mut self.star_distance, 0.1..=50.0)
-                            .text("Star Distance (AU)")
+                        egui::Slider::new(&mut self.params.star_distance_au, 0.1..=50.0)
+                            .text("Distance (AU)")
                             .logarithmic(true),
                     )
+                    .on_hover_text("Distance from the star in Astronomical Units")
                     .changed();
 
                 changed |= ui
                     .add(
-                        egui::Slider::new(&mut self.planet_mass, 0.01..=10.0)
+                        egui::Slider::new(&mut self.params.mass_earth, 0.01..=10.0)
                             .text("Mass (M⊕)")
                             .logarithmic(true),
                     )
+                    .on_hover_text("Planet mass in Earth masses")
                     .changed();
 
                 changed |= ui
                     .add(
-                        egui::Slider::new(&mut self.metallicity, -1.0..=1.0)
-                            .text("Metallicity [Fe/H]"),
+                        egui::Slider::new(&mut self.params.metallicity, -1.0..=1.0)
+                            .text("[Fe/H]"),
+                    )
+                    .on_hover_text(
+                        "Stellar metallicity in dex. 0 = Sun-like, negative = metal-poor, positive = metal-rich",
                     )
                     .changed();
 
                 changed |= ui
                     .add(
-                        egui::Slider::new(&mut self.axial_tilt, 0.0..=90.0)
-                            .text("Axial Tilt (°)"),
+                        egui::Slider::new(&mut self.params.axial_tilt_deg, 0.0..=90.0)
+                            .text("Tilt (°)"),
                     )
+                    .on_hover_text("Axial tilt in degrees. Earth = 23.4°")
                     .changed();
 
                 changed |= ui
                     .add(
-                        egui::Slider::new(&mut self.rotation_period, 1.0..=1000.0)
-                            .text("Rotation (hours)")
+                        egui::Slider::new(&mut self.params.rotation_period_h, 1.0..=1000.0)
+                            .text("Day (hours)")
                             .logarithmic(true),
                     )
+                    .on_hover_text("Rotation period in hours. Earth = 24h")
                     .changed();
 
                 ui.separator();
 
                 ui.horizontal(|ui| {
                     changed |= ui
-                        .add(egui::DragValue::new(&mut self.seed).prefix("Seed: "))
+                        .add(egui::DragValue::new(&mut self.params.seed).prefix("Seed: "))
                         .changed();
                     if ui.button("🎲").on_hover_text("Random seed").clicked() {
-                        self.seed = rand_seed();
+                        self.params.seed = rand_seed();
                         changed = true;
                     }
                 });
+
+                if changed {
+                    self.update_derived();
+                    self.needs_regenerate = true;
+                }
+
+                ui.separator();
+
+                // Derived properties (read-only)
+                ui.heading("Derived Properties");
+                ui.separator();
+
+                egui::Grid::new("derived_grid")
+                    .num_columns(2)
+                    .spacing([8.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label("Type:");
+                        ui.label(format!("{:?}", self.derived.planet_type));
+                        ui.end_row();
+
+                        ui.label("Tectonics:");
+                        ui.label(format!("{:?}", self.derived.tectonic_regime));
+                        ui.end_row();
+
+                        ui.label("Atmosphere:");
+                        ui.label(format!("{:?}", self.derived.atmosphere_type));
+                        ui.end_row();
+
+                        ui.label("Gravity:");
+                        ui.label(format!("{:.2} m/s²", self.derived.surface_gravity));
+                        ui.end_row();
+
+                        ui.label("Temp:");
+                        ui.label(format!("{:.1} °C", self.derived.base_temperature_c));
+                        ui.end_row();
+
+                        ui.label("Ocean:");
+                        ui.label(format!("{:.0}%", self.derived.ocean_fraction * 100.0));
+                        ui.end_row();
+
+                        ui.label("Frost line:");
+                        ui.label(format!("{:.1} AU", self.derived.frost_line_au));
+                        ui.end_row();
+                    });
 
                 ui.separator();
 
                 if ui
                     .add(
                         egui::Slider::new(&mut self.rotation_y, 0.0..=std::f32::consts::TAU)
-                            .text("Rotation"),
+                            .text("View rotation"),
                     )
                     .changed()
                 {
                     self.needs_regenerate = true;
                 }
 
-                if changed {
-                    self.needs_regenerate = true;
-                }
-
                 ui.separator();
-                ui.label(format!("GPU: {}", self.gpu.adapter_name()));
+                ui.small(format!("GPU: {}", self.gpu.adapter_name()));
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
