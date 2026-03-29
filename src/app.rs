@@ -35,16 +35,24 @@ impl PlanetGenApp {
     }
 
     fn terrain_params_from_planet(&self) -> TerrainParams {
-        // Map derived planet properties to terrain generation parameters
-        let frequency = match self.derived.tectonic_regime {
-            TectonicRegime::PlateTectonics => 1.5, // More varied terrain
-            TectonicRegime::StagnantLid => 0.8,    // Smoother, older surface
+        // Tectonics: active surfaces have more varied, higher-frequency terrain
+        let base_frequency = match self.derived.tectonic_regime {
+            TectonicRegime::PlateTectonics => 1.5,
+            TectonicRegime::StagnantLid => 0.8,
         };
 
-        // Heavier planets → slightly higher amplitude (more relief)
+        // Metallicity affects terrain roughness (more metals → more geological variety)
+        let frequency = base_frequency * (1.0 + 0.3 * self.params.metallicity);
+
+        // Mass affects relief amplitude
         let amplitude = 0.8 + 0.4 * self.params.mass_earth.min(3.0) / 3.0;
 
-        // More octaves for active surfaces
+        // Tilt affects terrain detail (higher tilt → more varied erosion patterns)
+        let gain = 0.45 + 0.1 * (self.params.axial_tilt_deg / 90.0);
+
+        // Rotation period affects lacunarity (faster rotation → more banding-like features)
+        let lacunarity = 1.8 + 0.4 * (24.0 / self.params.rotation_period_h).min(2.0);
+
         let octaves = match self.derived.tectonic_regime {
             TectonicRegime::PlateTectonics => 8,
             TectonicRegime::StagnantLid => 6,
@@ -56,8 +64,8 @@ impl PlanetGenApp {
             frequency,
             amplitude,
             octaves,
-            lacunarity: 2.0,
-            gain: 0.5,
+            lacunarity,
+            gain,
             face: 0,
         }
     }
@@ -263,8 +271,8 @@ impl eframe::App for PlanetGenApp {
                 // Handle drag rotation
                 if response.dragged() {
                     let delta = response.drag_delta();
-                    self.rotation_y += delta.x * 0.01;
-                    self.rotation_x -= delta.y * 0.01;
+                    self.rotation_y -= delta.x * 0.01;
+                    self.rotation_x += delta.y * 0.01;
                     // Clamp vertical rotation
                     self.rotation_x = self.rotation_x.clamp(
                         -std::f32::consts::FRAC_PI_2 + 0.1,

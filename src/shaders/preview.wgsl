@@ -27,10 +27,10 @@ fn vs_main(@builtin(vertex_index) idx: u32) -> VertexOutput {
     return out;
 }
 
-// Ray-sphere intersection
+// Ray-sphere intersection — camera at z=-2.2 for a larger planet in viewport
 fn intersect_sphere(uv: vec2<f32>) -> vec3<f32> {
-    let ro = vec3<f32>(0.0, 0.0, -3.0);
-    let rd = normalize(vec3<f32>((uv - 0.5) * 2.0, 1.0));
+    let ro = vec3<f32>(0.0, 0.0, -2.2);
+    let rd = normalize(vec3<f32>((uv - 0.5) * 2.0, 1.5));
 
     let b = dot(ro, rd);
     let c = dot(ro, ro) - 1.0;
@@ -93,8 +93,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let normal = normalize(hit);
     let rotated = (uniforms.rotation * vec4<f32>(normal, 0.0)).xyz;
 
-    // Sample height from cubemap (normalized to [-1, 1])
-    let height = textureSampleLevel(height_tex, height_sampler, rotated, 0.0).r;
+    // Sample height from cubemap with linear filtering (normalized to [-1, 1])
+    let height = textureSample(height_tex, height_sampler, rotated).r;
 
     // Color from height with ocean level
     let base_color = height_to_color(height, uniforms.ocean_level);

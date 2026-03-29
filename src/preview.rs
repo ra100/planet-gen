@@ -50,7 +50,7 @@ impl PreviewRenderer {
                             binding: 1,
                             visibility: wgpu::ShaderStages::FRAGMENT,
                             ty: wgpu::BindingType::Texture {
-                                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
                                 view_dimension: wgpu::TextureViewDimension::Cube,
                                 multisampled: false,
                             },
@@ -59,7 +59,7 @@ impl PreviewRenderer {
                         wgpu::BindGroupLayoutEntry {
                             binding: 2,
                             visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                             count: None,
                         },
                     ],
@@ -106,8 +106,8 @@ impl PreviewRenderer {
 
         let sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("preview sampler"),
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
 
@@ -131,6 +131,7 @@ impl PreviewRenderer {
         let res = terrain.resolution;
 
         // Create cubemap texture from terrain heightmap data
+        // Use R16Float for linear filtering support (R32Float is not filterable)
         let cubemap = gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("height cubemap"),
             size: wgpu::Extent3d {
@@ -141,13 +142,17 @@ impl PreviewRenderer {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R32Float,
+            format: wgpu::TextureFormat::R16Float,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
 
-        // Upload each face
+        // Upload each face (convert f32 → f16)
         for (i, face_data) in terrain.faces.iter().enumerate() {
+            let f16_data: Vec<u16> = face_data
+                .iter()
+                .map(|&v| half::f16::from_f32(v).to_bits())
+                .collect();
             gpu.queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &cubemap,
@@ -159,10 +164,10 @@ impl PreviewRenderer {
                     },
                     aspect: wgpu::TextureAspect::All,
                 },
-                bytemuck::cast_slice(face_data),
+                bytemuck::cast_slice(&f16_data),
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(res * 4), // f32 = 4 bytes
+                    bytes_per_row: Some(res * 2), // f16 = 2 bytes
                     rows_per_image: Some(res),
                 },
                 wgpu::Extent3d {

@@ -15,19 +15,37 @@ struct TerrainParams {
 @group(0) @binding(0) var<storage, read_write> heightmap: array<f32>;
 @group(0) @binding(1) var<uniform> params: TerrainParams;
 
+// Hash seed to a small, well-distributed offset in [0, 100) range.
+// Avoids floating point precision issues at large coordinates.
+fn hash_seed(s: u32) -> vec3<f32> {
+    // Simple integer hash (Wang hash variant)
+    var h1 = s;
+    h1 = (h1 ^ 61u) ^ (h1 >> 16u);
+    h1 = h1 * 9u;
+    h1 = h1 ^ (h1 >> 4u);
+    h1 = h1 * 0x27d4eb2du;
+    h1 = h1 ^ (h1 >> 15u);
+
+    var h2 = h1 * 0x85ebca6bu;
+    h2 = h2 ^ (h2 >> 13u);
+
+    var h3 = h2 * 0xc2b2ae35u;
+    h3 = h3 ^ (h3 >> 16u);
+
+    return vec3<f32>(
+        f32(h1 % 10000u) * 0.01,
+        f32(h2 % 10000u) * 0.01,
+        f32(h3 % 10000u) * 0.01
+    );
+}
+
 fn fbm(pos: vec3<f32>) -> f32 {
     var value = 0.0;
     var freq = params.frequency;
     var amp = params.amplitude;
-    var p = pos;
 
-    // Offset by seed to get different terrain per seed
-    let seed_offset = vec3<f32>(
-        f32(params.seed) * 13.37,
-        f32(params.seed) * 7.19,
-        f32(params.seed) * 23.71
-    );
-    p = p + seed_offset;
+    // Offset by hashed seed for deterministic variation
+    let p = pos + hash_seed(params.seed);
 
     for (var i = 0u; i < params.octaves; i++) {
         value += amp * snoise(p * freq);
