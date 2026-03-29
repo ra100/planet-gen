@@ -44,13 +44,27 @@ Implement the science rules that turn user parameters into planet properties.
 
 ---
 
+## Phase 3.5: Terrain & Preview Fixes
+
+Fix issues found during user testing. Root cause: terrain params mapped via discrete categories instead of continuous functions, seed hash broken at large values, preview seam from cubemap texel boundaries.
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 3.5.1 | Seamless preview: remove cubemap indirection for preview — sample 3D noise directly in the preview fragment shader using sphere position, eliminating face seam artifacts entirely | No visible seam when rotating the planet; preview matches terrain generation output | Phase 2 | cc:TODO |
+| 3.5.2 | Continuous parameter→terrain mapping: replace discrete `match` on planet type/tectonics with continuous functions. Use research spectral exponents (β): Earth=2.0, Mars=2.38, Venus=1.47 → persistence = 10^(-β/20). Distance drives base temperature → terrain roughness continuously. Mass drives amplitude via g∝M^0.46 continuously. All 6 slider values should produce visible continuous change | Test: moving any slider by 10% produces a visibly different (but not randomly different) planet. No flat regions where slider has no effect | 3.5.1 | cc:TODO |
+| 3.5.3 | Fix seed hash in WGSL: current integer hash may overflow incorrectly in WGSL. Use a float-based hash (fract/sin) or validated u32 hash. Test with seeds 0, 1, 42, 100000, 999999, 4294967295 | Test: all test seeds produce distinct, non-garbage terrain. Adjacent seeds (41,42,43) produce visually different but plausible planets | Phase 2 | cc:TODO |
+| 3.5.4 | Meaningful metallicity effect: metallicity shifts the frost line (already in DerivedProperties) and affects terrain spectral exponent β. Higher metallicity → more rocky minerals → rougher terrain (higher β). Should look like a continuous roughness change, not a random seed shift | Test: sweeping metallicity -1→+1 at fixed seed produces a smooth transition from smoother to rougher terrain | 3.5.2 | cc:TODO |
+| 3.5.5 | Planet fills preview area: adjust ray-sphere camera/FOV so the planet sphere fills ~85% of the preview render area | Planet visually fills most of the preview square with small margin | 3.5.1 | cc:TODO |
+
+---
+
 ## Phase 4: Biome & Surface Generation
 
 Generate biomes, albedo colors, and surface properties from terrain + planet physics.
 
 | Task | 内容 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
-| 4.1 | Temperature map: latitude + elevation lapse rate + noise → per-pixel temperature on cube faces | Test: temperature decreases from equator to poles and with elevation; values in physically plausible range | Phase 2, 3.3 | cc:TODO |
+| 4.1 | Temperature map: latitude + elevation lapse rate + noise → per-pixel temperature on cube faces | Test: temperature decreases from equator to poles and with elevation; values in physically plausible range | Phase 2, 3.3, Phase 3.5 | cc:TODO |
 | 4.2 | Moisture map: noise-based + ocean proximity bonus + rain shadow from wind direction | Test: moisture higher near oceans, lower in rain shadows behind mountains | 4.1 | cc:TODO |
 | 4.3 | Whittaker biome lookup: 7×9 table as a GPU texture, sample with (temp, moisture) → biome ID | Test: known (temp, moisture) pairs return correct biome; covers all 15+ biome types | 4.2 | cc:TODO |
 | 4.4 | Albedo generation: biome ID → base color + noise variation per biome | Test: desert is tan/brown, tropical rainforest is dark green, ice is white; colors vary within each biome | 4.3 | cc:TODO |
