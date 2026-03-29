@@ -1,0 +1,105 @@
+# Planet Gen Plans.md
+
+作成日: 2026-03-29
+Requirements: [docs/brainstorms/2026-03-29-planet-gen-requirements.md](docs/brainstorms/2026-03-29-planet-gen-requirements.md)
+
+---
+
+## Phase 1: Project Scaffold & GPU Hello World
+
+Bootstrap the Rust project, get wgpu device initialization working, and prove compute shaders run.
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 1.1 | Rust project init: `cargo init`, add wgpu, egui/eframe, bytemuck, image, exr crate dependencies | `cargo build` succeeds with all deps | - | cc:TODO |
+| 1.2 | wgpu device singleton: init adapter + device + queue at startup, store in app state | Unit test: device initializes and reports adapter name | 1.1 | cc:TODO |
+| 1.3 | Minimal compute shader: WGSL shader that writes a gradient to a 256×256 storage texture | Test: shader dispatches, readback buffer contains expected gradient values | 1.2 | cc:TODO |
+| 1.4 | egui app shell: eframe window with a sidebar panel (placeholder sliders) and a main area displaying the compute shader output as a texture | App launches, shows gradient texture in main area and sliders in sidebar | 1.3 | cc:TODO |
+
+---
+
+## Phase 2: Cube-Sphere & Noise Generation
+
+Implement the core geometry representation and fBm terrain generation on the GPU.
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 2.1 | Cube-to-sphere mapping: WGSL function `cube_to_sphere(face, uv) → vec3<f32>` with unit tests for all 6 faces | Test: points at face centers and corners map to correct sphere positions; no NaN at edges | Phase 1 | cc:TODO |
+| 2.2 | Simplex/Perlin noise in WGSL: 3D noise function usable in compute shaders | Test: noise output for known seed matches expected range [-1, 1], visually non-uniform | 2.1 | cc:TODO |
+| 2.3 | Multi-octave fBm compute shader: 8 octaves of noise applied to all 6 cube faces at 256×256 (preview res) | Test: generates 6 heightmaps, values in expected range, different faces show continuous terrain across edges | 2.2 | cc:TODO |
+| 2.4 | Preview renderer: render cube-sphere heightmap as a lit sphere in the egui viewport (render-to-texture → `ui.image()`) | Rotating planet preview visible in app, updates when noise seed changes | 2.3 | cc:TODO |
+
+---
+
+## Phase 3: Planet Physics & Parameter Derivation
+
+Implement the science rules that turn user parameters into planet properties.
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 3.1 | Parameter struct: `PlanetParams { star_distance_au, mass_earth, metallicity, axial_tilt_deg, rotation_period_h, seed }` with validation and defaults | Struct compiles, default produces Earth-like values, validation rejects nonsense (negative mass, etc.) | Phase 1 | cc:TODO |
+| 3.2 | Planet type derivation: frost line calc, planet type classification (hot rocky / terrestrial / icy), tectonic regime (Rayleigh number) | Test: Earth params → terrestrial + plate tectonics; Mars params → stagnant lid; 5 AU → icy | 3.1 | cc:TODO |
+| 3.3 | Derived properties: surface gravity, base temperature profile (latitude-based), ocean level, atmosphere type | Test: Earth params produce ~9.8 m/s² gravity, ~15°C avg temp, ~71% ocean coverage | 3.2 | cc:TODO |
+| 3.4 | Wire params to UI: egui sliders for all 6 inputs with ranges (distance: 0.1-50 AU, mass: 0.01-10 M⊕, etc.), derived properties shown as read-only labels | Changing sliders updates derived properties in real-time; tooltips explain each parameter | 3.3 | cc:TODO |
+
+---
+
+## Phase 4: Biome & Surface Generation
+
+Generate biomes, albedo colors, and surface properties from terrain + planet physics.
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 4.1 | Temperature map: latitude + elevation lapse rate + noise → per-pixel temperature on cube faces | Test: temperature decreases from equator to poles and with elevation; values in physically plausible range | Phase 2, 3.3 | cc:TODO |
+| 4.2 | Moisture map: noise-based + ocean proximity bonus + rain shadow from wind direction | Test: moisture higher near oceans, lower in rain shadows behind mountains | 4.1 | cc:TODO |
+| 4.3 | Whittaker biome lookup: 7×9 table as a GPU texture, sample with (temp, moisture) → biome ID | Test: known (temp, moisture) pairs return correct biome; covers all 15+ biome types | 4.2 | cc:TODO |
+| 4.4 | Albedo generation: biome ID → base color + noise variation per biome | Test: desert is tan/brown, tropical rainforest is dark green, ice is white; colors vary within each biome | 4.3 | cc:TODO |
+| 4.5 | Normal map generation: compute normals from heightmap via central differences | Test: normals point outward on flat areas, tilt correctly on slopes | Phase 2 | cc:TODO |
+| 4.6 | Roughness map: biome-dependent base roughness + noise | Test: water/ice smooth (low roughness), rock/desert rough (high roughness) | 4.3 | cc:TODO |
+| 4.7 | Ocean & ice masks: threshold height for ocean, threshold temperature for ice caps | Test: ocean mask covers areas below sea level; ice caps at poles for Earth-like params | 4.1 | cc:TODO |
+| 4.8 | Crater stamping: stamp crater shapes (rim + floor + ejecta) on heightmap, count scaled by derived surface age | Test: older surfaces get more craters; crater shapes have raised rim and depressed floor | Phase 2, 3.2 | cc:TODO |
+| 4.9 | Preview integration: all maps (albedo, height, biomes) visible in the preview sphere with <1s update at 256×256 | Changing any parameter updates the preview planet within 1 second | 4.4, 4.5, 4.6, 4.7 | cc:TODO |
+
+---
+
+## Phase 5: Tiled Full-Resolution Generation & Export
+
+Scale from preview (256²) to full 8K (8192²) via tiled generation and export to files.
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 5.1 | Tile coordinator: subdivide each face into 16×16 tiles of 512px, dispatch compute shaders per tile with correct UV offsets | Test: 6 × 256 = 1,536 tiles dispatched; adjacent tiles produce seamless output at borders | Phase 4 | cc:TODO |
+| 5.2 | GPU→CPU readback pipeline: read tile results from GPU storage textures to CPU memory, assemble into full-face images | Test: assembled face image matches expected resolution (8192×8192); no visible tile seams | 5.1 | cc:TODO |
+| 5.3 | EXR export: write height/displacement as 16-bit float EXR files (one per face or stitched) | Test: exported EXR opens in Blender, values match GPU output within float precision | 5.2 | cc:TODO |
+| 5.4 | PNG export: write albedo, normal, roughness, ocean mask, ice mask as 8-bit PNG | Test: exported PNGs open correctly, color values match preview visually | 5.2 | cc:TODO |
+| 5.5 | Background generation with progress: full generation runs on background thread, UI shows progress bar (% tiles complete) | Test: UI remains responsive during generation; progress bar updates; cancel button stops generation | 5.1 | cc:TODO |
+| 5.6 | Output directory structure: organize exported files in `<output_dir>/<planet_name>/` with consistent naming | Test: generate produces expected file tree with all 6 map types | 5.3, 5.4 | cc:TODO |
+| 5.7 | Performance validation: full 8K generation completes in <30s on RTX 3080-class GPU | Benchmark: timed generation from start to all files written, meets target | 5.5, 5.6 | cc:TODO |
+
+---
+
+## Phase 6: Blender Importer Addon
+
+Pure-Python Blender addon that imports generated textures and sets up materials.
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 6.1 | Addon skeleton: Blender addon with `bl_info`, register/unregister, sidebar panel in 3D Viewport | Addon installs in Blender 4.x, panel appears in N-panel | - | cc:TODO |
+| 6.2 | "Import Planet" operator: file browser to select planet output directory, load all texture files as Image datablocks | Test: all texture files load into Blender's Image Editor | 6.1 | cc:TODO |
+| 6.3 | Material builder: create Principled BSDF node tree, wire albedo→Base Color, normal→Normal Map→Normal, roughness→Roughness, height→Displacement | Test: material node tree is correctly wired; render shows textured planet | 6.2 | cc:TODO |
+| 6.4 | "Create Planet" mode: generate a UV sphere/icosphere with cube-projection UVs, apply material | Test: one-click produces a textured sphere in the scene | 6.3 | cc:TODO |
+| 6.5 | "Apply to Selected" mode: apply material to user's selected mesh object | Test: selecting an existing sphere and clicking "Apply" textures it correctly | 6.3 | cc:TODO |
+| 6.6 | Cycles + EEVEE compatibility: material works in both render engines (Displacement node setup differs) | Test: render in both Cycles and EEVEE produces correct results | 6.3 | cc:TODO |
+
+---
+
+## Phase 7: Polish & Distribution
+
+Error handling, cross-platform builds, and documentation.
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 7.1 | Error handling: GPU errors (OOM, device lost) caught and displayed in UI; graceful fallback messages for unsupported GPUs | Test: simulate OOM → error message shown, app doesn't crash | Phase 5 | cc:TODO |
+| 7.2 | Cross-platform CI: GitHub Actions builds for Linux, macOS, Windows; artifacts uploaded to releases | CI green on all 3 platforms; downloadable binaries work | Phase 5 | cc:TODO |
+| 7.3 | README: installation instructions, usage guide, parameter reference, example renders | README covers install → first planet → Blender import workflow | 7.2 | cc:TODO |
+| 7.4 | Blender addon packaging: zip file with addon Python files, install instructions | Addon installs via Blender Preferences → Install from File | Phase 6 | cc:TODO |

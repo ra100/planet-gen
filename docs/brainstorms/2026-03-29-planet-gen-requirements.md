@@ -79,8 +79,6 @@ Creating believable planet assets for sci-fi VFX shorts requires either hand-pai
 ## Dependencies / Assumptions
 
 - User has a WebGPU-capable GPU (most GPUs from 2018+ via wgpu's Vulkan/Metal/DX12 backends)
-- Blender 4.x+ (Python 3.11+, modern addon API)
-- User has a WebGPU-capable GPU (most GPUs from 2018+ via wgpu's Vulkan/Metal/DX12 backends)
 - Blender 4.x+ for the importer addon (standard Python addon, no native dependencies)
 - wgpu-rs is stable enough for compute shader workloads (used in production by Firefox, Bevy engine, etc.)
 - egui + eframe provides the UI framework (mature, integrates with wgpu natively)
