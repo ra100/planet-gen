@@ -1,7 +1,7 @@
 ---
 title: "fix: Height-aware climate and biome zone fixes"
 type: fix
-status: active
+status: completed
 date: 2026-03-30
 ---
 
