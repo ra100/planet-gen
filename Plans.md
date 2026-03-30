@@ -99,10 +99,10 @@ Plan: [docs/plans/2026-03-30-002-feat-physics-driven-terrain-plan.md](docs/plans
 
 | Task | 内容 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
-| 4.6.1 | Hadley cell moisture model: three-cell circulation replacing noise-based moisture, latitude-banded climate zones | Deserts at ~30° N/S, green equatorial band, tilt shifts bands | Phase 4 | cc:完了 |
-| 4.6.2 | Wind direction and rain shadow: wind from Hadley model creates dry leeward zones on mountains | Visible wet/dry asymmetry on mountain ranges | 4.6.1 | cc:完了 |
-| 4.6.3 | Domain warping for geological terrain: warp continental_base noise for ridges, irregular coastlines | Coastlines irregular, mountains rougher than lowlands | Phase 4 | cc:完了 |
-| 4.6.4 | Altitude zonation: forest → alpine → rock → snow bands on mountains, latitude-dependent snow line | Visible horizontal color banding on mountain slopes | 4.6.1 | cc:完了 |
+| 4.6.1 | Hadley cell moisture model: three-cell circulation replacing noise-based moisture, latitude-banded climate zones | Deserts at ~30° N/S, green equatorial band, tilt shifts bands | Phase 4 | cc:完了 [d8d7bd3] |
+| 4.6.2 | Wind direction and rain shadow: wind from Hadley model creates dry leeward zones on mountains | Visible wet/dry asymmetry on mountain ranges | 4.6.1 | cc:完了 [d8d7bd3] |
+| 4.6.3 | Domain warping for geological terrain: warp continental_base noise for ridges, irregular coastlines | Coastlines irregular, mountains rougher than lowlands | Phase 4 | cc:完了 [d8d7bd3] |
+| 4.6.4 | Altitude zonation: forest → alpine → rock → snow bands on mountains, latitude-dependent snow line | Visible horizontal color banding on mountain slopes | 4.6.1 | cc:完了 [d8d7bd3] |
 
 ---
 
@@ -114,10 +114,10 @@ Plan: [docs/plans/2026-03-30-001-feat-visual-control-parameters-plan.md](docs/pl
 
 | Task | 内容 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
-| 4.7.1 | Continental scale slider (0.5-4.0): controls frequency of continental_base noise layer | Different continent sizes at different values, preview updates <1s | Phase 4 | cc:完了 |
-| 4.7.2 | Polar ocean ice rendering: ocean rendered as ice when temperature < -2°C | Polar regions show ice on ocean, not just on land | Phase 4 | cc:完了 |
-| 4.7.3 | Water loss slider (0.0-1.0): reduces effective ocean fraction below physics-derived value | Slider reduces ocean coverage smoothly, exposed areas show land biomes | Phase 4 | cc:完了 |
-| 4.7.4 | Uniform struct alignment: ensure PreviewUniforms stays 16-byte aligned with new fields | cargo test passes, no GPU validation errors | 4.7.1, 4.7.3 | cc:完了 |
+| 4.7.1 | Continental scale slider (0.5-4.0): controls frequency of continental_base noise layer | Different continent sizes at different values, preview updates <1s | Phase 4 | cc:完了 [d8d7bd3] |
+| 4.7.2 | Polar ocean ice rendering: ocean rendered as ice when temperature < -2°C | Polar regions show ice on ocean, not just on land | Phase 4 | cc:完了 [d8d7bd3] |
+| 4.7.3 | Water loss slider (0.0-1.0): reduces effective ocean fraction below physics-derived value | Slider reduces ocean coverage smoothly, exposed areas show land biomes | Phase 4 | cc:完了 [d8d7bd3] |
+| 4.7.4 | Uniform struct alignment: ensure PreviewUniforms stays 16-byte aligned with new fields | cargo test passes, no GPU validation errors | 4.7.1, 4.7.3 | cc:完了 [d8d7bd3] |
 
 ---
 
@@ -144,13 +144,13 @@ Scale from preview (256²) to full 8K (8192²) via tiled generation and export t
 
 | Task | 内容 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
-| 5.1 | Tile coordinator: subdivide each face into 16×16 tiles of 512px, dispatch compute shaders per tile with correct UV offsets | Test: 6 × 256 = 1,536 tiles dispatched; adjacent tiles produce seamless output at borders | Phase 4 | cc:完了 |
-| 5.2 | GPU→CPU readback pipeline: read tile results from GPU storage textures to CPU memory, assemble into full-face images | Test: assembled face image matches expected resolution (8192×8192); no visible tile seams | 5.1 | cc:完了 |
-| 5.3 | EXR export: write height/displacement as 16-bit float EXR files (one per face or stitched) | Test: exported EXR opens in Blender, values match GPU output within float precision | 5.2 | cc:完了 |
-| 5.4 | PNG export: write albedo, normal, roughness, ocean mask, ice mask as 8-bit PNG | Test: exported PNGs open correctly, color values match preview visually | 5.2 | cc:完了 |
-| 5.5 | Background generation with progress: full generation runs on background thread, UI shows progress bar (% tiles complete) | Test: UI remains responsive during generation; progress bar updates; cancel button stops generation | 5.1 | cc:完了 |
-| 5.6 | Output directory structure: organize exported files in `<output_dir>/<planet_name>/` with consistent naming | Test: generate produces expected file tree with all 6 map types | 5.3, 5.4 | cc:完了 |
-| 5.7 | Performance validation: full 8K generation completes in <30s on RTX 3080-class GPU | Benchmark: timed generation from start to all files written, meets target | 5.5, 5.6 | cc:完了 |
+| 5.1 | Tile coordinator: subdivide each face into 16×16 tiles of 512px, dispatch compute shaders per tile with correct UV offsets | Test: 6 × 256 = 1,536 tiles dispatched; adjacent tiles produce seamless output at borders | Phase 4 | cc:完了 [d8d7bd3] |
+| 5.2 | GPU→CPU readback pipeline: read tile results from GPU storage textures to CPU memory, assemble into full-face images | Test: assembled face image matches expected resolution (8192×8192); no visible tile seams | 5.1 | cc:完了 [d8d7bd3] |
+| 5.3 | EXR export: write height/displacement as 16-bit float EXR files (one per face or stitched) | Test: exported EXR opens in Blender, values match GPU output within float precision | 5.2 | cc:完了 [d8d7bd3] |
+| 5.4 | PNG export: write albedo, normal, roughness, ocean mask, ice mask as 8-bit PNG | Test: exported PNGs open correctly, color values match preview visually | 5.2 | cc:完了 [d8d7bd3] |
+| 5.5 | Background generation with progress: full generation runs on background thread, UI shows progress bar (% tiles complete) | Test: UI remains responsive during generation; progress bar updates; cancel button stops generation | 5.1 | cc:完了 [d8d7bd3] |
+| 5.6 | Output directory structure: organize exported files in `<output_dir>/<planet_name>/` with consistent naming | Test: generate produces expected file tree with all 6 map types | 5.3, 5.4 | cc:完了 [d8d7bd3] |
+| 5.7 | Performance validation: full 8K generation completes in <30s on RTX 3080-class GPU | Benchmark: timed generation from start to all files written, meets target | 5.5, 5.6 | cc:完了 [d8d7bd3] |
 
 ---
 
