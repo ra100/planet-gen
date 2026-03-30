@@ -3,11 +3,14 @@ use std::sync::Arc;
 
 use crate::gpu::GpuContext;
 use crate::planet::{DerivedProperties, PlanetParams};
-use crate::preview::{self, PreviewRenderer, PreviewUniforms};
+use crate::plates::{generate_plates, PlateGenParams};
+use crate::preview::{PreviewRenderer, PreviewUniforms};
+use crate::terrain_compute::TerrainComputePipeline;
 
 pub struct PlanetGenApp {
     gpu: Arc<GpuContext>,
     preview_renderer: PreviewRenderer,
+    terrain_compute: TerrainComputePipeline,
     texture_handle: Option<egui::TextureHandle>,
     params: PlanetParams,
     derived: DerivedProperties,
@@ -24,11 +27,13 @@ pub struct PlanetGenApp {
 impl PlanetGenApp {
     pub fn new(gpu: Arc<GpuContext>) -> Self {
         let preview_renderer = PreviewRenderer::new(&gpu);
+        let terrain_compute = TerrainComputePipeline::new(&gpu);
         let params = PlanetParams::default();
         let derived = DerivedProperties::from_params(&params);
         Self {
             gpu,
             preview_renderer,
+            terrain_compute,
             texture_handle: None,
             params,
             derived,
@@ -37,58 +42,15 @@ impl PlanetGenApp {
             continental_scale: 1.0,
             water_loss: 0.0,
             view_mode: 0,
-            preview_resolution: preview::DEFAULT_PREVIEW_SIZE,
+            preview_resolution: crate::preview::DEFAULT_PREVIEW_SIZE,
             needs_regenerate: true,
         }
     }
 
     fn build_uniforms(&self) -> PreviewUniforms {
-        // --- Continuous parameter → terrain mapping ---
-        // Based on research spectral exponents:
-        //   Earth β=2.0, Mars β=2.38, Venus β=1.47
-        //   persistence (gain) = 2^(-H) where H = (β-1)/2
-        //   So: Earth H=0.5 → gain=0.707, Mars H=0.69 → gain=0.62, Venus H=0.235 → gain=0.85
-
-        // Distance affects temperature → terrain character continuously
-        // Closer = hotter = more volcanic/smooth (Venus-like, lower β)
-        // Farther = colder = more rugged/cratered (Mars-like, higher β)
-        let dist = self.params.star_distance_au;
-        let dist_factor = (dist.ln() / 3.0_f32.ln()).clamp(0.0, 1.0); // 0 at 1AU, 1 at ~3AU+
-
-        // Base spectral exponent: interpolate Venus(1.47) → Earth(2.0) → Mars(2.38)
-        let base_beta = 1.47 + 0.91 * dist_factor; // 1.47 → 2.38
-
-        // Metallicity shifts β: more metals → rougher terrain (higher β)
-        let beta = (base_beta + 0.3 * self.params.metallicity).clamp(1.2, 3.0);
-
-        // Convert β to fBm gain (persistence): gain = 2^(-H), H = (β-1)/2
-        let hurst = (beta - 1.0) / 2.0;
-        let gain = 2.0_f32.powf(-hurst); // Earth: 0.707, Mars: 0.62, Venus: 0.85
-
-        // Mass affects amplitude continuously via gravity scaling
-        // g ∝ M^0.46, more gravity → more relief but compressed
-        let mass = self.params.mass_earth;
-        let amplitude = 0.6 + 0.6 * mass.powf(0.3).min(2.0);
-
-        // Frequency: smaller planets have relatively larger features
-        // Larger planets have finer detail relative to their size
-        let frequency = 1.0 + 0.5 * mass.powf(0.2);
-
-        // Lacunarity: rotation period affects banding tendency
-        // Fast rotation → slight banding (higher lacunarity)
-        let rotation_factor = (24.0 / self.params.rotation_period_h).clamp(0.5, 2.0);
-        let lacunarity = 1.9 + 0.2 * rotation_factor;
-
-        // Octaves: minimum 8 per research section 7.3, up to 12 for active surfaces
-        // Tilt adds detail (artistic, not physics-based)
-        let tilt_factor = self.params.axial_tilt_deg / 90.0;
-        let octaves = (8.0 + 4.0 * tilt_factor * self.derived.tectonics_factor) as u32; // 8-12
-
-        // Ocean level: apply water_loss override
         let effective_ocean = self.derived.ocean_fraction * (1.0 - self.water_loss);
         let ocean_level = -1.0 + 2.0 * effective_ocean;
 
-        // Rotation matrix: Y then X
         let cy = self.rotation_y.cos();
         let sy = self.rotation_y.sin();
         let cx = self.rotation_x.cos();
@@ -103,26 +65,65 @@ impl PlanetGenApp {
             ],
             light_dir: [0.5, 0.7, -1.0],
             ocean_level,
-            seed_offset: preview::seed_to_offset(self.params.seed),
-            frequency,
-            lacunarity,
-            gain,
-            amplitude,
-            octaves,
             base_temp_c: self.derived.base_temperature_c,
             ocean_fraction: effective_ocean,
             axial_tilt_rad: self.params.axial_tilt_deg.to_radians(),
-            tectonics_factor: self.derived.tectonics_factor,
-            continental_scale: self.continental_scale,
             view_mode: self.view_mode,
-            _pad: [0.0; 2],
         }
     }
 
+    fn terrain_params(&self) -> (f32, f32, u32, f32, f32) {
+        // Spectral exponent mapping from research
+        let dist = self.params.star_distance_au;
+        let dist_factor = (dist.ln() / 3.0_f32.ln()).clamp(0.0, 1.0);
+        let base_beta = 1.47 + 0.91 * dist_factor;
+        let beta = (base_beta + 0.3 * self.params.metallicity).clamp(1.2, 3.0);
+        let hurst = (beta - 1.0) / 2.0;
+        let gain = 2.0_f32.powf(-hurst);
+
+        let mass = self.params.mass_earth;
+        let amplitude = 0.6 + 0.6 * mass.powf(0.3).min(2.0);
+        let frequency = (1.0 + 0.5 * mass.powf(0.2)) * self.continental_scale;
+
+        let tilt_factor = self.params.axial_tilt_deg / 90.0;
+        let octaves = (8.0 + 4.0 * tilt_factor * self.derived.tectonics_factor) as u32;
+
+        let rotation_factor = (24.0 / self.params.rotation_period_h).clamp(0.5, 2.0);
+        let lacunarity = 1.9 + 0.2 * rotation_factor;
+
+        (amplitude, frequency, octaves, gain, lacunarity)
+    }
+
     fn generate_preview(&mut self, ctx: &egui::Context) {
+        // 1. Generate plates on CPU
+        let plates = generate_plates(&PlateGenParams {
+            seed: self.params.seed,
+            mass_earth: self.params.mass_earth,
+            ocean_fraction: self.derived.ocean_fraction * (1.0 - self.water_loss),
+            tectonics_factor: self.derived.tectonics_factor,
+        });
+
+        // 2. Run compute pipeline to produce heightmap cubemap
+        let (amplitude, frequency, octaves, gain, lacunarity) = self.terrain_params();
+        let terrain = self.terrain_compute.generate(
+            &self.gpu,
+            &plates,
+            512, // cubemap resolution per face
+            self.params.seed,
+            amplitude,
+            frequency,
+            octaves,
+            gain,
+            lacunarity,
+        );
+
+        // 3. Upload cubemap
+        let cubemap_view = self.preview_renderer.upload_terrain(&self.gpu, &terrain);
+
+        // 4. Render preview
         let uniforms = self.build_uniforms();
         let size = self.preview_resolution;
-        let pixels = self.preview_renderer.render(&self.gpu, &uniforms, size);
+        let pixels = self.preview_renderer.render(&self.gpu, &uniforms, &cubemap_view, size);
 
         let image =
             egui::ColorImage::from_rgba_unmultiplied([size as usize, size as usize], &pixels);
@@ -157,48 +158,33 @@ impl eframe::App for PlanetGenApp {
                 let mut changed = false;
 
                 changed |= ui
-                    .add(
-                        egui::Slider::new(&mut self.params.star_distance_au, 0.1..=50.0)
-                            .text("Distance (AU)")
-                            .logarithmic(true),
-                    )
-                    .on_hover_text("Distance from star. Closer = hotter/smoother (Venus-like), farther = colder/rougher (Mars-like)")
+                    .add(egui::Slider::new(&mut self.params.star_distance_au, 0.1..=50.0)
+                        .text("Distance (AU)").logarithmic(true))
+                    .on_hover_text("Distance from star. Closer = hotter/smoother, farther = colder/rougher")
                     .changed();
 
                 changed |= ui
-                    .add(
-                        egui::Slider::new(&mut self.params.mass_earth, 0.01..=10.0)
-                            .text("Mass (M⊕)")
-                            .logarithmic(true),
-                    )
-                    .on_hover_text("Planet mass. Affects gravity, terrain relief, and feature scale")
+                    .add(egui::Slider::new(&mut self.params.mass_earth, 0.01..=10.0)
+                        .text("Mass (M⊕)").logarithmic(true))
+                    .on_hover_text("Planet mass. Affects gravity, terrain relief, plate count")
                     .changed();
 
                 changed |= ui
-                    .add(
-                        egui::Slider::new(&mut self.params.metallicity, -1.0..=1.0)
-                            .text("[Fe/H]"),
-                    )
-                    .on_hover_text(
-                        "Stellar metallicity. Higher = rougher terrain (more rocky minerals). Affects spectral exponent β",
-                    )
+                    .add(egui::Slider::new(&mut self.params.metallicity, -1.0..=1.0)
+                        .text("[Fe/H]"))
+                    .on_hover_text("Stellar metallicity. Higher = rougher terrain")
                     .changed();
 
                 changed |= ui
-                    .add(
-                        egui::Slider::new(&mut self.params.axial_tilt_deg, 0.0..=90.0)
-                            .text("Tilt (°)"),
-                    )
-                    .on_hover_text("Axial tilt. Higher tilt = more terrain detail (seasonal erosion effects)")
+                    .add(egui::Slider::new(&mut self.params.axial_tilt_deg, 0.0..=90.0)
+                        .text("Tilt (°)"))
+                    .on_hover_text("Axial tilt. Shifts climate zones, affects terrain detail")
                     .changed();
 
                 changed |= ui
-                    .add(
-                        egui::Slider::new(&mut self.params.rotation_period_h, 1.0..=1000.0)
-                            .text("Day (hours)")
-                            .logarithmic(true),
-                    )
-                    .on_hover_text("Rotation period. Faster rotation = slightly more banded features")
+                    .add(egui::Slider::new(&mut self.params.rotation_period_h, 1.0..=1000.0)
+                        .text("Day (hours)").logarithmic(true))
+                    .on_hover_text("Rotation period")
                     .changed();
 
                 ui.separator();
@@ -222,30 +208,23 @@ impl eframe::App for PlanetGenApp {
                 ui.heading("Visual Overrides");
                 ui.separator();
 
-                if ui
-                    .add(
-                        egui::Slider::new(&mut self.continental_scale, 0.5..=4.0)
-                            .text("Continent Scale"),
-                    )
-                    .on_hover_text("Lower = fewer, larger continents (Earth-like ~0.7). Higher = many small islands")
+                if ui.add(egui::Slider::new(&mut self.continental_scale, 0.5..=4.0)
+                    .text("Continent Scale"))
+                    .on_hover_text("Lower = fewer, larger continents. Higher = many small islands")
                     .changed()
                 {
                     self.needs_regenerate = true;
                 }
 
-                if ui
-                    .add(
-                        egui::Slider::new(&mut self.water_loss, 0.0..=1.0)
-                            .text("Water Loss"),
-                    )
-                    .on_hover_text("Simulate water loss from atmospheric escape. 0 = physics default, 1 = completely dry")
+                if ui.add(egui::Slider::new(&mut self.water_loss, 0.0..=1.0)
+                    .text("Water Loss"))
+                    .on_hover_text("Simulate water loss. 0 = physics default, 1 = completely dry")
                     .changed()
                 {
                     self.needs_regenerate = true;
                 }
 
                 ui.separator();
-
                 ui.heading("Derived Properties");
                 ui.separator();
 
@@ -291,19 +270,15 @@ impl eframe::App for PlanetGenApp {
                         ui.end_row();
                     });
 
-                // MMSN plausibility warning
                 if self.params.mass_earth > self.derived.isolation_mass * 15.0 {
                     ui.colored_label(
                         egui::Color32::YELLOW,
-                        format!(
-                            "Mass {:.1} M⊕ exceeds isolation mass {:.2} M⊕ — requires planetary migration",
-                            self.params.mass_earth, self.derived.isolation_mass
-                        ),
+                        format!("Mass {:.1} M⊕ exceeds isolation mass {:.2} M⊕ — requires migration",
+                            self.params.mass_earth, self.derived.isolation_mass),
                     );
                 }
 
                 ui.separator();
-
                 ui.heading("View");
                 ui.separator();
 
@@ -320,11 +295,7 @@ impl eframe::App for PlanetGenApp {
                 ui.add_space(4.0);
 
                 let resolutions: [(u32, &str); 5] = [
-                    (256, "256"),
-                    (512, "512"),
-                    (768, "768"),
-                    (1024, "1K"),
-                    (2048, "2K"),
+                    (256, "256"), (512, "512"), (768, "768"), (1024, "1K"), (2048, "2K"),
                 ];
                 ui.horizontal(|ui| {
                     ui.label("Resolution:");
@@ -344,8 +315,7 @@ impl eframe::App for PlanetGenApp {
                         self.rotation_x = 0.0;
                         self.needs_regenerate = true;
                     }
-                    if ui.button("Face sun").on_hover_text("Rotate to face the light source").clicked() {
-                        // Light is at (0.5, 0.7, -1.0) → planet should face toward it
+                    if ui.button("Face sun").clicked() {
                         self.rotation_y = 0.0;
                         self.rotation_x = 0.0;
                         self.needs_regenerate = true;
@@ -367,10 +337,9 @@ impl eframe::App for PlanetGenApp {
                     egui::Sense::click_and_drag(),
                 );
 
-                let rect = response.rect;
                 painter.image(
                     tex.id(),
-                    rect,
+                    response.rect,
                     egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                     egui::Color32::WHITE,
                 );

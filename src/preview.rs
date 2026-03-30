@@ -1,4 +1,5 @@
 use crate::gpu::GpuContext;
+use crate::terrain_compute::TectonicTerrain;
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
@@ -10,42 +11,32 @@ pub struct PreviewUniforms {
     pub rotation: [[f32; 4]; 4],
     pub light_dir: [f32; 3],
     pub ocean_level: f32,
-    // Terrain params
-    pub seed_offset: [f32; 3],
-    pub frequency: f32,
-    pub lacunarity: f32,
-    pub gain: f32,
-    pub amplitude: f32,
-    pub octaves: u32,
     // Planet properties
     pub base_temp_c: f32,
     pub ocean_fraction: f32,
     pub axial_tilt_rad: f32,
-    pub tectonics_factor: f32,
-    pub continental_scale: f32,
-    pub view_mode: u32, // 0=normal, 1=height, 2=temperature, 3=moisture, 4=biome, 5=ocean/ice
-    pub _pad: [f32; 2],
+    pub view_mode: u32,
 }
 
 pub struct PreviewRenderer {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
     pub size: u32,
 }
 
 impl PreviewRenderer {
     pub fn new(gpu: &GpuContext) -> Self {
-        // Concatenate noise functions + preview shader
         let shader_source = format!(
             "{}\n{}",
             include_str!("shaders/noise.wgsl"),
-            include_str!("shaders/preview.wgsl"),
+            include_str!("shaders/preview_cubemap.wgsl"),
         );
 
         let shader = gpu
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("preview shader"),
+                label: Some("preview cubemap shader"),
                 source: wgpu::ShaderSource::Wgsl(shader_source.into()),
             });
 
@@ -53,16 +44,37 @@ impl PreviewRenderer {
             gpu.device
                 .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                     label: Some("preview bgl"),
-                    entries: &[wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
+                    entries: &[
+                        // Uniforms
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
                         },
-                        count: None,
-                    }],
+                        // Height cubemap
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                                view_dimension: wgpu::TextureViewDimension::Cube,
+                                multisampled: false,
+                            },
+                            count: None,
+                        },
+                        // Sampler
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 2,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                            count: None,
+                        },
+                    ],
                 });
 
         let pipeline_layout =
@@ -104,17 +116,78 @@ impl PreviewRenderer {
                 cache: None,
             });
 
+        let sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("height sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
         Self {
             pipeline,
             bind_group_layout,
+            sampler,
             size: DEFAULT_PREVIEW_SIZE,
         }
     }
 
-    /// Render the planet preview to an RGBA pixel buffer.
-    /// No cubemap needed — noise is computed directly in the fragment shader.
-    pub fn render(&self, gpu: &GpuContext, uniforms: &PreviewUniforms, render_size: u32) -> Vec<u8> {
+    /// Upload terrain data to a cubemap texture (R16Float for filterability).
+    pub fn upload_terrain(&self, gpu: &GpuContext, terrain: &TectonicTerrain) -> wgpu::TextureView {
+        let res = terrain.resolution;
+
+        let cubemap = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("height cubemap"),
+            size: wgpu::Extent3d {
+                width: res,
+                height: res,
+                depth_or_array_layers: 6,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        for (i, face_data) in terrain.faces.iter().enumerate() {
+            let f16_data: Vec<u16> = face_data
+                .iter()
+                .map(|&v| half::f16::from_f32(v).to_bits())
+                .collect();
+            gpu.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &cubemap,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x: 0, y: 0, z: i as u32 },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                bytemuck::cast_slice(&f16_data),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(res * 2),
+                    rows_per_image: Some(res),
+                },
+                wgpu::Extent3d { width: res, height: res, depth_or_array_layers: 1 },
+            );
+        }
+
+        cubemap.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::Cube),
+            ..Default::default()
+        })
+    }
+
+    /// Render the planet preview to an RGBA pixel buffer using a pre-computed cubemap.
+    pub fn render(
+        &self,
+        gpu: &GpuContext,
+        uniforms: &PreviewUniforms,
+        cubemap_view: &wgpu::TextureView,
+        render_size: u32,
+    ) -> Vec<u8> {
         let size = render_size;
+
         let uniform_buffer =
             gpu.device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -126,19 +199,25 @@ impl PreviewRenderer {
         let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("preview bind group"),
             layout: &self.bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform_buffer.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(cubemap_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
         });
 
         let render_target = gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("preview render target"),
-            size: wgpu::Extent3d {
-                width: size,
-                height: size,
-                depth_or_array_layers: 1,
-            },
+            size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -150,9 +229,7 @@ impl PreviewRenderer {
 
         let mut encoder = gpu
             .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("preview encoder"),
-            });
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("preview encoder") });
 
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -162,12 +239,7 @@ impl PreviewRenderer {
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.02,
-                            g: 0.02,
-                            b: 0.05,
-                            a: 1.0,
-                        }),
+                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.02, g: 0.02, b: 0.05, a: 1.0 }),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -205,11 +277,7 @@ impl PreviewRenderer {
                     rows_per_image: Some(size),
                 },
             },
-            wgpu::Extent3d {
-                width: size,
-                height: size,
-                depth_or_array_layers: 1,
-            },
+            wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
         );
 
         gpu.queue.submit(Some(encoder.finish()));
@@ -228,10 +296,8 @@ impl PreviewRenderer {
     }
 }
 
-/// Compute a deterministic seed offset using float-based hash.
-/// Produces values in [0, 100) range — avoids the WGSL integer overflow issue.
+/// Compute a deterministic seed offset using golden ratio hash.
 pub fn seed_to_offset(seed: u32) -> [f32; 3] {
-    // Use golden ratio-based hash for good distribution
     let s = seed as f64;
     let phi = 1.618033988749895_f64;
     let x = ((s * phi) % 97.0) as f32;
@@ -244,11 +310,26 @@ pub fn seed_to_offset(seed: u32) -> [f32; 3] {
 mod tests {
     use super::*;
     use crate::gpu::GpuContext;
+    use crate::plates::{generate_plates, PlateGenParams};
+    use crate::terrain_compute::TerrainComputePipeline;
 
     #[test]
     fn test_preview_renders_non_empty() {
         let gpu = GpuContext::new().expect("GPU init failed");
+
+        // Generate terrain via compute pipeline
+        let compute = TerrainComputePipeline::new(&gpu);
+        let plates = generate_plates(&PlateGenParams {
+            seed: 42,
+            mass_earth: 1.0,
+            ocean_fraction: 0.7,
+            tectonics_factor: 0.85,
+        });
+        let terrain = compute.generate(&gpu, &plates, 64, 42, 1.0, 1.2, 8, 0.5, 2.0);
+
+        // Upload and render
         let renderer = PreviewRenderer::new(&gpu);
+        let cubemap_view = renderer.upload_terrain(&gpu, &terrain);
 
         let uniforms = PreviewUniforms {
             rotation: [
@@ -258,24 +339,15 @@ mod tests {
                 [0.0, 0.0, 0.0, 1.0],
             ],
             light_dir: [0.5, 0.7, -1.0],
-            ocean_level: 0.0,
-            seed_offset: seed_to_offset(42),
-            frequency: 1.5,
-            lacunarity: 2.0,
-            gain: 0.5,
-            amplitude: 1.0,
-            octaves: 8,
+            ocean_level: -0.1,
             base_temp_c: 15.0,
             ocean_fraction: 0.7,
             axial_tilt_rad: 0.41,
-            tectonics_factor: 0.8,
-            continental_scale: 1.0,
             view_mode: 0,
-            _pad: [0.0; 2],
         };
 
-        let size = renderer.size;
-        let pixels = renderer.render(&gpu, &uniforms, size);
+        let size = 256;
+        let pixels = renderer.render(&gpu, &uniforms, &cubemap_view, size);
         assert_eq!(pixels.len(), (size * size * 4) as usize);
 
         let non_background: usize = pixels
@@ -294,18 +366,12 @@ mod tests {
     fn test_seed_offset_distinct_for_different_seeds() {
         let seeds = [0u32, 1, 42, 100_000, 999_999, u32::MAX];
         let offsets: Vec<_> = seeds.iter().map(|&s| seed_to_offset(s)).collect();
-
-        // All pairs should be distinct
         for i in 0..offsets.len() {
             for j in (i + 1)..offsets.len() {
                 let diff = (offsets[i][0] - offsets[j][0]).abs()
                     + (offsets[i][1] - offsets[j][1]).abs()
                     + (offsets[i][2] - offsets[j][2]).abs();
-                assert!(
-                    diff > 0.1,
-                    "seeds {} and {} should produce different offsets: {:?} vs {:?}",
-                    seeds[i], seeds[j], offsets[i], offsets[j]
-                );
+                assert!(diff > 0.1, "seeds {} and {} too similar", seeds[i], seeds[j]);
             }
         }
     }
@@ -315,10 +381,7 @@ mod tests {
         for seed in [0u32, 1, 42, 100_000, 999_999, u32::MAX] {
             let off = seed_to_offset(seed);
             for (i, &v) in off.iter().enumerate() {
-                assert!(
-                    v >= 0.0 && v < 100.0,
-                    "seed {seed} offset[{i}] = {v} out of range"
-                );
+                assert!(v >= 0.0 && v < 100.0, "seed {seed} offset[{i}] = {v} out of range");
             }
         }
     }

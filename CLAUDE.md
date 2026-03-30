@@ -1,51 +1,77 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
 ## Project Overview
 
-Planet Gen is a GPU-accelerated procedural planet generator producing physically plausible planets with biomes, atmospheres, oceans, and up to 32K textures. Currently in **research/pre-implementation phase** — no source code yet, only comprehensive research documents.
+Planet Gen is a GPU-accelerated procedural planet generator built with Rust + wgpu. It produces physically plausible planets with biomes, atmospheres, oceans, and terrain from user-controlled parameters. Currently implements preview mode with plans for full-resolution 8K+ export.
+
+## Tech Stack
+
+- **Language:** Rust
+- **GPU:** wgpu (WebGPU API)
+- **UI:** egui / eframe
+- **Shaders:** WGSL (compute + fragment)
+- **Build:** `cargo build` / `cargo run`
+- **Tests:** `cargo test --lib`
 
 ## Repository Structure
 
-- `docs/research/final.md` — Complete research reference (~9,200 lines) covering planetary science, GPU architecture, tiling, atmospheric rendering, biome mapping, and lessons from existing engines
-- `docs/research/researcher-a.md` — Planet formation and accretion research
-- `docs/research/researcher-b.md` — GPU noise and procedural generation techniques
+```
+src/
+  app.rs          — Main application, UI, parameter sliders
+  preview.rs      — Preview renderer, uniform buffer, GPU pipeline
+  planet.rs       — PlanetParams, DerivedProperties, physics model
+  lib.rs          — Module declarations
+  shaders/
+    preview.wgsl  — Fragment shader: terrain, climate, biomes, coloring
+    compute.wgsl  — Compute shader (gradient test)
+docs/
+  research/       — Research documents (planetary science, GPU techniques)
+  brainstorms/    — Requirements documents
+  plans/          — Implementation plans (active plans for upcoming work)
+Plans.md          — Master progress tracker across all phases
+```
 
-## Architecture (from research)
+## Architecture
 
-The system is designed around three operational modes:
+### Preview Pipeline
 
-1. **Preview Mode**: 256×256 noise per cube face for instant parameter feedback
-2. **Generation Mode**: Async compute producing 24,576 tiles (6 faces × 64×64 tiles, 512² each) for full 32K output
-3. **Runtime Mode**: Virtual texturing with quadtree LOD, atmospheric scattering, FFT ocean
-
-### Core Pipeline
-
-User parameters (star distance, mass, metallicity, tilt, rotation) → terrain generation (multi-octave fBm, 8-12 octaves) → hydraulic erosion (GPU compute, 20-50 iterations) → biome assignment (Whittaker/Köppen lookup) → atmosphere (Bruneton 2017 precomputed scattering) → ocean (Tessendorf FFT) → compressed output (BC7/BC5/BC4 in KTX2 format).
-
-### Sphere Representation
-
-Cube-sphere with quadtree LOD using 6 faces, compatible with GPU cubemap sampling.
+User parameters → `PlanetParams` → `DerivedProperties` (physics model) → `PreviewUniforms` (GPU buffer) → fragment shader renders lit sphere with:
+- Continental structure (low-freq noise + domain warping)
+- Multi-octave fBm terrain detail (8-12 octaves)
+- Hadley cell atmospheric circulation → moisture
+- Rain shadows from wind-terrain interaction
+- Whittaker biome lookup (temperature × moisture)
+- Altitude zonation (forest → alpine → rock → snow)
+- Ocean and polar ice rendering
+- Crater stamping
 
 ### Key Physical Models
 
-- Frost line determines planet type (rocky vs gas giant)
-- MMSN surface density model: Σ(r) = 1700(r/AU)^(-3/2) g/cm²
-- Rayleigh number determines tectonic regime
-- 7×9 Whittaker table maps (temperature, precipitation) → biome
-- Crater distribution: N(>D) ∝ D^(-2) via Poisson disk sampling
+- Frost line → planet type classification
+- Continuous tectonics factor from Rayleigh number estimate
+- Atmosphere strength from escape velocity + greenhouse feedback
+- MMSN isolation mass for plausibility warnings
+- Bimodal elevation (continental +0.3, oceanic -0.4)
 
-### Output Maps (per 32K planet, ~9.3 GB compressed)
+### User Parameters
 
-- Albedo (BC7): 3.0 GB
-- Height (R16): 4.0 GB
-- Normal (BC5): 1.5 GB
-- Roughness (BC4): 0.75 GB
+**Physics:** star distance (AU), mass (M_Earth), metallicity, axial tilt, rotation period, seed
+**Visual overrides:** continental scale, water loss
 
-## Technology Decisions Pending
+## Workflow
 
-- Graphics API: Vulkan vs WebGPU
-- Language: C++, Rust, or TypeScript
-- Build system: not yet chosen
-- No tests, CI/CD, or package management yet
+### After completing implementation work
+
+1. Update `Plans.md` — mark completed tasks with `cc:完了 [commit_hash]`
+2. If a plan in `docs/plans/` is fully completed, set its frontmatter `status: completed`
+3. Completed plan files can be deleted once their tasks are tracked in Plans.md
+
+### Planning new features
+
+1. Write requirements in `docs/brainstorms/`
+2. Create implementation plan in `docs/plans/` with frontmatter (title, type, status, date, origin)
+3. Add a new phase section to `Plans.md` linking to the plan
+
+### Commits
+
+Follow existing commit message style with emoji prefixes: ✨ feature, 🔴 fix, 🔄 refactor, ✅ chore, 📋 plan, 📝 docs
