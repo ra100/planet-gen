@@ -71,8 +71,9 @@ fn compute_temperature(sphere_pos: vec3<f32>, height: f32) -> f32 {
     // Season modifies temperature: summer hemisphere warmer, winter hemisphere colder
     // season=0 (winter): north colder, south warmer. season=1 (summer): north warmer
     let season_angle = (uniforms.season - 0.5) * 2.0; // [-1, 1]
-    let hemisphere = select(-1.0, 1.0, effective_lat > 0.0); // +1 north, -1 south
-    let season_shift = season_angle * hemisphere * uniforms.axial_tilt_rad * 15.0; // ±10°C at max tilt
+    // Smooth hemisphere factor using sin(lat) — no discontinuity at equator
+    let hemisphere = sin(effective_lat); // smooth -1..+1 transition through equator
+    let season_shift = season_angle * hemisphere * uniforms.axial_tilt_rad * 15.0;
 
     let base_temp = 30.0 - temp_drop + temp_offset + season_shift;
 
@@ -305,12 +306,21 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let temp = compute_temperature(rotated, height);
         let moisture = compute_moisture(rotated, height);
 
+        // Add noise to temp/moisture before biome lookup to break sharp boundaries
+        let biome_noise1 = snoise(rotated * 12.0 + vec3<f32>(50.0, 0.0, 0.0));
+        let biome_noise2 = snoise(rotated * 6.0 + vec3<f32>(0.0, 77.0, 0.0));
+        let temp_biome = temp + biome_noise1 * 3.0;
+        let moisture_biome = moisture + biome_noise2 * 20.0;
+
         // Ice/snow threshold scales with ocean fraction — dry worlds need more moisture to form ice
         let ice_moisture_threshold = 15.0 + 40.0 * (1.0 - uniforms.ocean_fraction);
         if (temp < -15.0 && moisture > ice_moisture_threshold) {
-            surface_color = vec3<f32>(0.92, 0.94, 0.98) + vec3<f32>(0.03) * color_var;
+            let ice_edge = smooth_step(-18.0, -12.0, temp);
+            surface_color = mix(vec3<f32>(0.92, 0.94, 0.98) + vec3<f32>(0.03) * color_var,
+                                biome_color(whittaker_lookup(temp_biome, moisture_biome), color_var, temp),
+                                ice_edge);
         } else {
-            let biome = whittaker_lookup(temp, moisture);
+            let biome = whittaker_lookup(temp_biome, moisture_biome);
             surface_color = biome_color(biome, color_var, temp);
 
             // Altitude zonation
@@ -394,6 +404,24 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 let contour = fract(height * 8.0);
                 if (contour < 0.05 || contour > 0.95) {
                     debug_color *= 0.7;
+                }
+            }
+            case 7u: {
+                // Roughness visualization
+                if (is_ocean) {
+                    debug_color = vec3<f32>(0.05, 0.05, 0.1); // Water = very smooth (dark)
+                } else {
+                    let rt = compute_temperature(rotated, height);
+                    let rm = compute_moisture(rotated, height);
+                    var r: f32;
+                    if (rt < 0.0) { r = 0.15; }
+                    else if (rt < 10.0) { r = 0.55; }
+                    else if (rm < 25.0) { r = 0.85; }
+                    else if (rm < 100.0) { r = 0.60; }
+                    else { r = 0.50; }
+                    r += snoise(rotated * 10.0) * 0.1;
+                    r = clamp(r, 0.0, 1.0);
+                    debug_color = vec3<f32>(r, r, r);
                 }
             }
             default: { debug_color = surface_color; }

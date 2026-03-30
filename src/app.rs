@@ -25,7 +25,9 @@ pub struct PlanetGenApp {
     erosion_iterations: u32,
     view_mode: u32,
     preview_resolution: u32,
-    needs_regenerate: bool,
+    needs_terrain: bool,   // full terrain recompute (plates + compute + erosion)
+    needs_render: bool,    // just re-render sphere from cached cubemap
+    cached_cubemap_view: Option<wgpu::TextureView>,
     // Export state
     planet_name: String,
     export_resolution: u32,
@@ -57,7 +59,9 @@ impl PlanetGenApp {
             erosion_iterations: 25,
             view_mode: 0,
             preview_resolution: crate::preview::DEFAULT_PREVIEW_SIZE,
-            needs_regenerate: true,
+            needs_terrain: true,
+            needs_render: true,
+            cached_cubemap_view: None,
             planet_name: format!("planet_{}", PlanetParams::default().seed),
             export_resolution: export::DEFAULT_EXPORT_RESOLUTION,
             export_handle: None,
@@ -115,8 +119,7 @@ impl PlanetGenApp {
         (amplitude, frequency, octaves, gain, lacunarity)
     }
 
-    fn generate_preview(&mut self, ctx: &egui::Context) {
-        // 1. Generate plates on CPU
+    fn regenerate_terrain(&mut self) {
         let plates = generate_plates(&PlateGenParams {
             seed: self.params.seed,
             mass_earth: self.params.mass_earth,
@@ -125,12 +128,11 @@ impl PlanetGenApp {
             continental_scale: self.continental_scale,
         });
 
-        // 2. Run compute pipeline to produce heightmap cubemap
         let (amplitude, frequency, octaves, gain, lacunarity) = self.terrain_params();
         let mut terrain = self.terrain_compute.generate(
             &self.gpu,
             &plates,
-            512, // cubemap resolution per face
+            512,
             self.params.seed,
             amplitude,
             frequency,
@@ -139,29 +141,31 @@ impl PlanetGenApp {
             lacunarity,
         );
 
-        // 3. Run hydraulic erosion
         let effective_ocean = self.derived.ocean_fraction * (1.0 - self.water_loss);
         let ocean_level = -1.0 + 2.0 * effective_ocean;
         self.erosion_pipeline.erode(&self.gpu, &mut terrain, self.erosion_iterations, ocean_level);
 
-        // 4. Upload cubemap
-        let cubemap_view = self.preview_renderer.upload_terrain(&self.gpu, &terrain);
+        self.cached_cubemap_view = Some(self.preview_renderer.upload_terrain(&self.gpu, &terrain));
+        self.needs_terrain = false;
+        self.needs_render = true;
+    }
 
-        // 4. Render preview
-        let uniforms = self.build_uniforms();
-        let size = self.preview_resolution;
-        let pixels = self.preview_renderer.render(&self.gpu, &uniforms, &cubemap_view, size);
+    fn render_preview(&mut self, ctx: &egui::Context) {
+        if let Some(ref cubemap_view) = self.cached_cubemap_view {
+            let uniforms = self.build_uniforms();
+            let size = self.preview_resolution;
+            let pixels = self.preview_renderer.render(&self.gpu, &uniforms, cubemap_view, size);
 
-        let image =
-            egui::ColorImage::from_rgba_unmultiplied([size as usize, size as usize], &pixels);
+            let image =
+                egui::ColorImage::from_rgba_unmultiplied([size as usize, size as usize], &pixels);
 
-        self.texture_handle = Some(ctx.load_texture(
-            "planet_preview",
-            image,
-            egui::TextureOptions::LINEAR,
-        ));
-
-        self.needs_regenerate = false;
+            self.texture_handle = Some(ctx.load_texture(
+                "planet_preview",
+                image,
+                egui::TextureOptions::LINEAR,
+            ));
+        }
+        self.needs_render = false;
     }
 
     fn update_derived(&mut self) {
@@ -230,8 +234,11 @@ impl eframe::App for PlanetGenApp {
             ctx.request_repaint();
         }
 
-        if self.needs_regenerate {
-            self.generate_preview(ctx);
+        if self.needs_terrain {
+            self.regenerate_terrain();
+        }
+        if self.needs_render {
+            self.render_preview(ctx);
         }
 
         egui::SidePanel::left("params_panel")
@@ -288,7 +295,7 @@ impl eframe::App for PlanetGenApp {
 
                 if changed {
                     self.update_derived();
-                    self.needs_regenerate = true;
+                    self.needs_terrain = true;
                 }
 
                 ui.separator();
@@ -300,7 +307,7 @@ impl eframe::App for PlanetGenApp {
                     .on_hover_text("Lower = fewer, larger continents. Higher = many small islands")
                     .changed()
                 {
-                    self.needs_regenerate = true;
+                    self.needs_terrain = true;
                 }
 
                 if ui.add(egui::Slider::new(&mut self.water_loss, 0.0..=1.0)
@@ -308,7 +315,7 @@ impl eframe::App for PlanetGenApp {
                     .on_hover_text("Simulate water loss. 0 = physics default, 1 = completely dry")
                     .changed()
                 {
-                    self.needs_regenerate = true;
+                    self.needs_terrain = true;
                 }
 
                 let mut erosion_i32 = self.erosion_iterations as i32;
@@ -318,7 +325,7 @@ impl eframe::App for PlanetGenApp {
                     .changed()
                 {
                     self.erosion_iterations = erosion_i32 as u32;
-                    self.needs_regenerate = true;
+                    self.needs_terrain = true;
                 }
 
                 if ui.add(egui::Slider::new(&mut self.season, 0.0..=1.0)
@@ -326,7 +333,7 @@ impl eframe::App for PlanetGenApp {
                     .on_hover_text("0 = deep winter, 0.5 = equinox, 1 = deep summer. Affects vegetation color and ice extent")
                     .changed()
                 {
-                    self.needs_regenerate = true;
+                    self.needs_render = true;
                 }
 
                 ui.separator();
@@ -387,12 +394,12 @@ impl eframe::App for PlanetGenApp {
                 ui.heading("View");
                 ui.separator();
 
-                let view_labels = ["Normal", "Height", "Temperature", "Moisture", "Biome", "Ocean/Ice", "Plates"];
+                let view_labels = ["Normal", "Height", "Temperature", "Moisture", "Biome", "Ocean/Ice", "Plates", "Roughness"];
                 ui.horizontal_wrapped(|ui| {
                     for (i, label) in view_labels.iter().enumerate() {
                         if ui.selectable_label(self.view_mode == i as u32, *label).clicked() {
                             self.view_mode = i as u32;
-                            self.needs_regenerate = true;
+                            self.needs_render = true;
                         }
                     }
                 });
@@ -407,7 +414,7 @@ impl eframe::App for PlanetGenApp {
                     for (res, label) in &resolutions {
                         if ui.selectable_label(self.preview_resolution == *res, *label).clicked() {
                             self.preview_resolution = *res;
-                            self.needs_regenerate = true;
+                            self.needs_render = true;
                         }
                     }
                 });
@@ -418,12 +425,12 @@ impl eframe::App for PlanetGenApp {
                     if ui.button("Reset rotation").clicked() {
                         self.rotation_y = 0.0;
                         self.rotation_x = 0.0;
-                        self.needs_regenerate = true;
+                        self.needs_render = true;
                     }
                     if ui.button("Face sun").clicked() {
                         self.rotation_y = 0.0;
                         self.rotation_x = 0.0;
-                        self.needs_regenerate = true;
+                        self.needs_render = true;
                     }
                 });
 
@@ -496,7 +503,7 @@ impl eframe::App for PlanetGenApp {
                         -std::f32::consts::FRAC_PI_2 + 0.1,
                         std::f32::consts::FRAC_PI_2 - 0.1,
                     );
-                    self.needs_regenerate = true;
+                    self.needs_render = true;
                 }
             } else {
                 ui.centered_and_justified(|ui| {
