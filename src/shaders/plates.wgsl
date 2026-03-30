@@ -171,8 +171,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     // plates are mostly land but can have bays/gulfs/inland seas. Oceanic plates
     // are mostly ocean but can have island chains.
 
-    // Step 1: Plate type bias (continental plates tend to be higher)
-    let plate_bias: f32 = select(-0.25, 0.25, is_continental);
+    // Step 1: Plate type bias — stronger separation for distinct ocean/land levels
+    let plate_bias: f32 = select(-0.35, 0.30, is_continental);
 
     // Step 2: Domain-warped continental noise creates the actual coastline shapes
     // This is INDEPENDENT of Voronoi cell boundaries — creates bays, gulfs,
@@ -199,37 +199,38 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     // Blend between land and ocean features using smooth height-based weight
     let land_weight = smooth_step(-0.05, 0.05, height);
 
-    // Continental highlands and basins
+    // Continental interior elevation: land rises from coast toward center
+    // Uses distance from plate boundary as proxy for "how far inland"
+    let inland_factor = smooth_step(0.0, 0.15, height) * interior_factor;
+
+    // Highland terrain: large-scale basins and uplands within continents
     let highland = snoise(raw_pos * 4.0 + seed_offset(params.seed + 800u));
     let highland2 = snoise(raw_pos * 7.0 + seed_offset(params.seed + 810u)) * 0.5;
-    height += (highland + highland2) * 0.1 * interior_factor * land_weight;
-    // Smooth highland peaks instead of hard threshold
-    height += smooth_step(0.3, 0.8, highland) * 0.08 * land_weight;
+    // Interior highlands: stronger further from coast
+    height += (highland + highland2) * 0.15 * inland_factor;
+    // Plateau uplift in continental interiors
+    height += smooth_step(0.3, 0.7, highland) * 0.12 * inland_factor;
 
     // Seamounts: rare underwater volcanoes — high threshold, low amplitude
     let seamount = snoise(raw_pos * 8.0 + seed_offset(params.seed + 900u));
     let seamount_h = smooth_step(0.78, 0.95, seamount) * 0.3;
     height += seamount_h * (1.0 - land_weight);
 
-    // Continental shelf: smooth transition using smoothstep instead of hard threshold
-    let coast_dist = abs(height);
-    let shelf_factor = smooth_step(0.0, 0.1, coast_dist);
-    height *= 0.5 + 0.5 * shelf_factor;
-
     // --- Boundary terrain (R4-R7, R10) ---
-    let b_influence = boundary_influence(boundary_dist, 0.12); // Wider influence for gradual terrain
+    let b_influence = boundary_influence(boundary_dist, 0.10); // Focused mountain influence
 
     if (boundary_type < -0.3) {
         // CONVERGENT boundary
         if (is_continental && neighbor_continental) {
             // R4: Continental-continental collision → mountain range (Himalayas)
-            let ridge_height = 0.6 * b_influence * abs(boundary_type);
-            let ridge_noise = snoise(raw_pos * 15.0 + seed_offset(params.seed + 100u)) * 0.1;
-            height += ridge_height + ridge_noise * b_influence;
+            let ridge_height = 0.9 * b_influence * abs(boundary_type);
+            let ridge_noise = snoise(raw_pos * 15.0 + seed_offset(params.seed + 100u)) * 0.15;
+            let ridge_detail = snoise(raw_pos * 30.0 + seed_offset(params.seed + 110u)) * 0.06;
+            height += ridge_height + (ridge_noise + ridge_detail) * b_influence;
         } else if (is_continental && !neighbor_continental) {
             // R5: Oceanic-continental convergence → volcanic chain (Andes)
-            let volcanic_height = 0.45 * b_influence * abs(boundary_type);
-            let volcanic_noise = snoise(raw_pos * 12.0 + seed_offset(params.seed + 200u)) * 0.12;
+            let volcanic_height = 0.7 * b_influence * abs(boundary_type);
+            let volcanic_noise = snoise(raw_pos * 12.0 + seed_offset(params.seed + 200u)) * 0.15;
             height += volcanic_height + volcanic_noise * b_influence;
         } else if (!is_continental && neighbor_continental) {
             // R5: Ocean trench on the oceanic side of subduction
@@ -289,10 +290,22 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 
     // R13: fBm detail noise on top of geological structure
-    // Continuous elevation-dependent detail: more at higher elevations
     let detail = detail_noise(raw_pos);
-    let detail_scale = mix(0.3, 1.5, smooth_step(-0.1, 0.4, height));
+    let detail_scale = mix(0.3, 1.5, smooth_step(-0.1, 0.5, height));
     height += detail * detail_scale;
+
+    // Hypsometric profile: shape the height distribution to match real geology
+    // Land: coastal plains stay flat, interior rises, mountains amplified
+    // Ocean: deeper floor, steep continental slope
+    if (height > 0.0) {
+        // Power curve: keeps coastal areas (low h) near sea level,
+        // amplifies interior and mountain heights nonlinearly
+        let h_norm = min(height, 1.5);
+        height = pow(h_norm, 1.4) * 1.3;
+    } else {
+        // Deepen and shape ocean floor
+        height *= 1.2;
+    }
 
     let idx = id.y * res + id.x;
     heightmap[idx] = height;
