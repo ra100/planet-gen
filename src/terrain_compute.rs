@@ -347,10 +347,10 @@ impl ErosionPipeline {
 
         let erosion_params = ErosionParams {
             resolution: res,
-            erosion_rate: 0.05,
-            deposition_rate: 0.03,
-            min_slope: 0.002,
-            talus_angle: 0.7, // ~35 degrees
+            erosion_rate: 0.3,       // Aggressive erosion per iteration
+            deposition_rate: 0.15,   // Fill valleys substantially
+            min_slope: 0.0005,       // Erode even gentle slopes
+            talus_angle: 0.4,        // ~22 degrees — more landslide activity
             ocean_level,
             _pad0: 0,
             _pad1: 0,
