@@ -159,12 +159,39 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         height = -0.35; // Ocean floor base
     }
 
-    // Continental interior smoothing (R12): interiors are flatter
+    // Continental interior — mid-scale regional geology (Layer 2)
+    // Creates highlands, basins, plateaus, and lowlands within continents
     let interior_factor = clamp(boundary_dist * 8.0, 0.0, 1.0); // 0 at boundary, 1 in interior
     if (is_continental) {
-        // Smooth plateau interior with gentle variation
-        let interior_noise = snoise(raw_pos * 3.0 + seed_offset(params.seed)) * 0.08;
-        height += interior_noise * interior_factor;
+        // Regional highlands/lowlands (domain-warped for natural shapes)
+        let regional_warp = vec3<f32>(
+            snoise(raw_pos * 2.0 + seed_offset(params.seed + 600u)),
+            snoise(raw_pos * 2.0 + seed_offset(params.seed + 610u)),
+            snoise(raw_pos * 2.0 + seed_offset(params.seed + 620u))
+        ) * 0.12;
+        let regional_pos = raw_pos + regional_warp;
+        let highland = snoise(regional_pos * 4.0 + seed_offset(params.seed + 700u));
+        let basin = snoise(regional_pos * 6.0 + seed_offset(params.seed + 710u)) * 0.5;
+
+        // Highlands rise, basins sink, creating varied interior topography
+        let regional_height = (highland + basin) * 0.15;
+        height += regional_height * interior_factor;
+
+        // Occasional elevated plateaus (flat-topped highlands)
+        if (highland > 0.4) {
+            let plateau = 0.1 * (1.0 - interior_factor * 0.3);
+            height += plateau;
+        }
+    } else {
+        // Ocean floor: subtle abyssal plains + occasional seamounts
+        let abyssal = snoise(raw_pos * 5.0 + seed_offset(params.seed + 800u)) * 0.05;
+        height += abyssal * interior_factor;
+
+        // Seamounts: rare underwater volcanoes
+        let seamount_noise = snoise(raw_pos * 8.0 + seed_offset(params.seed + 810u));
+        if (seamount_noise > 0.7) {
+            height += (seamount_noise - 0.7) * 0.8; // Can poke above sea level as islands
+        }
     }
 
     // --- Boundary terrain (R4-R7, R10) ---

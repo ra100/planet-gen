@@ -26,11 +26,25 @@ pub fn generate_plates(params: &PlateGenParams) -> Vec<PlateGpu> {
     let continental_count = ((n as f32) * (1.0 - params.ocean_fraction)).round() as usize;
     let velocities = generate_velocities(n, params.seed, params.tectonics_factor);
 
+    // Assign continental/oceanic by seed-based scoring, not index order.
+    // This prevents continental plates from clustering at one pole.
+    let mut plate_scores: Vec<(usize, f32)> = (0..n)
+        .map(|i| (i, hash_f32(params.seed.wrapping_add(7777), i as u32, 3)))
+        .collect();
+    plate_scores.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+    let continental_indices: Vec<bool> = {
+        let mut is_continental = vec![false; n];
+        for k in 0..continental_count.min(n) {
+            is_continental[plate_scores[k].0] = true;
+        }
+        is_continental
+    };
+
     let mut plates = Vec::with_capacity(n);
     for i in 0..n {
         plates.push(PlateGpu {
             center: centers[i],
-            plate_type: if i < continental_count { 1.0 } else { 0.0 },
+            plate_type: if continental_indices[i] { 1.0 } else { 0.0 },
             velocity: velocities[i],
             _pad: 0.0,
         });
