@@ -4,13 +4,14 @@ pub fn cube_to_sphere(face: u32, u: f32, v: f32) -> [f32; 3] {
     let s = u * 2.0 - 1.0;
     let t = v * 2.0 - 1.0;
 
+    // Standard cubemap convention (OpenGL/Vulkan/WebGPU)
     let p = match face {
-        0 => [1.0, t, -s],  // +X
-        1 => [-1.0, t, s],  // -X
-        2 => [s, 1.0, -t],  // +Y
-        3 => [s, -1.0, t],  // -Y
-        4 => [s, t, 1.0],   // +Z
-        5 => [-s, t, -1.0], // -Z
+        0 => [1.0, -t, -s],   // +X
+        1 => [-1.0, -t, s],   // -X
+        2 => [s, 1.0, t],     // +Y
+        3 => [s, -1.0, -t],   // -Y
+        4 => [s, -t, 1.0],    // +Z
+        5 => [-s, -t, -1.0],  // -Z
         _ => [0.0, 0.0, 1.0],
     };
 
@@ -60,17 +61,19 @@ mod tests {
 
     #[test]
     fn adjacent_faces_share_edge_points() {
-        // +X face right edge (u=0) should meet +Z face left edge (u=1) at same sphere point
-        // +X: s = 0*2-1 = -1, so p = (1, t, 1) → normalized
-        // +Z: s = 1*2-1 = 1, so p = (1, t, 1) → normalized
+        // Standard cubemap: +X face s=1 edge should meet +Z face s=-1 edge
+        // +X: s=1 → p = (1, -t, -1) normalized
+        // +Z: s=-1 → p = (-1, -t, -(-1)) = (-1, -t, 1)... no.
+        // Actually: +X u=1 → s=1, p=(1,-t,-1). +Z u=0 → s=-1, p=(-1,-t,1). Not adjacent.
+        // Correct adjacency: +X s=-1 (u=0) → p=(1,-t,1) and +Z s=1 (u=1) → p=(1,-t,1). Yes!
         let eps = 1e-5;
         for &v in &[0.0f32, 0.25, 0.5, 0.75, 1.0] {
-            let p_xr = cube_to_sphere(0, 0.0, v); // +X face, u=0 edge
-            let p_zl = cube_to_sphere(4, 1.0, v); // +Z face, u=1 edge
+            let p_x = cube_to_sphere(0, 0.0, v);  // +X, u=0 → s=-1 → (1, -t, 1)
+            let p_z = cube_to_sphere(4, 1.0, v);   // +Z, u=1 → s=1  → (1, -t, 1)
             assert!(
-                approx_eq(p_xr, p_zl, eps),
+                approx_eq(p_x, p_z, eps),
                 "+X(u=0) and +Z(u=1) should match at v={v}: {:?} vs {:?}",
-                p_xr, p_zl
+                p_x, p_z
             );
         }
     }
