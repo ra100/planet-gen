@@ -16,6 +16,7 @@ pub struct PlanetGenApp {
     // Visual override parameters
     continental_scale: f32,
     water_loss: f32,
+    view_mode: u32,
     needs_regenerate: bool,
 }
 
@@ -34,6 +35,7 @@ impl PlanetGenApp {
             rotation_x: 0.0,
             continental_scale: 1.0,
             water_loss: 0.0,
+            view_mode: 0,
             needs_regenerate: true,
         }
     }
@@ -110,7 +112,8 @@ impl PlanetGenApp {
             axial_tilt_rad: self.params.axial_tilt_deg.to_radians(),
             tectonics_factor: self.derived.tectonics_factor,
             continental_scale: self.continental_scale,
-            _pad: [0.0; 3],
+            view_mode: self.view_mode,
+            _pad: [0.0; 2],
         }
     }
 
@@ -301,6 +304,18 @@ impl eframe::App for PlanetGenApp {
 
                 ui.heading("View");
                 ui.separator();
+
+                let view_labels = ["Normal", "Height", "Temperature", "Moisture", "Biome", "Ocean/Ice"];
+                ui.horizontal_wrapped(|ui| {
+                    for (i, label) in view_labels.iter().enumerate() {
+                        if ui.selectable_label(self.view_mode == i as u32, *label).clicked() {
+                            self.view_mode = i as u32;
+                            self.needs_regenerate = true;
+                        }
+                    }
+                });
+
+                ui.add_space(4.0);
 
                 ui.horizontal(|ui| {
                     if ui.button("Reset rotation").clicked() {

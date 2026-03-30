@@ -19,9 +19,9 @@ struct Uniforms {
     axial_tilt_rad: f32,
     tectonics_factor: f32, // 0.0 = stagnant lid (unimodal), 1.0 = plate tectonics (bimodal)
     continental_scale: f32, // multiplier for continental noise frequency (lower = bigger continents)
+    view_mode: u32, // 0=normal, 1=height, 2=temperature, 3=moisture, 4=biome, 5=ocean/ice
     _pad0: f32,
     _pad1: f32,
-    _pad2: f32,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -229,12 +229,19 @@ fn compute_moisture(sphere_pos: vec3<f32>, height: f32) -> f32 {
     let tilt_effect = sin(longitude) * uniforms.axial_tilt_rad;
     let effective_lat = clamp(latitude + tilt_effect, -1.5708, 1.5708);
 
-    // Base moisture from Hadley cell circulation (R1-R3)
-    var moisture = hadley_cell_moisture(effective_lat);
+    // Hadley cell sets the circulation tendency (R1-R3)
+    let hadley_base = hadley_cell_moisture(effective_lat);
 
-    // Local noise variation (±20% of base, not dominant)
-    let moisture_noise = snoise(sphere_pos * 4.0 + uniforms.seed_offset * 1.7 + vec3<f32>(100.0, 0.0, 0.0));
-    moisture += moisture * moisture_noise * 0.2;
+    // Local factors create the actual variation — terrain, noise, and geography
+    // break the latitude bands so biomes aren't just horizontal stripes
+    let moisture_noise1 = snoise(sphere_pos * 3.0 + uniforms.seed_offset * 1.7 + vec3<f32>(100.0, 0.0, 0.0));
+    let moisture_noise2 = snoise(sphere_pos * 6.0 + uniforms.seed_offset * 2.3 + vec3<f32>(0.0, 80.0, 0.0)) * 0.5;
+    let local_variation = (moisture_noise1 + moisture_noise2) * 0.5; // [-0.75, 0.75]
+
+    // Blend: Hadley tendency (60%) + local variation (40%)
+    var moisture = hadley_base * (0.6 + 0.4 * (local_variation * 0.5 + 0.5));
+    // Add absolute noise contribution to create local wet/dry patches
+    moisture += 60.0 * (local_variation * 0.5 + 0.5);
 
     // Ocean proximity / continentality effect (R6)
     // Sample height at a few offsets to estimate distance from ocean
@@ -477,7 +484,71 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
 
-    // Lighting
+    // Debug view modes
+    if (uniforms.view_mode > 0u) {
+        let temp = compute_temperature(rotated, height);
+        let moisture = compute_moisture(rotated, height);
+
+        var debug_color: vec3<f32>;
+
+        switch (uniforms.view_mode) {
+            case 1u: {
+                // Height: black (low) → white (high)
+                let h = (height + 1.0) * 0.5; // map [-1,1] to [0,1]
+                debug_color = vec3<f32>(h, h, h);
+            }
+            case 2u: {
+                // Temperature: blue (cold) → white (0°C) → red (hot)
+                let t = clamp(temp / 50.0, -1.0, 1.0); // normalize to [-1,1]
+                if (t < 0.0) {
+                    debug_color = mix(vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(1.0, 1.0, 1.0), t + 1.0);
+                } else {
+                    debug_color = mix(vec3<f32>(1.0, 1.0, 1.0), vec3<f32>(1.0, 0.0, 0.0), t);
+                }
+            }
+            case 3u: {
+                // Moisture: brown (dry) → green (wet) → blue (very wet)
+                let m = clamp(moisture / 300.0, 0.0, 1.0);
+                if (m < 0.5) {
+                    debug_color = mix(vec3<f32>(0.6, 0.4, 0.1), vec3<f32>(0.1, 0.6, 0.1), m * 2.0);
+                } else {
+                    debug_color = mix(vec3<f32>(0.1, 0.6, 0.1), vec3<f32>(0.1, 0.2, 0.8), (m - 0.5) * 2.0);
+                }
+            }
+            case 4u: {
+                // Biome: distinct color per biome ID
+                let biome = whittaker_lookup(temp, moisture);
+                debug_color = biome_color(biome, 0.0);
+                // Boost saturation for visibility
+                debug_color = debug_color * 1.3;
+            }
+            case 5u: {
+                // Ocean/Ice mask: blue=ocean, white=ice, green=land, brown=high land
+                if (is_ocean) {
+                    let ocean_temp = compute_temperature(rotated, height);
+                    if (ocean_temp < -2.0) {
+                        debug_color = vec3<f32>(1.0, 1.0, 1.0); // Ice
+                    } else {
+                        debug_color = vec3<f32>(0.0, 0.2, 0.8); // Ocean
+                    }
+                } else {
+                    let land_h = (height - uniforms.ocean_level) / max(1.0 - uniforms.ocean_level, 0.01);
+                    if (temp < -15.0) {
+                        debug_color = vec3<f32>(0.9, 0.95, 1.0); // Land ice
+                    } else {
+                        debug_color = mix(vec3<f32>(0.2, 0.6, 0.1), vec3<f32>(0.5, 0.3, 0.1), clamp(land_h, 0.0, 1.0));
+                    }
+                }
+            }
+            default: {
+                debug_color = surface_color;
+            }
+        }
+
+        return vec4<f32>(debug_color, 1.0);
+    }
+
+    // Normal view: apply lighting
     let light = normalize(uniforms.light_dir);
     let ndotl = max(dot(normal, light), 0.0);
     let ambient = 0.15;
