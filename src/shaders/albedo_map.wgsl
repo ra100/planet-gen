@@ -35,7 +35,7 @@ fn compute_temperature(sphere_pos: vec3<f32>, height: f32) -> f32 {
     let temp_offset = params.base_temp_c - 15.0;
 
     let season_angle = (params.season - 0.5) * 2.0;
-    let hemisphere = select(-1.0, 1.0, effective_lat > 0.0);
+    let hemisphere = sin(effective_lat);
     let season_shift = season_angle * hemisphere * params.axial_tilt_rad * 15.0;
 
     let base_temp = 30.0 - temp_drop + temp_offset + season_shift;
@@ -94,90 +94,43 @@ fn compute_moisture(sphere_pos: vec3<f32>, height: f32) -> f32 {
     return clamp(moisture, 0.0, 400.0);
 }
 
-// ---- Whittaker biome lookup ----
-fn whittaker_lookup(temp_c: f32, moisture_cm: f32) -> u32 {
-    if (temp_c < 0.0 && moisture_cm < 15.0) { return 4u; }
-    if (temp_c < 0.0) { if (moisture_cm < 50.0) { return 0u; } return 1u; }
-    if (temp_c < 5.0) { if (moisture_cm < 25.0) { return 1u; } return 2u; }
-    if (temp_c < 10.0) { if (moisture_cm < 10.0) { return 1u; } return 2u; }
-    if (temp_c < 15.0) {
-        if (moisture_cm < 10.0) { return 4u; }
-        if (moisture_cm < 25.0) { return 5u; }
-        if (moisture_cm < 50.0) { return 6u; }
-        if (moisture_cm < 150.0) { return 3u; }
-        return 10u;
-    }
-    if (temp_c < 20.0) {
-        if (moisture_cm < 10.0) { return 4u; }
-        if (moisture_cm < 25.0) { return 5u; }
-        if (moisture_cm < 50.0) { return 6u; }
-        if (moisture_cm < 100.0) { return 8u; }
-        if (moisture_cm < 150.0) { return 9u; }
-        return 10u;
-    }
-    if (temp_c < 24.0) {
-        if (moisture_cm < 25.0) { return 4u; }
-        if (moisture_cm < 50.0) { return 7u; }
-        if (moisture_cm < 100.0) { return 7u; }
-        if (moisture_cm < 150.0) { return 11u; }
-        return 12u;
-    }
-    if (moisture_cm < 25.0) { return 4u; }
-    if (moisture_cm < 50.0) { return 7u; }
-    if (moisture_cm < 100.0) { return 7u; }
-    if (moisture_cm < 200.0) { return 11u; }
-    return 12u;
-}
-
 fn smooth_step(edge0: f32, edge1: f32, x: f32) -> f32 {
     let t = clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
     return t * t * (3.0 - 2.0 * t);
 }
 
-fn biome_color(biome: u32, variation: f32, temp_c: f32) -> vec3<f32> {
-    var base: vec3<f32>;
-    switch (biome) {
-        case 0u:  { base = vec3<f32>(0.94, 0.96, 1.00); } // Tundra
-        case 1u:  { base = vec3<f32>(0.55, 0.63, 0.51); } // Boreal/Taiga
-        case 2u:  { base = vec3<f32>(0.24, 0.31, 0.18); } // Conifer forest
-        case 3u:  { base = vec3<f32>(0.16, 0.27, 0.14); } // Temperate rainforest
-        case 4u:  { base = vec3<f32>(0.82, 0.71, 0.55); } // Desert
-        case 5u:  { base = vec3<f32>(0.65, 0.60, 0.40); } // Scrubland
-        case 6u:  { base = vec3<f32>(0.34, 0.51, 0.20); } // Grassland
-        case 7u:  { base = vec3<f32>(0.63, 0.59, 0.24); } // Savanna
-        case 8u:  { base = vec3<f32>(0.30, 0.45, 0.20); } // Temperate forest
-        case 9u:  { base = vec3<f32>(0.20, 0.39, 0.12); } // Temperate deciduous
-        case 10u: { base = vec3<f32>(0.15, 0.35, 0.10); } // Tropical seasonal
-        case 11u: { base = vec3<f32>(0.18, 0.38, 0.10); } // Tropical deciduous
-        case 12u: { base = vec3<f32>(0.13, 0.31, 0.08); } // Tropical rainforest
-        default:  { base = vec3<f32>(0.50, 0.50, 0.50); }
+// ---- Continuous gradient biome coloring ----
+fn gradient_color(temp_c: f32, moisture_cm: f32, variation: f32) -> vec3<f32> {
+    let t_cold = smooth_step(-5.0, 12.0, temp_c);
+    let t_hot = smooth_step(12.0, 30.0, temp_c);
+    let m = smooth_step(15.0, 180.0, temp_c + moisture_cm * 0.5);
+
+    let cold_dry = vec3<f32>(0.62, 0.55, 0.45);
+    let cold_wet = vec3<f32>(0.78, 0.82, 0.86);
+    let mid_dry  = vec3<f32>(0.68, 0.58, 0.36);
+    let mid_wet  = vec3<f32>(0.22, 0.40, 0.15);
+    let hot_dry  = vec3<f32>(0.80, 0.66, 0.40);
+    let hot_wet  = vec3<f32>(0.10, 0.28, 0.06);
+
+    let dry_color = mix(cold_dry, mix(mid_dry, hot_dry, t_hot), t_cold);
+    let wet_color = mix(cold_wet, mix(mid_wet, hot_wet, t_hot), t_cold);
+
+    let moist_t = smooth_step(20.0, 160.0, moisture_cm);
+    var base = mix(dry_color, wet_color, moist_t);
+
+    let season = params.season;
+    let green_amount = max(base.g - max(base.r, base.b), 0.0);
+    if (green_amount > 0.05) {
+        let winter_shift = vec3<f32>(0.12, -0.04, -0.06) * (1.0 - season) * green_amount * 3.0;
+        base += winter_shift;
+    }
+    if (temp_c < 5.0) {
+        let cold_winter = mix(base, vec3<f32>(0.80, 0.82, 0.85), (1.0 - season) * 0.3 * (1.0 - t_cold));
+        base = cold_winter;
     }
 
-    // Cold desert override
-    if (biome == 4u) {
-        if (temp_c < 5.0) {
-            base = vec3<f32>(0.60, 0.32, 0.18);
-        } else if (temp_c < 15.0) {
-            let t = (temp_c - 5.0) / 10.0;
-            base = mix(vec3<f32>(0.60, 0.32, 0.18), vec3<f32>(0.75, 0.55, 0.35), t);
-        }
-    }
-    if (biome == 5u && temp_c < 10.0) {
-        base = mix(vec3<f32>(0.55, 0.40, 0.25), base, clamp(temp_c / 10.0, 0.0, 1.0));
-    }
-
-    // Seasonal shifts
-    let season_factor = params.season;
-    if (biome == 9u || biome == 11u) {
-        let winter_color = vec3<f32>(0.45, 0.35, 0.20);
-        base = mix(winter_color, base, season_factor);
-    }
-    if (biome == 6u || biome == 7u) {
-        let dry_color = vec3<f32>(0.55, 0.50, 0.25);
-        base = mix(dry_color, base, season_factor);
-    }
-
-    return base + vec3<f32>(variation * 0.04);
+    base += base * variation * 0.10;
+    return base;
 }
 
 @compute @workgroup_size(16, 16)
@@ -216,53 +169,49 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 
     if (is_ocean) {
         let ocean_temp = compute_temperature(sphere_pos, height);
-        if (ocean_temp < -2.0) {
-            let ice_intensity = clamp((-2.0 - ocean_temp) / 10.0, 0.0, 1.0);
-            surface_color = mix(vec3<f32>(0.55, 0.70, 0.82), vec3<f32>(0.85, 0.90, 0.95), ice_intensity);
-        } else if (ocean_temp < 2.0) {
-            let blend = (ocean_temp + 2.0) / 4.0;
-            let depth = (params.ocean_level - height) / max(params.ocean_level + 1.0, 0.5);
-            let water = mix(vec3<f32>(0.06, 0.18, 0.50), vec3<f32>(0.02, 0.05, 0.25), clamp(depth, 0.0, 1.0));
-            surface_color = mix(vec3<f32>(0.55, 0.70, 0.82), water, blend);
-        } else {
-            let depth = (params.ocean_level - height) / max(params.ocean_level + 1.0, 0.5);
-            surface_color = mix(vec3<f32>(0.06, 0.18, 0.50), vec3<f32>(0.02, 0.05, 0.25), clamp(depth, 0.0, 1.0));
-            surface_color += vec3<f32>(0.0, 0.02, 0.03) * color_var;
-        }
+        let depth = clamp((params.ocean_level - height) / max(params.ocean_level + 1.0, 0.5), 0.0, 1.0);
+
+        let shallow = vec3<f32>(0.08, 0.22, 0.48);
+        let deep = vec3<f32>(0.02, 0.05, 0.22);
+        var ocean_color = mix(shallow, deep, depth);
+        ocean_color += vec3<f32>(0.0, 0.015, 0.02) * color_var;
+
+        let ice_blend = smooth_step(3.0, -8.0, ocean_temp);
+        let ice_color = mix(vec3<f32>(0.65, 0.75, 0.85), vec3<f32>(0.88, 0.92, 0.96), clamp(-ocean_temp / 15.0, 0.0, 1.0));
+        surface_color = mix(ocean_color, ice_color, ice_blend);
     } else {
         let temp = compute_temperature(sphere_pos, height);
         let moisture = compute_moisture(sphere_pos, height);
 
+        surface_color = gradient_color(temp, moisture, color_var);
+
+        // Smooth ice/snow overlay
         let ice_moisture_threshold = 15.0 + 40.0 * (1.0 - params.ocean_fraction);
-        if (temp < -15.0 && moisture > ice_moisture_threshold) {
-            surface_color = vec3<f32>(0.92, 0.94, 0.98) + vec3<f32>(0.03) * color_var;
-        } else {
-            let biome = whittaker_lookup(temp, moisture);
-            surface_color = biome_color(biome, color_var, temp);
+        let ice_blend = smooth_step(-8.0, -20.0, temp) * smooth_step(ice_moisture_threshold * 0.5, ice_moisture_threshold, moisture);
+        let ice_color = vec3<f32>(0.90, 0.93, 0.97) + vec3<f32>(0.02) * color_var;
+        surface_color = mix(surface_color, ice_color, ice_blend);
 
-            // Altitude zonation
-            let land_height = (height - params.ocean_level) / max(1.0 - params.ocean_level, 0.01);
-            let snow_line = 0.65 + 0.25 * (1.0 - abs(effective_lat) / 1.5708);
-            let rock_line = snow_line - 0.15;
-            let alpine_line = rock_line - 0.15;
+        // Altitude zonation
+        let land_height = (height - params.ocean_level) / max(1.0 - params.ocean_level, 0.01);
+        let snow_line = 0.65 + 0.25 * (1.0 - abs(effective_lat) / 1.5708);
+        let rock_line = snow_line - 0.15;
+        let alpine_line = rock_line - 0.15;
 
-            if (land_height > snow_line && temp < 15.0) {
-                let blend = smooth_step(snow_line, snow_line + 0.08, land_height);
-                surface_color = mix(surface_color, vec3<f32>(0.94, 0.96, 1.0), blend);
-            } else if (land_height > rock_line) {
-                let blend = smooth_step(rock_line, rock_line + 0.08, land_height);
-                surface_color = mix(surface_color, vec3<f32>(0.45, 0.40, 0.35) + vec3<f32>(0.05) * color_var, blend);
-            } else if (land_height > alpine_line) {
-                let blend = smooth_step(alpine_line, alpine_line + 0.08, land_height);
-                let alpine_color = mix(surface_color, vec3<f32>(0.40, 0.45, 0.30), 0.6);
-                surface_color = mix(surface_color, alpine_color, blend);
-            }
+        if (land_height > snow_line && temp < 15.0) {
+            let blend = smooth_step(snow_line, snow_line + 0.10, land_height);
+            surface_color = mix(surface_color, vec3<f32>(0.92, 0.94, 0.98), blend);
+        } else if (land_height > rock_line) {
+            let blend = smooth_step(rock_line, rock_line + 0.10, land_height);
+            surface_color = mix(surface_color, vec3<f32>(0.50, 0.48, 0.44) + vec3<f32>(0.04) * color_var, blend);
+        } else if (land_height > alpine_line) {
+            let blend = smooth_step(alpine_line, alpine_line + 0.10, land_height);
+            let alpine = mix(surface_color, vec3<f32>(0.48, 0.52, 0.35), 0.5);
+            surface_color = mix(surface_color, alpine, blend);
+        }
 
-            // Beach transition
-            if (land_height < 0.03) {
-                let beach_blend = 1.0 - clamp(land_height / 0.03, 0.0, 1.0);
-                surface_color = mix(surface_color, vec3<f32>(0.76, 0.70, 0.50), beach_blend * 0.7);
-            }
+        if (land_height < 0.03) {
+            let beach_blend = smooth_step(0.03, 0.0, land_height);
+            surface_color = mix(surface_color, vec3<f32>(0.74, 0.68, 0.48), beach_blend * 0.6);
         }
     }
 

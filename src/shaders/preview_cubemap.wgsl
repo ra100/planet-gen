@@ -170,97 +170,50 @@ fn compute_moisture(sphere_pos: vec3<f32>, height: f32) -> f32 {
     return clamp(moisture, 0.0, 400.0);
 }
 
-// ---- Whittaker biome lookup ----
-fn whittaker_lookup(temp_c: f32, moisture_cm: f32) -> u32 {
-    // Cold arid: desert even below 0°C when very dry (Mars-like cold desert)
-    if (temp_c < 0.0 && moisture_cm < 15.0) { return 4u; } // Cold desert
-    if (temp_c < 0.0) { if (moisture_cm < 50.0) { return 0u; } return 1u; }
-    if (temp_c < 5.0) { if (moisture_cm < 25.0) { return 1u; } return 2u; }
-    if (temp_c < 10.0) { if (moisture_cm < 10.0) { return 1u; } return 2u; }
-    if (temp_c < 15.0) {
-        if (moisture_cm < 10.0) { return 4u; }
-        if (moisture_cm < 25.0) { return 5u; }
-        if (moisture_cm < 50.0) { return 6u; }
-        if (moisture_cm < 150.0) { return 3u; }
-        return 10u;
-    }
-    if (temp_c < 20.0) {
-        if (moisture_cm < 10.0) { return 4u; }
-        if (moisture_cm < 25.0) { return 5u; }
-        if (moisture_cm < 50.0) { return 6u; }
-        if (moisture_cm < 100.0) { return 8u; }
-        if (moisture_cm < 150.0) { return 9u; }
-        return 10u;
-    }
-    if (temp_c < 24.0) {
-        if (moisture_cm < 25.0) { return 4u; }
-        if (moisture_cm < 50.0) { return 7u; }
-        if (moisture_cm < 100.0) { return 7u; }
-        if (moisture_cm < 150.0) { return 11u; }
-        return 12u;
-    }
-    if (moisture_cm < 25.0) { return 4u; }
-    if (moisture_cm < 50.0) { return 7u; }
-    if (moisture_cm < 100.0) { return 7u; }
-    if (moisture_cm < 200.0) { return 11u; }
-    return 12u;
-}
+// ---- Continuous gradient biome coloring ----
+// Replaces discrete Whittaker lookup with smooth 2D interpolation.
+// Temperature × moisture → color via 3×2 anchor grid.
 
-fn biome_color(biome: u32, variation: f32, temp_c: f32) -> vec3<f32> {
-    var base: vec3<f32>;
-    switch (biome) {
-        case 0u:  { base = vec3<f32>(0.94, 0.96, 1.00); }
-        case 1u:  { base = vec3<f32>(0.55, 0.63, 0.51); }
-        case 2u:  { base = vec3<f32>(0.24, 0.31, 0.18); }
-        case 3u:  { base = vec3<f32>(0.16, 0.27, 0.14); }
-        case 4u:  { base = vec3<f32>(0.82, 0.71, 0.55); } // Hot desert — overridden below for cold
-        case 5u:  { base = vec3<f32>(0.65, 0.60, 0.40); }
-        case 6u:  { base = vec3<f32>(0.34, 0.51, 0.20); }
-        case 7u:  { base = vec3<f32>(0.63, 0.59, 0.24); }
-        case 8u:  { base = vec3<f32>(0.30, 0.45, 0.20); }
-        case 9u:  { base = vec3<f32>(0.20, 0.39, 0.12); }
-        case 10u: { base = vec3<f32>(0.15, 0.35, 0.10); }
-        case 11u: { base = vec3<f32>(0.18, 0.38, 0.10); }
-        case 12u: { base = vec3<f32>(0.13, 0.31, 0.08); }
-        default:  { base = vec3<f32>(0.50, 0.50, 0.50); }
+fn gradient_color(temp_c: f32, moisture_cm: f32, variation: f32) -> vec3<f32> {
+    // Normalize to [0,1] range with smooth transitions
+    let t_cold = smooth_step(-5.0, 12.0, temp_c);   // 0 = cold, 1 = temperate+
+    let t_hot = smooth_step(12.0, 30.0, temp_c);     // 0 = temperate-, 1 = hot
+    let m = smooth_step(15.0, 180.0, temp_c + moisture_cm * 0.5); // moisture with temp influence
+
+    // Anchor colors (3 temp levels × 2 moisture levels)
+    let cold_dry = vec3<f32>(0.62, 0.55, 0.45);  // Mars-like cold desert/tundra
+    let cold_wet = vec3<f32>(0.78, 0.82, 0.86);  // Snow fields / icy tundra
+    let mid_dry  = vec3<f32>(0.68, 0.58, 0.36);  // Warm steppe / dry grassland
+    let mid_wet  = vec3<f32>(0.22, 0.40, 0.15);  // Temperate forest green
+    let hot_dry  = vec3<f32>(0.80, 0.66, 0.40);  // Desert sand
+    let hot_wet  = vec3<f32>(0.10, 0.28, 0.06);  // Deep jungle
+
+    // Interpolate along temperature axis (cold → mid → hot)
+    let dry_color = mix(cold_dry, mix(mid_dry, hot_dry, t_hot), t_cold);
+    let wet_color = mix(cold_wet, mix(mid_wet, hot_wet, t_hot), t_cold);
+
+    // Interpolate along moisture axis
+    let moist_t = smooth_step(20.0, 160.0, moisture_cm);
+    var base = mix(dry_color, wet_color, moist_t);
+
+    // Season modulation: winter shifts green→brown, cold→whiter
+    let season = uniforms.season; // 0=winter, 1=summer
+    let green_amount = max(base.g - max(base.r, base.b), 0.0);
+    if (green_amount > 0.05) {
+        // Vegetated areas: shift toward golden-brown in winter
+        let winter_shift = vec3<f32>(0.12, -0.04, -0.06) * (1.0 - season) * green_amount * 3.0;
+        base += winter_shift;
+    }
+    if (temp_c < 5.0) {
+        // Cold regions: whiter in winter
+        let cold_winter = mix(base, vec3<f32>(0.80, 0.82, 0.85), (1.0 - season) * 0.3 * (1.0 - t_cold));
+        base = cold_winter;
     }
 
-    // Cold desert override: Mars-like rust/red-brown for cold arid worlds
-    if (biome == 4u) {
-        if (temp_c < 5.0) {
-            base = vec3<f32>(0.60, 0.32, 0.18); // Cold desert: rust/Mars-like
-        } else if (temp_c < 15.0) {
-            let t = (temp_c - 5.0) / 10.0;
-            base = mix(vec3<f32>(0.60, 0.32, 0.18), vec3<f32>(0.75, 0.55, 0.35), t); // Transition
-        }
-    }
-    // Cold steppe/semiarid also gets warmer tones
-    if (biome == 5u && temp_c < 10.0) {
-        base = mix(vec3<f32>(0.55, 0.40, 0.25), base, clamp(temp_c / 10.0, 0.0, 1.0));
-    }
+    // Per-pixel noise variation for natural texture
+    base += base * variation * 0.10;
 
-    // Seasonal color shifts (only for vegetation biomes)
-    let season_factor = uniforms.season; // 0=winter, 1=summer
-
-    // Deciduous forests: green in summer → gold/brown in fall → gray-brown in winter
-    if (biome == 9u || biome == 11u) { // Temperate & tropical deciduous
-        let winter_color = vec3<f32>(0.45, 0.35, 0.20); // Brown/bare
-        base = mix(winter_color, base, season_factor);
-    }
-    // Grasslands and savanna: golden in winter, green in summer
-    if (biome == 6u || biome == 7u) {
-        let dry_color = vec3<f32>(0.55, 0.50, 0.25); // Golden/dry
-        base = mix(dry_color, base, 0.3 + 0.7 * season_factor);
-    }
-    // Tundra: brown-green in summer, whiter in winter
-    if (biome == 1u) {
-        let winter_tundra = vec3<f32>(0.75, 0.78, 0.80); // Near-white
-        base = mix(winter_tundra, base, season_factor);
-    }
-    // Evergreen forests (taiga, boreal, tropical RF): minimal change
-    // Deserts: no change
-
-    return base + base * variation * 0.12;
+    return base;
 }
 
 // ---- Main fragment shader ----
@@ -288,67 +241,55 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var surface_color: vec3<f32>;
 
     if (is_ocean) {
+        // Smooth ocean gradient: shallow → deep with continuous depth color
         let ocean_temp = compute_temperature(rotated, height);
-        if (ocean_temp < -2.0) {
-            let ice_intensity = clamp((-2.0 - ocean_temp) / 10.0, 0.0, 1.0);
-            surface_color = mix(vec3<f32>(0.55, 0.70, 0.82), vec3<f32>(0.85, 0.90, 0.95), ice_intensity);
-        } else if (ocean_temp < 2.0) {
-            let blend = (ocean_temp + 2.0) / 4.0;
-            let depth = (uniforms.ocean_level - height) / max(uniforms.ocean_level + 1.0, 0.5);
-            let water = mix(vec3<f32>(0.06, 0.18, 0.50), vec3<f32>(0.02, 0.05, 0.25), clamp(depth, 0.0, 1.0));
-            surface_color = mix(vec3<f32>(0.55, 0.70, 0.82), water, blend);
-        } else {
-            let depth = (uniforms.ocean_level - height) / max(uniforms.ocean_level + 1.0, 0.5);
-            surface_color = mix(vec3<f32>(0.06, 0.18, 0.50), vec3<f32>(0.02, 0.05, 0.25), clamp(depth, 0.0, 1.0));
-            surface_color += vec3<f32>(0.0, 0.02, 0.03) * color_var;
-        }
+        let depth = clamp((uniforms.ocean_level - height) / max(uniforms.ocean_level + 1.0, 0.5), 0.0, 1.0);
+
+        // Continuous depth color: shallow turquoise → mid blue → deep navy
+        let shallow = vec3<f32>(0.08, 0.22, 0.48);
+        let deep = vec3<f32>(0.02, 0.05, 0.22);
+        var ocean_color = mix(shallow, deep, depth);
+        ocean_color += vec3<f32>(0.0, 0.015, 0.02) * color_var; // subtle variation
+
+        // Smooth ice transition: no hard cutoff, gradual freeze
+        let ice_blend = smooth_step(3.0, -8.0, ocean_temp); // starts blending at 3°C, full ice at -8°C
+        let ice_color = mix(vec3<f32>(0.65, 0.75, 0.85), vec3<f32>(0.88, 0.92, 0.96), clamp(-ocean_temp / 15.0, 0.0, 1.0));
+        surface_color = mix(ocean_color, ice_color, ice_blend);
     } else {
         let temp = compute_temperature(rotated, height);
         let moisture = compute_moisture(rotated, height);
 
-        // Ice/snow threshold scales with ocean fraction — dry worlds need more moisture to form ice
+        // Continuous gradient coloring — no biome IDs, no boundaries
+        surface_color = gradient_color(temp, moisture, color_var);
+
+        // Smooth ice/snow overlay for very cold land
         let ice_moisture_threshold = 15.0 + 40.0 * (1.0 - uniforms.ocean_fraction);
-        if (temp < -18.0 && moisture > ice_moisture_threshold) {
-            surface_color = vec3<f32>(0.92, 0.94, 0.98) + vec3<f32>(0.03) * color_var;
-        } else if (temp < -12.0 && moisture > ice_moisture_threshold) {
-            // Smooth ice→biome edge
-            let ice_blend = smooth_step(-18.0, -12.0, temp);
-            let biome_col = biome_color(whittaker_lookup(temp, moisture), color_var, temp);
-            surface_color = mix(vec3<f32>(0.92, 0.94, 0.98) + vec3<f32>(0.03) * color_var, biome_col, ice_blend);
-        } else {
-            // Multi-sample biome blending: sample at 3 noise-perturbed points and average
-            // to eliminate hard rectangular biome boundaries from the step-function lookup.
-            let bn1 = snoise(rotated * 15.0 + vec3<f32>(50.0, 0.0, 0.0));
-            let bn2 = snoise(rotated * 15.0 + vec3<f32>(0.0, 77.0, 0.0));
-            let bn3 = snoise(rotated * 9.0 + vec3<f32>(33.0, 0.0, 55.0));
-            let bn4 = snoise(rotated * 9.0 + vec3<f32>(0.0, 22.0, 88.0));
+        let ice_blend = smooth_step(-8.0, -20.0, temp) * smooth_step(ice_moisture_threshold * 0.5, ice_moisture_threshold, moisture);
+        let ice_color = vec3<f32>(0.90, 0.93, 0.97) + vec3<f32>(0.02) * color_var;
+        surface_color = mix(surface_color, ice_color, ice_blend);
 
-            let c1 = biome_color(whittaker_lookup(temp + bn1 * 6.0, moisture + bn2 * 35.0), color_var, temp);
-            let c2 = biome_color(whittaker_lookup(temp + bn3 * 6.0, moisture + bn4 * 35.0), color_var, temp);
-            let c3 = biome_color(whittaker_lookup(temp, moisture), color_var, temp);
-            surface_color = (c1 + c2 + c3) / 3.0;
+        // Altitude zonation (smooth blending on top of gradient base)
+        let land_height = (height - uniforms.ocean_level) / max(1.0 - uniforms.ocean_level, 0.01);
+        let snow_line = 0.65 + 0.25 * (1.0 - abs(effective_lat) / 1.5708);
+        let rock_line = snow_line - 0.15;
+        let alpine_line = rock_line - 0.15;
 
-            // Altitude zonation
-            let land_height = (height - uniforms.ocean_level) / max(1.0 - uniforms.ocean_level, 0.01);
-            let snow_line = 0.65 + 0.25 * (1.0 - abs(effective_lat) / 1.5708);
-            let rock_line = snow_line - 0.15;
-            let alpine_line = rock_line - 0.15;
+        if (land_height > snow_line && temp < 15.0) {
+            let blend = smooth_step(snow_line, snow_line + 0.10, land_height);
+            surface_color = mix(surface_color, vec3<f32>(0.92, 0.94, 0.98), blend);
+        } else if (land_height > rock_line) {
+            let blend = smooth_step(rock_line, rock_line + 0.10, land_height);
+            surface_color = mix(surface_color, vec3<f32>(0.50, 0.48, 0.44) + vec3<f32>(0.04) * color_var, blend);
+        } else if (land_height > alpine_line) {
+            let blend = smooth_step(alpine_line, alpine_line + 0.10, land_height);
+            let alpine = mix(surface_color, vec3<f32>(0.48, 0.52, 0.35), 0.5);
+            surface_color = mix(surface_color, alpine, blend);
+        }
 
-            if (land_height > snow_line && temp < 15.0) {
-                let blend = smooth_step(snow_line, snow_line + 0.08, land_height);
-                surface_color = mix(surface_color, vec3<f32>(0.94, 0.96, 1.0), blend);
-            } else if (land_height > rock_line) {
-                let blend = smooth_step(rock_line, rock_line + 0.08, land_height);
-                surface_color = mix(surface_color, vec3<f32>(0.48, 0.46, 0.44) + vec3<f32>(0.05) * color_var, blend);
-            } else if (land_height > alpine_line) {
-                let blend = smooth_step(alpine_line, alpine_line + 0.08, land_height);
-                surface_color = mix(surface_color, vec3<f32>(0.45, 0.50, 0.30), blend * 0.7);
-            }
-
-            if (land_height < 0.03) {
-                let beach_blend = 1.0 - clamp(land_height / 0.03, 0.0, 1.0);
-                surface_color = mix(surface_color, vec3<f32>(0.76, 0.70, 0.50), beach_blend * 0.7);
-            }
+        // Beach transition
+        if (land_height < 0.03) {
+            let beach_blend = smooth_step(0.03, 0.0, land_height);
+            surface_color = mix(surface_color, vec3<f32>(0.74, 0.68, 0.48), beach_blend * 0.6);
         }
     }
 
@@ -370,7 +311,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 if (m < 0.5) { debug_color = mix(vec3<f32>(0.6, 0.4, 0.1), vec3<f32>(0.1, 0.6, 0.1), m * 2.0); }
                 else { debug_color = mix(vec3<f32>(0.1, 0.6, 0.1), vec3<f32>(0.1, 0.2, 0.8), (m - 0.5) * 2.0); }
             }
-            case 4u: { debug_color = biome_color(whittaker_lookup(temp, moisture), 0.0, temp) * 1.3; }
+            case 4u: { debug_color = gradient_color(temp, moisture, 0.0) * 1.3; }
             case 5u: {
                 if (is_ocean) {
                     if (compute_temperature(rotated, height) < -2.0) { debug_color = vec3<f32>(1.0); }
