@@ -248,7 +248,7 @@ impl eframe::App for PlanetGenApp {
                     });
 
                 // MMSN plausibility warning
-                if self.params.mass_earth > self.derived.isolation_mass * 5.0 {
+                if self.params.mass_earth > self.derived.isolation_mass * 15.0 {
                     ui.colored_label(
                         egui::Color32::YELLOW,
                         format!(

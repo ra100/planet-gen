@@ -211,8 +211,8 @@ fn classify_planet(distance_au: f32, frost_line_au: f32) -> PlanetType {
 /// Continuous tectonics factor based on simplified Rayleigh number.
 /// Ra ∝ g · ΔT · D³ / (ν · κ). Returns [0, 1].
 fn compute_tectonics_factor(mass_earth: f32, distance_au: f32, gravity: f32) -> f32 {
-    // Water availability factor: peaks in habitable zone, drops outside
-    let water_factor = (-((distance_au - 1.5).powi(2)) / 2.0).exp();
+    // Water availability: peaks in habitable zone (centered ~1.0 AU), drops outside
+    let water_factor = (-((distance_au - 1.0).powi(2)) / 1.5).exp();
 
     // Rayleigh proxy: gravity × mass (mantle thickness ∝ mass^0.3)
     let ra_proxy = gravity * mass_earth.powf(0.3) * water_factor;
@@ -299,10 +299,13 @@ fn compute_ocean_fraction(
     let water_budget = mass_earth.powf(0.5) * (0.3 + 0.7 * frost_proximity);
 
     // Temperature affects surface water state
-    let temp_factor = if base_temp_c < -40.0 {
-        0.1 // Mostly frozen under ice
+    // Cold planets can still have water (frozen or subsurface — Mars had water)
+    let temp_factor = if base_temp_c < -80.0 {
+        0.15 // Very cold, but some subsurface ice possible
+    } else if base_temp_c < -40.0 {
+        0.15 + 0.25 * ((base_temp_c + 80.0) / 40.0) // Frozen but present
     } else if base_temp_c < 0.0 {
-        0.1 + 0.4 * ((base_temp_c + 40.0) / 40.0) // Partially frozen
+        0.40 + 0.30 * ((base_temp_c + 40.0) / 40.0) // Partially frozen
     } else if base_temp_c > 200.0 {
         0.0 // Boiled off
     } else if base_temp_c > 80.0 {
@@ -407,9 +410,35 @@ mod tests {
         let params = PlanetParams::default();
         let derived = DerivedProperties::from_params(&params);
         assert!(
-            derived.tectonics_factor > 0.6,
-            "Earth tectonics factor should be high, got {}",
+            derived.tectonics_factor > 0.7 && derived.tectonics_factor < 0.98,
+            "Earth tectonics factor should be ~0.8-0.95, got {}",
             derived.tectonics_factor
+        );
+    }
+
+    #[test]
+    fn earth_does_not_trigger_mmsn_warning() {
+        let params = PlanetParams::default();
+        let derived = DerivedProperties::from_params(&params);
+        assert!(
+            params.mass_earth <= derived.isolation_mass * 15.0,
+            "Earth (1.0 M⊕) should not trigger MMSN warning at isolation mass {:.3}",
+            derived.isolation_mass
+        );
+    }
+
+    #[test]
+    fn mars_has_some_water() {
+        let params = PlanetParams {
+            star_distance_au: 1.5,
+            mass_earth: 0.1,
+            ..Default::default()
+        };
+        let derived = DerivedProperties::from_params(&params);
+        assert!(
+            derived.ocean_fraction > 0.05,
+            "Mars-like planet should have some water/ice, got {}",
+            derived.ocean_fraction
         );
     }
 

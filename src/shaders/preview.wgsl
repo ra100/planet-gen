@@ -67,13 +67,34 @@ fn continental_base(pos: vec3<f32>) -> f32 {
     var continental = n1 + n2 + n3;
 
     // Plate tectonics → bimodal elevation (distinct continents + ocean basins)
-    // Stagnant lid → unimodal (smoother, more gradual)
-    let bimodal_strength = uniforms.tectonics_factor;
+    // Earth has two elevation modes: ocean floor (~-4km) and continental shelves (~0-1km)
+    let bimodal = uniforms.tectonics_factor;
 
-    // Sharpen the continent/ocean boundary for plate tectonics
-    // This creates the bimodal elevation distribution Earth has
-    let sharpened = sign(continental) * pow(abs(continental), 0.6);
-    continental = mix(continental, sharpened, bimodal_strength * 0.7);
+    // Step 1: Sharpen the land/ocean boundary
+    let sharpened = sign(continental) * pow(abs(continental), 0.5);
+    continental = mix(continental, sharpened, bimodal * 0.6);
+
+    // Step 2: Flatten plateaus (continental shelves and ocean floors)
+    // Land areas get a raised plateau; ocean floors get a depressed basin
+    // This creates the bimodal elevation distribution like Earth
+    if (continental > 0.0) {
+        // Continental shelf: flatten above threshold, add slight plateau
+        let shelf = clamp(continental, 0.0, 1.5);
+        let plateau = 0.3 + shelf * 0.5; // Continent base elevation
+        continental = mix(continental, plateau, bimodal * 0.5);
+    } else {
+        // Ocean floor: flatten below threshold, depress to basin
+        let basin = clamp(continental, -1.5, 0.0);
+        let floor_level = -0.4 + basin * 0.3; // Ocean floor depression
+        continental = mix(continental, floor_level, bimodal * 0.5);
+    }
+
+    // Step 3: Add continental edge detail (coastline irregularity)
+    let edge_dist = abs(continental);
+    if (edge_dist < 0.3) {
+        let edge_noise = snoise(p * 12.0) * 0.15 + snoise(p * 20.0) * 0.08;
+        continental += edge_noise * (1.0 - edge_dist / 0.3);
+    }
 
     return continental;
 }
