@@ -13,6 +13,9 @@ pub struct PlanetGenApp {
     derived: DerivedProperties,
     rotation_y: f32,
     rotation_x: f32,
+    // Visual override parameters
+    continental_scale: f32,
+    water_loss: f32,
     needs_regenerate: bool,
 }
 
@@ -29,6 +32,8 @@ impl PlanetGenApp {
             derived,
             rotation_y: 0.0,
             rotation_x: 0.0,
+            continental_scale: 1.0,
+            water_loss: 0.0,
             needs_regenerate: true,
         }
     }
@@ -75,8 +80,9 @@ impl PlanetGenApp {
         let tilt_factor = self.params.axial_tilt_deg / 90.0;
         let octaves = (8.0 + 4.0 * tilt_factor * self.derived.tectonics_factor) as u32; // 8-12
 
-        // Ocean level from derived properties
-        let ocean_level = -1.0 + 2.0 * self.derived.ocean_fraction;
+        // Ocean level: apply water_loss override
+        let effective_ocean = self.derived.ocean_fraction * (1.0 - self.water_loss);
+        let ocean_level = -1.0 + 2.0 * effective_ocean;
 
         // Rotation matrix: Y then X
         let cy = self.rotation_y.cos();
@@ -100,9 +106,11 @@ impl PlanetGenApp {
             amplitude,
             octaves,
             base_temp_c: self.derived.base_temperature_c,
-            ocean_fraction: self.derived.ocean_fraction,
+            ocean_fraction: effective_ocean,
             axial_tilt_rad: self.params.axial_tilt_deg.to_radians(),
             tectonics_factor: self.derived.tectonics_factor,
+            continental_scale: self.continental_scale,
+            _pad: [0.0; 3],
         }
     }
 
@@ -206,6 +214,32 @@ impl eframe::App for PlanetGenApp {
                 }
 
                 ui.separator();
+                ui.heading("Visual Overrides");
+                ui.separator();
+
+                if ui
+                    .add(
+                        egui::Slider::new(&mut self.continental_scale, 0.5..=4.0)
+                            .text("Continent Scale"),
+                    )
+                    .on_hover_text("Lower = fewer, larger continents (Earth-like ~0.7). Higher = many small islands")
+                    .changed()
+                {
+                    self.needs_regenerate = true;
+                }
+
+                if ui
+                    .add(
+                        egui::Slider::new(&mut self.water_loss, 0.0..=1.0)
+                            .text("Water Loss"),
+                    )
+                    .on_hover_text("Simulate water loss from atmospheric escape. 0 = physics default, 1 = completely dry")
+                    .changed()
+                {
+                    self.needs_regenerate = true;
+                }
+
+                ui.separator();
 
                 ui.heading("Derived Properties");
                 ui.separator();
@@ -235,7 +269,12 @@ impl eframe::App for PlanetGenApp {
                         ui.end_row();
 
                         ui.label("Ocean:");
-                        ui.label(format!("{:.0}%", self.derived.ocean_fraction * 100.0));
+                        if self.water_loss > 0.01 {
+                            let effective = self.derived.ocean_fraction * (1.0 - self.water_loss);
+                            ui.label(format!("{:.0}% (eff: {:.0}%)", self.derived.ocean_fraction * 100.0, effective * 100.0));
+                        } else {
+                            ui.label(format!("{:.0}%", self.derived.ocean_fraction * 100.0));
+                        }
                         ui.end_row();
 
                         ui.label("Frost line:");

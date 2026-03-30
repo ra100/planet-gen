@@ -18,6 +18,10 @@ struct Uniforms {
     ocean_fraction: f32,
     axial_tilt_rad: f32,
     tectonics_factor: f32, // 0.0 = stagnant lid (unimodal), 1.0 = plate tectonics (bimodal)
+    continental_scale: f32, // multiplier for continental noise frequency (lower = bigger continents)
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -61,9 +65,11 @@ fn continental_base(pos: vec3<f32>) -> f32 {
     let p = pos + uniforms.seed_offset;
 
     // Low-frequency noise for continent shapes (freq ≈ 2-3 per research)
-    let n1 = snoise(p * 2.0);
-    let n2 = snoise(p * 3.5 + vec3<f32>(50.0, 0.0, 0.0)) * 0.5;
-    let n3 = snoise(p * 5.0 + vec3<f32>(0.0, 50.0, 0.0)) * 0.25;
+    // continental_scale multiplier: lower = bigger continents, higher = more/smaller
+    let cs = uniforms.continental_scale;
+    let n1 = snoise(p * 2.0 * cs);
+    let n2 = snoise(p * 3.5 * cs + vec3<f32>(50.0, 0.0, 0.0)) * 0.5;
+    let n3 = snoise(p * 5.0 * cs + vec3<f32>(0.0, 50.0, 0.0)) * 0.25;
     var continental = n1 + n2 + n3;
 
     // Plate tectonics → bimodal elevation (distinct continents + ocean basins)
@@ -299,13 +305,30 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var surface_color: vec3<f32>;
 
     if (is_ocean) {
-        // Ocean coloring
-        let depth = (uniforms.ocean_level - height) / max(uniforms.ocean_level + 1.0, 0.5);
-        let deep = vec3<f32>(0.02, 0.05, 0.25);
-        let shallow = vec3<f32>(0.06, 0.18, 0.50);
-        surface_color = mix(shallow, deep, clamp(depth, 0.0, 1.0));
-        // Slight color variation in ocean
-        surface_color += vec3<f32>(0.0, 0.02, 0.03) * color_var;
+        // Check for polar ocean ice (seawater freezes at ~-2°C)
+        let ocean_temp = compute_temperature(rotated, height);
+        if (ocean_temp < -2.0) {
+            // Frozen ocean — sea ice
+            let ice_intensity = clamp((-2.0 - ocean_temp) / 10.0, 0.0, 1.0);
+            let sea_ice = vec3<f32>(0.85, 0.90, 0.95);
+            let thin_ice = vec3<f32>(0.55, 0.70, 0.82);
+            surface_color = mix(thin_ice, sea_ice, ice_intensity);
+            surface_color += vec3<f32>(0.02) * color_var;
+        } else if (ocean_temp < 2.0) {
+            // Transition zone: mix between ice and water
+            let blend = (ocean_temp + 2.0) / 4.0;
+            let ice_color = vec3<f32>(0.55, 0.70, 0.82);
+            let depth = (uniforms.ocean_level - height) / max(uniforms.ocean_level + 1.0, 0.5);
+            let water = mix(vec3<f32>(0.06, 0.18, 0.50), vec3<f32>(0.02, 0.05, 0.25), clamp(depth, 0.0, 1.0));
+            surface_color = mix(ice_color, water, blend);
+        } else {
+            // Open ocean
+            let depth = (uniforms.ocean_level - height) / max(uniforms.ocean_level + 1.0, 0.5);
+            let deep = vec3<f32>(0.02, 0.05, 0.25);
+            let shallow = vec3<f32>(0.06, 0.18, 0.50);
+            surface_color = mix(shallow, deep, clamp(depth, 0.0, 1.0));
+            surface_color += vec3<f32>(0.0, 0.02, 0.03) * color_var;
+        }
     } else {
         // 3. Temperature
         let temp = compute_temperature(rotated, height);
