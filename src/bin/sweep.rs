@@ -159,7 +159,9 @@ fn generate_planet_png(
         axial_tilt_rad: params.axial_tilt_deg.to_radians(),
         view_mode: 0,
         season: 0.5,
-        _pad: [0.0; 3],
+        atmosphere_density: 0.0,
+        atmosphere_height: 0.0,
+        _pad: 0.0,
     };
 
     renderer.render(gpu, &uniforms, &cubemap_view, render_size)

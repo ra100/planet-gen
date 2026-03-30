@@ -11,9 +11,9 @@ struct Uniforms {
     axial_tilt_rad: f32,
     view_mode: u32,
     season: f32, // 0=winter, 0.5=equinox, 1=summer
+    atmosphere_density: f32, // 0.0 = none, 1.0 = Earth-like (reserved)
+    atmosphere_height: f32,  // scale height in planet radii (reserved)
     _pad0: f32,
-    _pad1: f32,
-    _pad2: f32,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -226,6 +226,59 @@ fn gradient_color(temp_c: f32, moisture_cm: f32, variation: f32) -> vec3<f32> {
     return base;
 }
 
+// ---- Terrain normal from height cubemap ----
+fn compute_terrain_normal(sphere_pos: vec3<f32>, geo_normal: vec3<f32>) -> vec3<f32> {
+    let step = 0.004;
+
+    // Build tangent frame on the sphere surface
+    var up = vec3<f32>(0.0, 1.0, 0.0);
+    if (abs(dot(geo_normal, up)) > 0.99) { up = vec3<f32>(1.0, 0.0, 0.0); }
+    let tangent = normalize(cross(up, geo_normal));
+    let bitangent = normalize(cross(geo_normal, tangent));
+
+    // Sample 4 neighbors along tangent directions
+    let h_right = textureSample(height_tex, height_sampler, sphere_pos + tangent * step).r;
+    let h_left  = textureSample(height_tex, height_sampler, sphere_pos - tangent * step).r;
+    let h_up    = textureSample(height_tex, height_sampler, sphere_pos + bitangent * step).r;
+    let h_down  = textureSample(height_tex, height_sampler, sphere_pos - bitangent * step).r;
+
+    // Central differences → height gradient
+    let height_scale = 3.0; // Controls how pronounced terrain relief appears
+    let dx = (h_right - h_left) * height_scale;
+    let dy = (h_up - h_down) * height_scale;
+
+    // Perturb geometric normal by terrain gradient
+    let perturbed = normalize(geo_normal - tangent * dx - bitangent * dy);
+    return perturbed;
+}
+
+// ---- Surface roughness from climate ----
+fn compute_roughness(temp_c: f32, moisture_cm: f32, is_ocean: bool, is_ice: bool) -> f32 {
+    if (is_ocean) {
+        if (is_ice) { return 0.15; }
+        return 0.02; // Near-mirror water
+    }
+    // Land roughness from climate
+    if (temp_c < 0.0) { return 0.20; } // Snow/ice
+    if (temp_c < 10.0) { return 0.55; } // Tundra/Taiga
+    if (moisture_cm < 25.0) { return 0.80; } // Desert
+    if (moisture_cm < 100.0) { return 0.55; } // Grassland
+    return 0.45; // Forest
+}
+
+// ---- PBR: GGX normal distribution ----
+fn ggx_distribution(n_dot_h: f32, roughness: f32) -> f32 {
+    let a = roughness * roughness;
+    let a2 = a * a;
+    let d = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
+    return a2 / (3.14159 * d * d + 0.0001);
+}
+
+// ---- PBR: Schlick Fresnel ----
+fn fresnel_schlick(h_dot_v: f32, f0: f32) -> f32 {
+    return f0 + (1.0 - f0) * pow(1.0 - h_dot_v, 5.0);
+}
+
 // ---- Main fragment shader ----
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
@@ -385,9 +438,48 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         return vec4<f32>(debug_color, 1.0);
     }
 
-    // Lighting
+    // ---- PBR Lighting ----
     let light = normalize(uniforms.light_dir);
-    let ndotl = max(dot(normal, light), 0.0);
-    let lit_color = surface_color * (0.15 + 0.85 * ndotl);
+    let view_dir = vec3<f32>(0.0, 0.0, 1.0); // Camera looks along -Z, view = +Z
+    let half_vec = normalize(light + view_dir);
+
+    // Compute terrain-perturbed normal
+    let shading_normal = compute_terrain_normal(rotated, normal);
+
+    // PBR inputs
+    let n_dot_l = max(dot(shading_normal, light), 0.0);
+    let n_dot_v = max(dot(shading_normal, view_dir), 0.001);
+    let n_dot_h = max(dot(shading_normal, half_vec), 0.0);
+    let h_dot_v = max(dot(half_vec, view_dir), 0.0);
+
+    // Roughness and Fresnel base reflectance
+    let ocean_temp = compute_temperature(rotated, height);
+    let ocean_ice = is_ocean && ocean_temp < -2.0;
+    let temp_for_rough = compute_temperature(rotated, height);
+    let moist_for_rough = compute_moisture(rotated, height);
+    let roughness = compute_roughness(temp_for_rough, moist_for_rough, is_ocean, ocean_ice);
+    let f0 = select(0.03, 0.02, is_ocean); // Dielectric: land=0.03, water=0.02
+
+    // GGX specular
+    let d = ggx_distribution(n_dot_h, roughness);
+    let f = fresnel_schlick(h_dot_v, f0);
+    let specular = d * f / (4.0 * n_dot_v * n_dot_l + 0.001);
+
+    // Diffuse (energy-conserving: reduce diffuse where specular is strong)
+    let diffuse = surface_color * (1.0 - f) / 3.14159;
+
+    // Ambient (subtle, directional — slightly brighter on the lit hemisphere)
+    let ambient = surface_color * (0.06 + 0.04 * max(dot(normal, light), 0.0));
+
+    // Combine
+    var lit_color = ambient + (diffuse + specular) * n_dot_l;
+
+    // Rim darkening (limb effect — atmosphere placeholder)
+    let geo_n_dot_v = max(dot(normal, view_dir), 0.0);
+    lit_color *= pow(geo_n_dot_v, 0.12);
+
+    // Simple tonemap to prevent HDR clipping on specular
+    lit_color = lit_color / (lit_color + vec3<f32>(1.0));
+
     return vec4<f32>(lit_color, 1.0);
 }

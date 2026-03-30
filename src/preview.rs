@@ -17,7 +17,9 @@ pub struct PreviewUniforms {
     pub axial_tilt_rad: f32,
     pub view_mode: u32,
     pub season: f32, // 0=winter, 0.5=equinox, 1=summer
-    pub _pad: [f32; 3],
+    pub atmosphere_density: f32, // 0.0 = none, 1.0 = Earth-like (reserved for future)
+    pub atmosphere_height: f32,  // scale height in planet radii (reserved for future)
+    pub _pad: f32,
 }
 
 pub struct PreviewRenderer {
@@ -348,7 +350,9 @@ mod tests {
             axial_tilt_rad: 0.41,
             view_mode: 0,
             season: 0.5,
-            _pad: [0.0; 3],
+            atmosphere_density: 0.0,
+            atmosphere_height: 0.0,
+            _pad: 0.0,
         };
 
         let size = 256;
