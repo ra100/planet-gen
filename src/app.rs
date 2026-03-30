@@ -19,6 +19,7 @@ pub struct PlanetGenApp {
     // Visual override parameters
     continental_scale: f32,
     water_loss: f32,
+    season: f32, // 0=winter, 0.5=equinox, 1=summer
     view_mode: u32,
     preview_resolution: u32,
     needs_regenerate: bool,
@@ -41,6 +42,7 @@ impl PlanetGenApp {
             rotation_x: 0.0,
             continental_scale: 1.0,
             water_loss: 0.0,
+            season: 0.5, // equinox default
             view_mode: 0,
             preview_resolution: crate::preview::DEFAULT_PREVIEW_SIZE,
             needs_regenerate: true,
@@ -69,6 +71,8 @@ impl PlanetGenApp {
             ocean_fraction: effective_ocean,
             axial_tilt_rad: self.params.axial_tilt_deg.to_radians(),
             view_mode: self.view_mode,
+            season: self.season,
+            _pad: [0.0; 3],
         }
     }
 
@@ -220,6 +224,14 @@ impl eframe::App for PlanetGenApp {
                 if ui.add(egui::Slider::new(&mut self.water_loss, 0.0..=1.0)
                     .text("Water Loss"))
                     .on_hover_text("Simulate water loss. 0 = physics default, 1 = completely dry")
+                    .changed()
+                {
+                    self.needs_regenerate = true;
+                }
+
+                if ui.add(egui::Slider::new(&mut self.season, 0.0..=1.0)
+                    .text("Season"))
+                    .on_hover_text("0 = deep winter, 0.5 = equinox, 1 = deep summer. Affects vegetation color and ice extent")
                     .changed()
                 {
                     self.needs_regenerate = true;

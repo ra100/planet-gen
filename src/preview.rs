@@ -16,6 +16,8 @@ pub struct PreviewUniforms {
     pub ocean_fraction: f32,
     pub axial_tilt_rad: f32,
     pub view_mode: u32,
+    pub season: f32, // 0=winter, 0.5=equinox, 1=summer
+    pub _pad: [f32; 3],
 }
 
 pub struct PreviewRenderer {
@@ -345,6 +347,8 @@ mod tests {
             ocean_fraction: 0.7,
             axial_tilt_rad: 0.41,
             view_mode: 0,
+            season: 0.5,
+            _pad: [0.0; 3],
         };
 
         let size = 256;

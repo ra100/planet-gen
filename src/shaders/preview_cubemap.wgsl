@@ -10,6 +10,10 @@ struct Uniforms {
     ocean_fraction: f32,
     axial_tilt_rad: f32,
     view_mode: u32,
+    season: f32, // 0=winter, 0.5=equinox, 1=summer
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -60,10 +64,17 @@ fn compute_temperature(sphere_pos: vec3<f32>, height: f32) -> f32 {
 
     // Temperature gradient: ~50°C range (30°C equator to -20°C poles)
     // Non-linear: flatter at mid-latitudes (ocean heat transport), steeper near poles
-    let lat_normalized = lat_deg / 90.0; // 0 at equator, 1 at pole
+    let lat_normalized = lat_deg / 90.0;
     let temp_drop = 50.0 * (0.4 * lat_normalized + 0.6 * lat_normalized * lat_normalized);
     let temp_offset = uniforms.base_temp_c - 15.0;
-    let base_temp = 30.0 - temp_drop + temp_offset;
+
+    // Season modifies temperature: summer hemisphere warmer, winter hemisphere colder
+    // season=0 (winter): north colder, south warmer. season=1 (summer): north warmer
+    let season_angle = (uniforms.season - 0.5) * 2.0; // [-1, 1]
+    let hemisphere = select(-1.0, 1.0, effective_lat > 0.0); // +1 north, -1 south
+    let season_shift = season_angle * hemisphere * uniforms.axial_tilt_rad * 15.0; // ±10°C at max tilt
+
+    let base_temp = 30.0 - temp_drop + temp_offset + season_shift;
 
     let land_fraction = max(height - uniforms.ocean_level, 0.0) / max(1.0 - uniforms.ocean_level, 0.01);
     let elevation_km = land_fraction * 5.0;
@@ -226,6 +237,27 @@ fn biome_color(biome: u32, variation: f32, temp_c: f32) -> vec3<f32> {
     if (biome == 5u && temp_c < 10.0) {
         base = mix(vec3<f32>(0.55, 0.40, 0.25), base, clamp(temp_c / 10.0, 0.0, 1.0));
     }
+
+    // Seasonal color shifts (only for vegetation biomes)
+    let season_factor = uniforms.season; // 0=winter, 1=summer
+
+    // Deciduous forests: green in summer → gold/brown in fall → gray-brown in winter
+    if (biome == 9u || biome == 11u) { // Temperate & tropical deciduous
+        let winter_color = vec3<f32>(0.45, 0.35, 0.20); // Brown/bare
+        base = mix(winter_color, base, season_factor);
+    }
+    // Grasslands and savanna: golden in winter, green in summer
+    if (biome == 6u || biome == 7u) {
+        let dry_color = vec3<f32>(0.55, 0.50, 0.25); // Golden/dry
+        base = mix(dry_color, base, 0.3 + 0.7 * season_factor);
+    }
+    // Tundra: brown-green in summer, whiter in winter
+    if (biome == 1u) {
+        let winter_tundra = vec3<f32>(0.75, 0.78, 0.80); // Near-white
+        base = mix(winter_tundra, base, season_factor);
+    }
+    // Evergreen forests (taiga, boreal, tropical RF): minimal change
+    // Deserts: no change
 
     return base + base * variation * 0.12;
 }
