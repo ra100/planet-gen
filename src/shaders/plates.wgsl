@@ -206,9 +206,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     // Smooth highland peaks instead of hard threshold
     height += smooth_step(0.3, 0.8, highland) * 0.08 * land_weight;
 
-    // Seamounts: smooth emergence curve instead of hard cutoff
+    // Seamounts: rare underwater volcanoes — high threshold, low amplitude
     let seamount = snoise(raw_pos * 8.0 + seed_offset(params.seed + 900u));
-    let seamount_h = smooth_step(0.6, 0.9, seamount) * 0.8;
+    let seamount_h = smooth_step(0.78, 0.95, seamount) * 0.3;
     height += seamount_h * (1.0 - land_weight);
 
     // Continental shelf: smooth transition using smoothstep instead of hard threshold
