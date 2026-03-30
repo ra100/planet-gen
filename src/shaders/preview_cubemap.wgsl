@@ -142,7 +142,7 @@ fn compute_moisture(sphere_pos: vec3<f32>, height: f32) -> f32 {
     if (is_land) {
         // Continentality: more land neighbors = drier interior
         let coastal_factor = ocean_count / 4.0; // 0 = deep interior, 1 = surrounded by ocean
-        moisture *= 0.5 + 0.7 * coastal_factor; // Interior: ×0.5, coast: ×1.2
+        moisture *= 0.7 + 0.4 * coastal_factor; // Interior: ×0.7, coast: ×1.1
     } else {
         moisture *= 1.3; // Over ocean
     }
