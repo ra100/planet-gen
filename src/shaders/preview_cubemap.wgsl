@@ -228,7 +228,7 @@ fn gradient_color(temp_c: f32, moisture_cm: f32, variation: f32) -> vec3<f32> {
 
 // ---- Terrain normal from height cubemap ----
 fn compute_terrain_normal(sphere_pos: vec3<f32>, geo_normal: vec3<f32>) -> vec3<f32> {
-    let step = 0.004;
+    let step = 0.0015; // ~1 texel at 512 cubemap resolution
 
     // Build tangent frame in CUBEMAP space (consistent with height sampling)
     var up = vec3<f32>(0.0, 1.0, 0.0);
