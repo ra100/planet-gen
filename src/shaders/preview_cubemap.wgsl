@@ -88,11 +88,16 @@ fn compute_temperature(sphere_pos: vec3<f32>, height: f32) -> f32 {
 // ---- Hadley cell moisture ----
 fn hadley_cell_moisture(latitude_rad: f32) -> f32 {
     let lat_deg = abs(latitude_rad) * 180.0 / 3.14159;
-    let itcz_wet = exp(-lat_deg * lat_deg / 200.0) * 250.0;
-    let subtropical_dry = -150.0 * exp(-((lat_deg - 30.0) * (lat_deg - 30.0)) / 100.0);
-    let polar_front_wet = 80.0 * exp(-((lat_deg - 55.0) * (lat_deg - 55.0)) / 150.0);
-    let polar_dry = -100.0 * smooth_step(65.0, 85.0, lat_deg);
-    return max(itcz_wet + subtropical_dry + polar_front_wet + polar_dry + 50.0, 5.0);
+    // ITCZ: tropical wet belt
+    let itcz_wet = exp(-lat_deg * lat_deg / 200.0) * 200.0;
+    // Subtropical dry: reduced intensity, narrower — deserts are regional, not planet-wide
+    let subtropical_dry = -80.0 * exp(-((lat_deg - 28.0) * (lat_deg - 28.0)) / 60.0);
+    // Mid-latitude wet belt (westerlies)
+    let polar_front_wet = 90.0 * exp(-((lat_deg - 50.0) * (lat_deg - 50.0)) / 200.0);
+    // Polar drying
+    let polar_dry = -60.0 * smooth_step(65.0, 85.0, lat_deg);
+    // Higher base ensures most temperate land has enough moisture for vegetation
+    return max(itcz_wet + subtropical_dry + polar_front_wet + polar_dry + 90.0, 10.0);
 }
 
 // Wind direction from Hadley cells for rain shadow
