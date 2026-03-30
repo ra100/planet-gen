@@ -306,22 +306,27 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let temp = compute_temperature(rotated, height);
         let moisture = compute_moisture(rotated, height);
 
-        // Add noise to temp/moisture before biome lookup to break sharp boundaries
-        let biome_noise1 = snoise(rotated * 12.0 + vec3<f32>(50.0, 0.0, 0.0));
-        let biome_noise2 = snoise(rotated * 6.0 + vec3<f32>(0.0, 77.0, 0.0));
-        let temp_biome = temp + biome_noise1 * 3.0;
-        let moisture_biome = moisture + biome_noise2 * 20.0;
-
         // Ice/snow threshold scales with ocean fraction — dry worlds need more moisture to form ice
         let ice_moisture_threshold = 15.0 + 40.0 * (1.0 - uniforms.ocean_fraction);
-        if (temp < -15.0 && moisture > ice_moisture_threshold) {
-            let ice_edge = smooth_step(-18.0, -12.0, temp);
-            surface_color = mix(vec3<f32>(0.92, 0.94, 0.98) + vec3<f32>(0.03) * color_var,
-                                biome_color(whittaker_lookup(temp_biome, moisture_biome), color_var, temp),
-                                ice_edge);
+        if (temp < -18.0 && moisture > ice_moisture_threshold) {
+            surface_color = vec3<f32>(0.92, 0.94, 0.98) + vec3<f32>(0.03) * color_var;
+        } else if (temp < -12.0 && moisture > ice_moisture_threshold) {
+            // Smooth ice→biome edge
+            let ice_blend = smooth_step(-18.0, -12.0, temp);
+            let biome_col = biome_color(whittaker_lookup(temp, moisture), color_var, temp);
+            surface_color = mix(vec3<f32>(0.92, 0.94, 0.98) + vec3<f32>(0.03) * color_var, biome_col, ice_blend);
         } else {
-            let biome = whittaker_lookup(temp_biome, moisture_biome);
-            surface_color = biome_color(biome, color_var, temp);
+            // Multi-sample biome blending: sample at 3 noise-perturbed points and average
+            // to eliminate hard rectangular biome boundaries from the step-function lookup.
+            let bn1 = snoise(rotated * 15.0 + vec3<f32>(50.0, 0.0, 0.0));
+            let bn2 = snoise(rotated * 15.0 + vec3<f32>(0.0, 77.0, 0.0));
+            let bn3 = snoise(rotated * 9.0 + vec3<f32>(33.0, 0.0, 55.0));
+            let bn4 = snoise(rotated * 9.0 + vec3<f32>(0.0, 22.0, 88.0));
+
+            let c1 = biome_color(whittaker_lookup(temp + bn1 * 6.0, moisture + bn2 * 35.0), color_var, temp);
+            let c2 = biome_color(whittaker_lookup(temp + bn3 * 6.0, moisture + bn4 * 35.0), color_var, temp);
+            let c3 = biome_color(whittaker_lookup(temp, moisture), color_var, temp);
+            surface_color = (c1 + c2 + c3) / 3.0;
 
             // Altitude zonation
             let land_height = (height - uniforms.ocean_level) / max(1.0 - uniforms.ocean_level, 0.01);

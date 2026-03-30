@@ -38,6 +38,11 @@ fn seed_offset(s: u32) -> vec3<f32> {
     return vec3<f32>(x, y, z);
 }
 
+fn smooth_step(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
 // Domain warping for natural plate boundaries — multi-octave for fractal coastlines
 fn warp_position(pos: vec3<f32>) -> vec3<f32> {
     // Two octaves of warping: large-scale bends + fine-scale irregularity
@@ -175,10 +180,11 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let coast_warp_val = snoise(raw_pos * 1.5 + seed_offset(params.seed + 600u));
     let coast_pos = raw_pos + vec3<f32>(coast_warp_val) * 0.15;
 
-    // Two octaves for coastline shape (keep noise calls low to avoid GPU limits)
+    // Three octaves for coastline shape — fine detail breaks up smooth blobs
     let coast_n1 = snoise(coast_pos * 2.5 + seed_offset(params.seed + 700u));
     let coast_n2 = snoise(coast_pos * 5.0 + seed_offset(params.seed + 710u)) * 0.4;
-    let coastal_noise = coast_n1 + coast_n2;
+    let coast_n3 = snoise(coast_pos * 10.0 + seed_offset(params.seed + 720u)) * 0.15;
+    let coastal_noise = coast_n1 + coast_n2 + coast_n3;
 
     // Combine plate bias + coastal noise for elevation base
     // Continental plates: bias +0.25 + noise → mostly positive (land)
@@ -190,26 +196,25 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let interior_factor = clamp(boundary_dist * 8.0, 0.0, 1.0);
     let is_land = height > 0.0;
 
-    if (is_land) {
-        // Continental highlands and basins (single warped noise)
-        let highland = snoise(raw_pos * 4.0 + seed_offset(params.seed + 800u));
-        height += highland * 0.12 * interior_factor;
-        if (highland > 0.5) { height += 0.08; }
-    } else {
-        // Seamounts: rare underwater volcanoes that can breach surface
-        let seamount = snoise(raw_pos * 8.0 + seed_offset(params.seed + 900u));
-        if (seamount > 0.75) {
-            height += (seamount - 0.75) * 1.0;
-        }
-    }
+    // Blend between land and ocean features using smooth height-based weight
+    let land_weight = smooth_step(-0.05, 0.05, height);
 
-    // Continental shelf: smooth transition near the coastline
+    // Continental highlands and basins
+    let highland = snoise(raw_pos * 4.0 + seed_offset(params.seed + 800u));
+    let highland2 = snoise(raw_pos * 7.0 + seed_offset(params.seed + 810u)) * 0.5;
+    height += (highland + highland2) * 0.1 * interior_factor * land_weight;
+    // Smooth highland peaks instead of hard threshold
+    height += smooth_step(0.3, 0.8, highland) * 0.08 * land_weight;
+
+    // Seamounts: smooth emergence curve instead of hard cutoff
+    let seamount = snoise(raw_pos * 8.0 + seed_offset(params.seed + 900u));
+    let seamount_h = smooth_step(0.6, 0.9, seamount) * 0.8;
+    height += seamount_h * (1.0 - land_weight);
+
+    // Continental shelf: smooth transition using smoothstep instead of hard threshold
     let coast_dist = abs(height);
-    if (coast_dist < 0.08) {
-        // Near sea level: gentle shelf, less steep transition
-        let shelf_smooth = coast_dist / 0.08;
-        height *= 0.5 + 0.5 * shelf_smooth;
-    }
+    let shelf_factor = smooth_step(0.0, 0.1, coast_dist);
+    height *= 0.5 + 0.5 * shelf_factor;
 
     // --- Boundary terrain (R4-R7, R10) ---
     let b_influence = boundary_influence(boundary_dist, 0.12); // Wider influence for gradual terrain
@@ -284,16 +289,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 
     // R13: fBm detail noise on top of geological structure
-    // Elevation-dependent: mountains get more detail, plains less
+    // Continuous elevation-dependent detail: more at higher elevations
     let detail = detail_noise(raw_pos);
-    var detail_scale: f32;
-    if (height > 0.3) {
-        detail_scale = 1.5; // Mountains: craggy
-    } else if (height > 0.0) {
-        detail_scale = 0.8; // Land: moderate
-    } else {
-        detail_scale = 0.3; // Ocean: smooth
-    }
+    let detail_scale = mix(0.3, 1.5, smooth_step(-0.1, 0.4, height));
     height += detail * detail_scale;
 
     let idx = id.y * res + id.x;
