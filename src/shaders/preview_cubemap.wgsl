@@ -325,17 +325,21 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // Continuous gradient coloring — no biome IDs, no boundaries
         surface_color = gradient_color(temp, moisture, color_var);
 
-        // Smooth ice/snow overlay for very cold land
+        // Ice/snow overlay: only for genuinely glaciated land (very cold + high altitude or extreme cold)
+        // Tundra (cold flat land) stays brown/tan from gradient_color, NOT white
+        let land_height = (height - uniforms.ocean_level) / max(1.0 - uniforms.ocean_level, 0.01);
         let ice_moisture_threshold = 15.0 + 40.0 * (1.0 - uniforms.ocean_fraction);
-        let ice_blend = smooth_step(-8.0, -20.0, temp) * smooth_step(ice_moisture_threshold * 0.5, ice_moisture_threshold, moisture);
+        // Ice requires BOTH extreme cold AND either high altitude or very high moisture
+        let altitude_ice = smooth_step(0.3, 0.6, land_height); // high terrain gets ice easier
+        let cold_factor = smooth_step(-15.0, -30.0, temp);
+        let ice_blend = cold_factor * max(altitude_ice, smooth_step(ice_moisture_threshold * 0.7, ice_moisture_threshold, moisture));
         let ice_color = vec3<f32>(0.90, 0.93, 0.97) + vec3<f32>(0.02) * color_var;
         surface_color = mix(surface_color, ice_color, ice_blend);
 
-        // Altitude zonation (smooth blending on top of gradient base)
-        let land_height = (height - uniforms.ocean_level) / max(1.0 - uniforms.ocean_level, 0.01);
-        let snow_line = 0.65 + 0.25 * (1.0 - abs(effective_lat) / 1.5708);
-        let rock_line = snow_line - 0.15;
-        let alpine_line = rock_line - 0.15;
+        // Altitude zonation — raised thresholds for amplified terrain heights
+        let snow_line = 0.75 + 0.20 * (1.0 - abs(effective_lat) / 1.5708);
+        let rock_line = snow_line - 0.12;
+        let alpine_line = rock_line - 0.12;
 
         if (land_height > snow_line && temp < 15.0) {
             let blend = smooth_step(snow_line, snow_line + 0.10, land_height);
