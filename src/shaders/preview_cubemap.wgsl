@@ -230,26 +230,30 @@ fn gradient_color(temp_c: f32, moisture_cm: f32, variation: f32) -> vec3<f32> {
 fn compute_terrain_normal(sphere_pos: vec3<f32>, geo_normal: vec3<f32>) -> vec3<f32> {
     let step = 0.004;
 
-    // Build tangent frame on the sphere surface
+    // Build tangent frame in CUBEMAP space (consistent with height sampling)
     var up = vec3<f32>(0.0, 1.0, 0.0);
-    if (abs(dot(geo_normal, up)) > 0.99) { up = vec3<f32>(1.0, 0.0, 0.0); }
-    let tangent = normalize(cross(up, geo_normal));
-    let bitangent = normalize(cross(geo_normal, tangent));
+    if (abs(dot(sphere_pos, up)) > 0.99) { up = vec3<f32>(1.0, 0.0, 0.0); }
+    let tan_world = normalize(cross(up, sphere_pos));
+    let bitan_world = normalize(cross(sphere_pos, tan_world));
 
-    // Sample 4 neighbors along tangent directions
-    let h_right = textureSample(height_tex, height_sampler, sphere_pos + tangent * step).r;
-    let h_left  = textureSample(height_tex, height_sampler, sphere_pos - tangent * step).r;
-    let h_up    = textureSample(height_tex, height_sampler, sphere_pos + bitangent * step).r;
-    let h_down  = textureSample(height_tex, height_sampler, sphere_pos - bitangent * step).r;
+    // Sample 4 neighbors in cubemap space
+    let h_right = textureSample(height_tex, height_sampler, sphere_pos + tan_world * step).r;
+    let h_left  = textureSample(height_tex, height_sampler, sphere_pos - tan_world * step).r;
+    let h_up    = textureSample(height_tex, height_sampler, sphere_pos + bitan_world * step).r;
+    let h_down  = textureSample(height_tex, height_sampler, sphere_pos - bitan_world * step).r;
 
-    // Central differences → height gradient
+    // Central differences → height gradient in cubemap space
     let height_scale = uniforms.height_scale;
     let dx = (h_right - h_left) * height_scale;
     let dy = (h_up - h_down) * height_scale;
 
-    // Perturb geometric normal by terrain gradient
-    let perturbed = normalize(geo_normal - tangent * dx - bitangent * dy);
-    return perturbed;
+    // Perturbed normal in cubemap/world space
+    let perturbed_world = normalize(sphere_pos - tan_world * dx - bitan_world * dy);
+
+    // Transform back to view space using inverse rotation (transpose of orthogonal matrix)
+    let inv_rot = transpose(uniforms.rotation);
+    let perturbed_view = normalize((inv_rot * vec4<f32>(perturbed_world, 0.0)).xyz);
+    return perturbed_view;
 }
 
 // ---- Surface roughness from climate ----
