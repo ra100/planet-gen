@@ -103,8 +103,8 @@ fn wind_direction_vec(latitude_rad: f32) -> vec3<f32> {
     if (lat_deg < 30.0) { wind_x = -0.8; }  // Easterly
     else if (lat_deg < 60.0) { wind_x = 0.8; } // Westerly
     else { wind_x = -0.6; } // Polar easterly
-    // Slight poleward component
-    let wind_y = select(0.2, -0.2, latitude_rad > 0.0);
+    // Smooth poleward component — no discontinuity at equator
+    let wind_y = -0.2 * sin(latitude_rad);
     return normalize(vec3<f32>(wind_x, wind_y, 0.3));
 }
 
