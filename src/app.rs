@@ -23,6 +23,8 @@ pub struct PlanetGenApp {
     water_loss: f32,
     season: f32, // 0=winter, 0.5=equinox, 1=summer
     erosion_iterations: u32,
+    light_azimuth: f32,   // sun horizontal angle in radians
+    light_elevation: f32, // sun vertical angle in radians
     view_mode: u32,
     preview_resolution: u32,
     needs_terrain: bool,   // full terrain recompute (plates + compute + erosion)
@@ -57,6 +59,8 @@ impl PlanetGenApp {
             water_loss: 0.0,
             season: 0.5,
             erosion_iterations: 25,
+            light_azimuth: -1.1,   // ~-63° (default sun position)
+            light_elevation: 0.62, // ~35° above horizon
             view_mode: 0,
             preview_resolution: crate::preview::DEFAULT_PREVIEW_SIZE,
             needs_terrain: true,
@@ -86,7 +90,11 @@ impl PlanetGenApp {
                 [-sy, cy * sx, cy * cx, 0.0],
                 [0.0, 0.0, 0.0, 1.0],
             ],
-            light_dir: [0.5, 0.7, -1.0],
+            light_dir: [
+                self.light_azimuth.cos() * self.light_elevation.cos(),
+                self.light_elevation.sin(),
+                self.light_azimuth.sin() * self.light_elevation.cos(),
+            ],
             ocean_level,
             base_temp_c: self.derived.base_temperature_c,
             ocean_fraction: effective_ocean,
@@ -333,6 +341,26 @@ impl eframe::App for PlanetGenApp {
                 if ui.add(egui::Slider::new(&mut self.season, 0.0..=1.0)
                     .text("Season"))
                     .on_hover_text("0 = deep winter, 0.5 = equinox, 1 = deep summer. Affects vegetation color and ice extent")
+                    .changed()
+                {
+                    self.needs_render = true;
+                }
+
+                ui.separator();
+                ui.heading("Lighting");
+                ui.separator();
+
+                if ui.add(egui::Slider::new(&mut self.light_azimuth, -std::f32::consts::PI..=std::f32::consts::PI)
+                    .text("Sun Azimuth"))
+                    .on_hover_text("Horizontal angle of the sun")
+                    .changed()
+                {
+                    self.needs_render = true;
+                }
+
+                if ui.add(egui::Slider::new(&mut self.light_elevation, 0.0..=std::f32::consts::FRAC_PI_2)
+                    .text("Sun Elevation"))
+                    .on_hover_text("Height of the sun above the horizon")
                     .changed()
                 {
                     self.needs_render = true;

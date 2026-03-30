@@ -256,7 +256,7 @@ fn compute_terrain_normal(sphere_pos: vec3<f32>, geo_normal: vec3<f32>) -> vec3<
 fn compute_roughness(temp_c: f32, moisture_cm: f32, is_ocean: bool, is_ice: bool) -> f32 {
     if (is_ocean) {
         if (is_ice) { return 0.15; }
-        return 0.02; // Near-mirror water
+        return 0.10; // Smooth water — wide enough specular to be visible at planet scale
     }
     // Land roughness from climate
     if (temp_c < 0.0) { return 0.20; } // Snow/ice
@@ -458,7 +458,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let temp_for_rough = compute_temperature(rotated, height);
     let moist_for_rough = compute_moisture(rotated, height);
     let roughness = compute_roughness(temp_for_rough, moist_for_rough, is_ocean, ocean_ice);
-    let f0 = select(0.03, 0.02, is_ocean); // Dielectric: land=0.03, water=0.02
+    let f0 = select(0.04, 0.06, is_ocean); // Water has stronger Fresnel at glancing angles
 
     // GGX specular
     let d = ggx_distribution(n_dot_h, roughness);
