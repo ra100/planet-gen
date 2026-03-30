@@ -1,7 +1,7 @@
 ---
 title: "feat: GPU hydraulic erosion for realistic terrain"
 type: feat
-status: active
+status: completed
 date: 2026-03-30
 ---
 
