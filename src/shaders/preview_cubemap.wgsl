@@ -312,11 +312,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let ocean_temp = compute_temperature(rotated, height);
         let depth = clamp((uniforms.ocean_level - height) / max(uniforms.ocean_level + 1.0, 0.5), 0.0, 1.0);
 
-        // Continuous depth color: shallow turquoise → mid blue → deep navy
-        let shallow = vec3<f32>(0.08, 0.22, 0.48);
-        let deep = vec3<f32>(0.02, 0.05, 0.22);
-        var ocean_color = mix(shallow, deep, depth);
-        ocean_color += vec3<f32>(0.0, 0.015, 0.02) * color_var; // subtle variation
+        // 3-stop depth gradient: turquoise shelf → mid blue → deep navy
+        let near_shore = vec3<f32>(0.10, 0.35, 0.42);
+        let mid_ocean  = vec3<f32>(0.06, 0.18, 0.42);
+        let deep_ocean = vec3<f32>(0.02, 0.05, 0.20);
+        let shelf = smoothstep(0.0, 0.15, depth);
+        let abyss = smoothstep(0.15, 0.7, depth);
+        var ocean_color = mix(near_shore, mix(mid_ocean, deep_ocean, abyss), shelf);
+        ocean_color += vec3<f32>(0.0, 0.015, 0.02) * color_var;
 
         // Smooth ice transition: no hard cutoff, gradual freeze
         let ice_blend = smooth_step(3.0, -8.0, ocean_temp); // starts blending at 3°C, full ice at -8°C

@@ -65,10 +65,34 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 
     var r = biome_roughness_value(temp, moisture, is_ocean);
 
-    // Add noise variation to land only — ocean stays uniformly smooth
+    // Slope & moisture-dependent roughness for land only
     if (!is_ocean) {
+        // Compute slope from neighboring heights (central differences)
+        let x_left = select(global_x - 1u, 0u, global_x == 0u);
+        let x_right = min(global_x + 1u, full_res - 1u);
+        let y_up = select(global_y - 1u, 0u, global_y == 0u);
+        let y_down = min(global_y + 1u, full_res - 1u);
+
+        let h_left = heightmap[global_y * full_res + x_left];
+        let h_right = heightmap[global_y * full_res + x_right];
+        let h_up = heightmap[y_up * full_res + global_x];
+        let h_down = heightmap[y_down * full_res + global_x];
+
+        let step_size = 2.0 / f32(full_res);
+        let dx = (h_right - h_left) / step_size;
+        let dy = (h_down - h_up) / step_size;
+        let slope = length(vec2<f32>(dx, dy));
+
+        // Steep slopes → rougher (exposed rock, scree)
+        r = mix(r, 0.85, smoothstep(0.4, 2.0, slope));
+
+        // Wet surfaces slightly smoother
+        let moisture_norm = clamp(moisture / 400.0, 0.0, 1.0);
+        r *= mix(1.0, 0.75, moisture_norm);
+
+        // Add noise variation
         let noise_var = snoise(sphere_pos * 10.0 + seed_offset) * 0.1;
-        r = clamp(r + noise_var, 0.0, 1.0);
+        r = clamp(r + noise_var, 0.05, 1.0);
     }
 
     // Write to tile-local index

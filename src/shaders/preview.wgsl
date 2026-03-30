@@ -416,15 +416,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             // Transition zone: mix between ice and water
             let blend = (ocean_temp + 2.0) / 4.0;
             let ice_color = vec3<f32>(0.55, 0.70, 0.82);
-            let depth = (uniforms.ocean_level - height) / max(uniforms.ocean_level + 1.0, 0.5);
-            let water = mix(vec3<f32>(0.06, 0.18, 0.50), vec3<f32>(0.02, 0.05, 0.25), clamp(depth, 0.0, 1.0));
+            let depth = clamp((uniforms.ocean_level - height) / max(uniforms.ocean_level + 1.0, 0.5), 0.0, 1.0);
+            let water = mix(vec3<f32>(0.10, 0.35, 0.42), vec3<f32>(0.02, 0.05, 0.20), smoothstep(0.0, 0.5, depth));
             surface_color = mix(ice_color, water, blend);
         } else {
-            // Open ocean
-            let depth = (uniforms.ocean_level - height) / max(uniforms.ocean_level + 1.0, 0.5);
-            let deep = vec3<f32>(0.02, 0.05, 0.25);
-            let shallow = vec3<f32>(0.06, 0.18, 0.50);
-            surface_color = mix(shallow, deep, clamp(depth, 0.0, 1.0));
+            // Open ocean — 3-stop depth gradient: turquoise shelf → mid blue → deep navy
+            let depth = clamp((uniforms.ocean_level - height) / max(uniforms.ocean_level + 1.0, 0.5), 0.0, 1.0);
+            let near_shore = vec3<f32>(0.10, 0.35, 0.42);
+            let mid_ocean  = vec3<f32>(0.06, 0.18, 0.42);
+            let deep_ocean = vec3<f32>(0.02, 0.05, 0.20);
+            let shelf = smoothstep(0.0, 0.15, depth);
+            let abyss = smoothstep(0.15, 0.7, depth);
+            surface_color = mix(near_shore, mix(mid_ocean, deep_ocean, abyss), shelf);
             surface_color += vec3<f32>(0.0, 0.02, 0.03) * color_var;
         }
     } else {
