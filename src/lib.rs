@@ -7,3 +7,4 @@ pub mod planet;
 pub mod plates;
 pub mod preview;
 pub mod terrain;
+pub mod terrain_compute;
