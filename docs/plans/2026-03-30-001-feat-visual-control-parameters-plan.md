@@ -1,7 +1,7 @@
 ---
 title: "feat: Add visual control parameters for continents, ice, and water"
 type: feat
-status: active
+status: completed
 date: 2026-03-30
 origin: docs/brainstorms/2026-03-29-planet-gen-requirements.md
 ---
