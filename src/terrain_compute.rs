@@ -235,6 +235,216 @@ impl TerrainComputePipeline {
     }
 }
 
+// ---- Erosion Pipeline ----
+
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct ErosionParams {
+    pub resolution: u32,
+    pub erosion_rate: f32,
+    pub deposition_rate: f32,
+    pub min_slope: f32,
+    pub talus_angle: f32,
+    pub ocean_level: f32,
+    pub _pad0: u32,
+    pub _pad1: u32,
+}
+
+pub struct ErosionPipeline {
+    pipeline: wgpu::ComputePipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+}
+
+impl ErosionPipeline {
+    pub fn new(gpu: &GpuContext) -> Self {
+        let shader = gpu
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("erosion shader"),
+                source: wgpu::ShaderSource::Wgsl(
+                    include_str!("shaders/erosion.wgsl").into(),
+                ),
+            });
+
+        let bind_group_layout =
+            gpu.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("erosion bgl"),
+                    entries: &[
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Storage { read_only: false },
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 2,
+                            visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                    ],
+                });
+
+        let pipeline_layout =
+            gpu.device
+                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("erosion pipeline layout"),
+                    bind_group_layouts: &[&bind_group_layout],
+                    push_constant_ranges: &[],
+                });
+
+        let pipeline = gpu
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("erosion pipeline"),
+                layout: Some(&pipeline_layout),
+                module: &shader,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+
+        Self {
+            pipeline,
+            bind_group_layout,
+        }
+    }
+
+    /// Run N iterations of erosion on each face of the terrain.
+    pub fn erode(
+        &self,
+        gpu: &GpuContext,
+        terrain: &mut TectonicTerrain,
+        iterations: u32,
+        ocean_level: f32,
+    ) {
+        if iterations == 0 {
+            return;
+        }
+
+        let res = terrain.resolution;
+        let total_pixels = (res * res) as usize;
+        let buffer_size = (total_pixels * std::mem::size_of::<f32>()) as u64;
+
+        let erosion_params = ErosionParams {
+            resolution: res,
+            erosion_rate: 0.05,
+            deposition_rate: 0.03,
+            min_slope: 0.002,
+            talus_angle: 0.7, // ~35 degrees
+            ocean_level,
+            _pad0: 0,
+            _pad1: 0,
+        };
+
+        let params_buffer =
+            gpu.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("erosion params"),
+                    contents: bytemuck::bytes_of(&erosion_params),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
+
+        for face_idx in 0..6usize {
+            // Create double buffers
+            let buffer_a =
+                gpu.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("erosion buf A"),
+                        contents: bytemuck::cast_slice(&terrain.faces[face_idx]),
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                    });
+
+            let buffer_b = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("erosion buf B"),
+                size: buffer_size,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
+
+            // Create bind groups for both directions
+            let bg_a_to_b = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("erosion A→B"),
+                layout: &self.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: buffer_a.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: buffer_b.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: params_buffer.as_entire_binding() },
+                ],
+            });
+
+            let bg_b_to_a = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("erosion B→A"),
+                layout: &self.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: buffer_b.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: buffer_a.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: params_buffer.as_entire_binding() },
+                ],
+            });
+
+            let workgroups = (res + 15) / 16;
+
+            // Run iterations with ping-pong buffering
+            let mut encoder = gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("erosion encoder"),
+                });
+
+            for iter in 0..iterations {
+                let bg = if iter % 2 == 0 { &bg_a_to_b } else { &bg_b_to_a };
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("erosion pass"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.pipeline);
+                pass.set_bind_group(0, bg, &[]);
+                pass.dispatch_workgroups(workgroups, workgroups, 1);
+            }
+
+            // Read back result (final buffer depends on iteration count parity)
+            let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("erosion staging"),
+                size: buffer_size,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+
+            let result_buffer = if iterations % 2 == 0 { &buffer_a } else { &buffer_b };
+            encoder.copy_buffer_to_buffer(result_buffer, 0, &staging, 0, buffer_size);
+            gpu.queue.submit(Some(encoder.finish()));
+
+            staging.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+            let _ = gpu.device.poll(wgpu::PollType::Wait);
+
+            let mapped = staging.slice(..).get_mapped_range();
+            terrain.faces[face_idx] = bytemuck::cast_slice(&mapped).to_vec();
+            drop(mapped);
+            staging.unmap();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -5,12 +5,13 @@ use crate::gpu::GpuContext;
 use crate::planet::{DerivedProperties, PlanetParams};
 use crate::plates::{generate_plates, PlateGenParams};
 use crate::preview::{PreviewRenderer, PreviewUniforms};
-use crate::terrain_compute::TerrainComputePipeline;
+use crate::terrain_compute::{ErosionPipeline, TerrainComputePipeline};
 
 pub struct PlanetGenApp {
     gpu: Arc<GpuContext>,
     preview_renderer: PreviewRenderer,
     terrain_compute: TerrainComputePipeline,
+    erosion_pipeline: ErosionPipeline,
     texture_handle: Option<egui::TextureHandle>,
     params: PlanetParams,
     derived: DerivedProperties,
@@ -20,6 +21,7 @@ pub struct PlanetGenApp {
     continental_scale: f32,
     water_loss: f32,
     season: f32, // 0=winter, 0.5=equinox, 1=summer
+    erosion_iterations: u32,
     view_mode: u32,
     preview_resolution: u32,
     needs_regenerate: bool,
@@ -29,12 +31,14 @@ impl PlanetGenApp {
     pub fn new(gpu: Arc<GpuContext>) -> Self {
         let preview_renderer = PreviewRenderer::new(&gpu);
         let terrain_compute = TerrainComputePipeline::new(&gpu);
+        let erosion_pipeline = ErosionPipeline::new(&gpu);
         let params = PlanetParams::default();
         let derived = DerivedProperties::from_params(&params);
         Self {
             gpu,
             preview_renderer,
             terrain_compute,
+            erosion_pipeline,
             texture_handle: None,
             params,
             derived,
@@ -42,7 +46,8 @@ impl PlanetGenApp {
             rotation_x: 0.0,
             continental_scale: 1.0,
             water_loss: 0.0,
-            season: 0.5, // equinox default
+            season: 0.5,
+            erosion_iterations: 25,
             view_mode: 0,
             preview_resolution: crate::preview::DEFAULT_PREVIEW_SIZE,
             needs_regenerate: true,
@@ -110,7 +115,7 @@ impl PlanetGenApp {
 
         // 2. Run compute pipeline to produce heightmap cubemap
         let (amplitude, frequency, octaves, gain, lacunarity) = self.terrain_params();
-        let terrain = self.terrain_compute.generate(
+        let mut terrain = self.terrain_compute.generate(
             &self.gpu,
             &plates,
             512, // cubemap resolution per face
@@ -122,7 +127,12 @@ impl PlanetGenApp {
             lacunarity,
         );
 
-        // 3. Upload cubemap
+        // 3. Run hydraulic erosion
+        let effective_ocean = self.derived.ocean_fraction * (1.0 - self.water_loss);
+        let ocean_level = -1.0 + 2.0 * effective_ocean;
+        self.erosion_pipeline.erode(&self.gpu, &mut terrain, self.erosion_iterations, ocean_level);
+
+        // 4. Upload cubemap
         let cubemap_view = self.preview_renderer.upload_terrain(&self.gpu, &terrain);
 
         // 4. Render preview
@@ -226,6 +236,16 @@ impl eframe::App for PlanetGenApp {
                     .on_hover_text("Simulate water loss. 0 = physics default, 1 = completely dry")
                     .changed()
                 {
+                    self.needs_regenerate = true;
+                }
+
+                let mut erosion_i32 = self.erosion_iterations as i32;
+                if ui.add(egui::Slider::new(&mut erosion_i32, 0..=50)
+                    .text("Erosion"))
+                    .on_hover_text("Hydraulic erosion iterations. 0 = none, 25 = default, 50 = heavily eroded")
+                    .changed()
+                {
+                    self.erosion_iterations = erosion_i32 as u32;
                     self.needs_regenerate = true;
                 }
 
