@@ -2,7 +2,7 @@ use crate::gpu::GpuContext;
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
-const PREVIEW_SIZE: u32 = 768;
+pub const DEFAULT_PREVIEW_SIZE: u32 = 768;
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -107,13 +107,14 @@ impl PreviewRenderer {
         Self {
             pipeline,
             bind_group_layout,
-            size: PREVIEW_SIZE,
+            size: DEFAULT_PREVIEW_SIZE,
         }
     }
 
     /// Render the planet preview to an RGBA pixel buffer.
     /// No cubemap needed — noise is computed directly in the fragment shader.
-    pub fn render(&self, gpu: &GpuContext, uniforms: &PreviewUniforms) -> Vec<u8> {
+    pub fn render(&self, gpu: &GpuContext, uniforms: &PreviewUniforms, render_size: u32) -> Vec<u8> {
+        let size = render_size;
         let uniform_buffer =
             gpu.device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -134,8 +135,8 @@ impl PreviewRenderer {
         let render_target = gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("preview render target"),
             size: wgpu::Extent3d {
-                width: self.size,
-                height: self.size,
+                width: size,
+                height: size,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -180,11 +181,11 @@ impl PreviewRenderer {
         }
 
         // Readback
-        let bytes_per_row = self.size * 4;
+        let bytes_per_row = size * 4;
         let padded_bytes_per_row = (bytes_per_row + 255) & !255;
         let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("preview readback"),
-            size: (padded_bytes_per_row * self.size) as u64,
+            size: (padded_bytes_per_row * size) as u64,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -201,12 +202,12 @@ impl PreviewRenderer {
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(padded_bytes_per_row),
-                    rows_per_image: Some(self.size),
+                    rows_per_image: Some(size),
                 },
             },
             wgpu::Extent3d {
-                width: self.size,
-                height: self.size,
+                width: size,
+                height: size,
                 depth_or_array_layers: 1,
             },
         );
@@ -217,10 +218,10 @@ impl PreviewRenderer {
         let _ = gpu.device.poll(wgpu::PollType::Wait);
 
         let mapped = readback.slice(..).get_mapped_range();
-        let mut pixels = Vec::with_capacity((self.size * self.size * 4) as usize);
-        for row in 0..self.size {
+        let mut pixels = Vec::with_capacity((size * size * 4) as usize);
+        for row in 0..size {
             let start = (row * padded_bytes_per_row) as usize;
-            let end = start + (self.size * 4) as usize;
+            let end = start + (size * 4) as usize;
             pixels.extend_from_slice(&mapped[start..end]);
         }
         pixels
@@ -273,8 +274,8 @@ mod tests {
             _pad: [0.0; 2],
         };
 
-        let pixels = renderer.render(&gpu, &uniforms);
         let size = renderer.size;
+        let pixels = renderer.render(&gpu, &uniforms, size);
         assert_eq!(pixels.len(), (size * size * 4) as usize);
 
         let non_background: usize = pixels

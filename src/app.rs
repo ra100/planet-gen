@@ -17,6 +17,7 @@ pub struct PlanetGenApp {
     continental_scale: f32,
     water_loss: f32,
     view_mode: u32,
+    preview_resolution: u32,
     needs_regenerate: bool,
 }
 
@@ -36,6 +37,7 @@ impl PlanetGenApp {
             continental_scale: 1.0,
             water_loss: 0.0,
             view_mode: 0,
+            preview_resolution: preview::DEFAULT_PREVIEW_SIZE,
             needs_regenerate: true,
         }
     }
@@ -119,8 +121,8 @@ impl PlanetGenApp {
 
     fn generate_preview(&mut self, ctx: &egui::Context) {
         let uniforms = self.build_uniforms();
-        let size = self.preview_renderer.size;
-        let pixels = self.preview_renderer.render(&self.gpu, &uniforms);
+        let size = self.preview_resolution;
+        let pixels = self.preview_renderer.render(&self.gpu, &uniforms, size);
 
         let image =
             egui::ColorImage::from_rgba_unmultiplied([size as usize, size as usize], &pixels);
@@ -310,6 +312,25 @@ impl eframe::App for PlanetGenApp {
                     for (i, label) in view_labels.iter().enumerate() {
                         if ui.selectable_label(self.view_mode == i as u32, *label).clicked() {
                             self.view_mode = i as u32;
+                            self.needs_regenerate = true;
+                        }
+                    }
+                });
+
+                ui.add_space(4.0);
+
+                let resolutions: [(u32, &str); 5] = [
+                    (256, "256"),
+                    (512, "512"),
+                    (768, "768"),
+                    (1024, "1K"),
+                    (2048, "2K"),
+                ];
+                ui.horizontal(|ui| {
+                    ui.label("Resolution:");
+                    for (res, label) in &resolutions {
+                        if ui.selectable_label(self.preview_resolution == *res, *label).clicked() {
+                            self.preview_resolution = *res;
                             self.needs_regenerate = true;
                         }
                     }
