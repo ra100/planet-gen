@@ -91,6 +91,53 @@ Align physics model with research data. Replace heuristic thresholds with resear
 
 ---
 
+## Phase 4.6: Physics-Driven Terrain & Climate
+
+Interconnected physical systems: Hadley cell atmospheric circulation, domain warping for geological terrain, rain shadows, and altitude zonation.
+
+Plan: [docs/plans/2026-03-30-002-feat-physics-driven-terrain-plan.md](docs/plans/2026-03-30-002-feat-physics-driven-terrain-plan.md)
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 4.6.1 | Hadley cell moisture model: three-cell circulation replacing noise-based moisture, latitude-banded climate zones | Deserts at ~30° N/S, green equatorial band, tilt shifts bands | Phase 4 | cc:完了 |
+| 4.6.2 | Wind direction and rain shadow: wind from Hadley model creates dry leeward zones on mountains | Visible wet/dry asymmetry on mountain ranges | 4.6.1 | cc:完了 |
+| 4.6.3 | Domain warping for geological terrain: warp continental_base noise for ridges, irregular coastlines | Coastlines irregular, mountains rougher than lowlands | Phase 4 | cc:完了 |
+| 4.6.4 | Altitude zonation: forest → alpine → rock → snow bands on mountains, latitude-dependent snow line | Visible horizontal color banding on mountain slopes | 4.6.1 | cc:完了 |
+
+---
+
+## Phase 4.7: Visual Control Parameters
+
+Artistic override parameters for continent size, polar ocean ice, and water loss.
+
+Plan: [docs/plans/2026-03-30-001-feat-visual-control-parameters-plan.md](docs/plans/2026-03-30-001-feat-visual-control-parameters-plan.md)
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 4.7.1 | Continental scale slider (0.5-4.0): controls frequency of continental_base noise layer | Different continent sizes at different values, preview updates <1s | Phase 4 | cc:完了 |
+| 4.7.2 | Polar ocean ice rendering: ocean rendered as ice when temperature < -2°C | Polar regions show ice on ocean, not just on land | Phase 4 | cc:完了 |
+| 4.7.3 | Water loss slider (0.0-1.0): reduces effective ocean fraction below physics-derived value | Slider reduces ocean coverage smoothly, exposed areas show land biomes | Phase 4 | cc:完了 |
+| 4.7.4 | Uniform struct alignment: ensure PreviewUniforms stays 16-byte aligned with new fields | cargo test passes, no GPU validation errors | 4.7.1, 4.7.3 | cc:完了 |
+
+---
+
+## Phase 4.8: Tectonic Plate-Driven Terrain
+
+Replace noise-only heightmap with geologically structured terrain: Voronoi plates on sphere → boundary classification → height from geology → fBm detail. Two-pass GPU compute pipeline producing cubemap texture.
+
+Plan: [docs/plans/2026-03-30-003-feat-tectonic-terrain-plan.md](docs/plans/2026-03-30-003-feat-tectonic-terrain-plan.md)
+Requirements: [docs/brainstorms/2026-03-30-tectonic-terrain-requirements.md](docs/brainstorms/2026-03-30-tectonic-terrain-requirements.md)
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 4.8.1 | Plate generation on CPU (Rust): Fibonacci sphere, N=6-16 plates, continental/oceanic types, velocities | Earth params → 10-12 plates, ~30% continental | Phase 4 | cc:完了 [e599cd7] |
+| 4.8.2 | Plate assignment compute shader: Voronoi on sphere, boundary distance and type | Distinct Voronoi regions with classified boundaries | 4.8.1 | cc:完了 [9155677] |
+| 4.8.3 | Height generation compute shader: plate elevation + boundary terrain + fBm detail | Mountains at convergent boundaries, bimodal distribution | 4.8.2 | cc:完了 [9155677] |
+| 4.8.4 | Cubemap preview integration: compute → R16Float cubemap → preview shader | Preview shows geological terrain, all features work | 4.8.3 | cc:完了 [4c93ee5] |
+| 4.8.5 | Voronoi edge warping: domain warp for natural boundaries | Curved irregular plate boundaries | 4.8.2 | cc:完了 [9155677] |
+
+---
+
 ## Phase 5: Tiled Full-Resolution Generation & Export
 
 Scale from preview (256²) to full 8K (8192²) via tiled generation and export to files.
