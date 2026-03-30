@@ -251,6 +251,7 @@ mod tests {
             mass_earth: 1.0,
             ocean_fraction: 0.7,
             tectonics_factor: 0.85,
+            continental_scale: 1.0,
         });
 
         let terrain = pipeline.generate(
@@ -274,6 +275,7 @@ mod tests {
             mass_earth: 1.0,
             ocean_fraction: 0.7,
             tectonics_factor: 0.85,
+            continental_scale: 1.0,
         });
 
         let terrain = pipeline.generate(
@@ -308,6 +310,7 @@ mod tests {
             mass_earth: 1.0,
             ocean_fraction: 0.7,
             tectonics_factor: 0.85,
+            continental_scale: 1.0,
         });
 
         let terrain = pipeline.generate(

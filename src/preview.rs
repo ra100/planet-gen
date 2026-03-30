@@ -324,6 +324,7 @@ mod tests {
             mass_earth: 1.0,
             ocean_fraction: 0.7,
             tectonics_factor: 0.85,
+            continental_scale: 1.0,
         });
         let terrain = compute.generate(&gpu, &plates, 64, 42, 1.0, 1.2, 8, 0.5, 2.0);
 

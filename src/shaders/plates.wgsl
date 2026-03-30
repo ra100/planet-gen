@@ -73,7 +73,15 @@ fn find_nearest_plates(sphere_pos: vec3<f32>) -> PlateInfo {
 
     for (var i = 0u; i < params.num_plates; i++) {
         // Great-circle distance approximation using dot product
-        let d = 1.0 - dot(sphere_pos, plates[i].center);
+        var d = 1.0 - dot(sphere_pos, plates[i].center);
+
+        // Per-plate noise bias: each plate has a unique noise field that
+        // pushes its boundary outward in some directions and inward in others.
+        // This creates concave coastlines, peninsulas, and bays instead of convex polygons.
+        let plate_offset = vec3<f32>(f32(i) * 17.3, f32(i) * 31.7, f32(i) * 43.1);
+        let bias = snoise(sphere_pos * 4.0 + plate_offset) * 0.04
+                 + snoise(sphere_pos * 8.0 + plate_offset * 2.0) * 0.02;
+        d += bias;
 
         if (d < info.nearest_dist) {
             info.second_dist = info.nearest_dist;

@@ -16,12 +16,14 @@ pub struct PlateGenParams {
     pub mass_earth: f32,
     pub ocean_fraction: f32,
     pub tectonics_factor: f32,
+    /// Continental scale: lower = fewer, larger plates. Higher = more, smaller plates.
+    pub continental_scale: f32,
 }
 
 /// Generate tectonic plates from planet parameters.
 /// Returns a Vec of PlateGpu ready for GPU upload.
 pub fn generate_plates(params: &PlateGenParams) -> Vec<PlateGpu> {
-    let n = compute_plate_count(params.mass_earth, params.tectonics_factor);
+    let n = compute_plate_count(params.mass_earth, params.tectonics_factor, params.continental_scale);
     let centers = fibonacci_sphere(n, params.seed);
     let continental_count = ((n as f32) * (1.0 - params.ocean_fraction)).round() as usize;
     let velocities = generate_velocities(n, params.seed, params.tectonics_factor);
@@ -52,10 +54,13 @@ pub fn generate_plates(params: &PlateGenParams) -> Vec<PlateGpu> {
     plates
 }
 
-fn compute_plate_count(mass_earth: f32, tectonics_factor: f32) -> usize {
-    // Small planets: ~5-6 plates. Earth-like: ~8-14. Large: ~15-20.
+fn compute_plate_count(mass_earth: f32, tectonics_factor: f32, continental_scale: f32) -> usize {
+    // Base count from physics: small planets ~5-6, Earth-like ~8-14, large ~15-20
     let base = 6.0 + mass_earth * 4.0 + tectonics_factor * 6.0;
-    (base as usize).clamp(5, 20)
+    // Continental scale modifies: lower scale → fewer plates (bigger continents)
+    // continental_scale 0.5 → ×0.6, 1.0 → ×1.0, 4.0 → ×2.0
+    let scale_factor = 0.4 + 0.4 * continental_scale;
+    ((base * scale_factor) as usize).clamp(4, 25)
 }
 
 /// Fibonacci sphere: distribute N points evenly on a unit sphere, then perturb by seed.
@@ -127,6 +132,7 @@ mod tests {
             mass_earth: 1.0,
             ocean_fraction: 0.7,
             tectonics_factor: 0.85,
+            continental_scale: 1.0,
         };
         let plates = generate_plates(&params);
         assert!(
@@ -143,6 +149,7 @@ mod tests {
             mass_earth: 1.0,
             ocean_fraction: 0.7,
             tectonics_factor: 0.85,
+            continental_scale: 1.0,
         };
         let plates = generate_plates(&params);
         let continental = plates.iter().filter(|p| p.plate_type > 0.5).count();
@@ -160,6 +167,7 @@ mod tests {
             mass_earth: 1.0,
             ocean_fraction: 0.7,
             tectonics_factor: 0.85,
+            continental_scale: 1.0,
         };
         let plates = generate_plates(&params);
         for (i, p) in plates.iter().enumerate() {
@@ -179,12 +187,14 @@ mod tests {
             mass_earth: 1.0,
             ocean_fraction: 0.7,
             tectonics_factor: 0.85,
+            continental_scale: 1.0,
         });
         let p2 = generate_plates(&PlateGenParams {
             seed: 999,
             mass_earth: 1.0,
             ocean_fraction: 0.7,
             tectonics_factor: 0.85,
+            continental_scale: 1.0,
         });
         let diff: f32 = p1.iter().zip(p2.iter())
             .map(|(a, b)| {
@@ -203,6 +213,7 @@ mod tests {
             mass_earth: 0.1,
             ocean_fraction: 0.3,
             tectonics_factor: 0.2,
+            continental_scale: 1.0,
         });
         assert!(
             plates.len() <= 8,

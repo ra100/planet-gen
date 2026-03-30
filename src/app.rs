@@ -101,6 +101,7 @@ impl PlanetGenApp {
             mass_earth: self.params.mass_earth,
             ocean_fraction: self.derived.ocean_fraction * (1.0 - self.water_loss),
             tectonics_factor: self.derived.tectonics_factor,
+            continental_scale: self.continental_scale,
         });
 
         // 2. Run compute pipeline to produce heightmap cubemap
