@@ -251,7 +251,8 @@ pub struct ErosionParams {
 }
 
 pub struct ErosionPipeline {
-    pipeline: wgpu::ComputePipeline,
+    flow_pipeline: wgpu::ComputePipeline,
+    erode_pipeline: wgpu::ComputePipeline,
     bind_group_layout: wgpu::BindGroupLayout,
 }
 
@@ -271,6 +272,7 @@ impl ErosionPipeline {
                 .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                     label: Some("erosion bgl"),
                     entries: &[
+                        // binding 0: input height (read-only)
                         wgpu::BindGroupLayoutEntry {
                             binding: 0,
                             visibility: wgpu::ShaderStages::COMPUTE,
@@ -291,11 +293,23 @@ impl ErosionPipeline {
                             },
                             count: None,
                         },
+                        // binding 2: params uniform
                         wgpu::BindGroupLayoutEntry {
                             binding: 2,
                             visibility: wgpu::ShaderStages::COMPUTE,
                             ty: wgpu::BindingType::Buffer {
                                 ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                        // binding 3: water accumulation buffer (read-write)
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 3,
+                            visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Storage { read_only: false },
                                 has_dynamic_offset: false,
                                 min_binding_size: None,
                             },
@@ -312,24 +326,37 @@ impl ErosionPipeline {
                     push_constant_ranges: &[],
                 });
 
-        let pipeline = gpu
+        let flow_pipeline = gpu
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("flow accumulation pipeline"),
+                layout: Some(&pipeline_layout),
+                module: &shader,
+                entry_point: Some("accumulate_flow"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+
+        let erode_pipeline = gpu
             .device
             .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("erosion pipeline"),
                 layout: Some(&pipeline_layout),
                 module: &shader,
-                entry_point: Some("main"),
+                entry_point: Some("erode"),
                 compilation_options: Default::default(),
                 cache: None,
             });
 
         Self {
-            pipeline,
+            flow_pipeline,
+            erode_pipeline,
             bind_group_layout,
         }
     }
 
-    /// Run N iterations of erosion on each face of the terrain.
+    /// Run N iterations of erosion with drainage accumulation on each face.
+    /// Each iteration: 8 flow accumulation sub-passes → 1 erosion pass.
     pub fn erode(
         &self,
         gpu: &GpuContext,
@@ -344,13 +371,14 @@ impl ErosionPipeline {
         let res = terrain.resolution;
         let total_pixels = (res * res) as usize;
         let buffer_size = (total_pixels * std::mem::size_of::<f32>()) as u64;
+        let flow_sub_iterations = 8u32; // propagation passes per erosion iteration
 
         let erosion_params = ErosionParams {
             resolution: res,
-            erosion_rate: 0.3,       // Aggressive erosion per iteration
-            deposition_rate: 0.15,   // Fill valleys substantially
-            min_slope: 0.0005,       // Erode even gentle slopes
-            talus_angle: 0.4,        // ~22 degrees — more landslide activity
+            erosion_rate: 0.15,
+            deposition_rate: 0.08,
+            min_slope: 0.001,
+            talus_angle: 0.4,
             ocean_level,
             _pad0: 0,
             _pad1: 0,
@@ -364,8 +392,9 @@ impl ErosionPipeline {
                     usage: wgpu::BufferUsages::UNIFORM,
                 });
 
+        let workgroups = (res + 15) / 16;
+
         for face_idx in 0..6usize {
-            // Create double buffers
             let buffer_a =
                 gpu.device
                     .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -381,7 +410,16 @@ impl ErosionPipeline {
                 mapped_at_creation: false,
             });
 
-            // Create bind groups for both directions
+            // Water accumulation buffer (initialized to 1.0 per pixel = rainfall)
+            let water_init: Vec<f32> = vec![1.0; total_pixels];
+            let water_buffer =
+                gpu.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("water buffer"),
+                        contents: bytemuck::cast_slice(&water_init),
+                        usage: wgpu::BufferUsages::STORAGE,
+                    });
+
             let bg_a_to_b = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("erosion A→B"),
                 layout: &self.bind_group_layout,
@@ -389,6 +427,7 @@ impl ErosionPipeline {
                     wgpu::BindGroupEntry { binding: 0, resource: buffer_a.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 1, resource: buffer_b.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 2, resource: params_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: water_buffer.as_entire_binding() },
                 ],
             });
 
@@ -399,12 +438,10 @@ impl ErosionPipeline {
                     wgpu::BindGroupEntry { binding: 0, resource: buffer_b.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 1, resource: buffer_a.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 2, resource: params_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: water_buffer.as_entire_binding() },
                 ],
             });
 
-            let workgroups = (res + 15) / 16;
-
-            // Run iterations with ping-pong buffering
             let mut encoder = gpu
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -413,16 +450,31 @@ impl ErosionPipeline {
 
             for iter in 0..iterations {
                 let bg = if iter % 2 == 0 { &bg_a_to_b } else { &bg_b_to_a };
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("erosion pass"),
-                    timestamp_writes: None,
-                });
-                pass.set_pipeline(&self.pipeline);
-                pass.set_bind_group(0, bg, &[]);
-                pass.dispatch_workgroups(workgroups, workgroups, 1);
+
+                // Pass 1: Accumulate water flow (multiple sub-iterations)
+                for _ in 0..flow_sub_iterations {
+                    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("flow pass"),
+                        timestamp_writes: None,
+                    });
+                    pass.set_pipeline(&self.flow_pipeline);
+                    pass.set_bind_group(0, bg, &[]);
+                    pass.dispatch_workgroups(workgroups, workgroups, 1);
+                }
+
+                // Pass 2: Erode using accumulated drainage
+                {
+                    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("erode pass"),
+                        timestamp_writes: None,
+                    });
+                    pass.set_pipeline(&self.erode_pipeline);
+                    pass.set_bind_group(0, bg, &[]);
+                    pass.dispatch_workgroups(workgroups, workgroups, 1);
+                }
             }
 
-            // Read back result (final buffer depends on iteration count parity)
+            // Read back result
             let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("erosion staging"),
                 size: buffer_size,
