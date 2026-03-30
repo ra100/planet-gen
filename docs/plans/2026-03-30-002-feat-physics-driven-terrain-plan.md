@@ -1,7 +1,7 @@
 ---
 title: "feat: Physics-driven terrain and climate system"
 type: feat
-status: active
+status: completed
 date: 2026-03-30
 origin: docs/brainstorms/2026-03-30-physics-driven-terrain-requirements.md
 ---
