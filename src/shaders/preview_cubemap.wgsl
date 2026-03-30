@@ -149,6 +149,8 @@ fn compute_moisture(sphere_pos: vec3<f32>, height: f32) -> f32 {
 
 // ---- Whittaker biome lookup ----
 fn whittaker_lookup(temp_c: f32, moisture_cm: f32) -> u32 {
+    // Cold arid: desert even below 0°C when very dry (Mars-like cold desert)
+    if (temp_c < 0.0 && moisture_cm < 15.0) { return 4u; } // Cold desert
     if (temp_c < 0.0) { if (moisture_cm < 50.0) { return 0u; } return 1u; }
     if (temp_c < 5.0) { if (moisture_cm < 25.0) { return 1u; } return 2u; }
     if (temp_c < 10.0) { if (moisture_cm < 10.0) { return 1u; } return 2u; }
@@ -261,7 +263,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let temp = compute_temperature(rotated, height);
         let moisture = compute_moisture(rotated, height);
 
-        if (temp < -15.0) {
+        if (temp < -15.0 && moisture > 20.0) {
+            // Ice/snow cap — only when moisture is present (not on cold dry worlds like Mars)
             surface_color = vec3<f32>(0.92, 0.94, 0.98) + vec3<f32>(0.03) * color_var;
         } else {
             let biome = whittaker_lookup(temp, moisture);
