@@ -58,9 +58,11 @@ fn compute_plate_count(mass_earth: f32, tectonics_factor: f32, continental_scale
     // Base count from physics: small planets ~5-6, Earth-like ~8-14, large ~15-20
     let base = 6.0 + mass_earth * 4.0 + tectonics_factor * 6.0;
     // Continental scale modifies: lower scale → fewer plates (bigger continents)
-    // continental_scale 0.5 → ×0.6, 1.0 → ×1.0, 4.0 → ×2.0
     let scale_factor = 0.4 + 0.4 * continental_scale;
-    ((base * scale_factor) as usize).clamp(4, 25)
+    let raw = (base * scale_factor) as usize;
+    // Round to even numbers to reduce frequency of discrete jumps when sliding parameters
+    let even = (raw / 2) * 2;
+    even.clamp(4, 24)
 }
 
 /// Fibonacci sphere: distribute N points evenly on a unit sphere, then perturb by seed.
