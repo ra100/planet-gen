@@ -58,10 +58,10 @@ fn fibonacci_sphere(n: usize, seed: u32) -> Vec<[f32; 3]> {
         let y = phi.cos();
         let z = phi.sin() * theta.sin();
 
-        // Perturb by seed using simple hash
-        let hash_x = hash_f32(seed, i as u32, 0) * 0.15;
-        let hash_y = hash_f32(seed, i as u32, 1) * 0.15;
-        let hash_z = hash_f32(seed, i as u32, 2) * 0.15;
+        // Perturb by seed — larger perturbation breaks geometric regularity
+        let hash_x = hash_f32(seed, i as u32, 0) * 0.3;
+        let hash_y = hash_f32(seed, i as u32, 1) * 0.3;
+        let hash_z = hash_f32(seed, i as u32, 2) * 0.3;
 
         let px = x as f32 + hash_x;
         let py = y as f32 + hash_y;

@@ -282,7 +282,7 @@ impl eframe::App for PlanetGenApp {
                 ui.heading("View");
                 ui.separator();
 
-                let view_labels = ["Normal", "Height", "Temperature", "Moisture", "Biome", "Ocean/Ice"];
+                let view_labels = ["Normal", "Height", "Temperature", "Moisture", "Biome", "Ocean/Ice", "Plates"];
                 ui.horizontal_wrapped(|ui| {
                     for (i, label) in view_labels.iter().enumerate() {
                         if ui.selectable_label(self.view_mode == i as u32, *label).clicked() {

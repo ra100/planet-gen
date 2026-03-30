@@ -260,6 +260,34 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                     }
                 }
             }
+            case 6u: {
+                // Plate structure: height with contour lines at boundaries
+                // Sample neighboring heights to detect edges (plate boundaries)
+                let step = 0.01;
+                let h_r = textureSample(height_tex, height_sampler, rotated + vec3<f32>(step, 0.0, 0.0)).r;
+                let h_u = textureSample(height_tex, height_sampler, rotated + vec3<f32>(0.0, step, 0.0)).r;
+                let gradient = abs(h_r - height) + abs(h_u - height);
+
+                // Base: color by elevation (blue ocean, tan/green land)
+                let h = (height + 0.5) / 1.0;
+                if (height < uniforms.ocean_level) {
+                    debug_color = mix(vec3<f32>(0.05, 0.1, 0.3), vec3<f32>(0.1, 0.2, 0.5), clamp(h + 0.5, 0.0, 1.0));
+                } else {
+                    debug_color = mix(vec3<f32>(0.3, 0.5, 0.2), vec3<f32>(0.7, 0.6, 0.4), clamp((height - uniforms.ocean_level) * 3.0, 0.0, 1.0));
+                }
+
+                // Overlay bright lines at plate boundaries (sharp height gradients)
+                if (gradient > 0.02) {
+                    let edge_strength = clamp((gradient - 0.02) * 20.0, 0.0, 1.0);
+                    debug_color = mix(debug_color, vec3<f32>(1.0, 0.3, 0.1), edge_strength);
+                }
+
+                // Contour lines at regular height intervals
+                let contour = fract(height * 8.0);
+                if (contour < 0.05 || contour > 0.95) {
+                    debug_color *= 0.7;
+                }
+            }
             default: { debug_color = surface_color; }
         }
         return vec4<f32>(debug_color, 1.0);

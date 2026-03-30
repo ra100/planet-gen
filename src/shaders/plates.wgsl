@@ -38,14 +38,20 @@ fn seed_offset(s: u32) -> vec3<f32> {
     return vec3<f32>(x, y, z);
 }
 
-// Domain warping for natural plate boundaries (Unit 5)
+// Domain warping for natural plate boundaries — multi-octave for fractal coastlines
 fn warp_position(pos: vec3<f32>) -> vec3<f32> {
-    let warp = vec3<f32>(
-        snoise(pos * 2.5 + vec3<f32>(31.7, 0.0, 0.0)),
-        snoise(pos * 2.5 + vec3<f32>(0.0, 47.3, 0.0)),
-        snoise(pos * 2.5 + vec3<f32>(0.0, 0.0, 73.1))
-    ) * 0.07;
-    return normalize(pos + warp);
+    // Two octaves of warping: large-scale bends + fine-scale irregularity
+    let warp1 = vec3<f32>(
+        snoise(pos * 1.8 + vec3<f32>(31.7, 0.0, 0.0)),
+        snoise(pos * 1.8 + vec3<f32>(0.0, 47.3, 0.0)),
+        snoise(pos * 1.8 + vec3<f32>(0.0, 0.0, 73.1))
+    ) * 0.15; // Large-scale curves
+    let warp2 = vec3<f32>(
+        snoise(pos * 5.0 + vec3<f32>(13.1, 0.0, 0.0)),
+        snoise(pos * 5.0 + vec3<f32>(0.0, 19.7, 0.0)),
+        snoise(pos * 5.0 + vec3<f32>(0.0, 0.0, 29.3))
+    ) * 0.06; // Fine-scale irregularity
+    return normalize(pos + warp1 + warp2);
 }
 
 // Find the two nearest plates and compute boundary info
@@ -162,7 +168,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 
     // --- Boundary terrain (R4-R7, R10) ---
-    let b_influence = boundary_influence(boundary_dist, 0.06); // Narrow influence zone
+    let b_influence = boundary_influence(boundary_dist, 0.12); // Wider influence for gradual terrain
 
     if (boundary_type < -0.3) {
         // CONVERGENT boundary
