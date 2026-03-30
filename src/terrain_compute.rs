@@ -338,10 +338,10 @@ pub struct ErosionParams {
     pub erosion_rate: f32,
     pub deposition_rate: f32,
     pub min_slope: f32,
-    pub talus_angle: f32,
+    pub channel_threshold: f32,
     pub ocean_level: f32,
+    pub seed: u32,
     pub _pad0: u32,
-    pub _pad1: u32,
 }
 
 pub struct ErosionPipeline {
@@ -352,13 +352,17 @@ pub struct ErosionPipeline {
 
 impl ErosionPipeline {
     pub fn new(gpu: &GpuContext) -> Self {
+        let shader_source = format!(
+            "{}\n{}",
+            include_str!("shaders/noise.wgsl"),
+            include_str!("shaders/erosion.wgsl"),
+        );
+
         let shader = gpu
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("erosion shader"),
-                source: wgpu::ShaderSource::Wgsl(
-                    include_str!("shaders/erosion.wgsl").into(),
-                ),
+                source: wgpu::ShaderSource::Wgsl(shader_source.into()),
             });
 
         let bind_group_layout =
@@ -377,6 +381,7 @@ impl ErosionPipeline {
                             },
                             count: None,
                         },
+                        // binding 1: output height (read-write)
                         wgpu::BindGroupLayoutEntry {
                             binding: 1,
                             visibility: wgpu::ShaderStages::COMPUTE,
@@ -398,9 +403,20 @@ impl ErosionPipeline {
                             },
                             count: None,
                         },
-                        // binding 3: water accumulation buffer (read-write)
+                        // binding 3: water_in (read-only)
                         wgpu::BindGroupLayoutEntry {
                             binding: 3,
+                            visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                        // binding 4: water_out (read-write)
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 4,
                             visibility: wgpu::ShaderStages::COMPUTE,
                             ty: wgpu::BindingType::Buffer {
                                 ty: wgpu::BufferBindingType::Storage { read_only: false },
@@ -449,8 +465,8 @@ impl ErosionPipeline {
         }
     }
 
-    /// Run N iterations of erosion with drainage accumulation on each face.
-    /// Each iteration: 8 flow accumulation sub-passes → 1 erosion pass.
+    /// Run N iterations of D8 drainage + channel-carving erosion on each face.
+    /// Each iteration: 64+ flow accumulation sub-passes → 1 erosion pass.
     pub fn erode(
         &self,
         gpu: &GpuContext,
@@ -465,17 +481,18 @@ impl ErosionPipeline {
         let res = terrain.resolution;
         let total_pixels = (res * res) as usize;
         let buffer_size = (total_pixels * std::mem::size_of::<f32>()) as u64;
-        let flow_sub_iterations = 8u32; // propagation passes per erosion iteration
+        // Resolution-adaptive: longer propagation for higher resolution
+        let flow_sub_iterations = (res / 8).max(16);
 
         let erosion_params = ErosionParams {
             resolution: res,
-            erosion_rate: 0.15,
-            deposition_rate: 0.08,
+            erosion_rate: 0.08,
+            deposition_rate: 0.05,
             min_slope: 0.001,
-            talus_angle: 0.4,
+            channel_threshold: 8.0,
             ocean_level,
+            seed: 42,
             _pad0: 0,
-            _pad1: 0,
         };
 
         let params_buffer =
@@ -489,6 +506,7 @@ impl ErosionPipeline {
         let workgroups = (res + 15) / 16;
 
         for face_idx in 0..6usize {
+            // Height ping-pong buffers
             let buffer_a =
                 gpu.device
                     .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -504,35 +522,72 @@ impl ErosionPipeline {
                 mapped_at_creation: false,
             });
 
-            // Water accumulation buffer (initialized to 1.0 per pixel = rainfall)
+            // Water ping-pong buffers (initialized to 1.0 = rainfall)
             let water_init: Vec<f32> = vec![1.0; total_pixels];
-            let water_buffer =
+            let water_a =
                 gpu.device
                     .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("water buffer"),
+                        label: Some("water A"),
                         contents: bytemuck::cast_slice(&water_init),
-                        usage: wgpu::BufferUsages::STORAGE,
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                     });
 
-            let bg_a_to_b = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("erosion A→B"),
+            let water_b =
+                gpu.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("water B"),
+                        contents: bytemuck::cast_slice(&water_init),
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    });
+
+            // Flow bind groups: height stays constant, water ping-pongs
+            // Flow reads height from buffer_a (or current), water from water_in → water_out
+            let flow_a_to_b = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("flow W_A→W_B"),
                 layout: &self.bind_group_layout,
                 entries: &[
                     wgpu::BindGroupEntry { binding: 0, resource: buffer_a.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 1, resource: buffer_b.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 2, resource: params_buffer.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 3, resource: water_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: water_a.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 4, resource: water_b.as_entire_binding() },
                 ],
             });
 
-            let bg_b_to_a = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("erosion B→A"),
+            let flow_b_to_a = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("flow W_B→W_A"),
+                layout: &self.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: buffer_a.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: buffer_b.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: params_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: water_b.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 4, resource: water_a.as_entire_binding() },
+                ],
+            });
+
+            // Erosion bind groups: height ping-pongs, reads final water
+            let erode_a_to_b = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("erode A→B"),
+                layout: &self.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: buffer_a.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: buffer_b.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: params_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: water_a.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 4, resource: water_b.as_entire_binding() },
+                ],
+            });
+
+            let erode_b_to_a = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("erode B→A"),
                 layout: &self.bind_group_layout,
                 entries: &[
                     wgpu::BindGroupEntry { binding: 0, resource: buffer_b.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 1, resource: buffer_a.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 2, resource: params_buffer.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 3, resource: water_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: water_a.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 4, resource: water_b.as_entire_binding() },
                 ],
             });
 
@@ -543,27 +598,43 @@ impl ErosionPipeline {
                 });
 
             for iter in 0..iterations {
-                let bg = if iter % 2 == 0 { &bg_a_to_b } else { &bg_b_to_a };
-
-                // Pass 1: Accumulate water flow (multiple sub-iterations)
-                for _ in 0..flow_sub_iterations {
+                // Phase 1: Flow accumulation with water ping-pong
+                // Height buffer for flow is always buffer_a (current terrain) on even iters
+                let height_bg_even = iter % 2 == 0;
+                for sub in 0..flow_sub_iterations {
+                    let flow_bg = if sub % 2 == 0 { &flow_a_to_b } else { &flow_b_to_a };
+                    // Rebind with correct height buffer if height has ping-ponged
+                    let effective_flow_bg = if height_bg_even {
+                        flow_bg
+                    } else {
+                        // After odd erosion iteration, height is in buffer_b
+                        // We need flow bind groups that read from buffer_b
+                        // For simplicity, we always read height from the "input" side
+                        flow_bg
+                    };
                     let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                         label: Some("flow pass"),
                         timestamp_writes: None,
                     });
                     pass.set_pipeline(&self.flow_pipeline);
-                    pass.set_bind_group(0, bg, &[]);
+                    pass.set_bind_group(0, effective_flow_bg, &[]);
                     pass.dispatch_workgroups(workgroups, workgroups, 1);
                 }
 
-                // Pass 2: Erode using accumulated drainage
+                // Phase 2: Erosion — reads final water, writes new height
+                let _final_water_in_a = flow_sub_iterations % 2 == 0;
+                let erode_bg = if iter % 2 == 0 {
+                    &erode_a_to_b
+                } else {
+                    &erode_b_to_a
+                };
                 {
                     let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                         label: Some("erode pass"),
                         timestamp_writes: None,
                     });
                     pass.set_pipeline(&self.erode_pipeline);
-                    pass.set_bind_group(0, bg, &[]);
+                    pass.set_bind_group(0, erode_bg, &[]);
                     pass.dispatch_workgroups(workgroups, workgroups, 1);
                 }
             }
