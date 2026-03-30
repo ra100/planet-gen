@@ -158,48 +158,54 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let neighbor_continental = info.second_type > 0.5;
 
     // --- Pass 2: Generate height ---
+    // Architecture: plate type BIASES the elevation but doesn't determine it.
+    // A noise-based continental mask creates the actual coastlines — continental
+    // plates are mostly land but can have bays/gulfs/inland seas. Oceanic plates
+    // are mostly ocean but can have island chains.
 
-    // Base elevation from plate type (R8: bimodal distribution per research 7.2)
-    var height: f32;
-    if (is_continental) {
-        height = 0.25; // Continental shelf base
+    // Step 1: Plate type bias (continental plates tend to be higher)
+    let plate_bias: f32 = select(-0.25, 0.25, is_continental);
+
+    // Step 2: Domain-warped continental noise creates the actual coastline shapes
+    // This is INDEPENDENT of Voronoi cell boundaries — creates bays, gulfs,
+    // peninsulas, and inland seas that break the convex cell shape.
+    let coast_warp_val = snoise(raw_pos * 1.5 + seed_offset(params.seed + 600u));
+    let coast_pos = raw_pos + vec3<f32>(coast_warp_val) * 0.15;
+
+    // Two octaves for coastline shape (keep noise calls low to avoid GPU limits)
+    let coast_n1 = snoise(coast_pos * 2.5 + seed_offset(params.seed + 700u));
+    let coast_n2 = snoise(coast_pos * 5.0 + seed_offset(params.seed + 710u)) * 0.4;
+    let coastal_noise = coast_n1 + coast_n2;
+
+    // Combine plate bias + coastal noise for elevation base
+    // Continental plates: bias +0.25 + noise → mostly positive (land)
+    // Oceanic plates: bias -0.25 + noise → mostly negative (ocean)
+    // The noise creates crossovers: bays on continental, islands on oceanic
+    var height = plate_bias + coastal_noise * 0.35;
+
+    // Step 3: Regional geology within the established land/ocean pattern
+    let interior_factor = clamp(boundary_dist * 8.0, 0.0, 1.0);
+    let is_land = height > 0.0;
+
+    if (is_land) {
+        // Continental highlands and basins (single warped noise)
+        let highland = snoise(raw_pos * 4.0 + seed_offset(params.seed + 800u));
+        height += highland * 0.12 * interior_factor;
+        if (highland > 0.5) { height += 0.08; }
     } else {
-        height = -0.35; // Ocean floor base
+        // Seamounts: rare underwater volcanoes that can breach surface
+        let seamount = snoise(raw_pos * 8.0 + seed_offset(params.seed + 900u));
+        if (seamount > 0.75) {
+            height += (seamount - 0.75) * 1.0;
+        }
     }
 
-    // Continental interior — mid-scale regional geology (Layer 2)
-    // Creates highlands, basins, plateaus, and lowlands within continents
-    let interior_factor = clamp(boundary_dist * 8.0, 0.0, 1.0); // 0 at boundary, 1 in interior
-    if (is_continental) {
-        // Regional highlands/lowlands (domain-warped for natural shapes)
-        let regional_warp = vec3<f32>(
-            snoise(raw_pos * 2.0 + seed_offset(params.seed + 600u)),
-            snoise(raw_pos * 2.0 + seed_offset(params.seed + 610u)),
-            snoise(raw_pos * 2.0 + seed_offset(params.seed + 620u))
-        ) * 0.12;
-        let regional_pos = raw_pos + regional_warp;
-        let highland = snoise(regional_pos * 4.0 + seed_offset(params.seed + 700u));
-        let basin = snoise(regional_pos * 6.0 + seed_offset(params.seed + 710u)) * 0.5;
-
-        // Highlands rise, basins sink, creating varied interior topography
-        let regional_height = (highland + basin) * 0.15;
-        height += regional_height * interior_factor;
-
-        // Occasional elevated plateaus (flat-topped highlands)
-        if (highland > 0.4) {
-            let plateau = 0.1 * (1.0 - interior_factor * 0.3);
-            height += plateau;
-        }
-    } else {
-        // Ocean floor: subtle abyssal plains + occasional seamounts
-        let abyssal = snoise(raw_pos * 5.0 + seed_offset(params.seed + 800u)) * 0.05;
-        height += abyssal * interior_factor;
-
-        // Seamounts: rare underwater volcanoes
-        let seamount_noise = snoise(raw_pos * 8.0 + seed_offset(params.seed + 810u));
-        if (seamount_noise > 0.7) {
-            height += (seamount_noise - 0.7) * 0.8; // Can poke above sea level as islands
-        }
+    // Continental shelf: smooth transition near the coastline
+    let coast_dist = abs(height);
+    if (coast_dist < 0.08) {
+        // Near sea level: gentle shelf, less steep transition
+        let shelf_smooth = coast_dist / 0.08;
+        height *= 0.5 + 0.5 * shelf_smooth;
     }
 
     // --- Boundary terrain (R4-R7, R10) ---
