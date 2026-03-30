@@ -65,9 +65,11 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 
     var r = biome_roughness_value(temp, moisture, is_ocean);
 
-    // Add noise variation ±10%
-    let noise_var = snoise(sphere_pos * 10.0 + seed_offset) * 0.1;
-    r = clamp(r + noise_var, 0.0, 1.0);
+    // Add noise variation to land only — ocean stays uniformly smooth
+    if (!is_ocean) {
+        let noise_var = snoise(sphere_pos * 10.0 + seed_offset) * 0.1;
+        r = clamp(r + noise_var, 0.0, 1.0);
+    }
 
     // Write to tile-local index
     let idx = id.y * res + id.x;
