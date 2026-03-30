@@ -47,9 +47,15 @@ fn intersect_sphere(uv: vec2<f32>) -> vec3<f32> {
 // ---- Temperature ----
 fn compute_temperature(sphere_pos: vec3<f32>, height: f32) -> f32 {
     let latitude = asin(clamp(sphere_pos.y, -1.0, 1.0));
-    let longitude = atan2(sphere_pos.z, sphere_pos.x);
-    let tilt_effect = sin(longitude) * uniforms.axial_tilt_rad;
-    let effective_lat = clamp(latitude + tilt_effect, -1.5708, 1.5708);
+    // Axial tilt: rotate the "solar axis" rather than shifting latitude by sin(lon).
+    // This models the sub-solar point offset without creating V-shaped artifacts.
+    // The tilt shifts effective latitude smoothly across the whole sphere.
+    let tilt = uniforms.axial_tilt_rad;
+    let ct = cos(tilt);
+    let st = sin(tilt);
+    // Tilted Y-axis: the "effective pole" is rotated
+    let tilted_y = sphere_pos.y * ct + sphere_pos.z * st;
+    let effective_lat = asin(clamp(tilted_y, -1.0, 1.0));
     let lat_deg = abs(effective_lat) * 180.0 / 3.14159;
 
     let temp_offset = uniforms.base_temp_c - 15.0;
@@ -87,10 +93,9 @@ fn wind_direction_vec(latitude_rad: f32) -> vec3<f32> {
 }
 
 fn compute_moisture(sphere_pos: vec3<f32>, height: f32) -> f32 {
-    let latitude = asin(clamp(sphere_pos.y, -1.0, 1.0));
-    let longitude = atan2(sphere_pos.z, sphere_pos.x);
-    let tilt_effect = sin(longitude) * uniforms.axial_tilt_rad;
-    let effective_lat = clamp(latitude + tilt_effect, -1.5708, 1.5708);
+    let tilt = uniforms.axial_tilt_rad;
+    let tilted_y = sphere_pos.y * cos(tilt) + sphere_pos.z * sin(tilt);
+    let effective_lat = asin(clamp(tilted_y, -1.0, 1.0));
 
     // Hadley cell base moisture (sets latitude tendency)
     let hadley_base = hadley_cell_moisture(effective_lat);
@@ -236,11 +241,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let color_var = snoise(rotated * 8.0);
 
-    // Compute latitude for altitude zonation
-    let latitude = asin(clamp(rotated.y, -1.0, 1.0));
-    let longitude = atan2(rotated.z, rotated.x);
-    let tilt_shift = sin(longitude) * uniforms.axial_tilt_rad;
-    let effective_lat = clamp(latitude + tilt_shift, -1.5708, 1.5708);
+    // Compute effective latitude for altitude zonation (consistent tilt model)
+    let tilt_main = uniforms.axial_tilt_rad;
+    let tilted_y_main = rotated.y * cos(tilt_main) + rotated.z * sin(tilt_main);
+    let effective_lat = asin(clamp(tilted_y_main, -1.0, 1.0));
 
     var surface_color: vec3<f32>;
 
@@ -263,8 +267,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let temp = compute_temperature(rotated, height);
         let moisture = compute_moisture(rotated, height);
 
-        if (temp < -15.0 && moisture > 20.0) {
-            // Ice/snow cap — only when moisture is present (not on cold dry worlds like Mars)
+        // Ice/snow threshold scales with ocean fraction — dry worlds need more moisture to form ice
+        let ice_moisture_threshold = 15.0 + 40.0 * (1.0 - uniforms.ocean_fraction);
+        if (temp < -15.0 && moisture > ice_moisture_threshold) {
             surface_color = vec3<f32>(0.92, 0.94, 0.98) + vec3<f32>(0.03) * color_var;
         } else {
             let biome = whittaker_lookup(temp, moisture);
