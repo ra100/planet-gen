@@ -58,8 +58,12 @@ fn compute_temperature(sphere_pos: vec3<f32>, height: f32) -> f32 {
     let effective_lat = asin(clamp(tilted_y, -1.0, 1.0));
     let lat_deg = abs(effective_lat) * 180.0 / 3.14159;
 
+    // Temperature gradient: ~50°C range (30°C equator to -20°C poles)
+    // Non-linear: flatter at mid-latitudes (ocean heat transport), steeper near poles
+    let lat_normalized = lat_deg / 90.0; // 0 at equator, 1 at pole
+    let temp_drop = 50.0 * (0.4 * lat_normalized + 0.6 * lat_normalized * lat_normalized);
     let temp_offset = uniforms.base_temp_c - 15.0;
-    let base_temp = 30.0 - lat_deg * (60.0 / 90.0) + temp_offset;
+    let base_temp = 30.0 - temp_drop + temp_offset;
 
     let land_fraction = max(height - uniforms.ocean_level, 0.0) / max(1.0 - uniforms.ocean_level, 0.01);
     let elevation_km = land_fraction * 5.0;
