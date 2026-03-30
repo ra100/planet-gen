@@ -141,11 +141,15 @@ fn generate_planet_png(
     let cubemap_view = renderer.upload_terrain(gpu, &terrain);
     let ocean_level = -1.0 + 2.0 * effective_ocean;
 
+    // Tilted view showing equatorial features (~20° tilt)
+    let tilt = 0.35_f32; // ~20 degrees
+    let ct = tilt.cos();
+    let st = tilt.sin();
     let uniforms = PreviewUniforms {
         rotation: [
             [1.0, 0.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0, 0.0],
+            [0.0, ct, -st, 0.0],
+            [0.0, st, ct, 0.0],
             [0.0, 0.0, 0.0, 1.0],
         ],
         light_dir: [0.5, 0.7, -1.0],

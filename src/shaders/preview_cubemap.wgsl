@@ -73,27 +73,74 @@ fn hadley_cell_moisture(latitude_rad: f32) -> f32 {
     return max(itcz_wet + subtropical_dry + polar_front_wet + polar_dry + 50.0, 5.0);
 }
 
+// Wind direction from Hadley cells for rain shadow
+fn wind_direction_vec(latitude_rad: f32) -> vec3<f32> {
+    let lat_deg = abs(latitude_rad) * 180.0 / 3.14159;
+    // Trade winds (0-30°): from east. Westerlies (30-60°): from west. Polar (60-90°): from east.
+    var wind_x: f32;
+    if (lat_deg < 30.0) { wind_x = -0.8; }  // Easterly
+    else if (lat_deg < 60.0) { wind_x = 0.8; } // Westerly
+    else { wind_x = -0.6; } // Polar easterly
+    // Slight poleward component
+    let wind_y = select(0.2, -0.2, latitude_rad > 0.0);
+    return normalize(vec3<f32>(wind_x, wind_y, 0.3));
+}
+
 fn compute_moisture(sphere_pos: vec3<f32>, height: f32) -> f32 {
     let latitude = asin(clamp(sphere_pos.y, -1.0, 1.0));
     let longitude = atan2(sphere_pos.z, sphere_pos.x);
     let tilt_effect = sin(longitude) * uniforms.axial_tilt_rad;
     let effective_lat = clamp(latitude + tilt_effect, -1.5708, 1.5708);
 
+    // Hadley cell base moisture (sets latitude tendency)
     let hadley_base = hadley_cell_moisture(effective_lat);
-    let noise1 = snoise(sphere_pos * 3.0 + vec3<f32>(100.0, 0.0, 0.0));
-    let noise2 = snoise(sphere_pos * 6.0 + vec3<f32>(0.0, 80.0, 0.0)) * 0.5;
-    let local_var = (noise1 + noise2) * 0.5;
 
-    var moisture = hadley_base * (0.6 + 0.4 * (local_var * 0.5 + 0.5));
-    moisture += 60.0 * (local_var * 0.5 + 0.5);
+    // Local noise variation (breaks latitude bands)
+    let noise1 = snoise(sphere_pos * 3.0 + vec3<f32>(100.0, 0.0, 0.0));
+    let local_var = noise1 * 0.5;
+    var moisture = hadley_base * (0.55 + 0.45 * (local_var + 0.5));
+    moisture += 50.0 * (local_var + 0.5);
+
+    // === CUBEMAP-BASED CONTINENTALITY (Unit 2) ===
+    // Sample height at neighboring positions to determine coast vs interior
+    let step = 0.06;
+    let h_east = textureSample(height_tex, height_sampler, sphere_pos + vec3<f32>(step, 0.0, 0.0)).r;
+    let h_west = textureSample(height_tex, height_sampler, sphere_pos + vec3<f32>(-step, 0.0, 0.0)).r;
+    let h_north = textureSample(height_tex, height_sampler, sphere_pos + vec3<f32>(0.0, step, 0.0)).r;
+    let h_south = textureSample(height_tex, height_sampler, sphere_pos + vec3<f32>(0.0, -step, 0.0)).r;
+
+    var ocean_count = 0.0;
+    if (h_east < uniforms.ocean_level) { ocean_count += 1.0; }
+    if (h_west < uniforms.ocean_level) { ocean_count += 1.0; }
+    if (h_north < uniforms.ocean_level) { ocean_count += 1.0; }
+    if (h_south < uniforms.ocean_level) { ocean_count += 1.0; }
 
     let is_land = height > uniforms.ocean_level;
     if (is_land) {
-        let land_h = max(height - uniforms.ocean_level, 0.0) / max(1.0 - uniforms.ocean_level, 0.01);
-        let rain_shadow = 1.0 - 0.5 * smooth_step(0.3, 0.7, land_h);
-        moisture *= rain_shadow;
+        // Continentality: more land neighbors = drier interior
+        let coastal_factor = ocean_count / 4.0; // 0 = deep interior, 1 = surrounded by ocean
+        moisture *= 0.5 + 0.7 * coastal_factor; // Interior: ×0.5, coast: ×1.2
     } else {
-        moisture *= 1.3;
+        moisture *= 1.3; // Over ocean
+    }
+
+    // === CUBEMAP-BASED RAIN SHADOW (Unit 1) ===
+    // Sample upwind terrain to detect mountains blocking moisture
+    if (is_land) {
+        let wind = wind_direction_vec(effective_lat);
+        // Project wind to be tangent to sphere at this position
+        let tangent_wind = normalize(wind - sphere_pos * dot(wind, sphere_pos));
+        let upwind_pos = normalize(sphere_pos + tangent_wind * 0.05);
+
+        let upwind_h = textureSample(height_tex, height_sampler, upwind_pos).r;
+        let upwind_elevation = max(upwind_h - uniforms.ocean_level, 0.0);
+        let my_elevation = max(height - uniforms.ocean_level, 0.0);
+
+        // If upwind terrain is higher → we're in a rain shadow
+        if (upwind_elevation > my_elevation + 0.05) {
+            let shadow_strength = clamp((upwind_elevation - my_elevation) * 4.0, 0.0, 0.6);
+            moisture *= (1.0 - shadow_strength);
+        }
     }
 
     moisture *= 0.5 + uniforms.ocean_fraction;
@@ -134,14 +181,14 @@ fn whittaker_lookup(temp_c: f32, moisture_cm: f32) -> u32 {
     return 12u;
 }
 
-fn biome_color(biome: u32, variation: f32) -> vec3<f32> {
+fn biome_color(biome: u32, variation: f32, temp_c: f32) -> vec3<f32> {
     var base: vec3<f32>;
     switch (biome) {
         case 0u:  { base = vec3<f32>(0.94, 0.96, 1.00); }
         case 1u:  { base = vec3<f32>(0.55, 0.63, 0.51); }
         case 2u:  { base = vec3<f32>(0.24, 0.31, 0.18); }
         case 3u:  { base = vec3<f32>(0.16, 0.27, 0.14); }
-        case 4u:  { base = vec3<f32>(0.82, 0.71, 0.55); }
+        case 4u:  { base = vec3<f32>(0.82, 0.71, 0.55); } // Hot desert — overridden below for cold
         case 5u:  { base = vec3<f32>(0.65, 0.60, 0.40); }
         case 6u:  { base = vec3<f32>(0.34, 0.51, 0.20); }
         case 7u:  { base = vec3<f32>(0.63, 0.59, 0.24); }
@@ -152,6 +199,21 @@ fn biome_color(biome: u32, variation: f32) -> vec3<f32> {
         case 12u: { base = vec3<f32>(0.13, 0.31, 0.08); }
         default:  { base = vec3<f32>(0.50, 0.50, 0.50); }
     }
+
+    // Cold desert override: Mars-like rust/red-brown for cold arid worlds
+    if (biome == 4u) {
+        if (temp_c < 5.0) {
+            base = vec3<f32>(0.60, 0.32, 0.18); // Cold desert: rust/Mars-like
+        } else if (temp_c < 15.0) {
+            let t = (temp_c - 5.0) / 10.0;
+            base = mix(vec3<f32>(0.60, 0.32, 0.18), vec3<f32>(0.75, 0.55, 0.35), t); // Transition
+        }
+    }
+    // Cold steppe/semiarid also gets warmer tones
+    if (biome == 5u && temp_c < 10.0) {
+        base = mix(vec3<f32>(0.55, 0.40, 0.25), base, clamp(temp_c / 10.0, 0.0, 1.0));
+    }
+
     return base + base * variation * 0.12;
 }
 
@@ -203,7 +265,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             surface_color = vec3<f32>(0.92, 0.94, 0.98) + vec3<f32>(0.03) * color_var;
         } else {
             let biome = whittaker_lookup(temp, moisture);
-            surface_color = biome_color(biome, color_var);
+            surface_color = biome_color(biome, color_var, temp);
 
             // Altitude zonation
             let land_height = (height - uniforms.ocean_level) / max(1.0 - uniforms.ocean_level, 0.01);
@@ -247,7 +309,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 if (m < 0.5) { debug_color = mix(vec3<f32>(0.6, 0.4, 0.1), vec3<f32>(0.1, 0.6, 0.1), m * 2.0); }
                 else { debug_color = mix(vec3<f32>(0.1, 0.6, 0.1), vec3<f32>(0.1, 0.2, 0.8), (m - 0.5) * 2.0); }
             }
-            case 4u: { debug_color = biome_color(whittaker_lookup(temp, moisture), 0.0) * 1.3; }
+            case 4u: { debug_color = biome_color(whittaker_lookup(temp, moisture), 0.0, temp) * 1.3; }
             case 5u: {
                 if (is_ocean) {
                     if (compute_temperature(rotated, height) < -2.0) { debug_color = vec3<f32>(1.0); }
