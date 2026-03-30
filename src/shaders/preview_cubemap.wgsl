@@ -97,14 +97,16 @@ fn compute_moisture(sphere_pos: vec3<f32>, height: f32) -> f32 {
     let tilted_y = sphere_pos.y * cos(tilt) + sphere_pos.z * sin(tilt);
     let effective_lat = asin(clamp(tilted_y, -1.0, 1.0));
 
-    // Hadley cell base moisture (sets latitude tendency)
-    let hadley_base = hadley_cell_moisture(effective_lat);
+    // Hadley cell base moisture — scaled by ocean fraction FIRST.
+    // No ocean = no evaporation = no atmospheric moisture (dry world like Mars)
+    let ocean_scale = 0.05 + 0.95 * uniforms.ocean_fraction; // 5% minimum (sublimation)
+    let hadley_base = hadley_cell_moisture(effective_lat) * ocean_scale;
 
     // Local noise variation (breaks latitude bands)
     let noise1 = snoise(sphere_pos * 3.0 + vec3<f32>(100.0, 0.0, 0.0));
     let local_var = noise1 * 0.5;
     var moisture = hadley_base * (0.55 + 0.45 * (local_var + 0.5));
-    moisture += 50.0 * (local_var + 0.5);
+    moisture += 50.0 * (local_var + 0.5) * ocean_scale;
 
     // === CUBEMAP-BASED CONTINENTALITY (Unit 2) ===
     // Sample height at neighboring positions to determine coast vs interior
