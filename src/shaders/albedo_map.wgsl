@@ -106,15 +106,15 @@ fn gradient_color(temp_c: f32, moisture_cm: f32, variation: f32) -> vec3<f32> {
 
     let cold_dry = vec3<f32>(0.58, 0.38, 0.25);
     let cold_wet = vec3<f32>(0.75, 0.80, 0.85);
-    let mid_dry  = vec3<f32>(0.62, 0.55, 0.32);
-    let mid_wet  = vec3<f32>(0.18, 0.42, 0.12);
+    let mid_dry  = vec3<f32>(0.55, 0.50, 0.30);
+    let mid_wet  = vec3<f32>(0.16, 0.40, 0.10);
     let hot_dry  = vec3<f32>(0.82, 0.55, 0.30);
-    let hot_wet  = vec3<f32>(0.08, 0.32, 0.06);
+    let hot_wet  = vec3<f32>(0.08, 0.30, 0.05);
 
     let dry_color = mix(cold_dry, mix(mid_dry, hot_dry, t_hot), t_cold);
     let wet_color = mix(cold_wet, mix(mid_wet, hot_wet, t_hot), t_cold);
 
-    let moist_t = smooth_step(15.0, 140.0, moisture_cm);
+    let moist_t = smooth_step(10.0, 90.0, moisture_cm);
     var base = mix(dry_color, wet_color, moist_t);
 
     let season = params.season;
