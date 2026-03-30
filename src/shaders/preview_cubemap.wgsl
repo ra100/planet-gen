@@ -443,8 +443,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let view_dir = vec3<f32>(0.0, 0.0, 1.0); // Camera looks along -Z, view = +Z
     let half_vec = normalize(light + view_dir);
 
-    // Compute terrain-perturbed normal
-    let shading_normal = compute_terrain_normal(rotated, normal);
+    // Compute terrain-perturbed normal (flat for ocean — water surface is smooth)
+    var shading_normal: vec3<f32>;
+    if (is_ocean) {
+        shading_normal = normal; // Geometric sphere normal — flat water
+    } else {
+        shading_normal = compute_terrain_normal(rotated, normal);
+    }
 
     // PBR inputs
     let n_dot_l = max(dot(shading_normal, light), 0.0);
