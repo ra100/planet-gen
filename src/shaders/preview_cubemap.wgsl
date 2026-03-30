@@ -13,7 +13,7 @@ struct Uniforms {
     season: f32, // 0=winter, 0.5=equinox, 1=summer
     atmosphere_density: f32, // 0.0 = none, 1.0 = Earth-like (reserved)
     atmosphere_height: f32,  // scale height in planet radii (reserved)
-    _pad0: f32,
+    height_scale: f32,       // normal map height exaggeration
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -243,7 +243,7 @@ fn compute_terrain_normal(sphere_pos: vec3<f32>, geo_normal: vec3<f32>) -> vec3<
     let h_down  = textureSample(height_tex, height_sampler, sphere_pos - bitangent * step).r;
 
     // Central differences → height gradient
-    let height_scale = 3.0; // Controls how pronounced terrain relief appears
+    let height_scale = uniforms.height_scale;
     let dx = (h_right - h_left) * height_scale;
     let dy = (h_up - h_down) * height_scale;
 

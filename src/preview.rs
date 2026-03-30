@@ -19,7 +19,7 @@ pub struct PreviewUniforms {
     pub season: f32, // 0=winter, 0.5=equinox, 1=summer
     pub atmosphere_density: f32, // 0.0 = none, 1.0 = Earth-like (reserved for future)
     pub atmosphere_height: f32,  // scale height in planet radii (reserved for future)
-    pub _pad: f32,
+    pub height_scale: f32,       // normal map height exaggeration (1.0 = subtle, 5.0 = dramatic)
 }
 
 pub struct PreviewRenderer {
@@ -352,7 +352,7 @@ mod tests {
             season: 0.5,
             atmosphere_density: 0.0,
             atmosphere_height: 0.0,
-            _pad: 0.0,
+            height_scale: 3.0,
         };
 
         let size = 256;

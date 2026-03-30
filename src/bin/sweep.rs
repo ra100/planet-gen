@@ -161,7 +161,7 @@ fn generate_planet_png(
         season: 0.5,
         atmosphere_density: 0.0,
         atmosphere_height: 0.0,
-        _pad: 0.0,
+        height_scale: 3.0,
     };
 
     renderer.render(gpu, &uniforms, &cubemap_view, render_size)

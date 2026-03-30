@@ -25,6 +25,7 @@ pub struct PlanetGenApp {
     erosion_iterations: u32,
     light_azimuth: f32,   // sun horizontal angle in radians
     light_elevation: f32, // sun vertical angle in radians
+    height_scale: f32,    // normal map height exaggeration
     view_mode: u32,
     preview_resolution: u32,
     needs_terrain: bool,   // full terrain recompute (plates + compute + erosion)
@@ -59,8 +60,9 @@ impl PlanetGenApp {
             water_loss: 0.0,
             season: 0.5,
             erosion_iterations: 25,
-            light_azimuth: -1.1,   // ~-63° (default sun position)
-            light_elevation: 0.62, // ~35° above horizon
+            light_azimuth: -0.5,
+            light_elevation: 0.3,
+            height_scale: 3.0,
             view_mode: 0,
             preview_resolution: crate::preview::DEFAULT_PREVIEW_SIZE,
             needs_terrain: true,
@@ -103,7 +105,7 @@ impl PlanetGenApp {
             season: self.season,
             atmosphere_density: 0.0,
             atmosphere_height: 0.0,
-            _pad: 0.0,
+            height_scale: self.height_scale,
         }
     }
 
@@ -361,6 +363,14 @@ impl eframe::App for PlanetGenApp {
                 if ui.add(egui::Slider::new(&mut self.light_elevation, 0.0..=std::f32::consts::FRAC_PI_2)
                     .text("Sun Elevation"))
                     .on_hover_text("Height of the sun above the horizon")
+                    .changed()
+                {
+                    self.needs_render = true;
+                }
+
+                if ui.add(egui::Slider::new(&mut self.height_scale, 0.5..=10.0)
+                    .text("Relief"))
+                    .on_hover_text("How pronounced terrain relief appears in lighting. 1 = subtle, 5 = dramatic")
                     .changed()
                 {
                     self.needs_render = true;
