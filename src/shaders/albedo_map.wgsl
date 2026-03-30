@@ -28,17 +28,17 @@ fn compute_temperature(sphere_pos: vec3<f32>, height: f32) -> f32 {
     let st = sin(tilt);
     let tilted_y = sphere_pos.y * ct + sphere_pos.z * st;
     let effective_lat = asin(clamp(tilted_y, -1.0, 1.0));
-    let lat_deg = abs(effective_lat) * 180.0 / 3.14159;
+    // Sub-solar latitude shift (matches preview shader)
+    let season_angle = (params.season - 0.5) * 2.0;
+    let sub_solar_lat = params.axial_tilt_rad * season_angle;
+    let thermal_lat = effective_lat - sub_solar_lat;
+    let thermal_deg = min(abs(thermal_lat) * 180.0 / 3.14159, 90.0);
 
-    let lat_normalized = lat_deg / 90.0;
+    let lat_normalized = thermal_deg / 90.0;
     let temp_drop = 50.0 * (0.4 * lat_normalized + 0.6 * lat_normalized * lat_normalized);
     let temp_offset = params.base_temp_c - 15.0;
 
-    let season_angle = (params.season - 0.5) * 2.0;
-    let hemisphere = sin(effective_lat);
-    let season_shift = season_angle * hemisphere * params.axial_tilt_rad * 15.0;
-
-    let base_temp = 30.0 - temp_drop + temp_offset + season_shift;
+    let base_temp = 30.0 - temp_drop + temp_offset;
 
     let land_fraction = max(height - params.ocean_level, 0.0) / max(1.0 - params.ocean_level, 0.01);
     let elevation_km = land_fraction * 5.0;
@@ -61,8 +61,13 @@ fn compute_moisture(sphere_pos: vec3<f32>, height: f32) -> f32 {
     let tilted_y = sphere_pos.y * cos(tilt) + sphere_pos.z * sin(tilt);
     let effective_lat = asin(clamp(tilted_y, -1.0, 1.0));
 
+    // Shift Hadley cells with thermal equator (matches preview shader)
+    let season_angle = (params.season - 0.5) * 2.0;
+    let sub_solar_lat = tilt * season_angle;
+    let thermal_lat = effective_lat - sub_solar_lat;
+
     let ocean_scale = 0.05 + 0.95 * params.ocean_fraction;
-    let hadley_base = hadley_cell_moisture(effective_lat) * ocean_scale;
+    let hadley_base = hadley_cell_moisture(thermal_lat) * ocean_scale;
 
     let noise1 = snoise(sphere_pos * 3.0 + vec3<f32>(100.0, 0.0, 0.0));
     let local_var = noise1 * 0.5;

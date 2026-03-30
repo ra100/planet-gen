@@ -62,20 +62,22 @@ fn compute_temperature(sphere_pos: vec3<f32>, height: f32) -> f32 {
     let effective_lat = asin(clamp(tilted_y, -1.0, 1.0));
     let lat_deg = abs(effective_lat) * 180.0 / 3.14159;
 
-    // Temperature gradient: ~50°C range (30°C equator to -20°C poles)
-    // Non-linear: flatter at mid-latitudes (ocean heat transport), steeper near poles
-    let lat_normalized = lat_deg / 90.0;
+    // Sub-solar latitude: shifts the thermal equator with season and tilt.
+    // At equinox (season=0.5): sub-solar at equator. At solstice: sub-solar at ±tilt.
+    // At 90° tilt + summer: the north pole is the hottest point (Uranus-like).
+    let season_angle = (uniforms.season - 0.5) * 2.0; // [-1, 1]
+    let sub_solar_lat = uniforms.axial_tilt_rad * season_angle;
+
+    // Thermal latitude: angular distance from the sub-solar point
+    let thermal_lat = effective_lat - sub_solar_lat;
+    let thermal_deg = min(abs(thermal_lat) * 180.0 / 3.14159, 90.0);
+
+    // Temperature gradient: ~50°C range from thermal equator to thermal poles
+    let lat_normalized = thermal_deg / 90.0;
     let temp_drop = 50.0 * (0.4 * lat_normalized + 0.6 * lat_normalized * lat_normalized);
     let temp_offset = uniforms.base_temp_c - 15.0;
 
-    // Season modifies temperature: summer hemisphere warmer, winter hemisphere colder
-    // season=0 (winter): north colder, south warmer. season=1 (summer): north warmer
-    let season_angle = (uniforms.season - 0.5) * 2.0; // [-1, 1]
-    // Smooth hemisphere factor using sin(lat) — no discontinuity at equator
-    let hemisphere = sin(effective_lat); // smooth -1..+1 transition through equator
-    let season_shift = season_angle * hemisphere * uniforms.axial_tilt_rad * 15.0;
-
-    let base_temp = 30.0 - temp_drop + temp_offset + season_shift;
+    let base_temp = 30.0 - temp_drop + temp_offset;
 
     let land_fraction = max(height - uniforms.ocean_level, 0.0) / max(1.0 - uniforms.ocean_level, 0.01);
     let elevation_km = land_fraction * 5.0;
@@ -118,10 +120,14 @@ fn compute_moisture(sphere_pos: vec3<f32>, height: f32) -> f32 {
     let tilted_y = sphere_pos.y * cos(tilt) + sphere_pos.z * sin(tilt);
     let effective_lat = asin(clamp(tilted_y, -1.0, 1.0));
 
+    // Shift Hadley cells with thermal equator (same sub-solar shift as temperature)
+    let season_angle = (uniforms.season - 0.5) * 2.0;
+    let sub_solar_lat = tilt * season_angle;
+    let thermal_lat = effective_lat - sub_solar_lat;
+
     // Hadley cell base moisture — scaled by ocean fraction FIRST.
-    // No ocean = no evaporation = no atmospheric moisture (dry world like Mars)
-    let ocean_scale = 0.05 + 0.95 * uniforms.ocean_fraction; // 5% minimum (sublimation)
-    let hadley_base = hadley_cell_moisture(effective_lat) * ocean_scale;
+    let ocean_scale = 0.05 + 0.95 * uniforms.ocean_fraction;
+    let hadley_base = hadley_cell_moisture(thermal_lat) * ocean_scale;
 
     // Local noise variation (breaks latitude bands)
     let noise1 = snoise(sphere_pos * 3.0 + vec3<f32>(100.0, 0.0, 0.0));
