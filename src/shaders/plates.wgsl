@@ -219,19 +219,23 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     // --- Boundary terrain (R4-R7, R10) ---
     let b_influence = boundary_influence(boundary_dist, 0.10); // Focused mountain influence
 
+    // Ridge variation: breaks continuous mountain walls into segments with gaps/passes
+    let ridge_var = snoise(raw_pos * 5.0 + seed_offset(params.seed + 150u));
+    let ridge_mask = smooth_step(-0.3, 0.4, ridge_var); // ~40% gaps, ~60% peaks
+
     if (boundary_type < -0.3) {
         // CONVERGENT boundary
         if (is_continental && neighbor_continental) {
             // R4: Continental-continental collision → mountain range (Himalayas)
-            let ridge_height = 0.9 * b_influence * abs(boundary_type);
+            let ridge_height = 0.7 * b_influence * abs(boundary_type) * ridge_mask;
             let ridge_noise = snoise(raw_pos * 15.0 + seed_offset(params.seed + 100u)) * 0.15;
             let ridge_detail = snoise(raw_pos * 30.0 + seed_offset(params.seed + 110u)) * 0.06;
-            height += ridge_height + (ridge_noise + ridge_detail) * b_influence;
+            height += ridge_height + (ridge_noise + ridge_detail) * b_influence * ridge_mask;
         } else if (is_continental && !neighbor_continental) {
             // R5: Oceanic-continental convergence → volcanic chain (Andes)
-            let volcanic_height = 0.7 * b_influence * abs(boundary_type);
+            let volcanic_height = 0.55 * b_influence * abs(boundary_type) * ridge_mask;
             let volcanic_noise = snoise(raw_pos * 12.0 + seed_offset(params.seed + 200u)) * 0.15;
-            height += volcanic_height + volcanic_noise * b_influence;
+            height += volcanic_height + volcanic_noise * b_influence * ridge_mask;
         } else if (!is_continental && neighbor_continental) {
             // R5: Ocean trench on the oceanic side of subduction
             height -= 0.25 * b_influence * abs(boundary_type);

@@ -340,10 +340,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let ice_color = vec3<f32>(0.90, 0.93, 0.97) + vec3<f32>(0.02) * color_var;
         surface_color = mix(surface_color, ice_color, ice_blend);
 
-        // Altitude zonation — raised thresholds for amplified terrain heights
-        let snow_line = 0.75 + 0.20 * (1.0 - abs(effective_lat) / 1.5708);
-        let rock_line = snow_line - 0.12;
-        let alpine_line = rock_line - 0.12;
+        // Altitude zonation — only the highest peaks get snow/rock
+        let snow_line = 0.85 + 0.10 * (1.0 - abs(effective_lat) / 1.5708);
+        let rock_line = snow_line - 0.10;
+        let alpine_line = rock_line - 0.10;
 
         if (land_height > snow_line && temp < 15.0) {
             let blend = smooth_step(snow_line, snow_line + 0.10, land_height);
