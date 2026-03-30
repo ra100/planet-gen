@@ -15,9 +15,9 @@ pub struct TerrainGenParams {
     pub octaves: u32,
     pub gain: f32,
     pub lacunarity: f32,
-    pub _pad0: f32,
-    pub _pad1: f32,
-    pub _pad2: f32,
+    pub tile_offset_x: u32,
+    pub tile_offset_y: u32,
+    pub full_resolution: u32,
 }
 
 /// Generated tectonic heightmap for all 6 cube faces.
@@ -113,6 +113,100 @@ impl TerrainComputePipeline {
         }
     }
 
+    /// Create a reusable plates buffer for tiled generation.
+    pub fn create_plates_buffer(&self, gpu: &GpuContext, plates: &[PlateGpu]) -> wgpu::Buffer {
+        gpu.device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("plates buffer"),
+                contents: bytemuck::cast_slice(plates),
+                usage: wgpu::BufferUsages::STORAGE,
+            })
+    }
+
+    /// Dispatch a single tile and read back the heightmap data.
+    pub fn dispatch_tile(
+        &self,
+        gpu: &GpuContext,
+        plates_buffer: &wgpu::Buffer,
+        params: &TerrainGenParams,
+    ) -> Vec<f32> {
+        let tile_size = params.resolution;
+        let total_pixels = (tile_size * tile_size) as usize;
+        let buffer_size = (total_pixels * std::mem::size_of::<f32>()) as u64;
+
+        let params_buffer =
+            gpu.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("terrain tile params"),
+                    contents: bytemuck::bytes_of(params),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
+
+        let output_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("terrain tile output"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        let staging_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("terrain tile staging"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("terrain tile bind group"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: plates_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: output_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("terrain tile encoder"),
+            });
+
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("terrain tile pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups((tile_size + 15) / 16, (tile_size + 15) / 16, 1);
+        }
+
+        encoder.copy_buffer_to_buffer(&output_buffer, 0, &staging_buffer, 0, buffer_size);
+        gpu.queue.submit(Some(encoder.finish()));
+
+        staging_buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, |_| {});
+        let _ = gpu.device.poll(wgpu::PollType::Wait);
+
+        let mapped = staging_buffer.slice(..).get_mapped_range();
+        let result: Vec<f32> = bytemuck::cast_slice(&mapped).to_vec();
+        drop(mapped);
+        staging_buffer.unmap();
+
+        result
+    }
+
     /// Generate tectonic terrain for all 6 cube faces.
     pub fn generate(
         &self,
@@ -165,9 +259,9 @@ impl TerrainComputePipeline {
                 octaves,
                 gain,
                 lacunarity,
-                _pad0: 0.0,
-                _pad1: 0.0,
-                _pad2: 0.0,
+                tile_offset_x: 0,
+                tile_offset_y: 0,
+                full_resolution: resolution,
             };
 
             let params_buffer =

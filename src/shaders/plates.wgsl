@@ -20,9 +20,9 @@ struct GenParams {
     octaves: u32,
     gain: f32,
     lacunarity: f32,
-    _pad0: f32,
-    _pad1: f32,
-    _pad2: f32,
+    tile_offset_x: u32,
+    tile_offset_y: u32,
+    full_resolution: u32,
 }
 
 @group(0) @binding(0) var<storage, read> plates: array<Plate>;
@@ -140,9 +140,12 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
 
+    let full_res = params.full_resolution;
+    let global_x = params.tile_offset_x + id.x;
+    let global_y = params.tile_offset_y + id.y;
     let uv = vec2<f32>(
-        f32(id.x) / f32(res - 1u),
-        f32(id.y) / f32(res - 1u)
+        f32(global_x) / f32(full_res - 1u),
+        f32(global_y) / f32(full_res - 1u)
     );
 
     let raw_pos = cube_to_sphere(params.face, uv);

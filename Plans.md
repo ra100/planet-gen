@@ -144,13 +144,13 @@ Scale from preview (256²) to full 8K (8192²) via tiled generation and export t
 
 | Task | 内容 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
-| 5.1 | Tile coordinator: subdivide each face into 16×16 tiles of 512px, dispatch compute shaders per tile with correct UV offsets | Test: 6 × 256 = 1,536 tiles dispatched; adjacent tiles produce seamless output at borders | Phase 4 | cc:TODO |
-| 5.2 | GPU→CPU readback pipeline: read tile results from GPU storage textures to CPU memory, assemble into full-face images | Test: assembled face image matches expected resolution (8192×8192); no visible tile seams | 5.1 | cc:TODO |
-| 5.3 | EXR export: write height/displacement as 16-bit float EXR files (one per face or stitched) | Test: exported EXR opens in Blender, values match GPU output within float precision | 5.2 | cc:TODO |
-| 5.4 | PNG export: write albedo, normal, roughness, ocean mask, ice mask as 8-bit PNG | Test: exported PNGs open correctly, color values match preview visually | 5.2 | cc:TODO |
-| 5.5 | Background generation with progress: full generation runs on background thread, UI shows progress bar (% tiles complete) | Test: UI remains responsive during generation; progress bar updates; cancel button stops generation | 5.1 | cc:TODO |
-| 5.6 | Output directory structure: organize exported files in `<output_dir>/<planet_name>/` with consistent naming | Test: generate produces expected file tree with all 6 map types | 5.3, 5.4 | cc:TODO |
-| 5.7 | Performance validation: full 8K generation completes in <30s on RTX 3080-class GPU | Benchmark: timed generation from start to all files written, meets target | 5.5, 5.6 | cc:TODO |
+| 5.1 | Tile coordinator: subdivide each face into 16×16 tiles of 512px, dispatch compute shaders per tile with correct UV offsets | Test: 6 × 256 = 1,536 tiles dispatched; adjacent tiles produce seamless output at borders | Phase 4 | cc:完了 |
+| 5.2 | GPU→CPU readback pipeline: read tile results from GPU storage textures to CPU memory, assemble into full-face images | Test: assembled face image matches expected resolution (8192×8192); no visible tile seams | 5.1 | cc:完了 |
+| 5.3 | EXR export: write height/displacement as 16-bit float EXR files (one per face or stitched) | Test: exported EXR opens in Blender, values match GPU output within float precision | 5.2 | cc:完了 |
+| 5.4 | PNG export: write albedo, normal, roughness, ocean mask, ice mask as 8-bit PNG | Test: exported PNGs open correctly, color values match preview visually | 5.2 | cc:完了 |
+| 5.5 | Background generation with progress: full generation runs on background thread, UI shows progress bar (% tiles complete) | Test: UI remains responsive during generation; progress bar updates; cancel button stops generation | 5.1 | cc:完了 |
+| 5.6 | Output directory structure: organize exported files in `<output_dir>/<planet_name>/` with consistent naming | Test: generate produces expected file tree with all 6 map types | 5.3, 5.4 | cc:完了 |
+| 5.7 | Performance validation: full 8K generation completes in <30s on RTX 3080-class GPU | Benchmark: timed generation from start to all files written, meets target | 5.5, 5.6 | cc:完了 |
 
 ---
 

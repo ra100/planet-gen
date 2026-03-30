@@ -9,8 +9,12 @@ struct RoughnessParams {
     base_temp_c: f32,
     ocean_level: f32,
     ocean_fraction: f32,
+    tile_offset_x: u32,
+    tile_offset_y: u32,
+    full_resolution: u32,
     _pad0: u32,
     _pad1: u32,
+    _pad2: u32,
 }
 
 @group(0) @binding(0) var<storage, read> heightmap: array<f32>;
@@ -35,13 +39,17 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
 
-    let idx = id.y * res + id.x;
-    let height = heightmap[idx];
+    // Global coordinates for heightmap lookup and UV
+    let full_res = params.full_resolution;
+    let global_x = params.tile_offset_x + id.x;
+    let global_y = params.tile_offset_y + id.y;
+    let height_idx = global_y * full_res + global_x;
+    let height = heightmap[height_idx];
     let is_ocean = height < params.ocean_level;
 
     let uv = vec2<f32>(
-        f32(id.x) / f32(res - 1u),
-        f32(id.y) / f32(res - 1u)
+        f32(global_x) / f32(full_res - 1u),
+        f32(global_y) / f32(full_res - 1u)
     );
     let sphere_pos = cube_to_sphere(params.face, uv);
 
@@ -61,5 +69,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let noise_var = snoise(sphere_pos * 10.0 + seed_offset) * 0.1;
     r = clamp(r + noise_var, 0.0, 1.0);
 
+    // Write to tile-local index
+    let idx = id.y * res + id.x;
     roughness[idx] = r;
 }

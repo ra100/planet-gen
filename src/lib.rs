@@ -1,6 +1,7 @@
 pub mod app;
 pub mod compute;
 pub mod cube_sphere;
+pub mod export;
 pub mod gpu;
 pub mod noise;
 pub mod planet;

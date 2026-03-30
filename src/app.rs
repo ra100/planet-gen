@@ -1,6 +1,7 @@
 use eframe::egui;
 use std::sync::Arc;
 
+use crate::export::{self, ExportConfig, ExportHandle, ExportProgress};
 use crate::gpu::GpuContext;
 use crate::planet::{DerivedProperties, PlanetParams};
 use crate::plates::{generate_plates, PlateGenParams};
@@ -25,6 +26,12 @@ pub struct PlanetGenApp {
     view_mode: u32,
     preview_resolution: u32,
     needs_regenerate: bool,
+    // Export state
+    planet_name: String,
+    export_resolution: u32,
+    export_handle: Option<ExportHandle>,
+    export_status: String,
+    export_progress: f32,
 }
 
 impl PlanetGenApp {
@@ -51,6 +58,11 @@ impl PlanetGenApp {
             view_mode: 0,
             preview_resolution: crate::preview::DEFAULT_PREVIEW_SIZE,
             needs_regenerate: true,
+            planet_name: format!("planet_{}", PlanetParams::default().seed),
+            export_resolution: export::DEFAULT_EXPORT_RESOLUTION,
+            export_handle: None,
+            export_status: String::new(),
+            export_progress: 0.0,
         }
     }
 
@@ -155,10 +167,69 @@ impl PlanetGenApp {
     fn update_derived(&mut self) {
         self.derived = DerivedProperties::from_params(&self.params);
     }
+
+    fn start_export(&mut self) {
+        let config = ExportConfig {
+            face_resolution: self.export_resolution,
+            tile_size: export::TILE_SIZE,
+            output_dir: std::env::current_dir().unwrap_or_default().join("output"),
+            planet_name: self.planet_name.clone(),
+            erosion_iterations: self.erosion_iterations,
+            season: self.season,
+        };
+
+        let terrain_params = self.terrain_params();
+
+        let handle = export::spawn_export(
+            self.gpu.clone(),
+            config,
+            self.params.clone(),
+            self.derived.clone(),
+            self.continental_scale,
+            self.water_loss,
+            terrain_params,
+        );
+
+        self.export_handle = Some(handle);
+        self.export_status = "Starting export...".into();
+        self.export_progress = 0.0;
+    }
+
+    fn poll_export(&mut self) {
+        let mut finished = false;
+        if let Some(ref handle) = self.export_handle {
+            while let Ok(progress) = handle.progress_rx.try_recv() {
+                match progress {
+                    ExportProgress::Progress { message, fraction } => {
+                        self.export_status = message;
+                        self.export_progress = fraction;
+                    }
+                    ExportProgress::Complete => {
+                        self.export_status = "Export complete!".into();
+                        self.export_progress = 1.0;
+                        finished = true;
+                    }
+                    ExportProgress::Error(e) => {
+                        self.export_status = format!("Error: {e}");
+                        self.export_progress = 0.0;
+                        finished = true;
+                    }
+                }
+            }
+        }
+        if finished {
+            self.export_handle = None;
+        }
+    }
 }
 
 impl eframe::App for PlanetGenApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.export_handle.is_some() {
+            self.poll_export();
+            ctx.request_repaint();
+        }
+
         if self.needs_regenerate {
             self.generate_preview(ctx);
         }
@@ -210,6 +281,7 @@ impl eframe::App for PlanetGenApp {
                         .changed();
                     if ui.button("🎲").on_hover_text("Random seed").clicked() {
                         self.params.seed = rand_seed();
+                        self.planet_name = format!("planet_{}", self.params.seed);
                         changed = true;
                     }
                 });
@@ -354,6 +426,45 @@ impl eframe::App for PlanetGenApp {
                         self.needs_regenerate = true;
                     }
                 });
+
+                ui.separator();
+                ui.heading("Export");
+                ui.separator();
+
+                ui.horizontal(|ui| {
+                    ui.label("Name:");
+                    ui.text_edit_singleline(&mut self.planet_name);
+                });
+
+                let resolutions: [(u32, &str); 3] = [
+                    (2048, "2K"), (4096, "4K"), (8192, "8K"),
+                ];
+                ui.horizontal(|ui| {
+                    ui.label("Resolution:");
+                    for (res, label) in &resolutions {
+                        if ui.selectable_label(self.export_resolution == *res, *label).clicked() {
+                            self.export_resolution = *res;
+                        }
+                    }
+                });
+
+                let is_exporting = self.export_handle.is_some();
+
+                if is_exporting {
+                    ui.add(egui::ProgressBar::new(self.export_progress).text(&self.export_status));
+                    if ui.button("Cancel").clicked() {
+                        if let Some(ref handle) = self.export_handle {
+                            handle.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                } else {
+                    if ui.button("Export Textures").clicked() {
+                        self.start_export();
+                    }
+                    if !self.export_status.is_empty() {
+                        ui.small(&self.export_status);
+                    }
+                }
 
                 ui.separator();
                 ui.small(format!("GPU: {}", self.gpu.adapter_name()));
