@@ -78,8 +78,45 @@ fn lowest_neighbor(x: i32, y: i32) -> vec2<i32> {
     return min_pos;
 }
 
-// Pass 1: D8 flow accumulation — each pixel receives water from uphill neighbors
-// whose steepest-descent path leads to this pixel. Ping-pong water buffers.
+// Compute what fraction of a neighbor's water flows toward (tx, ty).
+// Uses MFD (Multiple Flow Direction): water splits proportionally among
+// all downhill neighbors based on slope, preventing single-pixel channels.
+fn flow_fraction(nx: i32, ny: i32, tx: i32, ty: i32) -> f32 {
+    let nh = get_h(nx, ny);
+    let offsets = array<vec2<i32>, 8>(
+        vec2<i32>(-1, -1), vec2<i32>(0, -1), vec2<i32>(1, -1),
+        vec2<i32>(-1,  0),                    vec2<i32>(1,  0),
+        vec2<i32>(-1,  1), vec2<i32>(0,  1), vec2<i32>(1,  1)
+    );
+    let dists = array<f32, 8>(
+        1.414, 1.0, 1.414,
+        1.0,        1.0,
+        1.414, 1.0, 1.414
+    );
+
+    var target_slope = 0.0;
+    var total_slope = 0.0;
+
+    for (var i = 0; i < 8; i++) {
+        let cx = nx + offsets[i].x;
+        let cy = ny + offsets[i].y;
+        let ch = get_h(cx, cy);
+        let drop = nh - ch;
+        if (drop > 0.0) {
+            let s = drop / dists[i];
+            total_slope += s;
+            if (cx == tx && cy == ty) {
+                target_slope = s;
+            }
+        }
+    }
+
+    if (total_slope <= 0.0 || target_slope <= 0.0) { return 0.0; }
+    return target_slope / total_slope;
+}
+
+// Pass 1: MFD flow accumulation — each pixel receives a proportional share
+// of water from uphill neighbors based on relative slope. Ping-pong buffers.
 // Run 64+ times to propagate water from ridgelines to valleys.
 @compute @workgroup_size(16, 16)
 fn accumulate_flow(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -94,8 +131,6 @@ fn accumulate_flow(@builtin(global_invocation_id) id: vec3<u32>) {
     // Start with base rainfall
     var w = 1.0;
 
-    // Check all 8 neighbors: if a neighbor is uphill and its steepest
-    // descent leads to us, we receive ALL of its water.
     let offsets = array<vec2<i32>, 8>(
         vec2<i32>(-1, -1), vec2<i32>(0, -1), vec2<i32>(1, -1),
         vec2<i32>(-1,  0),                    vec2<i32>(1,  0),
@@ -107,14 +142,10 @@ fn accumulate_flow(@builtin(global_invocation_id) id: vec3<u32>) {
         let ny = y + offsets[i].y;
         let nh = get_h(nx, ny);
 
-        // Only consider uphill neighbors
+        // Only receive water from uphill neighbors
         if (nh > h) {
-            // Check if WE are this neighbor's steepest descent
-            let lowest = lowest_neighbor(nx, ny);
-            if (lowest.x == x && lowest.y == y) {
-                // We are the steepest descent — receive all water
-                w += get_water_in(nx, ny);
-            }
+            let frac = flow_fraction(nx, ny, x, y);
+            w += get_water_in(nx, ny) * frac;
         }
     }
 

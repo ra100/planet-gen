@@ -283,6 +283,7 @@ impl eframe::App for PlanetGenApp {
             .resizable(true)
             .default_width(280.0)
             .show(ctx, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.heading("Planet Parameters");
                 ui.separator();
 
@@ -596,6 +597,7 @@ impl eframe::App for PlanetGenApp {
                 ui.separator();
                 ui.small(format!("GPU: {}", self.gpu.adapter_name()));
                 ui.small("Drag to rotate • Scroll to zoom • Middle-drag to pan");
+                }); // ScrollArea
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
