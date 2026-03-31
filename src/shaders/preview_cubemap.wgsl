@@ -393,13 +393,9 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     // Start with global coverage blended with moisture
     var local_coverage = mix(coverage, moisture_norm, 0.35);
 
-    // Ocean/land influence: very wide transition so clouds don't follow coastlines
-    // Clouds at altitude average over large areas — no per-pixel terrain following
-    let h_diff = height - uniforms.ocean_level;
-    let ocean_factor = smooth_step(0.12, -0.08, h_diff); // wide 20% band
-    let warm_ocean = smooth_step(5.0, 25.0, temp) * 0.05 * ocean_factor;
-    let interior_dry = smooth_step(0.05, 0.25, max(h_diff, 0.0)) * 0.04 * (1.0 - ocean_factor);
-    local_coverage += warm_ocean - interior_dry;
+    // NOTE: No per-pixel ocean/land coverage adjustment — it creates visible
+    // terrain-following edges at coastlines. The moisture model already captures
+    // climate differences between land and ocean.
 
     // Orographic lift: mountains force air up → condensation on windward side
     let tilt = uniforms.axial_tilt_rad;
@@ -1003,19 +999,20 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         lit_color = ambient + (diffuse + specular) * n_dot_l * s_color * mix(1.0, surface_shadow, 0.65);
     }
 
-    // ---- Night-side city lights ----
+    // ---- Night-side city lights (rendered before clouds so clouds occlude them) ----
+    var city_glow_through = vec3<f32>(0.0); // stored for scatter through clouds
+    var city_glow_amount = 0.0;
     if (uniforms.night_lights > 0.0 && !is_ocean) {
-        let night_factor = smooth_step(0.05, -0.1, n_dot_l); // 1 on dark side, 0 on lit
+        let night_factor = smooth_step(0.05, -0.1, n_dot_l);
         if (night_factor > 0.01) {
             let urban = compute_urban_density(rotated, height);
             if (urban > 0.01) {
-                // Fine sparkle: very high frequency for individual light dots
                 let sparkle = snoise(rotated * 300.0) * 0.3 + snoise(rotated * 600.0) * 0.2 + 0.5;
                 let light_intensity = urban * night_factor * uniforms.night_lights * max(sparkle, 0.3);
-                // City glow color from hue slider
-                let amber = vec3<f32>(1.2, 0.85, 0.3);   // warm sodium
-                let white_led = vec3<f32>(1.1, 1.05, 1.0); // neutral LED
-                let cool_blue = vec3<f32>(0.5, 0.7, 1.2);  // alien/futuristic
+                // City color from hue slider
+                let amber = vec3<f32>(1.2, 0.85, 0.3);
+                let white_led = vec3<f32>(1.1, 1.05, 1.0);
+                let cool_blue = vec3<f32>(0.5, 0.7, 1.2);
                 let hue = uniforms.city_light_hue;
                 var city_col: vec3<f32>;
                 if (hue < 0.5) {
@@ -1023,7 +1020,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 } else {
                     city_col = mix(white_led, cool_blue, (hue - 0.5) * 2.0);
                 }
-                lit_color += city_col * light_intensity * 1.2;
+                // Dim lights under cloud cover
+                let cloud_above = compute_cloud_density(rotated, height);
+                let cloud_block = exp(-cloud_above * 4.0); // thick clouds block most light
+                lit_color += city_col * light_intensity * 1.2 * cloud_block;
+                // Save glow for scatter through clouds
+                city_glow_through = city_col * light_intensity * 0.3;
+                city_glow_amount = cloud_above;
             }
         }
     }
@@ -1095,6 +1098,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
             lit_color = mix(lit_color, ci_color, ci_alpha * 0.7);
         }
+    }
+
+    // City light scatter through clouds: soft glow on top of cloud layer
+    if (city_glow_amount > 0.05) {
+        let scatter_strength = (1.0 - exp(-city_glow_amount * 2.0)) * 0.4; // thicker clouds scatter more
+        lit_color += city_glow_through * scatter_strength;
     }
 
     // Ray-marched atmosphere (in HDR space, before tonemapping)
