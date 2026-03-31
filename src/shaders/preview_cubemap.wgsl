@@ -304,9 +304,8 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
             let storm_sigma = base_sigma / max(uniforms.storm_size * uniforms.storm_size, 0.1);
             let influence = exp(-d * d * storm_sigma);
 
-            // Tangent rotation: rotate position around storm center axis
-            // Stronger rotation near center (1/d falloff), Coriolis-correct direction
-            let rotation_amount = influence * sign_y * 0.8 / max(d * 8.0, 0.3);
+            // Tangent rotation: strong vortex near center, Coriolis-correct
+            let rotation_amount = influence * sign_y * 3.0 / max(d * 5.0, 0.2);
             let tangent = cross(center, sphere_pos);
             vortex_sphere = normalize(vortex_sphere + tangent * rotation_amount * 0.03);
         }
@@ -463,13 +462,18 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
             let eye_wall_boost = exp(-wall_dist * wall_dist / (eye_r * eye_r * 0.5)) * near_storm * 0.4;
             density += eye_wall_boost;
 
-            // Spiral arm mask: deep carving between arms
+            // Spiral arms: ADD dense bands + CARVE gaps (both needed for visibility)
             let spiral_phase = angle * sign_y - log(max(d, 0.003)) * 3.5;
-            let spiral_raw = cos(spiral_phase * 2.0); // -1 to 1
-            let spiral_fade = smooth_step(eye_r * 1.5, eye_r * 5.0, d);
-            // Deep gaps (up to 80% density removal between arms)
-            let gap_depth = near_storm * spiral_fade * 0.8;
-            let arm_shape = spiral_raw * 0.5 + 0.5; // 0=gap, 1=arm
+            let spiral_raw = cos(spiral_phase * 2.0);
+            let spiral_fade = smooth_step(eye_r * 1.5, eye_r * 6.0, d);
+
+            // Add dense cloud along spiral arms (positive peaks only)
+            let arm_boost = pow(max(spiral_raw, 0.0), 1.5) * near_storm * spiral_fade * 0.5;
+            density += arm_boost;
+
+            // Carve gaps between arms
+            let gap_depth = near_storm * spiral_fade * 0.85;
+            let arm_shape = spiral_raw * 0.5 + 0.5;
             let spiral_mask = 1.0 - gap_depth * (1.0 - arm_shape);
 
             density *= mix(1.0, spiral_mask * eye_mask, near_storm);
