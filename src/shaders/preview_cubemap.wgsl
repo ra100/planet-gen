@@ -372,63 +372,76 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     local_coverage += convection_boost;
 
     // === Step 3b: Cyclone storm coverage boost ===
-    // Storms add local coverage (not separate density) so existing noise creates the texture.
+    // Phase 1: storms boost local_coverage to make the area cloudier.
     let n_storms = i32(min(uniforms.storm_count, 8.0));
     if (n_storms > 0) {
-        let tilt_s = uniforms.axial_tilt_rad;
         for (var i = 0; i < 8; i++) {
             if (i >= n_storms) { break; }
             let fi = f32(i);
-            // Pseudo-random storm center
             let slat = (30.0 + fract(sin(fi * 127.1 + s) * 43758.5) * 25.0) * 3.14159 / 180.0;
             let slon = fract(sin(fi * 311.7 + s * 1.3) * 23421.6) * 6.28318;
-            let sign_y = select(-1.0, 1.0, i % 2 == 0); // alternate hemispheres
+            let sign_y = select(-1.0, 1.0, i % 2 == 0);
             let center = normalize(vec3<f32>(
-                cos(slat) * cos(slon),
-                sin(slat) * sign_y,
-                cos(slat) * sin(slon)
+                cos(slat) * cos(slon), sin(slat) * sign_y, cos(slat) * sin(slon)
             ));
-
-            // Great-circle distance
             let d = acos(clamp(dot(sphere_pos, center), -1.0, 1.0));
-
-            // Gaussian storm envelope — size controlled by slider
             let base_sigma = 22.0 + fract(sin(fi * 73.1 + s * 0.7) * 19283.3) * 12.0;
             let storm_sigma = base_sigma / max(uniforms.storm_size * uniforms.storm_size, 0.1);
             let falloff = exp(-d * d * storm_sigma);
-
-            // Soft spiral bias via tangent-plane angle (Coriolis-correct)
-            let up_s = select(vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0, 1.0, 0.0), abs(center.y) < 0.9);
-            let tx = normalize(cross(up_s, center));
-            let ty = cross(center, tx);
-            let to_pt = sphere_pos - center * dot(sphere_pos, center);
-            let angle = atan2(dot(to_pt, ty), dot(to_pt, tx));
-
-            // Clear eye at center + dense eye wall ring
-            let eye_radius = 0.02 + fract(sin(fi * 53.7 + s * 0.3) * 31415.9) * 0.015;
-            let eye_clear = 1.0 - exp(-d * d / (eye_radius * eye_radius));
-            let eye_wall = exp(-(d - eye_radius * 1.5) * (d - eye_radius * 1.5) / (eye_radius * eye_radius * 2.0));
-
-            // Spiral only in outer bands — fades out near center
-            let spiral_strength = smooth_step(eye_radius * 2.0, eye_radius * 5.0, d);
-            let spiral = cos((angle * sign_y - log(max(d, 0.003)) * 3.5) * 2.0);
-            let spiral_bias = spiral * 0.3 * spiral_strength + 0.7; // 0.4–1.0 range for visible arms
-
-            // Coverage: eye wall ring + outer bands with spiral, minus clear eye
-            local_coverage += (falloff * spiral_bias * 0.35 + eye_wall * 0.3) * eye_clear;
+            // Just boost coverage in the storm area (no spiral yet)
+            local_coverage += falloff * 0.4;
         }
     }
 
     local_coverage = clamp(local_coverage, 0.0, 1.0);
 
     // === Step 4: Multi-scale pattern variety ===
-    // Large-scale weather modulation: some regions have big connected masses,
-    // others have scattered small clouds. Varies the effective noise value.
     let weather_scale = snoise(sphere_pos * 2.0 + seed_off * 0.2) * 0.15;
     let varied_noise = clamp(noise_val + weather_scale, 0.0, 1.0);
 
     // === Step 5: Schneider remap ===
-    let density = cloud_remap(varied_noise, 1.0 - local_coverage, 1.0, 0.0, 1.0) * local_coverage;
+    var density = cloud_remap(varied_noise, 1.0 - local_coverage, 1.0, 0.0, 1.0) * local_coverage;
+
+    // === Step 6: Carve spiral arms + eye into density (post-remap) ===
+    // This directly sculpts the visible cloud density, making spiral structure visible.
+    if (n_storms > 0) {
+        for (var i = 0; i < 8; i++) {
+            if (i >= n_storms) { break; }
+            let fi = f32(i);
+            let slat = (30.0 + fract(sin(fi * 127.1 + s) * 43758.5) * 25.0) * 3.14159 / 180.0;
+            let slon = fract(sin(fi * 311.7 + s * 1.3) * 23421.6) * 6.28318;
+            let sign_y = select(-1.0, 1.0, i % 2 == 0);
+            let center = normalize(vec3<f32>(
+                cos(slat) * cos(slon), sin(slat) * sign_y, cos(slat) * sin(slon)
+            ));
+            let d = acos(clamp(dot(sphere_pos, center), -1.0, 1.0));
+            let base_sigma = 22.0 + fract(sin(fi * 73.1 + s * 0.7) * 19283.3) * 12.0;
+            let storm_sigma = base_sigma / max(uniforms.storm_size * uniforms.storm_size, 0.1);
+            let near_storm = exp(-d * d * storm_sigma);
+
+            // Tangent-plane angle for spiral
+            let up_s = select(vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0, 1.0, 0.0), abs(center.y) < 0.9);
+            let tx = normalize(cross(up_s, center));
+            let ty = cross(center, tx);
+            let to_pt = sphere_pos - center * dot(sphere_pos, center);
+            let angle = atan2(dot(to_pt, ty), dot(to_pt, tx));
+
+            // Eye: clear center
+            let eye_r = (0.025 + fract(sin(fi * 53.7 + s * 0.3) * 31415.9) * 0.02) * uniforms.storm_size;
+            let eye_mask = smooth_step(eye_r * 0.5, eye_r, d); // 0 at center, 1 outside eye
+
+            // Spiral arm mask: carves gaps between arms
+            // Coriolis: CCW in NH (sign_y=1), CW in SH (sign_y=-1)
+            let spiral_phase = angle * sign_y - log(max(d, 0.003)) * 3.5;
+            let spiral_raw = cos(spiral_phase * 2.0); // -1 to 1
+            // Stronger spiral near storm, fading to no effect far away
+            let spiral_fade = smooth_step(eye_r * 1.5, eye_r * 4.0, d); // no spiral in eye
+            let gap_depth = near_storm * spiral_fade * 0.55; // how deep gaps are carved
+            let spiral_mask = 1.0 - gap_depth * (1.0 - (spiral_raw * 0.5 + 0.5)); // 1=arm, reduced=gap
+
+            density *= mix(1.0, spiral_mask * eye_mask, near_storm);
+        }
+    }
 
     return max(density, 0.0);
 }
