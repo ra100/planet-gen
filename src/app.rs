@@ -42,6 +42,7 @@ pub struct PlanetGenApp {
     storm_size: f32,
     night_lights: f32,
     star_color_temp: f32,
+    city_light_hue: f32,
     view_mode: u32,
     preview_resolution: u32,
     needs_terrain: bool,   // full terrain recompute (plates + compute + erosion)
@@ -95,6 +96,7 @@ impl PlanetGenApp {
             storm_size: 1.0,
             night_lights: 0.0,
             star_color_temp: 0.5,
+            city_light_hue: 0.0,
             view_mode: 0,
             preview_resolution: crate::preview::DEFAULT_PREVIEW_SIZE,
             needs_terrain: true,
@@ -149,7 +151,7 @@ impl PlanetGenApp {
             storm_size: self.storm_size,
             night_lights: self.night_lights,
             star_color_temp: self.star_color_temp,
-            _pad3: 0.0,
+            city_light_hue: self.city_light_hue,
         }
     }
 
@@ -480,6 +482,15 @@ impl eframe::App for PlanetGenApp {
                     .changed()
                 {
                     self.needs_render = true;
+                }
+                if self.night_lights > 0.0 {
+                    if ui.add(egui::Slider::new(&mut self.city_light_hue, 0.0..=1.0)
+                        .text("Light Color"))
+                        .on_hover_text("Night light color: 0 = warm amber (sodium), 0.5 = white (LED), 1.0 = cool blue (alien/futuristic)")
+                        .changed()
+                    {
+                        self.needs_render = true;
+                    }
                 }
 
                 ui.separator();

@@ -106,7 +106,7 @@ fn main() {
                 storm_size: 1.0,
                 night_lights: 0.0,
                 star_color_temp: 0.5,
-                _pad3: 0.0,
+                city_light_hue: 0.0,
             };
 
             let pixels = renderer.render(&gpu, &uniforms, &cubemap_view, render_size);

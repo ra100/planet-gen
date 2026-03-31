@@ -31,7 +31,7 @@ pub struct PreviewUniforms {
     pub storm_size: f32,         // storm radius multiplier (0.5 = small, 1.0 = default, 2.0 = large)
     pub night_lights: f32,       // 0.0 = pristine, 1.0 = heavily urbanized
     pub star_color_temp: f32,    // 0.0 = blue hot star, 0.5 = sun-like, 1.0 = red dwarf
-    pub _pad3: f32,
+    pub city_light_hue: f32,    // 0.0 = warm amber, 0.5 = white, 1.0 = cool blue
 }
 
 pub struct PreviewRenderer {
@@ -377,7 +377,7 @@ mod tests {
             storm_size: 1.0,
             night_lights: 0.0,
             star_color_temp: 0.5,
-            _pad3: 0.0,
+            city_light_hue: 0.0,
         };
 
         let size = 256;

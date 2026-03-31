@@ -25,7 +25,7 @@ struct Uniforms {
     storm_size: f32,         // storm radius multiplier
     night_lights: f32,       // 0.0 = pristine, 1.0 = urbanized
     star_color_temp: f32,    // 0.0 = blue, 0.5 = sun, 1.0 = red dwarf
-    _pad3: f32,
+    city_light_hue: f32,    // 0.0 = warm amber, 0.5 = white, 1.0 = cool blue
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -1012,8 +1012,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 // Fine sparkle: very high frequency for individual light dots
                 let sparkle = snoise(rotated * 300.0) * 0.3 + snoise(rotated * 600.0) * 0.2 + 0.5;
                 let light_intensity = urban * night_factor * uniforms.night_lights * max(sparkle, 0.3);
-                // Bright warm yellow-orange city glow (emissive — HDR, will tonemap)
-                lit_color += vec3<f32>(1.2, 0.95, 0.4) * light_intensity * 1.2;
+                // City glow color from hue slider
+                let amber = vec3<f32>(1.2, 0.85, 0.3);   // warm sodium
+                let white_led = vec3<f32>(1.1, 1.05, 1.0); // neutral LED
+                let cool_blue = vec3<f32>(0.5, 0.7, 1.2);  // alien/futuristic
+                let hue = uniforms.city_light_hue;
+                var city_col: vec3<f32>;
+                if (hue < 0.5) {
+                    city_col = mix(amber, white_led, hue * 2.0);
+                } else {
+                    city_col = mix(white_led, cool_blue, (hue - 0.5) * 2.0);
+                }
+                lit_color += city_col * light_intensity * 1.2;
             }
         }
     }
