@@ -292,7 +292,7 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     let weather_mask = smooth_step(-0.15, 0.35, weather - subtropical_clear);
 
     // ================================================================
-    // CYCLONE SYSTEMS — messy, asymmetric spiral storms
+    // CYCLONE SYSTEMS — cloud masses with loose spiral tendency
     // ================================================================
     var storm = 0.0;
     for (var i = 0; i < 4; i++) {
@@ -308,36 +308,31 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
 
         let d = acos(clamp(dot(sphere_pos, center), -1.0, 1.0));
 
-        // Tangent plane for spiral angle
-        let up = vec3<f32>(0.0, 1.0, 0.0);
+        // Tangent plane (avoid degenerate cross product near poles)
+        let up = select(vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0, 1.0, 0.0), abs(center.y) < 0.9);
         let tx = normalize(cross(up, center));
         let ty = cross(center, tx);
         let to_pt = sphere_pos - center * dot(sphere_pos, center);
         let angle = atan2(dot(to_pt, ty), dot(to_pt, tx));
 
-        // NOISE-PERTURBED spiral: break perfect geometry
-        let angle_noise = snoise(sphere_pos * 5.0 + seed_off + vec3<f32>(fi * 31.0, 0.0, 0.0)) * 0.8;
-        let perturbed_angle = angle + angle_noise;
-
-        // Logarithmic spiral with noise-modulated arm thickness
-        let spiral_phase = perturbed_angle * sign_y - log(max(d, 0.001)) * 4.0;
-        let arm_noise = snoise(sphere_pos * 10.0 + seed_off + vec3<f32>(fi * 23.0, 7.0, 0.0)) * 0.3;
-        let spiral_raw = cos(spiral_phase * 2.5 + arm_noise) * 0.5 + 0.5;
-        // Sharpen arms: make them narrower bands, not smooth sine
-        let spiral_arm = smooth_step(0.3, 0.6, spiral_raw);
-
-        // Storm envelope (Gaussian falloff)
-        let storm_radius = 18.0 + fract(sin(fi * 73.1 + s * 0.7) * 19283.3) * 15.0;
+        // Storm envelope
+        let storm_radius = 20.0 + fract(sin(fi * 73.1 + s * 0.7) * 19283.3) * 15.0;
         let falloff = exp(-d * d * storm_radius);
 
-        // Cloud texture within arms (ridged noise for puffy structure)
-        let arm_detail = (1.0 - abs(snoise(sphere_pos * 18.0 + seed_off + vec3<f32>(fi * 17.0, 0.0, 0.0)))) * 0.5
-                       + (1.0 - abs(snoise(sphere_pos * 36.0 + seed_off + vec3<f32>(fi * 41.0, 3.0, 0.0)))) * 0.3
-                       + 0.2;
+        // PRIMARY: cloud texture (ridged noise = puffy cloud shapes)
+        let cp = sphere_pos + seed_off + vec3<f32>(fi * 17.0, 0.0, 0.0);
+        let cloud_tex = (1.0 - abs(snoise(cp * 8.0))) * 0.45
+                      + (1.0 - abs(snoise(cp * 16.0 + vec3<f32>(3.1, 7.2, 1.5)))) * 0.35
+                      + (1.0 - abs(snoise(cp * 32.0 + vec3<f32>(5.7, 2.3, 8.1)))) * 0.20;
+
+        // SECONDARY: spiral is just a soft density bias (NOT hard bands)
+        let spiral_phase = angle * sign_y - log(max(d, 0.005)) * 3.5;
+        let spiral_bias = cos(spiral_phase * 2.0) * 0.25 + 0.75; // range 0.5–1.0
 
         // Small eye
-        let eye = smooth_step(0.02, 0.06, d);
-        storm += falloff * spiral_arm * arm_detail * eye;
+        let eye = smooth_step(0.015, 0.05, d);
+
+        storm += falloff * cloud_tex * spiral_bias * eye;
     }
     storm = clamp(storm, 0.0, 1.0);
 
@@ -403,8 +398,9 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
 
     density = clamp(density, 0.0, 1.0);
 
-    // Coverage threshold — sharper edges for more defined clouds
-    let threshold = 1.0 - coverage;
+    // Coverage threshold — quadratic makes slider usable across full range
+    // coverage=0.3 → threshold=0.49, coverage=0.5 → threshold=0.25, coverage=0.8 → threshold=0.04
+    let threshold = (1.0 - coverage) * (1.0 - coverage);
     return smooth_step(threshold, threshold + 0.15, density);
 }
 
