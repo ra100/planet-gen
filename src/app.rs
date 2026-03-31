@@ -762,14 +762,34 @@ impl eframe::App for PlanetGenApp {
                 }
             } else {
                 ui.centered_and_justified(|ui| {
-                    ui.label("Generating preview...");
+                    ui.spinner();
+                    ui.label("Generating terrain...");
                 });
+            }
+
+            // Loading overlay when terrain is regenerating (shown over existing preview)
+            if self.needs_terrain {
+                let overlay_rect = ui.min_rect();
+                let painter = ui.painter();
+                painter.rect_filled(
+                    overlay_rect,
+                    0.0,
+                    egui::Color32::from_rgba_premultiplied(0, 0, 0, 140),
+                );
+                painter.text(
+                    overlay_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    format!("Generating terrain ({}px)...", self.preview_resolution),
+                    egui::FontId::proportional(18.0),
+                    egui::Color32::WHITE,
+                );
             }
         });
 
         // Run expensive GPU work AFTER UI so input events (mouse-up) are processed first.
         // This prevents sliders from "sticking" during terrain regeneration.
         if self.needs_terrain {
+            ctx.request_repaint(); // ensure overlay shows before blocking
             self.regenerate_terrain();
         }
         if self.needs_render {
