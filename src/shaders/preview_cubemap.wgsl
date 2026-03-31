@@ -258,6 +258,59 @@ fn compute_moisture(sphere_pos: vec3<f32>, height: f32, season: f32) -> f32 {
     return clamp(moisture, 0.0, 400.0);
 }
 
+// ---- Cloud density function ----
+// Returns 0.0 (no cloud) to 1.0 (dense overcast).
+// Combines fBm noise with climate moisture, latitude-based cloud types, and orographic lift.
+fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
+    let coverage = uniforms.cloud_coverage;
+    if (coverage <= 0.0) { return 0.0; }
+
+    // Seed offset: spread cloud pattern away from terrain noise
+    let s = uniforms.cloud_seed;
+    let seed_off = vec3<f32>(s * 0.0371, s * 0.0593, s * 0.0127);
+
+    // === Layer 1: Cumulus / stratus — large systems, 3-octave fBm ===
+    let p = sphere_pos + seed_off;
+    let fbm = snoise(p * 2.1) * 0.5
+            + snoise(p * 4.3 + vec3<f32>(5.1, 0.0, 3.7)) * 0.3
+            + snoise(p * 8.7 + vec3<f32>(2.4, 6.1, 1.3)) * 0.2;
+    let cumulus = fbm * 0.5 + 0.5; // remap [-1,1] → [0,1]
+
+    // === Layer 2: Cirrus — thin E–W streaks at high latitudes ===
+    // Compress Y axis to stretch features into latitude bands
+    let ps = sphere_pos * vec3<f32>(1.0, 0.35, 1.0) + seed_off * 1.7 + vec3<f32>(23.0, 11.0, 7.0);
+    let cirrus_raw = snoise(ps * 7.0) * 0.5 + snoise(ps * 14.5) * 0.25;
+    // Only keep the sharp peaks — thin wisps
+    let cirrus = smooth_step(0.55, 0.85, cirrus_raw * 0.5 + 0.5);
+
+    // Blend cloud type by latitude: cumulus in tropics, cirrus above 45°
+    let tilt = uniforms.axial_tilt_rad;
+    let tilted_y = sphere_pos.y * cos(tilt) + sphere_pos.z * sin(tilt);
+    let lat_rad  = asin(clamp(tilted_y, -1.0, 1.0));
+    let lat_deg  = abs(lat_rad) * 180.0 / 3.14159;
+    let cirrus_blend = smooth_step(30.0, 65.0, lat_deg);
+    let base_cloud = mix(cumulus, max(cumulus * 0.35, cirrus), cirrus_blend);
+
+    // === Climate: moisture modulation ===
+    // Low moisture (desert) → almost no clouds; high moisture → dense coverage
+    let moisture = compute_moisture(sphere_pos, height, 0.5);
+    let moisture_factor = smooth_step(15.0, 110.0, moisture);
+    let noise_weighted = base_cloud * mix(0.2, 1.0, moisture_factor);
+
+    // === Orographic lift: upwind mountains trigger condensation ===
+    let wind = wind_direction_vec(lat_rad);
+    let tangent_wind = normalize(wind - sphere_pos * dot(wind, sphere_pos));
+    let upwind_pos = normalize(sphere_pos + tangent_wind * 0.04);
+    let upwind_h = textureSample(height_tex, height_sampler, upwind_pos).r;
+    let orographic = smooth_step(0.04, 0.22, max(upwind_h - uniforms.ocean_level, 0.0)) * 0.22;
+
+    let total = clamp(noise_weighted + orographic, 0.0, 1.0);
+
+    // Coverage threshold: low coverage → only densest patches survive
+    let threshold = 1.0 - coverage;
+    return smooth_step(threshold, threshold + 0.3, total);
+}
+
 // ---- Continuous gradient biome coloring ----
 // Replaces discrete Whittaker lookup with smooth 2D interpolation.
 // Temperature × moisture → color via 3×2 anchor grid.
@@ -606,6 +659,27 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Combine
     var lit_color = ambient + (diffuse + specular) * n_dot_l;
+
+    // ---- Cloud shell (rendered before atmosphere so atm scattering wraps over clouds) ----
+    if (uniforms.cloud_coverage > 0.001) {
+        // Find where the view ray hits the cloud shell sphere (always above surface)
+        let cloud_r = 1.0 + uniforms.cloud_altitude;
+        let z_cloud = sqrt(max(cloud_r * cloud_r - r2, 0.0));
+        let cloud_dir = normalize(vec3<f32>(ndc.x, ndc.y, z_cloud));
+        let cloud_world = (uniforms.rotation * vec4<f32>(cloud_dir, 0.0)).xyz;
+
+        let cloud_sfc_h = textureSample(height_tex, height_sampler, cloud_world).r;
+        let cloud_density = compute_cloud_density(cloud_world, cloud_sfc_h);
+
+        if (cloud_density > 0.01) {
+            // Sun lighting: bright on day side, dim on night side (self-shadow terminator)
+            let sun_dot = max(dot(cloud_dir, sun_dir), 0.0);
+            let cloud_lit = sun_dot * 0.85 + 0.15; // 0.15 ambient keeps night clouds faintly visible
+            let cloud_color = vec3<f32>(1.0, 0.97, 0.95) * cloud_lit;
+            let cloud_alpha = cloud_density * 0.85;
+            lit_color = mix(lit_color, cloud_color, cloud_alpha);
+        }
+    }
 
     // Ray-marched atmosphere (in HDR space, before tonemapping)
     if (has_atm) {
