@@ -323,14 +323,14 @@ impl eframe::App for PlanetGenApp {
                 ui.separator();
 
                 ui.horizontal(|ui| {
-                    changed |= ui
-                        .add(egui::DragValue::new(&mut self.params.seed).prefix("Seed: "))
-                        .changed();
                     if ui.button("🎲").on_hover_text("Random seed").clicked() {
                         self.params.seed = rand_seed();
                         self.planet_name = format!("planet_{}", self.params.seed);
                         changed = true;
                     }
+                    changed |= ui
+                        .add(egui::DragValue::new(&mut self.params.seed).prefix("Seed: "))
+                        .changed();
                 });
 
                 if changed {
@@ -422,11 +422,7 @@ impl eframe::App for PlanetGenApp {
                 }
                 ui.horizontal(|ui| {
                     if ui.small_button("🎲").on_hover_text("Randomize cloud pattern").clicked() {
-                        let t = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .subsec_nanos();
-                        self.cloud_seed = t ^ (self.cloud_seed.wrapping_mul(2654435761));
+                        self.cloud_seed = rand_seed();
                         self.needs_render = true;
                     }
                     let mut seed_i64 = self.cloud_seed as i64;

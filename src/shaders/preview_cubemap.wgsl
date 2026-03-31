@@ -260,78 +260,74 @@ fn compute_moisture(sphere_pos: vec3<f32>, height: f32, season: f32) -> f32 {
 
 // ---- Cloud density function ----
 // Returns 0.0 (no cloud) to 1.0 (dense overcast).
-// Combines multi-octave fBm with domain warping, climate moisture, and orographic lift.
+// Uses billowy ridged noise for puffy cumulus shapes + climate modulation.
+
+// Hash seed to bounded offset (works for any f32 magnitude)
+fn cloud_seed_hash(s: f32) -> vec3<f32> {
+    return vec3<f32>(
+        fract(sin(s * 78.233) * 43758.5453) * 100.0,
+        fract(sin(s * 12.989 + 1.5) * 67890.1234) * 100.0,
+        fract(sin(s * 37.719 + 3.1) * 91234.5678) * 100.0
+    );
+}
+
 fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     let coverage = uniforms.cloud_coverage;
     if (coverage <= 0.0) { return 0.0; }
 
-    // Bounded seed offset: golden ratio hash keeps offset in [0, 97) regardless of seed magnitude
-    let s = uniforms.cloud_seed;
-    let phi = 1.618033;
-    let seed_off = vec3<f32>(
-        fract(s * phi) * 97.0,
-        fract(s * phi * phi) * 89.0,
-        fract(s * phi * phi * phi) * 83.0
-    );
+    let seed_off = cloud_seed_hash(uniforms.cloud_seed);
 
-    // Domain warping: distort sample position for organic cloud edges
-    let warp1 = snoise(sphere_pos * 2.0 + seed_off) * 0.15;
-    let warp2 = snoise(sphere_pos * 3.5 + seed_off + vec3<f32>(50.0, 30.0, 70.0)) * 0.10;
-    let warped = sphere_pos + vec3<f32>(warp1, warp2, warp1 * 0.7);
+    // === Cumulus: billowy ridged noise (abs creates puffy rounded shapes) ===
+    let p = sphere_pos + seed_off;
+    // Ridged multifractal: 1-abs(noise) gives cloud-like billowy edges
+    let r1 = 1.0 - abs(snoise(p * 3.0));
+    let r2 = 1.0 - abs(snoise(p * 6.0 + vec3<f32>(5.1, 3.3, 1.7)));
+    let r3 = 1.0 - abs(snoise(p * 12.0 + vec3<f32>(2.4, 6.1, 1.3)));
+    // Weight lower octaves more for soft, large cloud masses
+    let cumulus = r1 * 0.5 + r2 * 0.3 + r3 * 0.2;
+    // Square to sharpen: makes clouds puffier with clearer sky between them
+    let cumulus_shaped = cumulus * cumulus;
 
-    // === Layer 1: Cumulus / stratocumulus — 4-octave fBm with detail ===
-    let p = warped + seed_off;
-    let o1 = snoise(p * 2.5) * 0.40;
-    let o2 = snoise(p * 5.0 + vec3<f32>(5.1, 0.0, 3.7)) * 0.25;
-    let o3 = snoise(p * 10.0 + vec3<f32>(2.4, 6.1, 1.3)) * 0.20;
-    let o4 = snoise(p * 20.0 + vec3<f32>(8.3, 1.7, 4.9)) * 0.15;
-    let cumulus = (o1 + o2 + o3 + o4) * 0.5 + 0.5;
+    // === Cirrus: high-frequency with slight E-W elongation ===
+    let pc = sphere_pos * vec3<f32>(1.0, 0.6, 1.0) + seed_off + vec3<f32>(50.0, 30.0, 70.0);
+    let cf1 = snoise(pc * 8.0);
+    let cf2 = snoise(pc * 16.0 + vec3<f32>(3.7, 1.1, 8.3)) * 0.5;
+    let cirrus = smooth_step(0.4, 0.8, (cf1 + cf2) * 0.4 + 0.5);
 
-    // === Layer 2: Cirrus — thin wispy streaks ===
-    // Compress Y to elongate features E–W; separate seed region
-    let ps = warped * vec3<f32>(1.0, 0.3, 1.0) + seed_off * 1.3 + vec3<f32>(23.0, 11.0, 7.0);
-    let c1 = snoise(ps * 8.0) * 0.5;
-    let c2 = snoise(ps * 16.0 + vec3<f32>(3.7, 0.5, 8.3)) * 0.3;
-    let c3 = snoise(ps * 32.0 + vec3<f32>(1.1, 5.5, 2.7)) * 0.2;
-    let cirrus_raw = c1 + c2 + c3;
-    // Threshold to get thin filaments
-    let cirrus = smooth_step(0.3, 0.7, cirrus_raw * 0.5 + 0.5);
+    // === Scattered fair-weather cumulus: small isolated puffs ===
+    let pp = sphere_pos + seed_off * 0.8 + vec3<f32>(41.0, 17.0, 63.0);
+    let puff = 1.0 - abs(snoise(pp * 14.0));
+    let puffs = smooth_step(0.7, 0.9, puff) * 0.5;
 
-    // === Layer 3: Small convective puffs (scattered cumulus) ===
-    let pp = warped + seed_off * 0.7 + vec3<f32>(41.0, 17.0, 63.0);
-    let puff_noise = snoise(pp * 15.0) * 0.6 + snoise(pp * 30.0) * 0.4;
-    let puffs = smooth_step(0.35, 0.65, puff_noise * 0.5 + 0.5) * 0.6;
-
-    // Blend cloud types by latitude, with overlap everywhere
+    // Latitude-based blending (smooth, avoids hard bands)
     let tilt = uniforms.axial_tilt_rad;
     let tilted_y = sphere_pos.y * cos(tilt) + sphere_pos.z * sin(tilt);
-    let lat_rad  = asin(clamp(tilted_y, -1.0, 1.0));
-    let lat_deg  = abs(lat_rad) * 180.0 / 3.14159;
-    // Tropics: mostly cumulus + puffs. Mid-lat: mix. High-lat: cirrus dominant
-    let tropical = smooth_step(35.0, 15.0, lat_deg);      // 1 in tropics
-    let midlat   = 1.0 - abs(lat_deg - 45.0) / 30.0;     // peaks at 45°
-    let polar    = smooth_step(50.0, 75.0, lat_deg);       // 1 near poles
-    let base_cloud = cumulus * (0.5 + 0.4 * tropical)
-                   + cirrus * (0.15 + 0.6 * polar + 0.25 * clamp(midlat, 0.0, 1.0))
-                   + puffs * (0.3 + 0.5 * tropical);
+    let lat_rad = asin(clamp(tilted_y, -1.0, 1.0));
+    let lat_deg = abs(lat_rad) * 180.0 / 3.14159;
+
+    let tropical_w = 1.0 - smooth_step(10.0, 40.0, lat_deg);
+    let polar_w = smooth_step(50.0, 70.0, lat_deg);
+    let mid_w = 1.0 - tropical_w - polar_w;
+
+    let base_cloud = cumulus_shaped * (0.6 + 0.3 * tropical_w + 0.1 * mid_w)
+                   + cirrus * (0.1 + 0.4 * polar_w + 0.2 * mid_w)
+                   + puffs * (0.5 * tropical_w + 0.3 * mid_w);
     let base_norm = clamp(base_cloud, 0.0, 1.0);
 
-    // === Climate: moisture modulation (softened to avoid hard latitude bands) ===
+    // === Climate: moisture influence (soft, avoids latitude banding) ===
     let moisture = compute_moisture(sphere_pos, height, 0.5);
-    let moisture_factor = smooth_step(25.0, 140.0, moisture);
-    // Mix noise and moisture so noise can still produce clouds in drier areas
-    let noise_weighted = base_norm * (0.35 + 0.65 * moisture_factor);
+    let moisture_factor = smooth_step(30.0, 150.0, moisture);
+    let noise_weighted = base_norm * (0.4 + 0.6 * moisture_factor);
 
-    // === Orographic lift: upwind mountains trigger condensation ===
+    // === Orographic lift ===
     let wind = wind_direction_vec(lat_rad);
     let tangent_wind = normalize(wind - sphere_pos * dot(wind, sphere_pos));
     let upwind_pos = normalize(sphere_pos + tangent_wind * 0.04);
     let upwind_h = textureSample(height_tex, height_sampler, upwind_pos).r;
-    let orographic = smooth_step(0.04, 0.22, max(upwind_h - uniforms.ocean_level, 0.0)) * 0.18;
+    let orographic = smooth_step(0.04, 0.22, max(upwind_h - uniforms.ocean_level, 0.0)) * 0.15;
 
     let total = clamp(noise_weighted + orographic, 0.0, 1.0);
 
-    // Coverage threshold: low coverage → only densest patches survive
     let threshold = 1.0 - coverage;
     return smooth_step(threshold, threshold + 0.3, total);
 }
