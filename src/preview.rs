@@ -23,7 +23,10 @@ pub struct PreviewUniforms {
     pub zoom: f32,               // viewport zoom (1.0 = default, >1 = zoomed in)
     pub pan_x: f32,              // viewport pan in NDC units
     pub pan_y: f32,
-    pub _pad1: f32,
+    pub cloud_coverage: f32,     // 0.0 = clear, 1.0 = overcast
+    pub cloud_seed: f32,         // noise seed for cloud pattern
+    pub cloud_altitude: f32,     // cloud shell altitude above surface (planet radii)
+    pub _pad2: [f32; 2],
 }
 
 pub struct PreviewRenderer {
@@ -361,7 +364,10 @@ mod tests {
             zoom: 1.0,
             pan_x: 0.0,
             pan_y: 0.0,
-            _pad1: 0.0,
+            cloud_coverage: 0.5,
+            cloud_seed: 42.0,
+            cloud_altitude: 0.008,
+            _pad2: [0.0; 2],
         };
 
         let size = 256;

@@ -98,7 +98,10 @@ fn main() {
                 zoom: 1.0,
                 pan_x: 0.0,
                 pan_y: 0.0,
-                _pad1: 0.0,
+                cloud_coverage: 0.0,
+                cloud_seed: 0.0,
+                cloud_altitude: 0.008,
+                _pad2: [0.0; 2],
             };
 
             let pixels = renderer.render(&gpu, &uniforms, &cubemap_view, render_size);

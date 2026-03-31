@@ -35,6 +35,8 @@ pub struct PlanetGenApp {
     warp_strength: f32,
     detail_scale: f32,
     num_plates_override: u32, // 0 = auto from physics
+    cloud_coverage: f32,
+    cloud_seed: u32,
     view_mode: u32,
     preview_resolution: u32,
     needs_terrain: bool,   // full terrain recompute (plates + compute + erosion)
@@ -55,6 +57,7 @@ impl PlanetGenApp {
         let erosion_pipeline = ErosionPipeline::new(&gpu);
         let params = PlanetParams::default();
         let derived = DerivedProperties::from_params(&params);
+        let default_cloud_seed = params.seed.wrapping_add(1000);
         Self {
             gpu,
             preview_renderer,
@@ -80,6 +83,8 @@ impl PlanetGenApp {
             warp_strength: 1.0,
             detail_scale: 1.0,
             num_plates_override: 0,
+            cloud_coverage: 0.5,
+            cloud_seed: default_cloud_seed,
             view_mode: 0,
             preview_resolution: crate::preview::DEFAULT_PREVIEW_SIZE,
             needs_terrain: true,
@@ -126,7 +131,10 @@ impl PlanetGenApp {
             zoom: self.zoom,
             pan_x: self.pan[0],
             pan_y: self.pan[1],
-            _pad1: 0.0,
+            cloud_coverage: self.cloud_coverage,
+            cloud_seed: self.cloud_seed as f32,
+            cloud_altitude: 0.008,
+            _pad2: [0.0; 2],
         }
     }
 
@@ -402,6 +410,31 @@ impl eframe::App for PlanetGenApp {
                 {
                     self.needs_render = true;
                 }
+
+                ui.separator();
+                ui.label("Clouds");
+                if ui.add(egui::Slider::new(&mut self.cloud_coverage, 0.0..=1.0)
+                    .text("Coverage"))
+                    .on_hover_text("Cloud coverage fraction. 0 = clear sky, 1 = heavy overcast")
+                    .changed()
+                {
+                    self.needs_render = true;
+                }
+                ui.horizontal(|ui| {
+                    let mut seed_i64 = self.cloud_seed as i64;
+                    if ui.add(egui::DragValue::new(&mut seed_i64).prefix("Seed: ")).changed() {
+                        self.cloud_seed = seed_i64.clamp(0, u32::MAX as i64) as u32;
+                        self.needs_render = true;
+                    }
+                    if ui.small_button("🎲").on_hover_text("Randomize cloud pattern").clicked() {
+                        let t = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .subsec_nanos();
+                        self.cloud_seed = t ^ (self.cloud_seed.wrapping_mul(2654435761));
+                        self.needs_render = true;
+                    }
+                });
 
                 ui.separator();
                 egui::CollapsingHeader::new("Advanced Tweaks")

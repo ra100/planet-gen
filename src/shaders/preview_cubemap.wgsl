@@ -17,7 +17,10 @@ struct Uniforms {
     zoom: f32,               // viewport zoom (1.0 = default)
     pan_x: f32,              // viewport pan in NDC units
     pan_y: f32,
-    _pad1: f32,
+    cloud_coverage: f32,     // 0.0 = clear, 1.0 = overcast
+    cloud_seed: f32,
+    cloud_altitude: f32,
+    _pad2: vec2<f32>,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
