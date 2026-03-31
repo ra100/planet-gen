@@ -349,8 +349,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     if (height > 0.0) {
         // Power curve: keeps coastal areas (low h) near sea level,
         // amplifies interior and mountain heights nonlinearly
-        let h_norm = min(height, 1.5);
-        height = pow(h_norm, 1.4) * 1.3;
+        let h_cap = 1.5 * max(params.mountain_scale, 1.0);
+        let h_norm = min(height, h_cap);
+        height = pow(h_norm / h_cap, 1.4) * h_cap * 1.3;
     } else {
         // Deepen and shape ocean floor
         height *= 1.2;
