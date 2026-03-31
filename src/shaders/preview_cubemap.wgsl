@@ -290,19 +290,36 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     ) * 0.6;
     let warped_p = p_base + warp;
 
-    // === Step 2: 5-octave fBm on warped position ===
-    var noise_val = 0.0;
+    // === Step 2: Dual-noise cloud shapes ===
+    // Mix standard fBm (smooth stratus) with ridged noise (puffy cumulus).
+    // A spatial blend varies the mix so clouds aren't all the same type.
+
+    // Standard fBm: smooth, flowing clouds (stratus-like)
+    var fbm_val = 0.0;
     var freq = 1.0;
     var amp = 1.0;
     var amp_sum = 0.0;
     for (var i = 0; i < 5; i++) {
-        noise_val += snoise(warped_p * freq) * amp;
+        fbm_val += snoise(warped_p * freq) * amp;
         amp_sum += amp;
         freq *= 2.1;
         amp *= 0.52;
     }
-    noise_val = noise_val / amp_sum; // normalize to roughly [-1, 1]
-    noise_val = noise_val * 0.5 + 0.5; // remap to [0, 1]
+    fbm_val = fbm_val / amp_sum * 0.5 + 0.5; // [0, 1]
+
+    // Ridged noise: puffy, cellular cumulus shapes (1-abs creates rounded peaks)
+    let rp = warped_p + vec3<f32>(13.7, 7.3, 21.1); // offset to decorrelate
+    let r1 = 1.0 - abs(snoise(rp * 1.0));
+    let r2 = 1.0 - abs(snoise(rp * 2.1 + vec3<f32>(5.3, 1.7, 3.1)));
+    let r3 = 1.0 - abs(snoise(rp * 4.4 + vec3<f32>(2.1, 8.5, 0.7)));
+    let r4 = 1.0 - abs(snoise(rp * 9.2 + vec3<f32>(7.1, 3.3, 5.9)));
+    let ridged_val = (r1 * 0.4 + r2 * 0.3 + r3 * 0.2 + r4 * 0.1);
+    let ridged_shaped = ridged_val * ridged_val; // square for sharper puffy shapes
+
+    // Spatial blend: varies which cloud type dominates per region
+    // Low-frequency noise determines if this area has smooth or puffy clouds
+    let type_blend = snoise(sphere_pos * 1.8 + seed_off * 0.15 + vec3<f32>(97.0, 41.0, 63.0)) * 0.5 + 0.5;
+    let noise_val = mix(fbm_val, ridged_shaped, type_blend);
 
     // === Step 3: Climate + terrain modulated local coverage ===
     // All influences adjust the Schneider THRESHOLD, not density amplitude.
@@ -740,6 +757,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Combine
     var lit_color = ambient + (diffuse + specular) * n_dot_l;
+
+    // Cloud shadow on surface: darken where clouds above block sunlight
+    if (uniforms.cloud_coverage > 0.001) {
+        // Offset toward sun to approximate shadow projection angle
+        let shadow_sample_pos = normalize(rotated + sun_dir * 0.015);
+        let shadow_sfc_h = textureSample(height_tex, height_sampler, shadow_sample_pos).r;
+        let cloud_above = compute_cloud_density(shadow_sample_pos, shadow_sfc_h);
+        // Beer-Lambert shadow: thick clouds block more light
+        let surface_shadow = exp(-cloud_above * 3.0);
+        // Only shadow the direct light portion, not ambient
+        lit_color = ambient + (diffuse + specular) * n_dot_l * mix(1.0, surface_shadow, 0.65);
+    }
 
     // ---- Two-layer cloud rendering ----
     // Layer 1 (low): cumulus/stratus at ~0.01 planet radii above surface
