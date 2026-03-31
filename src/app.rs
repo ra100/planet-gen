@@ -568,8 +568,8 @@ impl eframe::App for PlanetGenApp {
                 if response.dragged_by(egui::PointerButton::Middle) {
                     let delta = response.drag_delta();
                     let ndc_per_pixel = 2.0 / (0.85 * size);
-                    self.pan[0] -= delta.x * ndc_per_pixel;
-                    self.pan[1] -= delta.y * ndc_per_pixel;
+                    self.pan[0] += delta.x * ndc_per_pixel;
+                    self.pan[1] += delta.y * ndc_per_pixel;
                     self.needs_render = true;
                 }
 
