@@ -1051,24 +1051,22 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Combine — tint direct light by star color
     var lit_color = ambient + (diffuse + specular) * n_dot_l * s_color;
 
-    // Ice/snow override: PBR + Reinhard crushes high-albedo to grey.
-    // For ice, directly set HDR-bright values that tonemap to white.
-    let ice_detect = smooth_step(1.0, 1.15, max(surface_color.r, max(surface_color.g, surface_color.b)));
-    if (ice_detect > 0.0) {
-        let ice_lit = s_color * (n_dot_l * 3.5 + 1.0); // HDR: tonemaps to 0.6-0.8
-        lit_color = mix(lit_color, ice_lit, ice_detect);
-    }
-
     // Cloud shadow on surface: darken where clouds above block sunlight
     if (uniforms.cloud_coverage > 0.001) {
-        // Offset toward sun to approximate shadow projection angle
         let shadow_sample_pos = normalize(rotated + sun_dir * 0.015);
         let shadow_sfc_h = textureSample(height_tex, height_sampler, shadow_sample_pos).r;
         let cloud_above = compute_cloud_density(shadow_sample_pos, shadow_sfc_h);
-        // Beer-Lambert shadow: thick clouds block more light
         let surface_shadow = exp(-cloud_above * 3.0);
-        // Only shadow the direct light portion, not ambient
-        lit_color = ambient + (diffuse + specular) * n_dot_l * s_color * mix(1.0, surface_shadow, 0.65);
+        // Multiply existing lit_color by shadow (preserves ice override, ambient, etc.)
+        lit_color *= mix(1.0, surface_shadow, 0.65);
+    }
+
+    // Ice/snow override: PBR + Reinhard crushes high-albedo to grey.
+    // Applied AFTER cloud shadow so it isn't wiped out.
+    let ice_detect = smooth_step(1.0, 1.15, max(surface_color.r, max(surface_color.g, surface_color.b)));
+    if (ice_detect > 0.0) {
+        let ice_lit = s_color * (n_dot_l * 3.5 + 1.0);
+        lit_color = mix(lit_color, ice_lit, ice_detect);
     }
 
     // ---- Night-side city lights (rendered before clouds so clouds occlude them) ----
