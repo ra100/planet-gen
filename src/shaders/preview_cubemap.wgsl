@@ -381,27 +381,40 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     let cirrus_w = smooth_step(25.0, 50.0, lat_deg);
 
     // ================================================================
-    // Combine: weather pattern gates everything except cyclones
+    // Combine all layers — weather pattern modulates, not gates
     // ================================================================
-    var density = storm * 0.85  // cyclones are their own weather — not masked
-               + (itcz_cloud * 0.65
-                + stratocumulus
-                + fair_cu * 0.4
-                + cirrus * cirrus_w * 0.4) * weather_mask * moisture_w;
+    // Moisture softens but doesn't zero out (even deserts have some clouds)
+    let moist_mod = 0.3 + 0.7 * moisture_w;
+    // Weather pattern provides spatial variation, not hard cutoff
+    let weather_mod = 0.2 + 0.8 * weather_mask;
+
+    var density = storm  // cyclones are self-contained
+               + (itcz_cloud * 0.8
+                + stratocumulus * 0.7
+                + fair_cu * 0.6
+                + cirrus * cirrus_w * 0.5) * weather_mod * moist_mod;
 
     // Orographic lift
     let wind = wind_direction_vec(lat_rad);
     let tangent_wind = normalize(wind - sphere_pos * dot(wind, sphere_pos));
     let upwind_pos = normalize(sphere_pos + tangent_wind * 0.04);
     let upwind_h = textureSample(height_tex, height_sampler, upwind_pos).r;
-    density += smooth_step(0.04, 0.22, max(upwind_h - uniforms.ocean_level, 0.0)) * 0.12 * weather_mask;
+    density += smooth_step(0.04, 0.22, max(upwind_h - uniforms.ocean_level, 0.0)) * 0.15;
+
+    // Global base cloud layer — fills in at high coverage values
+    // fBm noise that provides ubiquitous cloud potential
+    let gp = sphere_pos + seed_off * 0.4 + vec3<f32>(71.0, 13.0, 47.0);
+    let global_base = snoise(gp * 3.0) * 0.4
+                    + snoise(gp * 7.0 + vec3<f32>(3.0, 9.0, 1.0)) * 0.3
+                    + snoise(gp * 14.0 + vec3<f32>(6.0, 2.0, 8.0)) * 0.2;
+    let global_cloud = smooth_step(-0.1, 0.4, global_base * 0.5 + 0.5) * moist_mod * 0.5;
+    density = max(density, global_cloud);
 
     density = clamp(density, 0.0, 1.0);
 
-    // Coverage threshold — quadratic makes slider usable across full range
-    // coverage=0.3 → threshold=0.49, coverage=0.5 → threshold=0.25, coverage=0.8 → threshold=0.04
+    // Coverage threshold — quadratic for usable range
     let threshold = (1.0 - coverage) * (1.0 - coverage);
-    return smooth_step(threshold, threshold + 0.15, density);
+    return smooth_step(threshold, threshold + 0.12, density);
 }
 
 // ---- Continuous gradient biome coloring ----
@@ -764,14 +777,23 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let cloud_sfc_h = textureSample(height_tex, height_sampler, cloud_world).r;
         let cloud_density = compute_cloud_density(cloud_world, cloud_sfc_h);
 
-        if (cloud_density > 0.05) {
-            // Clouds are bright white. Only sun angle creates variation.
+        if (cloud_density > 0.03) {
             let sun_dot = max(dot(cloud_dir, sun_dir), 0.0);
-            // Terminator: smooth day/night transition on clouds
-            let cloud_lit = smooth_step(-0.05, 0.15, sun_dot);
-            let cloud_color = vec3<f32>(0.95, 0.95, 0.95) * (cloud_lit * 0.85 + 0.12);
-            // Opacity: thin clouds are transparent, thick clouds are opaque
-            let cloud_alpha = smooth_step(0.05, 0.5, cloud_density) * 0.92;
+            let cloud_lit = smooth_step(-0.05, 0.2, sun_dot);
+
+            // Cloud-top roughness noise: breaks up flat surfaces
+            let ctn = snoise(cloud_world * 20.0) * 0.12
+                    + snoise(cloud_world * 40.0) * 0.08;
+            // Self-shadowing: thick clouds have darker bases, brighter tops
+            let thickness = cloud_density;
+            let top_bright = 0.95 + ctn; // bright cloud tops with bumpy texture
+            let base_shadow = mix(0.6, top_bright, thickness); // thin=darker, thick=brighter tops
+
+            let brightness = base_shadow * (cloud_lit * 0.82 + 0.15);
+            let cloud_color = vec3<f32>(brightness, brightness, brightness * 1.01);
+
+            // Alpha: continuous ramp, thin clouds translucent
+            let cloud_alpha = smooth_step(0.03, 0.4, cloud_density) * 0.93;
             lit_color = mix(lit_color, cloud_color, cloud_alpha);
         }
     }
