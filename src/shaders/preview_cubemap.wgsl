@@ -77,14 +77,16 @@ fn ray_march_atmosphere(
         let density = exp(-altitude / scale_h);
         optical_depth += beta * density * abs(step_len);
 
-        // Sun illumination at this point (airmass approximation)
-        let sun_cos = max(dot(normalize(pos), sun_dir), 0.0);
-        let sun_od = beta * density * scale_h / max(sun_cos, 0.12);
+        // Sun illumination: smooth day/night transition at terminator
+        let raw_sun_cos = dot(normalize(pos), sun_dir);
+        let sun_factor = smoothstep(-0.1, 0.2, raw_sun_cos);
 
-        let view_transmit = exp(-optical_depth);
-        let sun_transmit = exp(-sun_od);
-
-        in_scatter += view_transmit * sun_transmit * density * phase * abs(step_len);
+        if (sun_factor > 0.001) {
+            let sun_od = beta * density * scale_h / max(raw_sun_cos, 0.12);
+            let view_transmit = exp(-optical_depth);
+            let sun_transmit = exp(-sun_od);
+            in_scatter += view_transmit * sun_transmit * sun_factor * density * phase * abs(step_len);
+        }
     }
 
     var result: ScatterResult;
