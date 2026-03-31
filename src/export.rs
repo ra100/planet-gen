@@ -101,6 +101,19 @@ pub struct RoughnessMapParams {
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
+pub struct AoMapParams {
+    pub face: u32,
+    pub full_resolution: u32,
+    pub ao_strength: f32,
+    pub ocean_level: f32,
+    pub tile_offset_x: u32,
+    pub tile_offset_y: u32,
+    pub resolution: u32,
+    pub _pad0: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
 pub struct AlbedoMapParams {
     pub face: u32,
     pub resolution: u32,
@@ -580,8 +593,8 @@ pub fn run_export(
     let tiles_per_face = coordinator.tiles_per_face();
     let total_steps = coordinator.total_tiles() // terrain generation
         + 6 // erosion
-        + 3 * 6 * tiles_per_face // normal + roughness + albedo tiles
-        + 6 * 6; // file writes (6 faces * 6 map types)
+        + 4 * 6 * tiles_per_face // normal + roughness + albedo + ao tiles
+        + 6 * 7; // file writes (6 faces * 7 map types)
     let mut progress = ProgressTracker::new(progress_tx, total_steps);
 
     // --- Phase 1: Generate plates ---
@@ -653,6 +666,11 @@ pub fn run_export(
             include_str!("shaders/albedo_map.wgsl"),
         ),
         "albedo map",
+    );
+    let ao_pipeline = MapPipeline::new(
+        gpu,
+        include_str!("shaders/ao_map.wgsl"),
+        "ao map",
     );
 
     // --- Phase 5: Generate maps and export per face ---
@@ -805,6 +823,36 @@ pub fn run_export(
             &ice_mask,
             full_res,
             &planet_dir.join(format!("face{face}_ice_mask.png")),
+        )?;
+
+        // -- AO map (tiled) --
+        let ao_bytes = generate_map_tiled(
+            gpu,
+            &ao_pipeline,
+            &heightmap_buffer,
+            &coordinator,
+            |offset_x, offset_y| AoMapParams {
+                face,
+                full_resolution: full_res,
+                ao_strength: 30.0,
+                ocean_level,
+                tile_offset_x: offset_x,
+                tile_offset_y: offset_y,
+                resolution: tile_size,
+                _pad0: 0,
+            },
+            4, // f32 = 4 bytes
+            &mut progress,
+            "AO",
+            face,
+            cancel,
+        )?;
+        progress.advance(&format!("Exporting AO face {face}"));
+        let ao_floats: &[f32] = bytemuck::cast_slice(&ao_bytes);
+        export_png_gray(
+            ao_floats,
+            full_res,
+            &planet_dir.join(format!("face{face}_ao.png")),
         )?;
     }
 
