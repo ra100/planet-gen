@@ -26,7 +26,8 @@ pub struct PreviewUniforms {
     pub cloud_coverage: f32,     // 0.0 = clear, 1.0 = overcast
     pub cloud_seed: f32,         // noise seed for cloud pattern
     pub cloud_altitude: f32,     // cloud shell altitude above surface (planet radii)
-    pub _pad2: [f32; 2],
+    pub cloud_type: f32,         // 0.0 = smooth stratus, 1.0 = puffy cumulus
+    pub _pad2: f32,
 }
 
 pub struct PreviewRenderer {
@@ -367,7 +368,8 @@ mod tests {
             cloud_coverage: 0.5,
             cloud_seed: 42.0,
             cloud_altitude: 0.008,
-            _pad2: [0.0; 2],
+            cloud_type: 0.5,
+            _pad2: 0.0,
         };
 
         let size = 256;

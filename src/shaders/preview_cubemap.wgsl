@@ -20,7 +20,8 @@ struct Uniforms {
     cloud_coverage: f32,     // 0.0 = clear, 1.0 = overcast
     cloud_seed: f32,
     cloud_altitude: f32,
-    _pad2: vec2<f32>,
+    cloud_type: f32,         // 0.0 = smooth stratus, 1.0 = puffy cumulus
+    _pad2: f32,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -320,8 +321,9 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     cumulus_val = pow(cumulus_val, 1.3); // round off peaks for softer blobs
 
     // === Step 2: Spatial blend — smooth stratus vs puffy cumulus per region ===
+    // cloud_type uniform (0=stratus, 1=cumulus) sets the center; spatial noise adds local variation
     let type_noise = snoise(sphere_pos * 1.8 + seed_off * 0.15 + vec3<f32>(97.0, 41.0, 63.0));
-    let type_blend = clamp(type_noise * 0.45 + 0.5, 0.0, 1.0); // 0.05–0.95, centered at 0.5
+    let type_blend = clamp(type_noise * 0.35 + uniforms.cloud_type, 0.0, 1.0);
     let noise_val = mix(fbm_val, cumulus_val, type_blend);
 
     // === Step 3: Climate + terrain modulated local coverage ===

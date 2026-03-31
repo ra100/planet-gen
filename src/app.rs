@@ -37,6 +37,7 @@ pub struct PlanetGenApp {
     num_plates_override: u32, // 0 = auto from physics
     cloud_coverage: f32,
     cloud_seed: u32,
+    cloud_type: f32,
     view_mode: u32,
     preview_resolution: u32,
     needs_terrain: bool,   // full terrain recompute (plates + compute + erosion)
@@ -85,6 +86,7 @@ impl PlanetGenApp {
             num_plates_override: 0,
             cloud_coverage: 0.5,
             cloud_seed: default_cloud_seed,
+            cloud_type: 0.5,
             view_mode: 0,
             preview_resolution: crate::preview::DEFAULT_PREVIEW_SIZE,
             needs_terrain: true,
@@ -134,7 +136,8 @@ impl PlanetGenApp {
             cloud_coverage: self.cloud_coverage,
             cloud_seed: crate::preview::seed_to_offset(self.cloud_seed)[0],
             cloud_altitude: 0.008,
-            _pad2: [0.0; 2],
+            cloud_type: self.cloud_type,
+            _pad2: 0.0,
         }
     }
 
@@ -431,6 +434,13 @@ impl eframe::App for PlanetGenApp {
                         self.needs_render = true;
                     }
                 });
+                if ui.add(egui::Slider::new(&mut self.cloud_type, 0.0..=1.0)
+                    .text("Type"))
+                    .on_hover_text("Cloud style: 0 = smooth flowing stratus, 1 = puffy cumulus blobs")
+                    .changed()
+                {
+                    self.needs_render = true;
+                }
 
                 ui.separator();
                 egui::CollapsingHeader::new("Advanced Tweaks")
