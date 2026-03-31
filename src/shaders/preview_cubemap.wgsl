@@ -399,12 +399,18 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
             let to_pt = sphere_pos - center * dot(sphere_pos, center);
             let angle = atan2(dot(to_pt, ty), dot(to_pt, tx));
 
-            // Coriolis: CCW in NH (sign_y=1), CW in SH (sign_y=-1)
-            let spiral = cos((angle * sign_y - log(max(d, 0.003)) * 3.0) * 2.0);
-            let spiral_bias = spiral * 0.15 + 0.85; // soft 0.7–1.0 range
+            // Clear eye at center + dense eye wall ring
+            let eye_radius = 0.02 + fract(sin(fi * 53.7 + s * 0.3) * 31415.9) * 0.015;
+            let eye_clear = 1.0 - exp(-d * d / (eye_radius * eye_radius));
+            let eye_wall = exp(-(d - eye_radius * 1.5) * (d - eye_radius * 1.5) / (eye_radius * eye_radius * 2.0));
 
-            // Add to local coverage
-            local_coverage += falloff * spiral_bias * 0.35;
+            // Spiral only in outer bands — fades out near center
+            let spiral_strength = smooth_step(eye_radius * 2.0, eye_radius * 5.0, d);
+            let spiral = cos((angle * sign_y - log(max(d, 0.003)) * 3.0) * 2.0);
+            let spiral_bias = spiral * 0.15 * spiral_strength + 0.85;
+
+            // Coverage: eye wall ring + outer bands with spiral, minus clear eye
+            local_coverage += (falloff * spiral_bias * 0.35 + eye_wall * 0.3) * eye_clear;
         }
     }
 
