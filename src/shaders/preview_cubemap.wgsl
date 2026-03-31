@@ -1052,8 +1052,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let shadow_density = compute_cloud_density(shadow_pos, shadow_h);
             let shadow = exp(-shadow_density * 2.5);
 
-            // Warm white (lit) → blue-grey (shadow)
-            let lit_cloud = vec3<f32>(0.95, 0.95, 0.93);
+            // Warm white (lit) → blue-grey (shadow), tinted by star color
+            let lit_cloud = vec3<f32>(0.95, 0.95, 0.93) * s_color;
             let shadow_cloud = vec3<f32>(0.55, 0.58, 0.65);
             var low_color = mix(shadow_cloud, lit_cloud, shadow);
 
@@ -1086,7 +1086,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             // Cirrus color: ice-white, less self-shadowing (thin layer)
             let ci_sun = max(dot(high_dir, sun_dir), 0.0);
             let ci_day = smooth_step(-0.05, 0.2, ci_sun);
-            var ci_color = vec3<f32>(0.92, 0.93, 0.96) * (ci_day * 0.8 + 0.15);
+            var ci_color = vec3<f32>(0.92, 0.93, 0.96) * s_color * (ci_day * 0.8 + 0.15);
 
             // Forward scattering stronger for thin ice crystals
             let ci_cos = dot(normalize(high_world), sun_dir);
