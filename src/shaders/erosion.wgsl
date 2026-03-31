@@ -37,9 +37,13 @@ fn get_water_in(x: i32, y: i32) -> f32 {
     return water_in[u32(cy) * params.resolution + u32(cx)];
 }
 
-// Find the index of the lowest of 8 neighbors (D8 steepest descent)
+// Find the steepest-descent neighbor (D8) using slope, not raw height.
+// Diagonal neighbors are sqrt(2) away — dividing by distance prevents
+// bias toward cardinal directions that creates straight-line artifacts.
+// A small noise jitter breaks remaining grid alignment.
 fn lowest_neighbor(x: i32, y: i32) -> vec2<i32> {
-    var min_h = 1e10;
+    let h = get_h(x, y);
+    var max_slope = 0.0;
     var min_pos = vec2<i32>(x, y);
 
     let offsets = array<vec2<i32>, 8>(
@@ -47,14 +51,27 @@ fn lowest_neighbor(x: i32, y: i32) -> vec2<i32> {
         vec2<i32>(-1,  0),                    vec2<i32>(1,  0),
         vec2<i32>(-1,  1), vec2<i32>(0,  1), vec2<i32>(1,  1)
     );
+    let dists = array<f32, 8>(
+        1.414, 1.0, 1.414,
+        1.0,        1.0,
+        1.414, 1.0, 1.414
+    );
+
+    // Noise jitter to break grid-aligned ties
+    let jitter_seed = vec3<f32>(f32(x) * 0.37 + f32(params.seed) * 0.01, f32(y) * 0.41, 0.0);
+    let jitter = snoise(jitter_seed) * 0.003;
 
     for (var i = 0; i < 8; i++) {
         let nx = x + offsets[i].x;
         let ny = y + offsets[i].y;
         let nh = get_h(nx, ny);
-        if (nh < min_h) {
-            min_h = nh;
-            min_pos = vec2<i32>(nx, ny);
+        let drop = h - nh;
+        if (drop > 0.0) {
+            let slope = drop / dists[i] + jitter * (f32(i) - 3.5) * 0.1;
+            if (slope > max_slope) {
+                max_slope = slope;
+                min_pos = vec2<i32>(nx, ny);
+            }
         }
     }
 
