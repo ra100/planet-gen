@@ -386,9 +386,11 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     ) * 0.12;
     let warped_climate_pos = normalize(sphere_pos + climate_warp);
 
-    let moisture = compute_moisture(warped_climate_pos, height, uniforms.season);
+    // Use ocean_level (not sampled height) for climate — avoids cubemap face seams
+    let cloud_h = uniforms.ocean_level;
+    let moisture = compute_moisture(warped_climate_pos, cloud_h, uniforms.season);
     let moisture_norm = clamp(moisture / 300.0, 0.0, 1.0);
-    let temp = compute_temperature(warped_climate_pos, height, uniforms.season);
+    let temp = compute_temperature(warped_climate_pos, cloud_h, uniforms.season);
 
     // Start with global coverage blended with moisture
     var local_coverage = mix(coverage, moisture_norm, 0.35);
@@ -675,12 +677,12 @@ fn compute_urban_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     let land_h = (height - uniforms.ocean_level) / max(1.0 - uniforms.ocean_level, 0.01);
     let temp = compute_temperature(sphere_pos, height, 0.5);
 
-    // Habitability score: ADDITIVE (not multiplicative) so factors don't zero each other
+    // Habitability score — restrict to temperate zones (no arctic/cold cities)
     var score = 0.0;
-    // Temperate climate: biggest factor
-    score += smooth_step(0.0, 15.0, temp) * smooth_step(35.0, 20.0, temp) * 0.35;
+    // Temperate climate: must be warm enough (8-25°C sweet spot)
+    score += smooth_step(8.0, 18.0, temp) * smooth_step(35.0, 22.0, temp) * 0.4;
     // Low elevation preferred
-    score += (1.0 - smooth_step(0.0, 0.3, land_h)) * 0.25;
+    score += (1.0 - smooth_step(0.0, 0.25, land_h)) * 0.2;
     // Coastal boost
     let stp = 0.06;
     let h_e = textureSample(height_tex, height_sampler, sphere_pos + vec3<f32>(stp, 0.0, 0.0)).r;
@@ -693,20 +695,23 @@ fn compute_urban_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     if (h_n < uniforms.ocean_level) { ocean_near += 1.0; }
     if (h_s < uniforms.ocean_level) { ocean_near += 1.0; }
     score += min(ocean_near / 2.0, 1.0) * 0.25;
-    // Base habitability from being on non-frozen land
-    score += smooth_step(-10.0, 5.0, temp) * 0.15;
-    // score now in [0, 1]
+    // Hard cutoff: no cities below 5°C mean annual
+    score *= smooth_step(3.0, 10.0, temp);
 
-    // High-frequency noise for city clustering
-    let cn1 = snoise(sphere_pos * 45.0) * 0.5 + 0.5;
-    let cn2 = snoise(sphere_pos * 90.0 + vec3<f32>(7.3, 2.1, 5.9)) * 0.5 + 0.5;
-    let cn3 = snoise(sphere_pos * 180.0 + vec3<f32>(3.1, 8.7, 1.3)) * 0.5 + 0.5;
-    let city_noise = cn1 * 0.5 + cn2 * 0.3 + cn3 * 0.2;
+    // City pattern: web/dot network instead of blobs
+    // Very high frequency for tiny dots
+    let dots = snoise(sphere_pos * 120.0) * 0.5 + 0.5;
+    let dots2 = snoise(sphere_pos * 250.0 + vec3<f32>(7.3, 2.1, 5.9)) * 0.5 + 0.5;
+    // Web-like connections: abs(noise) creates thin lines at zero crossings
+    let web1 = 1.0 - abs(snoise(sphere_pos * 60.0 + vec3<f32>(3.1, 8.7, 1.3))) * 2.0;
+    let web2 = 1.0 - abs(snoise(sphere_pos * 130.0 + vec3<f32>(11.3, 4.7, 7.1))) * 2.0;
+    let webs = max(max(web1, 0.0), max(web2, 0.0));
+    // Combine dots + webs
+    let city_pattern = max(dots * dots2 * 1.5, webs * 0.6);
 
-    // Combine: square the noise for sharper city clusters (not uniform smear)
-    let urban_raw = score * city_noise * city_noise;
-    let threshold = (1.0 - dev) * 0.3;
-    return smooth_step(threshold, threshold + 0.08, urban_raw);
+    let urban_raw = score * city_pattern;
+    let threshold = (1.0 - dev) * 0.35;
+    return smooth_step(threshold, threshold + 0.06, urban_raw);
 }
 
 // ---- Starfield + sun orb background ----
