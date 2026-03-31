@@ -43,6 +43,32 @@ fn smooth_step(edge0: f32, edge1: f32, x: f32) -> f32 {
     return t * t * (3.0 - 2.0 * t);
 }
 
+// Ridged multifractal noise — sharp peaks at zero crossings with weight feedback.
+// Produces natural mountain ridges: sharp crests, multi-scale detail, gaps at valleys.
+// offset: controls ridge sharpness (1.0 = sharp ridges at zero crossings)
+// gain:   how strongly each octave weight is fed back (2.0 = strong cascading detail)
+fn ridged_multifractal(p: vec3<f32>, octaves: i32, lacunarity: f32, gain: f32, offset: f32) -> f32 {
+    var sum = 0.0;
+    var freq = 1.0;
+    var amp = 0.5;
+    var weight = 1.0;
+    var max_val = 0.0;
+
+    for (var i = 0; i < octaves; i++) {
+        var signal = snoise(p * freq);
+        signal = offset - abs(signal); // Sharp ridges at zero crossings
+        signal *= signal;              // Square: sharpens peaks, flattens valleys
+        signal *= weight;              // Weight feedback: peaks attract finer detail
+        weight = clamp(signal * gain, 0.0, 1.0);
+
+        sum += signal * amp;
+        max_val += amp;
+        freq *= lacunarity;
+        amp *= 0.5;
+    }
+    return sum / max_val; // Normalise to ~0–1
+}
+
 // Domain warping for natural plate boundaries — multi-octave for fractal coastlines
 fn warp_position(pos: vec3<f32>) -> vec3<f32> {
     // Two octaves of warping: large-scale bends + fine-scale irregularity
@@ -219,20 +245,27 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     // --- Boundary terrain (R4-R7, R10) ---
     let b_influence = boundary_influence(boundary_dist, 0.10); // Focused mountain influence
 
-    // Ridge variation: breaks continuous mountain walls into segments with gaps/passes
-    let ridge_var = snoise(raw_pos * 5.0 + seed_offset(params.seed + 150u));
-    let ridge_mask = smooth_step(-0.3, 0.4, ridge_var); // ~40% gaps, ~60% peaks
+    // Ridge variation: ridged multifractal produces sharp crests with natural gaps at valleys.
+    // Evaluated at boundary-zone scale (freq 5.0 base) with 5 octaves for multi-scale detail.
+    // The seed offset shifts the ridge pattern per-planet without changing the overall form.
+    let ridge_pos = raw_pos * 5.0 + seed_offset(params.seed + 150u);
+    let rmf = ridged_multifractal(ridge_pos, 5, 2.0, 2.0, 1.0);
+    // rmf is in ~0–1; treat values below 0.25 as valley gaps (natural passes/breaks).
+    let ridge_mask = smooth_step(0.25, 0.55, rmf);
 
     if (boundary_type < -0.3) {
         // CONVERGENT boundary
         if (is_continental && neighbor_continental) {
             // R4: Continental-continental collision → mountain range (Himalayas)
+            // Ridge height driven by ridged multifractal for sharp, varied peaks.
             let ridge_height = 0.7 * b_influence * abs(boundary_type) * ridge_mask;
+            // Fine surface detail on top — only adds texture where ridges exist.
             let ridge_noise = snoise(raw_pos * 15.0 + seed_offset(params.seed + 100u)) * 0.15;
             let ridge_detail = snoise(raw_pos * 30.0 + seed_offset(params.seed + 110u)) * 0.06;
             height += ridge_height + (ridge_noise + ridge_detail) * b_influence * ridge_mask;
         } else if (is_continental && !neighbor_continental) {
             // R5: Oceanic-continental convergence → volcanic chain (Andes)
+            // Volcanic arc shares the same ridged multifractal so spacing matches geology.
             let volcanic_height = 0.55 * b_influence * abs(boundary_type) * ridge_mask;
             let volcanic_noise = snoise(raw_pos * 12.0 + seed_offset(params.seed + 200u)) * 0.15;
             height += volcanic_height + volcanic_noise * b_influence * ridge_mask;
