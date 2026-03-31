@@ -30,7 +30,8 @@ pub struct PreviewUniforms {
     pub storm_count: f32,        // 0-8 cyclone storm systems
     pub storm_size: f32,         // storm radius multiplier (0.5 = small, 1.0 = default, 2.0 = large)
     pub night_lights: f32,       // 0.0 = pristine, 1.0 = heavily urbanized
-    pub _pad3: [f32; 2],
+    pub star_color_temp: f32,    // 0.0 = blue hot star, 0.5 = sun-like, 1.0 = red dwarf
+    pub _pad3: f32,
 }
 
 pub struct PreviewRenderer {
@@ -375,7 +376,8 @@ mod tests {
             storm_count: 0.0,
             storm_size: 1.0,
             night_lights: 0.0,
-            _pad3: [0.0; 2],
+            star_color_temp: 0.5,
+            _pad3: 0.0,
         };
 
         let size = 256;

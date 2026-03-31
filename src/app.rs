@@ -41,6 +41,7 @@ pub struct PlanetGenApp {
     storm_count: u32,
     storm_size: f32,
     night_lights: f32,
+    star_color_temp: f32,
     view_mode: u32,
     preview_resolution: u32,
     needs_terrain: bool,   // full terrain recompute (plates + compute + erosion)
@@ -93,6 +94,7 @@ impl PlanetGenApp {
             storm_count: 0,
             storm_size: 1.0,
             night_lights: 0.0,
+            star_color_temp: 0.5,
             view_mode: 0,
             preview_resolution: crate::preview::DEFAULT_PREVIEW_SIZE,
             needs_terrain: true,
@@ -146,7 +148,8 @@ impl PlanetGenApp {
             storm_count: self.storm_count as f32,
             storm_size: self.storm_size,
             night_lights: self.night_lights,
-            _pad3: [0.0; 2],
+            star_color_temp: self.star_color_temp,
+            _pad3: 0.0,
         }
     }
 
@@ -523,6 +526,15 @@ impl eframe::App for PlanetGenApp {
                             .changed()
                         {
                             self.needs_terrain = true;
+                        }
+
+                        ui.separator();
+                        if ui.add(egui::Slider::new(&mut self.star_color_temp, 0.0..=1.0)
+                            .text("Star Color"))
+                            .on_hover_text("Star type: 0 = hot blue (O/B), 0.5 = sun-like (G), 1.0 = red dwarf (M)")
+                            .changed()
+                        {
+                            self.needs_render = true;
                         }
                     });
 

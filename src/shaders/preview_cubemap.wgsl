@@ -24,8 +24,8 @@ struct Uniforms {
     storm_count: f32,        // 0-8 cyclone systems
     storm_size: f32,         // storm radius multiplier
     night_lights: f32,       // 0.0 = pristine, 1.0 = urbanized
-    _pad3a: f32,
-    _pad3b: f32,
+    star_color_temp: f32,    // 0.0 = blue, 0.5 = sun, 1.0 = red dwarf
+    _pad3: f32,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -35,6 +35,25 @@ struct Uniforms {
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
+}
+
+// Star color from temperature slider: 0=blue O-star, 0.5=sun G-star, 1.0=red M-dwarf
+fn star_color(temp: f32) -> vec3<f32> {
+    // Blue (O/B) → White (A/F) → Yellow (G) → Orange (K) → Red (M)
+    let blue = vec3<f32>(0.6, 0.7, 1.0);
+    let white = vec3<f32>(1.0, 1.0, 1.0);
+    let yellow = vec3<f32>(1.0, 0.95, 0.85);
+    let orange = vec3<f32>(1.0, 0.75, 0.5);
+    let red = vec3<f32>(1.0, 0.5, 0.3);
+
+    if (temp < 0.25) {
+        return mix(blue, white, temp * 4.0);
+    } else if (temp < 0.5) {
+        return mix(white, yellow, (temp - 0.25) * 4.0);
+    } else if (temp < 0.75) {
+        return mix(yellow, orange, (temp - 0.5) * 4.0);
+    }
+    return mix(orange, red, (temp - 0.75) * 4.0);
 }
 
 fn smooth_step(edge0: f32, edge1: f32, x: f32) -> f32 {
@@ -670,7 +689,7 @@ fn compute_urban_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
 }
 
 // ---- Starfield + sun orb background ----
-fn starfield(ndc: vec2<f32>, sun_dir: vec3<f32>) -> vec3<f32> {
+fn starfield(ndc: vec2<f32>, sun_dir: vec3<f32>, sun_color: vec3<f32>) -> vec3<f32> {
     var bg = vec3<f32>(0.0, 0.0, 0.0); // pure black space
 
     // Stars: hash-based bright dots at pseudo-random positions
@@ -702,14 +721,14 @@ fn starfield(ndc: vec2<f32>, sun_dir: vec3<f32>) -> vec3<f32> {
         let sun_screen = vec2<f32>(sun_dir.x, sun_dir.y) / (-sun_dir.z);
         let sun_dist = length(ndc - sun_screen);
 
-        // Sun disc
+        // Sun disc — colored by star type
         let sun_radius = 0.06;
         let sun_core = 1.0 - smooth_step(0.0, sun_radius, sun_dist);
-        bg += vec3<f32>(3.0, 2.8, 2.2) * sun_core;
+        bg += sun_color * 3.0 * sun_core;
 
         // Tight glow halo
         let glow = exp(-sun_dist * sun_dist * 30.0) * 0.2;
-        bg += vec3<f32>(1.0, 0.9, 0.6) * glow;
+        bg += sun_color * glow;
     }
 
     return bg;
@@ -723,6 +742,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let r2 = dot(ndc, ndc);
 
     let sun_dir = normalize(uniforms.light_dir);
+    let s_color = star_color(uniforms.star_color_temp);
 
     let atm_h = uniforms.atmosphere_height;
     let atm_radius = 1.0 + atm_h;
@@ -731,7 +751,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Miss everything — outside both planet and atmosphere → show starfield
     if (r2 > outer_r * outer_r) {
-        let bg = starfield(ndc, sun_dir);
+        let bg = starfield(ndc, sun_dir, s_color);
         let bg_tm = bg / (bg + vec3<f32>(1.0)); // tonemap sun HDR
         return vec4<f32>(bg_tm, 1.0);
     }
@@ -740,7 +760,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Atmosphere-only ring (between planet edge and outer atmosphere boundary)
     if (!hit_planet) {
-        let bg = starfield(ndc, sun_dir);
+        let bg = starfield(ndc, sun_dir, s_color);
         let bg_tm = bg / (bg + vec3<f32>(1.0));
         if (!has_atm || uniforms.view_mode != 0u) {
             return vec4<f32>(bg_tm, 1.0);
@@ -968,8 +988,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Ambient (subtle, directional — slightly brighter on the lit hemisphere)
     let ambient = surface_color * (0.06 + 0.04 * max(dot(normal, light), 0.0));
 
-    // Combine
-    var lit_color = ambient + (diffuse + specular) * n_dot_l;
+    // Combine — tint direct light by star color
+    var lit_color = ambient + (diffuse + specular) * n_dot_l * s_color;
 
     // Cloud shadow on surface: darken where clouds above block sunlight
     if (uniforms.cloud_coverage > 0.001) {
@@ -1080,7 +1100,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Edge AA at planet boundary (when no atmosphere provides the transition)
     if (!has_atm) {
-        let edge_bg = starfield(ndc, sun_dir);
+        let edge_bg = starfield(ndc, sun_dir, s_color);
         let edge_bg_tm = edge_bg / (edge_bg + vec3<f32>(1.0));
         let edge_aa = 1.0 - smooth_step(0.99, 1.0, sqrt(r2));
         lit_color = mix(edge_bg_tm, lit_color, edge_aa);
