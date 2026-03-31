@@ -23,9 +23,9 @@ struct Uniforms {
     cloud_type: f32,         // 0.0 = smooth stratus, 1.0 = puffy cumulus
     storm_count: f32,        // 0-8 cyclone systems
     storm_size: f32,         // storm radius multiplier
+    night_lights: f32,       // 0.0 = pristine, 1.0 = urbanized
     _pad3a: f32,
     _pad3b: f32,
-    _pad3c: f32,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -623,6 +623,51 @@ fn fresnel_schlick(h_dot_v: f32, f0: f32) -> f32 {
     return f0 + (1.0 - f0) * pow(1.0 - h_dot_v, 5.0);
 }
 
+// ---- Urban density: procedural city placement ----
+// Returns 0.0 (wilderness) to 1.0 (dense urban). Based on climate habitability.
+fn compute_urban_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
+    let dev = uniforms.night_lights;
+    if (dev <= 0.0) { return 0.0; }
+
+    // Only on land
+    if (height <= uniforms.ocean_level) { return 0.0; }
+
+    let land_h = (height - uniforms.ocean_level) / max(1.0 - uniforms.ocean_level, 0.01);
+    let temp = compute_temperature(sphere_pos, height, 0.5);
+
+    // Habitability factors
+    let temperate = smooth_step(5.0, 15.0, temp) * smooth_step(35.0, 25.0, temp); // prefer 15-25°C
+    let lowland = 1.0 - smooth_step(0.0, 0.25, land_h); // prefer low elevation
+    let not_frozen = smooth_step(-5.0, 5.0, temp); // no cities in frozen land
+
+    // Coast proximity: sample neighbors for ocean
+    let step = 0.06;
+    let h_e = textureSample(height_tex, height_sampler, sphere_pos + vec3<f32>(step, 0.0, 0.0)).r;
+    let h_w = textureSample(height_tex, height_sampler, sphere_pos + vec3<f32>(-step, 0.0, 0.0)).r;
+    let h_n = textureSample(height_tex, height_sampler, sphere_pos + vec3<f32>(0.0, step, 0.0)).r;
+    let h_s = textureSample(height_tex, height_sampler, sphere_pos + vec3<f32>(0.0, -step, 0.0)).r;
+    var ocean_near = 0.0;
+    if (h_e < uniforms.ocean_level) { ocean_near += 1.0; }
+    if (h_w < uniforms.ocean_level) { ocean_near += 1.0; }
+    if (h_n < uniforms.ocean_level) { ocean_near += 1.0; }
+    if (h_s < uniforms.ocean_level) { ocean_near += 1.0; }
+    let coastal = 0.4 + 0.6 * min(ocean_near / 2.0, 1.0); // coastal boost
+
+    // Base habitability
+    let habitability = temperate * lowland * coastal * not_frozen;
+
+    // High-frequency noise for city clustering (not uniform smear)
+    let cn1 = snoise(sphere_pos * 45.0) * 0.5 + 0.5;
+    let cn2 = snoise(sphere_pos * 90.0 + vec3<f32>(7.3, 2.1, 5.9)) * 0.5 + 0.5;
+    let cn3 = snoise(sphere_pos * 180.0 + vec3<f32>(3.1, 8.7, 1.3)) * 0.5 + 0.5;
+    let city_noise = cn1 * 0.5 + cn2 * 0.3 + cn3 * 0.2;
+
+    // Threshold: higher dev = more area urbanized
+    let threshold = 1.0 - dev;
+    let urban_raw = habitability * city_noise;
+    return smooth_step(threshold * 0.5, threshold * 0.5 + 0.15, urban_raw);
+}
+
 // ---- Starfield + sun orb background ----
 fn starfield(ndc: vec2<f32>, sun_dir: vec3<f32>) -> vec3<f32> {
     var bg = vec3<f32>(0.0, 0.0, 0.0); // pure black space
@@ -787,6 +832,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
 
+    // Day-side urban grey patches
+    if (uniforms.night_lights > 0.0 && !is_ocean) {
+        let urban = compute_urban_density(rotated, height);
+        if (urban > 0.01) {
+            let grey = vec3<f32>(0.45, 0.43, 0.42);
+            surface_color = mix(surface_color, grey, urban * 0.55 * uniforms.night_lights);
+        }
+    }
+
     // Debug views
     if (uniforms.view_mode > 0u) {
         let temp = compute_temperature(rotated, height, uniforms.season);
@@ -924,6 +978,21 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let surface_shadow = exp(-cloud_above * 3.0);
         // Only shadow the direct light portion, not ambient
         lit_color = ambient + (diffuse + specular) * n_dot_l * mix(1.0, surface_shadow, 0.65);
+    }
+
+    // ---- Night-side city lights ----
+    if (uniforms.night_lights > 0.0 && !is_ocean) {
+        let night_factor = smooth_step(0.05, -0.1, n_dot_l); // 1 on dark side, 0 on lit
+        if (night_factor > 0.01) {
+            let urban = compute_urban_density(rotated, height);
+            if (urban > 0.01) {
+                // Fine sparkle: very high frequency for individual light dots
+                let sparkle = snoise(rotated * 300.0) * 0.3 + snoise(rotated * 600.0) * 0.2 + 0.5;
+                let light_intensity = urban * night_factor * uniforms.night_lights * max(sparkle, 0.2);
+                // Warm yellow-orange city glow
+                lit_color += vec3<f32>(1.0, 0.82, 0.35) * light_intensity * 0.35;
+            }
+        }
     }
 
     // ---- Two-layer cloud rendering ----

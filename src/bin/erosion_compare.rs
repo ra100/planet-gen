@@ -104,7 +104,8 @@ fn main() {
                 cloud_type: 0.5,
                 storm_count: 0.0,
                 storm_size: 1.0,
-                _pad3: [0.0; 3],
+                night_lights: 0.0,
+                _pad3: [0.0; 2],
             };
 
             let pixels = renderer.render(&gpu, &uniforms, &cubemap_view, render_size);

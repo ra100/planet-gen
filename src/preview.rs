@@ -29,7 +29,8 @@ pub struct PreviewUniforms {
     pub cloud_type: f32,         // 0.0 = smooth stratus, 1.0 = puffy cumulus
     pub storm_count: f32,        // 0-8 cyclone storm systems
     pub storm_size: f32,         // storm radius multiplier (0.5 = small, 1.0 = default, 2.0 = large)
-    pub _pad3: [f32; 3],
+    pub night_lights: f32,       // 0.0 = pristine, 1.0 = heavily urbanized
+    pub _pad3: [f32; 2],
 }
 
 pub struct PreviewRenderer {
@@ -373,7 +374,8 @@ mod tests {
             cloud_type: 0.5,
             storm_count: 0.0,
             storm_size: 1.0,
-            _pad3: [0.0; 3],
+            night_lights: 0.0,
+            _pad3: [0.0; 2],
         };
 
         let size = 256;

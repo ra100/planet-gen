@@ -40,6 +40,7 @@ pub struct PlanetGenApp {
     cloud_type: f32,
     storm_count: u32,
     storm_size: f32,
+    night_lights: f32,
     view_mode: u32,
     preview_resolution: u32,
     needs_terrain: bool,   // full terrain recompute (plates + compute + erosion)
@@ -91,6 +92,7 @@ impl PlanetGenApp {
             cloud_type: 0.5,
             storm_count: 0,
             storm_size: 1.0,
+            night_lights: 0.0,
             view_mode: 0,
             preview_resolution: crate::preview::DEFAULT_PREVIEW_SIZE,
             needs_terrain: true,
@@ -143,7 +145,8 @@ impl PlanetGenApp {
             cloud_type: self.cloud_type,
             storm_count: self.storm_count as f32,
             storm_size: self.storm_size,
-            _pad3: [0.0; 3],
+            night_lights: self.night_lights,
+            _pad3: [0.0; 2],
         }
     }
 
@@ -464,6 +467,16 @@ impl eframe::App for PlanetGenApp {
                     {
                         self.needs_render = true;
                     }
+                }
+
+                ui.separator();
+                ui.label("Civilization");
+                if ui.add(egui::Slider::new(&mut self.night_lights, 0.0..=1.0)
+                    .text("Development"))
+                    .on_hover_text("Urbanization level: 0 = pristine wilderness, 1 = heavily developed. Shows grey cities by day, lights at night")
+                    .changed()
+                {
+                    self.needs_render = true;
                 }
 
                 ui.separator();
