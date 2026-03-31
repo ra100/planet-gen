@@ -304,8 +304,10 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     noise_val = noise_val / amp_sum; // normalize to roughly [-1, 1]
     noise_val = noise_val * 0.5 + 0.5; // remap to [0, 1]
 
-    // === Step 3: Climate-modulated local coverage ===
-    // Domain-warp the climate lookup to break latitude bands
+    // === Step 3: Climate + terrain modulated local coverage ===
+    // All influences adjust the Schneider THRESHOLD, not density amplitude.
+
+    // Domain-warp climate lookup to break latitude bands
     let climate_warp = vec3<f32>(
         snoise(sphere_pos * 2.5 + vec3<f32>(200.0, 0.0, 0.0)),
         snoise(sphere_pos * 2.5 + vec3<f32>(0.0, 300.0, 0.0)),
@@ -313,19 +315,50 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     ) * 0.12;
     let warped_climate_pos = normalize(sphere_pos + climate_warp);
 
-    // Get moisture at warped position, normalize to [0, 1]
     let moisture = compute_moisture(warped_climate_pos, height, 0.5);
     let moisture_norm = clamp(moisture / 300.0, 0.0, 1.0);
+    let temp = compute_temperature(warped_climate_pos, height, 0.5);
 
-    // Blend global coverage with climate: noise drives shape, climate nudges placement
-    // At coverage=0.5: dry regions get ~0.38, wet regions get ~0.62
-    let local_coverage = mix(coverage, moisture_norm, 0.35);
+    // Start with global coverage blended with moisture
+    var local_coverage = mix(coverage, moisture_norm, 0.35);
 
-    // === Step 4: Schneider remap ===
-    // remap(noise, 1-cov, 1, 0, 1) * cov
-    // - Lighter thin clouds, denser large clouds
-    // - Linear visual response across coverage range
-    let density = cloud_remap(noise_val, 1.0 - local_coverage, 1.0, 0.0, 1.0) * local_coverage;
+    // Ocean boost: warm oceans have more evaporation → more clouds
+    let is_ocean = height < uniforms.ocean_level;
+    if (is_ocean) {
+        let warm_ocean = smooth_step(5.0, 25.0, temp) * 0.08;
+        local_coverage += warm_ocean;
+    } else {
+        // Continental interiors: slightly drier (less marine moisture)
+        let land_height = (height - uniforms.ocean_level) / max(1.0 - uniforms.ocean_level, 0.01);
+        let interior_dry = smooth_step(0.0, 0.15, land_height) * 0.06;
+        local_coverage -= interior_dry;
+    }
+
+    // Orographic lift: mountains force air up → condensation on windward side
+    let tilt = uniforms.axial_tilt_rad;
+    let tilted_y = sphere_pos.y * cos(tilt) + sphere_pos.z * sin(tilt);
+    let lat_rad = asin(clamp(tilted_y, -1.0, 1.0));
+    let wind = wind_direction_vec(lat_rad);
+    let tangent_wind = normalize(wind - sphere_pos * dot(wind, sphere_pos));
+    let upwind_pos = normalize(sphere_pos + tangent_wind * 0.04);
+    let upwind_h = textureSample(height_tex, height_sampler, upwind_pos).r;
+    let mountain_lift = smooth_step(0.04, 0.25, max(upwind_h - uniforms.ocean_level, 0.0));
+    local_coverage += mountain_lift * 0.12;
+
+    // Warm convection: warmer areas produce more convective cloud potential
+    let convection_boost = smooth_step(15.0, 30.0, temp) * 0.05;
+    local_coverage += convection_boost;
+
+    local_coverage = clamp(local_coverage, 0.0, 1.0);
+
+    // === Step 4: Multi-scale pattern variety ===
+    // Large-scale weather modulation: some regions have big connected masses,
+    // others have scattered small clouds. Varies the effective noise value.
+    let weather_scale = snoise(sphere_pos * 2.0 + seed_off * 0.2) * 0.15;
+    let varied_noise = clamp(noise_val + weather_scale, 0.0, 1.0);
+
+    // === Step 5: Schneider remap ===
+    let density = cloud_remap(varied_noise, 1.0 - local_coverage, 1.0, 0.0, 1.0) * local_coverage;
 
     return max(density, 0.0);
 }
