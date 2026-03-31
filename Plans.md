@@ -154,6 +154,46 @@ Scale from preview (256²) to full 8K (8192²) via tiled generation and export t
 
 ---
 
+## Phase 5.5: Preview Interaction & Visual Enhancements
+
+Viewport controls, atmosphere rendering, and UI polish for the preview.
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 5.5.1 | Viewport zoom (scroll wheel) and pan (middle mouse drag) | Zoom in/out, drag planet around viewport | Phase 5 | cc:完了 [03721e1] |
+| 5.5.2 | Inverse drag direction + cursor-centered zoom | Drag feels like moving the planet; zoom centers on cursor | 5.5.1 | cc:完了 [ab10d3d] |
+| 5.5.3 | Fix seasonal biome instability: mean annual climate for biome type, seasonal for color modulation | Forests stay stable across seasons | Phase 4 | cc:完了 [26b54e0] |
+| 5.5.4 | Improve tectonic plate shapes: per-plate noise bias + stronger domain warping | Less convex, more organic plate boundaries | Phase 4.8 | cc:完了 [1d730e5] |
+| 5.5.5 | Advanced Tweaks panel: mountain height, boundary width, shape warp, detail scale, plate count sliders | Exposed terrain controls with tooltips | Phase 4.8 | cc:完了 [1024f30] |
+| 5.5.6 | Fix mountain height clipping at high mountain_scale | No flat plateaus at extreme settings | 5.5.5 | cc:完了 [f787c86] |
+| 5.5.7 | Fix grid-aligned erosion artifacts (MFD flow routing) + scrollable side panel | Smooth erosion on steep terrain | Phase 4.8 | cc:完了 [e073f4e] |
+| 5.5.8 | Fix slider sticking during GPU work: process UI before blocking GPU | Mouse release captured correctly | 5.5.5 | cc:完了 [cb707bf] |
+| 5.5.9 | Mie scattering for atmospheric haze and sun glow (Henyey-Greenstein phase function) | Blue limb glow + bright sun-side haze | Phase 4 | cc:完了 [c56a543] |
+
+---
+
+## Phase 5.6: Cloud Layer
+
+Procedural cloud system: Schneider remap, domain-warped fBm, Beer-Lambert opacity, self-shadowing, cyclone storms.
+
+Plan: [docs/plans/2026-03-31-003-feat-cloud-layer-v2-plan.md](docs/plans/2026-03-31-003-feat-cloud-layer-v2-plan.md)
+Requirements: [docs/brainstorms/2026-03-31-cloud-layer-requirements.md](docs/brainstorms/2026-03-31-cloud-layer-requirements.md)
+Research: [docs/research/cloud-layer-rendering.md](docs/research/cloud-layer-rendering.md)
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 5.6.1 | Cloud uniforms + UI: coverage slider, seed control, randomize button | Cloud section in sidebar with coverage and seed | Phase 5.5 | cc:完了 [f8722c9] |
+| 5.6.2 | Cloud density: Schneider remap, domain-warped 5-octave fBm, climate threshold modulation | Organic cloud shapes, no latitude banding, linear slider response | 5.6.1 | cc:完了 [0def439] |
+| 5.6.3 | Cloud rendering: Beer-Lambert opacity, self-shadowing, HG silver lining | Bright tops, blue-grey shadows, translucent thin edges | 5.6.2 | cc:完了 [0def439] |
+| 5.6.4 | Terrain-aware clouds: orographic lift, ocean/land influence, convection, weather scale | Clouds cluster over warm oceans and mountain windward sides | 5.6.3 | cc:完了 [de6bd6a] |
+| 5.6.5 | Seasonal clouds: moisture and temperature follow season slider | Cloud patterns shift with seasons | 5.6.4 | cc:完了 [2e0dbea] |
+| 5.6.6 | Two-layer rendering: low cumulus/stratus shell + high cirrus layer with parallax | Visible depth between cloud layers | 5.6.3 | cc:完了 [248c1eb] |
+| 5.6.7 | Cloud shadows on surface + dual-noise cloud types (stratus/cumulus blend) | Surface darkened under clouds, mixed cloud textures | 5.6.3 | cc:完了 [b37ec7c] |
+| 5.6.8 | Cloud type slider: smooth stratus (0) ↔ puffy cumulus (1) | User-controllable cloud style | 5.6.7 | cc:完了 [f6520bb] |
+| 5.6.9 | Cyclone storms: count slider (0-8), size slider, vortex warp, spiral arm carving, Coriolis-correct | Visible storm systems with eye, spiral arms, configurable count/size | 5.6.2 | cc:完了 [da89ff5] |
+
+---
+
 ## Phase 6: Blender Importer Addon
 
 Pure-Python Blender addon that imports generated textures and sets up materials.
