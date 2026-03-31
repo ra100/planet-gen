@@ -51,19 +51,33 @@ struct ScatterResult {
     transmittance: vec3<f32>,
 }
 
+// Henyey-Greenstein phase function for Mie scattering.
+// g > 0: strong forward scattering (bright glow around sun).
+fn henyey_greenstein(cos_theta: f32, g: f32) -> f32 {
+    let g2 = g * g;
+    return (1.0 - g2) / (4.0 * 3.14159 * pow(1.0 + g2 - 2.0 * g * cos_theta, 1.5));
+}
+
 fn ray_march_atmosphere(
     ndc: vec2<f32>,
     z_start: f32,
     z_end: f32,
     sun_dir: vec3<f32>,
 ) -> ScatterResult {
-    // Rayleigh scattering coefficients — wavelength-dependent (λ^-4 ratio)
-    let beta = vec3<f32>(1.0, 2.4, 5.8) * uniforms.atmosphere_density;
-    let scale_h = max(uniforms.atmosphere_height * 0.5, 0.003);
+    let atm_density = uniforms.atmosphere_density;
 
-    // Rayleigh phase function: angle between sun and view direction (0,0,1)
-    let cos_theta = sun_dir.z;
-    let phase = 0.05968 * (1.0 + cos_theta * cos_theta); // 3/(16π)
+    // Rayleigh: wavelength-dependent (λ^-4), blue sky + red sunsets
+    let beta_r = vec3<f32>(1.0, 2.4, 5.8) * atm_density;
+    let scale_h_r = max(uniforms.atmosphere_height * 0.5, 0.003);
+
+    // Mie: wavelength-independent (white/gray haze), concentrated near surface
+    let beta_m = vec3<f32>(1.0, 1.0, 1.0) * atm_density * 0.35;
+    let scale_h_m = scale_h_r * 0.25; // lower scale height — haze near ground
+
+    // Phase functions
+    let cos_theta = sun_dir.z; // angle between sun and view direction (0,0,1)
+    let phase_r = 0.05968 * (1.0 + cos_theta * cos_theta); // Rayleigh: 3/(16π)
+    let phase_m = henyey_greenstein(cos_theta, 0.76);        // Mie: forward-peaked
 
     let steps = 8;
     let step_len = (z_start - z_end) / f32(steps);
@@ -78,23 +92,32 @@ fn ray_march_atmosphere(
 
         if (altitude < 0.0) { continue; }
 
-        let density = exp(-altitude / scale_h);
-        optical_depth += beta * density * abs(step_len);
+        let density_r = exp(-altitude / scale_h_r);
+        let density_m = exp(-altitude / scale_h_m);
+
+        // Combined optical depth (extinction)
+        let ext = beta_r * density_r + beta_m * density_m;
+        optical_depth += ext * abs(step_len);
 
         // Sun illumination: smooth day/night transition at terminator
         let raw_sun_cos = dot(normalize(pos), sun_dir);
         let sun_factor = smoothstep(-0.1, 0.2, raw_sun_cos);
 
         if (sun_factor > 0.001) {
-            let sun_od = beta * density * scale_h / max(raw_sun_cos, 0.12);
+            let sun_od_r = beta_r * density_r * scale_h_r / max(raw_sun_cos, 0.12);
+            let sun_od_m = beta_m * density_m * scale_h_m / max(raw_sun_cos, 0.12);
             let view_transmit = exp(-optical_depth);
-            let sun_transmit = exp(-sun_od);
-            in_scatter += view_transmit * sun_transmit * sun_factor * density * phase * abs(step_len);
+            let sun_transmit = exp(-(sun_od_r + sun_od_m));
+
+            // Rayleigh + Mie in-scatter combined
+            let scatter_r = density_r * phase_r * beta_r;
+            let scatter_m = density_m * phase_m * beta_m;
+            in_scatter += view_transmit * sun_transmit * sun_factor * (scatter_r + scatter_m) * abs(step_len);
         }
     }
 
     var result: ScatterResult;
-    result.in_scatter = in_scatter * beta * 25.0;
+    result.in_scatter = in_scatter * 25.0;
     result.transmittance = exp(-optical_depth);
     return result;
 }
