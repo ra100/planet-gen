@@ -625,6 +625,31 @@ fn compute_roughness(temp_c: f32, moisture_cm: f32, is_ocean: bool, is_ice: bool
     return 0.45; // Forest
 }
 
+// ---- Terrain ambient occlusion ----
+// Samples height neighbors to darken valleys and crevices.
+fn compute_ao(sphere_pos: vec3<f32>) -> f32 {
+    let step = 0.003; // sampling radius
+    let h_center = textureSample(height_tex, height_sampler, sphere_pos).r;
+
+    // 8 neighbor samples (cardinal + diagonal)
+    var occlusion = 0.0;
+    let offsets = array<vec3<f32>, 8>(
+        vec3<f32>(step, 0.0, 0.0), vec3<f32>(-step, 0.0, 0.0),
+        vec3<f32>(0.0, step, 0.0), vec3<f32>(0.0, -step, 0.0),
+        vec3<f32>(step, step, 0.0) * 0.707, vec3<f32>(-step, step, 0.0) * 0.707,
+        vec3<f32>(step, -step, 0.0) * 0.707, vec3<f32>(-step, -step, 0.0) * 0.707
+    );
+    for (var i = 0; i < 8; i++) {
+        let neighbor = textureSample(height_tex, height_sampler, sphere_pos + offsets[i]).r;
+        // If neighbor is higher, this pixel is in a crevice → occluded
+        let height_diff = max(neighbor - h_center, 0.0);
+        occlusion += smooth_step(0.0, 0.08, height_diff);
+    }
+    // Normalize: 0 = fully occluded (deep valley), 1 = fully exposed (ridge)
+    let ao = 1.0 - occlusion * 0.1; // max darkening ~80%
+    return clamp(ao, 0.2, 1.0);
+}
+
 // ---- PBR: GGX normal distribution ----
 fn ggx_distribution(n_dot_h: f32, roughness: f32) -> f32 {
     let a = roughness * roughness;
@@ -800,9 +825,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         var ocean_color = mix(near_shore, mix(mid_ocean, deep_ocean, abyss), shelf);
         ocean_color += vec3<f32>(0.0, 0.015, 0.02) * color_var;
 
-        // Smooth ice transition: no hard cutoff, gradual freeze
-        let ice_blend = smooth_step(3.0, -8.0, ocean_temp); // starts blending at 3°C, full ice at -8°C
-        let ice_color = mix(vec3<f32>(0.65, 0.75, 0.85), vec3<f32>(0.88, 0.92, 0.96), clamp(-ocean_temp / 15.0, 0.0, 1.0));
+        // Improved polar ice: noisy edge, subsurface blue, seasonal extent
+        let ice_edge_noise = snoise(rotated * 15.0) * 3.0 + snoise(rotated * 30.0) * 1.5;
+        let ice_temp_threshold = 3.0 + ice_edge_noise; // organic, jagged ice edge
+        let ice_blend = smooth_step(ice_temp_threshold, ice_temp_threshold - 8.0, ocean_temp);
+        // Thick ice: subsurface blue. Thin ice: translucent dark showing ocean below
+        let thick_ice = vec3<f32>(0.82, 0.90, 0.96); // blue-white
+        let thin_ice = mix(ocean_color, vec3<f32>(0.70, 0.80, 0.90), 0.5); // ocean showing through
+        let ice_thickness = smooth_step(ice_temp_threshold - 3.0, ice_temp_threshold - 12.0, ocean_temp);
+        let ice_color = mix(thin_ice, thick_ice, ice_thickness) + vec3<f32>(0.02) * color_var;
         surface_color = mix(ocean_color, ice_color, ice_blend);
     } else {
         // Mean annual climate for biome classification (stable across seasons)
@@ -814,16 +845,19 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // Continuous gradient coloring — biome type from mean, color shift from season
         surface_color = gradient_color(mean_temp, mean_moisture, seasonal_temp, color_var);
 
-        // Ice/snow overlay: only for genuinely glaciated land (very cold + high altitude or extreme cold)
-        // Tundra (cold flat land) stays brown/tan from gradient_color, NOT white
+        // Improved land ice/snow: noisy edges, subsurface blue for glaciers
         let land_height = (height - uniforms.ocean_level) / max(1.0 - uniforms.ocean_level, 0.01);
         let ice_moisture_threshold = 15.0 + 40.0 * (1.0 - uniforms.ocean_fraction);
-        // Ice requires BOTH extreme cold AND either high altitude or very high moisture
-        let altitude_ice = smooth_step(0.3, 0.6, land_height); // high terrain gets ice easier
-        let cold_factor = smooth_step(-15.0, -30.0, seasonal_temp);
+        let altitude_ice = smooth_step(0.3, 0.6, land_height);
+        // Noisy ice boundary for organic edge
+        let land_ice_noise = snoise(rotated * 12.0) * 4.0;
+        let cold_factor = smooth_step(-12.0 + land_ice_noise, -28.0, seasonal_temp);
         let ice_blend = cold_factor * max(altitude_ice, smooth_step(ice_moisture_threshold * 0.7, ice_moisture_threshold, mean_moisture));
-        let ice_color = vec3<f32>(0.90, 0.93, 0.97) + vec3<f32>(0.02) * color_var;
-        surface_color = mix(surface_color, ice_color, ice_blend);
+        // Glacier blue for thick ice, fresh snow white for thin
+        let glacier_blue = vec3<f32>(0.78, 0.88, 0.96);
+        let fresh_snow = vec3<f32>(0.92, 0.94, 0.97) + vec3<f32>(0.02) * color_var;
+        let land_ice_color = mix(fresh_snow, glacier_blue, altitude_ice * cold_factor);
+        surface_color = mix(surface_color, land_ice_color, ice_blend);
 
         // Altitude zonation — only the highest peaks get snow/rock
         let snow_line = 0.85 + 0.10 * (1.0 - abs(effective_lat) / 1.5708);
@@ -982,7 +1016,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let diffuse = surface_color * (1.0 - f) / 3.14159;
 
     // Ambient (subtle, directional — slightly brighter on the lit hemisphere)
-    let ambient = surface_color * (0.06 + 0.04 * max(dot(normal, light), 0.0));
+    let ao = select(1.0, compute_ao(rotated), !is_ocean); // AO only on land
+    let ambient = surface_color * (0.06 + 0.04 * max(dot(normal, light), 0.0)) * ao;
 
     // Combine — tint direct light by star color
     var lit_color = ambient + (diffuse + specular) * n_dot_l * s_color;
