@@ -397,9 +397,9 @@ impl eframe::App for PlanetGenApp {
                     self.needs_render = true;
                 }
 
-                if ui.add(egui::Slider::new(&mut self.light_elevation, 0.0..=std::f32::consts::FRAC_PI_2)
+                if ui.add(egui::Slider::new(&mut self.light_elevation, 0.0..=std::f32::consts::PI)
                     .text("Sun Elevation"))
-                    .on_hover_text("Height of the sun above the horizon")
+                    .on_hover_text("Height of the sun: 0 = horizon, π/2 = overhead, π = below")
                     .changed()
                 {
                     self.needs_render = true;
