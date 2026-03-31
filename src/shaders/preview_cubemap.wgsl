@@ -1051,11 +1051,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Combine — tint direct light by star color
     var lit_color = ambient + (diffuse + specular) * n_dot_l * s_color;
 
-    // Ice/snow ambient boost: high-albedo surfaces scatter skylight strongly
-    // Without this, Reinhard tonemap crushes snow to grey
-    if (surface_color.r > 0.95 || surface_color.g > 0.95) {
-        let ice_boost = max(max(surface_color.r, surface_color.g) - 0.95, 0.0) * 3.0;
-        lit_color += surface_color * ice_boost * s_color * 0.15;
+    // Ice/snow override: PBR + Reinhard crushes high-albedo to grey.
+    // For ice, directly set HDR-bright values that tonemap to white.
+    let ice_detect = smooth_step(1.0, 1.15, max(surface_color.r, max(surface_color.g, surface_color.b)));
+    if (ice_detect > 0.0) {
+        let ice_lit = s_color * (n_dot_l * 3.5 + 1.0); // HDR: tonemaps to 0.6-0.8
+        lit_color = mix(lit_color, ice_lit, ice_detect);
     }
 
     // Cloud shadow on surface: darken where clouds above block sunlight
