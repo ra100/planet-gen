@@ -1000,7 +1000,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // Beer-Lambert shadow: thick clouds block more light
         let surface_shadow = exp(-cloud_above * 3.0);
         // Only shadow the direct light portion, not ambient
-        lit_color = ambient + (diffuse + specular) * n_dot_l * mix(1.0, surface_shadow, 0.65);
+        lit_color = ambient + (diffuse + specular) * n_dot_l * s_color * mix(1.0, surface_shadow, 0.65);
     }
 
     // ---- Night-side city lights ----
