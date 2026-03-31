@@ -315,9 +315,9 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     ) * 0.12;
     let warped_climate_pos = normalize(sphere_pos + climate_warp);
 
-    let moisture = compute_moisture(warped_climate_pos, height, 0.5);
+    let moisture = compute_moisture(warped_climate_pos, height, uniforms.season);
     let moisture_norm = clamp(moisture / 300.0, 0.0, 1.0);
-    let temp = compute_temperature(warped_climate_pos, height, 0.5);
+    let temp = compute_temperature(warped_climate_pos, height, uniforms.season);
 
     // Start with global coverage blended with moisture
     var local_coverage = mix(coverage, moisture_norm, 0.35);
