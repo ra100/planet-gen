@@ -132,7 +132,7 @@ impl PlanetGenApp {
             pan_x: self.pan[0],
             pan_y: self.pan[1],
             cloud_coverage: self.cloud_coverage,
-            cloud_seed: self.cloud_seed as f32,
+            cloud_seed: crate::preview::seed_to_offset(self.cloud_seed)[0],
             cloud_altitude: 0.008,
             _pad2: [0.0; 2],
         }

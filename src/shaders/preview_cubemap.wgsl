@@ -259,77 +259,133 @@ fn compute_moisture(sphere_pos: vec3<f32>, height: f32, season: f32) -> f32 {
 }
 
 // ---- Cloud density function ----
-// Returns 0.0 (no cloud) to 1.0 (dense overcast).
-// Uses billowy ridged noise for puffy cumulus shapes + climate modulation.
-
-// Hash seed to bounded offset (works for any f32 magnitude)
-fn cloud_seed_hash(s: f32) -> vec3<f32> {
-    return vec3<f32>(
-        fract(sin(s * 78.233) * 43758.5453) * 100.0,
-        fract(sin(s * 12.989 + 1.5) * 67890.1234) * 100.0,
-        fract(sin(s * 37.719 + 3.1) * 91234.5678) * 100.0
-    );
-}
+// Multi-layer cloud system: cyclone spirals, ITCZ convection, marine stratocumulus,
+// fair-weather cumulus, cirrus wisps. Climate-driven by moisture + temperature.
 
 fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     let coverage = uniforms.cloud_coverage;
     if (coverage <= 0.0) { return 0.0; }
 
-    let seed_off = cloud_seed_hash(uniforms.cloud_seed);
+    // Seed offset: pre-hashed on CPU via seed_to_offset() → always in [0, 97)
+    let s = uniforms.cloud_seed;
+    let seed_off = vec3<f32>(s, fract(s * 1.618) * 89.0, fract(s * 2.618) * 83.0);
 
-    // === Cumulus: billowy ridged noise (abs creates puffy rounded shapes) ===
-    let p = sphere_pos + seed_off;
-    // Ridged multifractal: 1-abs(noise) gives cloud-like billowy edges
-    let r1 = 1.0 - abs(snoise(p * 3.0));
-    let r2 = 1.0 - abs(snoise(p * 6.0 + vec3<f32>(5.1, 3.3, 1.7)));
-    let r3 = 1.0 - abs(snoise(p * 12.0 + vec3<f32>(2.4, 6.1, 1.3)));
-    // Weight lower octaves more for soft, large cloud masses
-    let cumulus = r1 * 0.5 + r2 * 0.3 + r3 * 0.2;
-    // Square to sharpen: makes clouds puffier with clearer sky between them
-    let cumulus_shaped = cumulus * cumulus;
-
-    // === Cirrus: high-frequency with slight E-W elongation ===
-    let pc = sphere_pos * vec3<f32>(1.0, 0.6, 1.0) + seed_off + vec3<f32>(50.0, 30.0, 70.0);
-    let cf1 = snoise(pc * 8.0);
-    let cf2 = snoise(pc * 16.0 + vec3<f32>(3.7, 1.1, 8.3)) * 0.5;
-    let cirrus = smooth_step(0.4, 0.8, (cf1 + cf2) * 0.4 + 0.5);
-
-    // === Scattered fair-weather cumulus: small isolated puffs ===
-    let pp = sphere_pos + seed_off * 0.8 + vec3<f32>(41.0, 17.0, 63.0);
-    let puff = 1.0 - abs(snoise(pp * 14.0));
-    let puffs = smooth_step(0.7, 0.9, puff) * 0.5;
-
-    // Latitude-based blending (smooth, avoids hard bands)
+    // --- Climate data ---
     let tilt = uniforms.axial_tilt_rad;
     let tilted_y = sphere_pos.y * cos(tilt) + sphere_pos.z * sin(tilt);
     let lat_rad = asin(clamp(tilted_y, -1.0, 1.0));
     let lat_deg = abs(lat_rad) * 180.0 / 3.14159;
-
-    let tropical_w = 1.0 - smooth_step(10.0, 40.0, lat_deg);
-    let polar_w = smooth_step(50.0, 70.0, lat_deg);
-    let mid_w = 1.0 - tropical_w - polar_w;
-
-    let base_cloud = cumulus_shaped * (0.6 + 0.3 * tropical_w + 0.1 * mid_w)
-                   + cirrus * (0.1 + 0.4 * polar_w + 0.2 * mid_w)
-                   + puffs * (0.5 * tropical_w + 0.3 * mid_w);
-    let base_norm = clamp(base_cloud, 0.0, 1.0);
-
-    // === Climate: moisture influence (soft, avoids latitude banding) ===
     let moisture = compute_moisture(sphere_pos, height, 0.5);
-    let moisture_factor = smooth_step(30.0, 150.0, moisture);
-    let noise_weighted = base_norm * (0.4 + 0.6 * moisture_factor);
+    let temp = compute_temperature(sphere_pos, height, 0.5);
+    let is_ocean = height < uniforms.ocean_level;
+    let moisture_w = smooth_step(40.0, 120.0, moisture);
 
-    // === Orographic lift ===
+    // ================================================================
+    // Layer 1: CYCLONE SYSTEMS — spiral storms at mid-latitudes
+    // ================================================================
+    var storm = 0.0;
+    for (var i = 0; i < 5; i++) {
+        let fi = f32(i);
+        // Pseudo-random storm center using seed
+        let slat = (35.0 + fract(sin(fi * 127.1 + s) * 43758.5) * 20.0) * 3.14159 / 180.0;
+        let slon = fract(sin(fi * 311.7 + s * 1.3) * 23421.6) * 6.28318;
+        let sign_y = select(-1.0, 1.0, i % 2 == 0);
+        let center = normalize(vec3<f32>(
+            cos(slat) * cos(slon),
+            sin(slat) * sign_y,
+            cos(slat) * sin(slon)
+        ));
+
+        // Great-circle distance
+        let d = acos(clamp(dot(sphere_pos, center), -1.0, 1.0));
+
+        // Spiral: azimuthal angle in tangent plane at storm center
+        let up = vec3<f32>(0.0, 1.0, 0.0);
+        let tx = normalize(cross(up, center));
+        let ty = cross(center, tx);
+        let to_pt = sphere_pos - center * dot(sphere_pos, center);
+        let angle = atan2(dot(to_pt, ty), dot(to_pt, tx));
+
+        // Coriolis: counter-clockwise NH, clockwise SH
+        let spiral_arm = cos((angle * sign_y - d * 12.0) * 2.5) * 0.5 + 0.5;
+
+        // Storm size varies
+        let storm_size = 50.0 + fract(sin(fi * 73.1 + s * 0.7) * 19283.3) * 40.0;
+        let falloff = exp(-d * d * storm_size);
+
+        // Noise detail within spiral
+        let sd = snoise(sphere_pos * 12.0 + seed_off + vec3<f32>(fi * 17.0, 0.0, 0.0)) * 0.3 + 0.7;
+        storm += falloff * spiral_arm * sd * 0.9;
+    }
+    let storm_lat_w = smooth_step(20.0, 35.0, lat_deg) * smooth_step(70.0, 55.0, lat_deg);
+    storm = clamp(storm, 0.0, 1.0) * storm_lat_w * moisture_w;
+
+    // ================================================================
+    // Layer 2: ITCZ CONVECTIVE BAND — cumulonimbus near equator
+    // ================================================================
+    let p = sphere_pos + seed_off;
+    let cb1 = 1.0 - abs(snoise(p * 4.0));
+    let cb2 = 1.0 - abs(snoise(p * 8.0 + vec3<f32>(5.1, 3.3, 1.7)));
+    let cb3 = snoise(p * 16.0 + vec3<f32>(2.4, 6.1, 1.3)) * 0.15;
+    let convective = (cb1 * 0.5 + cb2 * 0.35 + cb3);
+    let conv_shaped = convective * convective;
+    let itcz_w = smooth_step(20.0, 5.0, lat_deg) * smooth_step(20.0, 28.0, temp) * moisture_w;
+    let itcz_cloud = conv_shaped * itcz_w;
+
+    // ================================================================
+    // Layer 3: STRATOCUMULUS — marine patches over cool oceans
+    // ================================================================
+    let ps = sphere_pos + seed_off * 0.6 + vec3<f32>(33.0, 7.0, 51.0);
+    let sc1 = snoise(ps * 10.0);
+    let sc2 = snoise(ps * 20.0 + vec3<f32>(4.1, 2.7, 6.3)) * 0.4;
+    let sc_pattern = smooth_step(-0.2, 0.3, sc1 + sc2);
+    let sc_temp_w = smooth_step(8.0, 14.0, temp) * smooth_step(22.0, 16.0, temp);
+    let sc_lat_w = smooth_step(15.0, 25.0, lat_deg) * smooth_step(45.0, 35.0, lat_deg);
+    let ocean_f = select(0.0, 1.0, is_ocean);
+    let stratocumulus = sc_pattern * sc_temp_w * sc_lat_w * ocean_f * 0.65;
+
+    // ================================================================
+    // Layer 4: FAIR-WEATHER CUMULUS — small scattered puffs
+    // ================================================================
+    let pp = sphere_pos + seed_off * 0.8 + vec3<f32>(41.0, 17.0, 63.0);
+    let puff1 = 1.0 - abs(snoise(pp * 12.0));
+    let puff2 = 1.0 - abs(snoise(pp * 24.0 + vec3<f32>(7.3, 1.9, 4.1)));
+    let puff = smooth_step(0.65, 0.85, puff1 * 0.6 + puff2 * 0.4);
+    let land_f = select(0.0, 1.0, !is_ocean);
+    let warm_w = smooth_step(10.0, 25.0, temp);
+    let fair_cu = puff * (0.3 + 0.4 * land_f * warm_w) * moisture_w;
+
+    // ================================================================
+    // Layer 5: CIRRUS — thin ice-crystal wisps (jet stream)
+    // ================================================================
+    let pc = sphere_pos * vec3<f32>(1.0, 0.65, 1.0) + seed_off + vec3<f32>(50.0, 30.0, 70.0);
+    let ci1 = snoise(pc * 7.0);
+    let ci2 = snoise(pc * 14.0 + vec3<f32>(3.7, 1.1, 8.3)) * 0.5;
+    let ci3 = snoise(pc * 28.0 + vec3<f32>(1.3, 5.9, 2.1)) * 0.25;
+    let cirrus = smooth_step(0.35, 0.7, (ci1 + ci2 + ci3) * 0.35 + 0.5) * 0.45;
+    let cirrus_w = smooth_step(25.0, 45.0, lat_deg);
+
+    // ================================================================
+    // Combine all layers
+    // ================================================================
+    var density = storm * 0.8
+               + itcz_cloud * 0.7
+               + stratocumulus
+               + fair_cu * 0.5
+               + cirrus * cirrus_w * 0.5;
+
+    // Orographic lift: mountains force condensation
     let wind = wind_direction_vec(lat_rad);
     let tangent_wind = normalize(wind - sphere_pos * dot(wind, sphere_pos));
     let upwind_pos = normalize(sphere_pos + tangent_wind * 0.04);
     let upwind_h = textureSample(height_tex, height_sampler, upwind_pos).r;
-    let orographic = smooth_step(0.04, 0.22, max(upwind_h - uniforms.ocean_level, 0.0)) * 0.15;
+    density += smooth_step(0.04, 0.22, max(upwind_h - uniforms.ocean_level, 0.0)) * 0.15;
 
-    let total = clamp(noise_weighted + orographic, 0.0, 1.0);
+    density = clamp(density, 0.0, 1.0);
 
+    // Coverage threshold: low coverage → only densest patches survive
     let threshold = 1.0 - coverage;
-    return smooth_step(threshold, threshold + 0.3, total);
+    return smooth_step(threshold, threshold + 0.3, density);
 }
 
 // ---- Continuous gradient biome coloring ----
