@@ -641,14 +641,18 @@ fn compute_terrain_normal(sphere_pos: vec3<f32>, geo_normal: vec3<f32>) -> vec3<
 fn compute_roughness(temp_c: f32, moisture_cm: f32, is_ocean: bool, is_ice: bool) -> f32 {
     if (is_ocean) {
         if (is_ice) { return 0.15; }
-        return 0.10; // Smooth water — wide enough specular to be visible at planet scale
+        return 0.10;
     }
-    // Land roughness from climate
-    if (temp_c < 0.0) { return 0.20; } // Snow/ice
-    if (temp_c < 10.0) { return 0.55; } // Tundra/Taiga
-    if (moisture_cm < 25.0) { return 0.80; } // Desert
-    if (moisture_cm < 100.0) { return 0.55; } // Grassland
-    return 0.45; // Forest
+    // Continuous land roughness from temperature + moisture (no hard thresholds)
+    // Cold → smooth (snow/ice), hot+dry → rough (desert), wet → moderate (vegetation)
+    let snow_smooth = smooth_step(5.0, -5.0, temp_c) * 0.55; // snow: pulls toward 0.20
+    let desert_rough = smooth_step(50.0, 15.0, moisture_cm) * smooth_step(5.0, 20.0, temp_c); // dry+warm
+    let vegetation = smooth_step(30.0, 120.0, moisture_cm) * smooth_step(5.0, 15.0, temp_c); // wet+warm
+    var roughness = 0.55; // base: moderate
+    roughness -= snow_smooth; // snow smooths it
+    roughness += desert_rough * 0.25; // desert roughens
+    roughness -= vegetation * 0.15; // dense vegetation slightly smoother
+    return clamp(roughness, 0.15, 0.85);
 }
 
 // ---- Terrain ambient occlusion ----
