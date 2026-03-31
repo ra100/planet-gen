@@ -71,18 +71,23 @@ fn ridged_multifractal(p: vec3<f32>, octaves: i32, lacunarity: f32, gain: f32, o
 
 // Domain warping for natural plate boundaries — multi-octave for fractal coastlines
 fn warp_position(pos: vec3<f32>) -> vec3<f32> {
-    // Two octaves of warping: large-scale bends + fine-scale irregularity
+    // Three octaves of warping: large sweeps + medium bends + fine irregularity
     let warp1 = vec3<f32>(
-        snoise(pos * 1.8 + vec3<f32>(31.7, 0.0, 0.0)),
-        snoise(pos * 1.8 + vec3<f32>(0.0, 47.3, 0.0)),
-        snoise(pos * 1.8 + vec3<f32>(0.0, 0.0, 73.1))
-    ) * 0.15; // Large-scale curves
+        snoise(pos * 1.2 + vec3<f32>(31.7, 0.0, 0.0)),
+        snoise(pos * 1.2 + vec3<f32>(0.0, 47.3, 0.0)),
+        snoise(pos * 1.2 + vec3<f32>(0.0, 0.0, 73.1))
+    ) * 0.20; // Large-scale sweeps
     let warp2 = vec3<f32>(
-        snoise(pos * 5.0 + vec3<f32>(13.1, 0.0, 0.0)),
-        snoise(pos * 5.0 + vec3<f32>(0.0, 19.7, 0.0)),
-        snoise(pos * 5.0 + vec3<f32>(0.0, 0.0, 29.3))
-    ) * 0.06; // Fine-scale irregularity
-    return normalize(pos + warp1 + warp2);
+        snoise(pos * 3.0 + vec3<f32>(13.1, 0.0, 0.0)),
+        snoise(pos * 3.0 + vec3<f32>(0.0, 19.7, 0.0)),
+        snoise(pos * 3.0 + vec3<f32>(0.0, 0.0, 29.3))
+    ) * 0.10; // Medium-scale bends
+    let warp3 = vec3<f32>(
+        snoise(pos * 7.0 + vec3<f32>(7.3, 0.0, 0.0)),
+        snoise(pos * 7.0 + vec3<f32>(0.0, 11.9, 0.0)),
+        snoise(pos * 7.0 + vec3<f32>(0.0, 0.0, 17.1))
+    ) * 0.04; // Fine-scale irregularity
+    return normalize(pos + warp1 + warp2 + warp3);
 }
 
 // Find the two nearest plates and compute boundary info
@@ -109,9 +114,11 @@ fn find_nearest_plates(sphere_pos: vec3<f32>) -> PlateInfo {
         // Per-plate noise bias: each plate has a unique noise field that
         // pushes its boundary outward in some directions and inward in others.
         // This creates concave coastlines, peninsulas, and bays instead of convex polygons.
+        // Three octaves: large-scale concavities + medium bends + fine irregularity.
         let plate_offset = vec3<f32>(f32(i) * 17.3, f32(i) * 31.7, f32(i) * 43.1);
-        let bias = snoise(sphere_pos * 4.0 + plate_offset) * 0.04
-                 + snoise(sphere_pos * 8.0 + plate_offset * 2.0) * 0.02;
+        let bias = snoise(sphere_pos * 2.0 + plate_offset) * 0.08
+                 + snoise(sphere_pos * 4.5 + plate_offset * 2.0) * 0.05
+                 + snoise(sphere_pos * 9.0 + plate_offset * 3.0) * 0.025;
         d += bias;
 
         if (d < info.nearest_dist) {
