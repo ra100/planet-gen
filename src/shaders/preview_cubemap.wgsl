@@ -739,8 +739,10 @@ fn compute_urban_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     // Combine dots + webs
     let city_pattern = max(dots * dots2 * 1.5, webs * 0.6);
 
+    // Quadratic dev ramp: 0.01→0.0001 (sparse), 0.1→0.01, 0.5→0.25, 1.0→1.0
+    let dev_scaled = dev * dev;
     let urban_raw = score * city_pattern;
-    let threshold = (1.0 - dev) * 0.35;
+    let threshold = (1.0 - dev_scaled) * 0.35;
     return smooth_step(threshold, threshold + 0.06, urban_raw);
 }
 

@@ -46,6 +46,7 @@ pub struct PlanetGenApp {
     view_mode: u32,
     preview_resolution: u32,
     needs_terrain: bool,   // full terrain recompute (plates + compute + erosion)
+    terrain_pending: bool, // true = overlay painted, next frame does the work
     needs_render: bool,    // just re-render sphere from cached cubemap
     cached_cubemap_view: Option<wgpu::TextureView>,
     // Export state
@@ -100,6 +101,7 @@ impl PlanetGenApp {
             view_mode: 0,
             preview_resolution: crate::preview::DEFAULT_PREVIEW_SIZE,
             needs_terrain: true,
+            terrain_pending: false,
             needs_render: true,
             cached_cubemap_view: None,
             planet_name: format!("planet_{}", PlanetParams::default().seed),
@@ -178,6 +180,10 @@ impl PlanetGenApp {
     }
 
     fn regenerate_terrain(&mut self) {
+        use std::time::Instant;
+        let t_total = Instant::now();
+
+        let t0 = Instant::now();
         let plates = generate_plates(&PlateGenParams {
             seed: self.params.seed,
             mass_earth: self.params.mass_earth,
@@ -186,7 +192,9 @@ impl PlanetGenApp {
             continental_scale: self.continental_scale,
             num_plates_override: self.num_plates_override,
         });
+        let t_plates = t0.elapsed();
 
+        let t1 = Instant::now();
         let (amplitude, frequency, octaves, gain, lacunarity) = self.terrain_params();
         let mut terrain = self.terrain_compute.generate(
             &self.gpu,
@@ -203,12 +211,28 @@ impl PlanetGenApp {
             self.warp_strength,
             self.detail_scale,
         );
+        let t_compute = t1.elapsed();
 
+        let t2 = Instant::now();
         let effective_ocean = self.derived.ocean_fraction * (1.0 - self.water_loss);
         let ocean_level = -1.0 + 2.0 * effective_ocean;
         self.erosion_pipeline.erode(&self.gpu, &mut terrain, self.erosion_iterations, ocean_level);
+        let t_erosion = t2.elapsed();
 
+        let t3 = Instant::now();
         self.cached_cubemap_view = Some(self.preview_renderer.upload_terrain(&self.gpu, &terrain));
+        let t_upload = t3.elapsed();
+
+        eprintln!(
+            "[terrain {}px] plates: {:.0}ms, compute: {:.0}ms, erosion: {:.0}ms, upload: {:.0}ms, total: {:.0}ms",
+            self.preview_resolution,
+            t_plates.as_secs_f64() * 1000.0,
+            t_compute.as_secs_f64() * 1000.0,
+            t_erosion.as_secs_f64() * 1000.0,
+            t_upload.as_secs_f64() * 1000.0,
+            t_total.elapsed().as_secs_f64() * 1000.0,
+        );
+
         self.needs_terrain = false;
         self.needs_render = true;
     }
@@ -768,7 +792,7 @@ impl eframe::App for PlanetGenApp {
             }
 
             // Loading overlay when terrain is regenerating (centered on preview image)
-            if self.needs_terrain {
+            if self.terrain_pending {
                 if self.texture_handle.is_some() {
                     let available = ui.available_size();
                     let img_size = available.x.min(available.y);
@@ -791,10 +815,16 @@ impl eframe::App for PlanetGenApp {
             }
         });
 
-        // Run expensive GPU work AFTER UI so input events (mouse-up) are processed first.
-        // This prevents sliders from "sticking" during terrain regeneration.
-        if self.needs_terrain {
-            ctx.request_repaint(); // ensure overlay shows before blocking
+        // Two-frame terrain generation:
+        // Frame 1: needs_terrain=true → set terrain_pending, paint overlay, request repaint
+        // Frame 2: terrain_pending=true → do the actual blocking work
+        // This ensures the overlay is visible before the UI freezes.
+        if self.needs_terrain && !self.terrain_pending {
+            self.terrain_pending = true;
+            self.needs_terrain = false;
+            ctx.request_repaint();
+        } else if self.terrain_pending {
+            self.terrain_pending = false;
             self.regenerate_terrain();
         }
         if self.needs_render {
