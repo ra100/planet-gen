@@ -858,9 +858,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let ice_edge_noise = snoise(rotated * 12.0) * 1.5;
         let ice_temp_threshold = 3.0 + ice_edge_noise;
         let ice_blend = smooth_step(ice_temp_threshold, ice_temp_threshold - 8.0, ocean_temp);
-        // Thick ice: bright blue-white. Thin ice: shows ocean through
-        let thick_ice = vec3<f32>(0.90, 0.94, 0.98);
-        let thin_ice = mix(ocean_color, vec3<f32>(0.82, 0.88, 0.94), 0.6);
+        // Thick ice: HDR bright (survives PBR + tonemap as white). Thin ice: shows ocean
+        let thick_ice = vec3<f32>(1.15, 1.18, 1.25);
+        let thin_ice = mix(ocean_color, vec3<f32>(0.95, 1.0, 1.08), 0.6);
         let ice_thickness = smooth_step(ice_temp_threshold - 3.0, ice_temp_threshold - 12.0, ocean_temp);
         let ice_color = mix(thin_ice, thick_ice, ice_thickness) + vec3<f32>(0.015) * color_var;
         surface_color = mix(ocean_color, ice_color, ice_blend);
@@ -882,9 +882,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let land_ice_noise = snoise(rotated * 10.0) * 2.0;
         let cold_factor = smooth_step(-12.0 + land_ice_noise, -28.0, seasonal_temp);
         let ice_blend = cold_factor * max(altitude_ice, smooth_step(ice_moisture_threshold * 0.7, ice_moisture_threshold, mean_moisture));
-        // Bright glacier blue + fresh snow
-        let glacier_blue = vec3<f32>(0.85, 0.92, 0.98);
-        let fresh_snow = vec3<f32>(0.95, 0.96, 0.98) + vec3<f32>(0.015) * color_var;
+        // HDR bright glacier + snow (survives PBR pipeline as white)
+        let glacier_blue = vec3<f32>(1.05, 1.15, 1.25);
+        let fresh_snow = vec3<f32>(1.20, 1.22, 1.25) + vec3<f32>(0.015) * color_var;
         let land_ice_color = mix(fresh_snow, glacier_blue, altitude_ice * cold_factor);
         surface_color = mix(surface_color, land_ice_color, ice_blend);
 
@@ -895,7 +895,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
         if (land_height > snow_line && seasonal_temp < 15.0) {
             let blend = smooth_step(snow_line, snow_line + 0.10, land_height);
-            surface_color = mix(surface_color, vec3<f32>(0.92, 0.94, 0.98), blend);
+            surface_color = mix(surface_color, vec3<f32>(1.15, 1.18, 1.22), blend);
         } else if (land_height > rock_line) {
             let blend = smooth_step(rock_line, rock_line + 0.10, land_height);
             surface_color = mix(surface_color, vec3<f32>(0.50, 0.48, 0.44) + vec3<f32>(0.04) * color_var, blend);
