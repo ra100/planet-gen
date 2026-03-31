@@ -29,6 +29,12 @@ pub struct PlanetGenApp {
     show_atmosphere: bool, // toggle atmosphere rendering
     zoom: f32,            // viewport zoom level
     pan: [f32; 2],        // viewport pan in NDC units
+    // Advanced terrain tweaks
+    mountain_scale: f32,
+    boundary_width: f32,
+    warp_strength: f32,
+    detail_scale: f32,
+    num_plates_override: u32, // 0 = auto from physics
     view_mode: u32,
     preview_resolution: u32,
     needs_terrain: bool,   // full terrain recompute (plates + compute + erosion)
@@ -69,6 +75,11 @@ impl PlanetGenApp {
             show_atmosphere: true,
             zoom: 1.0,
             pan: [0.0, 0.0],
+            mountain_scale: 1.0,
+            boundary_width: 0.10,
+            warp_strength: 1.0,
+            detail_scale: 1.0,
+            num_plates_override: 0,
             view_mode: 0,
             preview_resolution: crate::preview::DEFAULT_PREVIEW_SIZE,
             needs_terrain: true,
@@ -148,6 +159,7 @@ impl PlanetGenApp {
             ocean_fraction: self.derived.ocean_fraction * (1.0 - self.water_loss),
             tectonics_factor: self.derived.tectonics_factor,
             continental_scale: self.continental_scale,
+            num_plates_override: self.num_plates_override,
         });
 
         let (amplitude, frequency, octaves, gain, lacunarity) = self.terrain_params();
@@ -161,6 +173,10 @@ impl PlanetGenApp {
             octaves,
             gain,
             lacunarity,
+            self.mountain_scale,
+            self.boundary_width,
+            self.warp_strength,
+            self.detail_scale,
         );
 
         let effective_ocean = self.derived.ocean_fraction * (1.0 - self.water_loss);
@@ -392,6 +408,53 @@ impl eframe::App for PlanetGenApp {
                 {
                     self.needs_render = true;
                 }
+
+                ui.separator();
+                egui::CollapsingHeader::new("Advanced Tweaks")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        let mut plates_i32 = self.num_plates_override as i32;
+                        if ui.add(egui::Slider::new(&mut plates_i32, 0..=30)
+                            .text("Plates"))
+                            .on_hover_text("Number of tectonic plates. 0 = auto from planet mass")
+                            .changed()
+                        {
+                            self.num_plates_override = plates_i32 as u32;
+                            self.needs_terrain = true;
+                        }
+
+                        if ui.add(egui::Slider::new(&mut self.mountain_scale, 0.0..=3.0)
+                            .text("Mountain Height"))
+                            .on_hover_text("Multiplier for tectonic mountain height. 0 = flat, 1 = default, 3 = extreme")
+                            .changed()
+                        {
+                            self.needs_terrain = true;
+                        }
+
+                        if ui.add(egui::Slider::new(&mut self.boundary_width, 0.03..=0.30)
+                            .text("Range Width"))
+                            .on_hover_text("How wide mountain ranges spread from plate boundaries. Low = narrow ridges, high = broad highlands")
+                            .changed()
+                        {
+                            self.needs_terrain = true;
+                        }
+
+                        if ui.add(egui::Slider::new(&mut self.warp_strength, 0.0..=3.0)
+                            .text("Shape Warp"))
+                            .on_hover_text("How organic plate boundaries look. 0 = geometric, 1 = default, 3 = very irregular")
+                            .changed()
+                        {
+                            self.needs_terrain = true;
+                        }
+
+                        if ui.add(egui::Slider::new(&mut self.detail_scale, 0.0..=3.0)
+                            .text("Detail"))
+                            .on_hover_text("Fine terrain noise intensity. 0 = smooth, 1 = default, 3 = very rough")
+                            .changed()
+                        {
+                            self.needs_terrain = true;
+                        }
+                    });
 
                 ui.separator();
                 ui.heading("Derived Properties");

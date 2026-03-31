@@ -18,6 +18,10 @@ pub struct TerrainGenParams {
     pub tile_offset_x: u32,
     pub tile_offset_y: u32,
     pub full_resolution: u32,
+    pub mountain_scale: f32,   // multiplier for tectonic mountain height (1.0 = default)
+    pub boundary_width: f32,   // sigma for boundary influence spread (0.10 = default)
+    pub warp_strength: f32,    // domain warp intensity (1.0 = default)
+    pub detail_scale: f32,     // fBm detail noise intensity (1.0 = default)
 }
 
 /// Generated tectonic heightmap for all 6 cube faces.
@@ -219,6 +223,10 @@ impl TerrainComputePipeline {
         octaves: u32,
         gain: f32,
         lacunarity: f32,
+        mountain_scale: f32,
+        boundary_width: f32,
+        warp_strength: f32,
+        detail_scale: f32,
     ) -> TectonicTerrain {
         let total_pixels = (resolution * resolution) as usize;
         let buffer_size = (total_pixels * std::mem::size_of::<f32>()) as u64;
@@ -262,6 +270,10 @@ impl TerrainComputePipeline {
                 tile_offset_x: 0,
                 tile_offset_y: 0,
                 full_resolution: resolution,
+                mountain_scale,
+                boundary_width,
+                warp_strength,
+                detail_scale,
             };
 
             let params_buffer =
@@ -679,10 +691,11 @@ mod tests {
             ocean_fraction: 0.7,
             tectonics_factor: 0.85,
             continental_scale: 1.0,
+            num_plates_override: 0,
         });
 
         let terrain = pipeline.generate(
-            &gpu, &plates, 64, 42, 1.0, 1.2, 8, 0.5, 2.0,
+            &gpu, &plates, 64, 42, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0,
         );
 
         assert_eq!(terrain.faces.len(), 6);
@@ -703,10 +716,11 @@ mod tests {
             ocean_fraction: 0.7,
             tectonics_factor: 0.85,
             continental_scale: 1.0,
+            num_plates_override: 0,
         });
 
         let terrain = pipeline.generate(
-            &gpu, &plates, 64, 42, 1.0, 1.2, 8, 0.5, 2.0,
+            &gpu, &plates, 64, 42, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0,
         );
 
         // Collect all heights
@@ -738,10 +752,11 @@ mod tests {
             ocean_fraction: 0.7,
             tectonics_factor: 0.85,
             continental_scale: 1.0,
+            num_plates_override: 0,
         });
 
         let terrain = pipeline.generate(
-            &gpu, &plates, 64, 42, 1.0, 1.2, 8, 0.5, 2.0,
+            &gpu, &plates, 64, 42, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0,
         );
 
         let all_heights: Vec<f32> = terrain.faces.iter().flat_map(|f| f.iter().copied()).collect();

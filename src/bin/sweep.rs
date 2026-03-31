@@ -118,6 +118,7 @@ fn generate_planet_png(
         ocean_fraction: effective_ocean,
         tectonics_factor: derived.tectonics_factor,
         continental_scale: preset.continental_scale,
+        num_plates_override: 0,
     });
 
     // Terrain params from spectral exponents
@@ -135,7 +136,7 @@ fn generate_planet_png(
     let lacunarity = 1.9 + 0.2 * rotation_factor;
 
     let terrain = compute.generate(
-        gpu, &plates, 512, seed, amplitude, frequency, octaves, gain, lacunarity,
+        gpu, &plates, 512, seed, amplitude, frequency, octaves, gain, lacunarity, 1.0, 0.10, 1.0, 1.0,
     );
 
     let cubemap_view = renderer.upload_terrain(gpu, &terrain);

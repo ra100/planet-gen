@@ -384,7 +384,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let hit = intersect_sphere(in.uv);
 
     if (length(hit) < 0.01) {
-        return vec4<f32>(0.02, 0.02, 0.05, 1.0); // Space background
+        return vec4<f32>(0.0, 0.0, 0.0, 1.0); // Space background
     }
 
     let normal = normalize(hit);

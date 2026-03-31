@@ -18,12 +18,18 @@ pub struct PlateGenParams {
     pub tectonics_factor: f32,
     /// Continental scale: lower = fewer, larger plates. Higher = more, smaller plates.
     pub continental_scale: f32,
+    /// Override plate count (0 = auto from physics).
+    pub num_plates_override: u32,
 }
 
 /// Generate tectonic plates from planet parameters.
 /// Returns a Vec of PlateGpu ready for GPU upload.
 pub fn generate_plates(params: &PlateGenParams) -> Vec<PlateGpu> {
-    let n = compute_plate_count(params.mass_earth, params.tectonics_factor, params.continental_scale);
+    let n = if params.num_plates_override > 0 {
+        params.num_plates_override as usize
+    } else {
+        compute_plate_count(params.mass_earth, params.tectonics_factor, params.continental_scale)
+    };
     let centers = fibonacci_sphere(n, params.seed);
     let continental_count = ((n as f32) * (1.0 - params.ocean_fraction)).round() as usize;
     let velocities = generate_velocities(n, params.seed, params.tectonics_factor);
@@ -135,6 +141,7 @@ mod tests {
             ocean_fraction: 0.7,
             tectonics_factor: 0.85,
             continental_scale: 1.0,
+            num_plates_override: 0,
         };
         let plates = generate_plates(&params);
         assert!(
@@ -152,6 +159,7 @@ mod tests {
             ocean_fraction: 0.7,
             tectonics_factor: 0.85,
             continental_scale: 1.0,
+            num_plates_override: 0,
         };
         let plates = generate_plates(&params);
         let continental = plates.iter().filter(|p| p.plate_type > 0.5).count();
@@ -170,6 +178,7 @@ mod tests {
             ocean_fraction: 0.7,
             tectonics_factor: 0.85,
             continental_scale: 1.0,
+            num_plates_override: 0,
         };
         let plates = generate_plates(&params);
         for (i, p) in plates.iter().enumerate() {
@@ -190,6 +199,7 @@ mod tests {
             ocean_fraction: 0.7,
             tectonics_factor: 0.85,
             continental_scale: 1.0,
+            num_plates_override: 0,
         });
         let p2 = generate_plates(&PlateGenParams {
             seed: 999,
@@ -197,6 +207,7 @@ mod tests {
             ocean_fraction: 0.7,
             tectonics_factor: 0.85,
             continental_scale: 1.0,
+            num_plates_override: 0,
         });
         let diff: f32 = p1.iter().zip(p2.iter())
             .map(|(a, b)| {
@@ -216,6 +227,7 @@ mod tests {
             ocean_fraction: 0.3,
             tectonics_factor: 0.2,
             continental_scale: 1.0,
+            num_plates_override: 0,
         });
         assert!(
             plates.len() <= 8,

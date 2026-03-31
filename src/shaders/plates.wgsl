@@ -23,6 +23,10 @@ struct GenParams {
     tile_offset_x: u32,
     tile_offset_y: u32,
     full_resolution: u32,
+    mountain_scale: f32,   // multiplier for tectonic mountain height
+    boundary_width: f32,   // sigma for boundary influence spread
+    warp_strength: f32,    // domain warp intensity
+    detail_scale: f32,     // fBm detail noise intensity
 }
 
 @group(0) @binding(0) var<storage, read> plates: array<Plate>;
@@ -87,7 +91,8 @@ fn warp_position(pos: vec3<f32>) -> vec3<f32> {
         snoise(pos * 7.0 + vec3<f32>(0.0, 11.9, 0.0)),
         snoise(pos * 7.0 + vec3<f32>(0.0, 0.0, 17.1))
     ) * 0.04; // Fine-scale irregularity
-    return normalize(pos + warp1 + warp2 + warp3);
+    let w = params.warp_strength;
+    return normalize(pos + (warp1 + warp2 + warp3) * w);
 }
 
 // Find the two nearest plates and compute boundary info
@@ -250,7 +255,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     height += seamount_h * (1.0 - land_weight);
 
     // --- Boundary terrain (R4-R7, R10) ---
-    let b_influence = boundary_influence(boundary_dist, 0.10); // Focused mountain influence
+    let b_influence = boundary_influence(boundary_dist, params.boundary_width);
 
     // Ridge variation: ridged multifractal produces sharp crests with natural gaps at valleys.
     // Evaluated at boundary-zone scale (freq 5.0 base) with 5 octaves for multi-scale detail.
@@ -265,7 +270,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         if (is_continental && neighbor_continental) {
             // R4: Continental-continental collision → mountain range (Himalayas)
             // Ridge height driven by ridged multifractal for sharp, varied peaks.
-            let ridge_height = 0.7 * b_influence * abs(boundary_type) * ridge_mask;
+            let ridge_height = 0.7 * params.mountain_scale * b_influence * abs(boundary_type) * ridge_mask;
             // Fine surface detail on top — only adds texture where ridges exist.
             let ridge_noise = snoise(raw_pos * 15.0 + seed_offset(params.seed + 100u)) * 0.15;
             let ridge_detail = snoise(raw_pos * 30.0 + seed_offset(params.seed + 110u)) * 0.06;
@@ -273,7 +278,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         } else if (is_continental && !neighbor_continental) {
             // R5: Oceanic-continental convergence → volcanic chain (Andes)
             // Volcanic arc shares the same ridged multifractal so spacing matches geology.
-            let volcanic_height = 0.55 * b_influence * abs(boundary_type) * ridge_mask;
+            let volcanic_height = 0.55 * params.mountain_scale * b_influence * abs(boundary_type) * ridge_mask;
             let volcanic_noise = snoise(raw_pos * 12.0 + seed_offset(params.seed + 200u)) * 0.15;
             height += volcanic_height + volcanic_noise * b_influence * ridge_mask;
         } else if (!is_continental && neighbor_continental) {
@@ -281,7 +286,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             height -= 0.25 * b_influence * abs(boundary_type);
         } else {
             // R10: Oceanic-oceanic convergence → island arc
-            let arc_height = 0.35 * b_influence * abs(boundary_type);
+            let arc_height = 0.35 * params.mountain_scale * b_influence * abs(boundary_type);
             // Create arc-shaped elevation (islands above sea level)
             let arc_noise = snoise(raw_pos * 10.0 + seed_offset(params.seed + 300u));
             if (arc_noise > 0.0) {
@@ -335,8 +340,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 
     // R13: fBm detail noise on top of geological structure
     let detail = detail_noise(raw_pos);
-    let detail_scale = mix(0.3, 1.5, smooth_step(-0.1, 0.5, height));
-    height += detail * detail_scale;
+    let detail_mix = mix(0.3, 1.5, smooth_step(-0.1, 0.5, height));
+    height += detail * detail_mix * params.detail_scale;
 
     // Hypsometric profile: shape the height distribution to match real geology
     // Land: coastal plains stay flat, interior rises, mountains amplified
