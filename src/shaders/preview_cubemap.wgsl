@@ -467,14 +467,16 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
             let spiral_raw = cos(spiral_phase * 2.0);
             let spiral_fade = smooth_step(eye_r * 1.5, eye_r * 6.0, d);
 
-            // Add dense cloud along spiral arms (positive peaks only)
-            let arm_boost = pow(max(spiral_raw, 0.0), 1.5) * near_storm * spiral_fade * 0.5;
+            // Add dense TEXTURED cloud along spiral arms (not smooth arcs)
+            let arm_tex = snoise(sphere_pos * 15.0 + seed_off + vec3<f32>(fi * 13.0, 0.0, 0.0)) * 0.3 + 0.7;
+            let arm_strength = pow(max(spiral_raw, 0.0), 1.2) * arm_tex;
+            let arm_boost = arm_strength * near_storm * spiral_fade * 0.55;
             density += arm_boost;
 
-            // Carve gaps between arms
+            // Carve gaps between arms (only where near_storm is strong)
             let gap_depth = near_storm * spiral_fade * 0.85;
             let arm_shape = spiral_raw * 0.5 + 0.5;
-            let spiral_mask = 1.0 - gap_depth * (1.0 - arm_shape);
+            let spiral_mask = 1.0 - gap_depth * (1.0 - max(arm_shape, arm_tex * 0.3));
 
             density *= mix(1.0, spiral_mask * eye_mask, near_storm);
         }
