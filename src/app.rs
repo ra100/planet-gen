@@ -767,22 +767,27 @@ impl eframe::App for PlanetGenApp {
                 });
             }
 
-            // Loading overlay when terrain is regenerating (shown over existing preview)
+            // Loading overlay when terrain is regenerating (centered on preview image)
             if self.needs_terrain {
-                let overlay_rect = ui.min_rect();
-                let painter = ui.painter();
-                painter.rect_filled(
-                    overlay_rect,
-                    0.0,
-                    egui::Color32::from_rgba_premultiplied(0, 0, 0, 140),
-                );
-                painter.text(
-                    overlay_rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    format!("Generating terrain ({}px)...", self.preview_resolution),
-                    egui::FontId::proportional(18.0),
-                    egui::Color32::WHITE,
-                );
+                if self.texture_handle.is_some() {
+                    let available = ui.available_size();
+                    let img_size = available.x.min(available.y);
+                    let min = ui.min_rect().min;
+                    let img_rect = egui::Rect::from_min_size(min, egui::Vec2::splat(img_size));
+                    let painter = ui.painter();
+                    painter.rect_filled(
+                        img_rect,
+                        0.0,
+                        egui::Color32::from_rgba_premultiplied(0, 0, 0, 140),
+                    );
+                    painter.text(
+                        img_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        format!("Generating terrain ({}px)...", self.preview_resolution),
+                        egui::FontId::proportional(18.0),
+                        egui::Color32::WHITE,
+                    );
+                }
             }
         });
 
