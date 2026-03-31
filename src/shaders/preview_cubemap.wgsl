@@ -22,6 +22,10 @@ struct Uniforms {
     cloud_altitude: f32,
     cloud_type: f32,         // 0.0 = smooth stratus, 1.0 = puffy cumulus
     storm_count: f32,        // 0-8 cyclone systems
+    storm_size: f32,         // storm radius multiplier
+    _pad3a: f32,
+    _pad3b: f32,
+    _pad3c: f32,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -388,8 +392,9 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
             // Great-circle distance
             let d = acos(clamp(dot(sphere_pos, center), -1.0, 1.0));
 
-            // Gaussian storm envelope (radius ~15-20° on sphere)
-            let storm_sigma = 22.0 + fract(sin(fi * 73.1 + s * 0.7) * 19283.3) * 12.0;
+            // Gaussian storm envelope — size controlled by slider
+            let base_sigma = 22.0 + fract(sin(fi * 73.1 + s * 0.7) * 19283.3) * 12.0;
+            let storm_sigma = base_sigma / max(uniforms.storm_size * uniforms.storm_size, 0.1);
             let falloff = exp(-d * d * storm_sigma);
 
             // Soft spiral bias via tangent-plane angle (Coriolis-correct)
@@ -406,8 +411,8 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
 
             // Spiral only in outer bands — fades out near center
             let spiral_strength = smooth_step(eye_radius * 2.0, eye_radius * 5.0, d);
-            let spiral = cos((angle * sign_y - log(max(d, 0.003)) * 3.0) * 2.0);
-            let spiral_bias = spiral * 0.15 * spiral_strength + 0.85;
+            let spiral = cos((angle * sign_y - log(max(d, 0.003)) * 3.5) * 2.0);
+            let spiral_bias = spiral * 0.3 * spiral_strength + 0.7; // 0.4–1.0 range for visible arms
 
             // Coverage: eye wall ring + outer bands with spiral, minus clear eye
             local_coverage += (falloff * spiral_bias * 0.35 + eye_wall * 0.3) * eye_clear;

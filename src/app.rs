@@ -39,6 +39,7 @@ pub struct PlanetGenApp {
     cloud_seed: u32,
     cloud_type: f32,
     storm_count: u32,
+    storm_size: f32,
     view_mode: u32,
     preview_resolution: u32,
     needs_terrain: bool,   // full terrain recompute (plates + compute + erosion)
@@ -89,6 +90,7 @@ impl PlanetGenApp {
             cloud_seed: default_cloud_seed,
             cloud_type: 0.5,
             storm_count: 0,
+            storm_size: 1.0,
             view_mode: 0,
             preview_resolution: crate::preview::DEFAULT_PREVIEW_SIZE,
             needs_terrain: true,
@@ -140,6 +142,8 @@ impl PlanetGenApp {
             cloud_altitude: 0.008,
             cloud_type: self.cloud_type,
             storm_count: self.storm_count as f32,
+            storm_size: self.storm_size,
+            _pad3: [0.0; 3],
         }
     }
 
@@ -451,6 +455,15 @@ impl eframe::App for PlanetGenApp {
                 {
                     self.storm_count = storms_i32 as u32;
                     self.needs_render = true;
+                }
+                if self.storm_count > 0 {
+                    if ui.add(egui::Slider::new(&mut self.storm_size, 0.3..=3.0)
+                        .text("Storm Size"))
+                        .on_hover_text("Storm radius: 0.3 = compact, 1.0 = Earth-like, 3.0 = massive")
+                        .changed()
+                    {
+                        self.needs_render = true;
+                    }
                 }
 
                 ui.separator();

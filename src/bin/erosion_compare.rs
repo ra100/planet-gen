@@ -103,6 +103,8 @@ fn main() {
                 cloud_altitude: 0.008,
                 cloud_type: 0.5,
                 storm_count: 0.0,
+                storm_size: 1.0,
+                _pad3: [0.0; 3],
             };
 
             let pixels = renderer.render(&gpu, &uniforms, &cubemap_view, render_size);
