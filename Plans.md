@@ -194,6 +194,32 @@ Research: [docs/research/cloud-layer-rendering.md](docs/research/cloud-layer-ren
 
 ---
 
+## Phase 5.7: Starfield, City Lights & Star Color
+
+Background environment, night-side civilization, and star type lighting.
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 5.7.1 | Starfield background with sun orb: hash-based stars, color variation, sun disc with glow | Stars visible behind planet, sun at light_dir position | Phase 5.5 | cc:完了 [361b6de] |
+| 5.7.2 | Night-side city lights + day-side urban grey patches: procedural urban density from climate data | Warm glow on dark side, grey patches on day side, Development slider | Phase 5.6 | cc:完了 [02e4109] |
+| 5.7.3 | City light color slider: warm amber → white LED → cool blue | Configurable night light color | 5.7.2 | cc:完了 [91bd657] |
+| 5.7.4 | Star color temperature slider: blue O-star → sun G-star → red M-dwarf, tints all lighting + clouds + sun orb | Planet illumination matches star type | Phase 5.5 | cc:完了 [9fea2ab] |
+| 5.7.5 | City lights under clouds with scattered glow: dimmed by cloud cover, soft glow through thin clouds | Lights properly occluded, scattered through clouds | 5.7.2, Phase 5.6 | cc:完了 [a83332d] |
+
+---
+
+## Phase 5.8: Visual Polish
+
+Terrain rendering improvements and additional visual features.
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 5.8.1 | Ambient occlusion in terrain valleys: darken crevices and low areas for depth | Visible darkening in valleys and steep terrain | Phase 4.8 | cc:TODO |
+| 5.8.2 | Export cloud + night light layers as textures: add cloud density and city lights to 8K export pipeline | Cloud and night light PNGs exported alongside albedo/normal/roughness | Phase 5, 5.6, 5.7 | cc:TODO |
+| 5.8.3 | Better polar ice rendering: improved ice caps with gradual transition, snow coverage, seasonal variation | Realistic polar ice that responds to season slider | Phase 4 | cc:TODO |
+
+---
+
 ## Phase 6: Blender Importer Addon
 
 Pure-Python Blender addon that imports generated textures and sets up materials.
@@ -209,13 +235,27 @@ Pure-Python Blender addon that imports generated textures and sets up materials.
 
 ---
 
-## Phase 7: Polish & Distribution
+## Phase 7: Advanced Visual Features
+
+Post-Blender visual enhancements for cinematic renders.
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 7.1 | Lava glow along plate boundaries: volcanic emission at tectonic faults, tectonic activity slider | Orange-red glow at convergent/divergent boundaries, configurable intensity | Phase 4.8 | cc:TODO |
+| 7.2 | Lens flare near planet limb: procedural flare when sun is near the edge | Cinematic lens flare effect, subtle and adjustable | Phase 5.7 | cc:TODO |
+| 7.3 | Ocean specular / sun glint: bright reflection on water surface toward sun | Visible sun glint on oceans, PBR-correct | Phase 4 | cc:TODO |
+| 7.4 | Ring system: Saturn-like rings with color gradients, transparency, shadow casting on planet | Configurable ring tilt, inner/outer radius, color gradient, planet shadow on rings | Phase 5 | cc:TODO |
+| 7.5 | Ring export: single pixel width gradient texture (at least 4K) for Blender use | Exported 4K+ gradient PNG with transparency for ring shader | 7.4, Phase 6 | cc:TODO |
+
+---
+
+## Phase 8: Polish & Distribution
 
 Error handling, cross-platform builds, and documentation.
 
 | Task | 内容 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
-| 7.1 | Error handling: GPU errors (OOM, device lost) caught and displayed in UI; graceful fallback messages for unsupported GPUs | Test: simulate OOM → error message shown, app doesn't crash | Phase 5 | cc:TODO |
-| 7.2 | Cross-platform CI: GitHub Actions builds for Linux, macOS, Windows; artifacts uploaded to releases | CI green on all 3 platforms; downloadable binaries work | Phase 5 | cc:TODO |
-| 7.3 | README: installation instructions, usage guide, parameter reference, example renders | README covers install → first planet → Blender import workflow | 7.2 | cc:TODO |
-| 7.4 | Blender addon packaging: zip file with addon Python files, install instructions | Addon installs via Blender Preferences → Install from File | Phase 6 | cc:TODO |
+| 8.1 | Error handling: GPU errors (OOM, device lost) caught and displayed in UI; graceful fallback messages for unsupported GPUs | Test: simulate OOM → error message shown, app doesn't crash | Phase 5 | cc:TODO |
+| 8.2 | Cross-platform CI: GitHub Actions builds for Linux, macOS, Windows; artifacts uploaded to releases | CI green on all 3 platforms; downloadable binaries work | Phase 5 | cc:TODO |
+| 8.3 | README: installation instructions, usage guide, parameter reference, example renders | README covers install → first planet → Blender import workflow | 8.2 | cc:TODO |
+| 8.4 | Blender addon packaging: zip file with addon Python files, install instructions | Addon installs via Blender Preferences → Install from File | Phase 6 | cc:TODO |
