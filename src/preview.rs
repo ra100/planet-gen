@@ -357,6 +357,10 @@ mod tests {
             atmosphere_density: 0.0,
             atmosphere_height: 0.0,
             height_scale: 3.0,
+            zoom: 1.0,
+            pan_x: 0.0,
+            pan_y: 0.0,
+            _pad1: 0.0,
         };
 
         let size = 256;

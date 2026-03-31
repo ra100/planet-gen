@@ -100,7 +100,7 @@ fn ray_march_atmosphere(
 }
 
 // ---- Temperature ----
-fn compute_temperature(sphere_pos: vec3<f32>, height: f32) -> f32 {
+fn compute_temperature(sphere_pos: vec3<f32>, height: f32, season: f32) -> f32 {
     let latitude = asin(clamp(sphere_pos.y, -1.0, 1.0));
     // Axial tilt: rotate the "solar axis" rather than shifting latitude by sin(lon).
     // This models the sub-solar point offset without creating V-shaped artifacts.
@@ -116,7 +116,7 @@ fn compute_temperature(sphere_pos: vec3<f32>, height: f32) -> f32 {
     // Sub-solar latitude: shifts the thermal equator with season and tilt.
     // At equinox (season=0.5): sub-solar at equator. At solstice: sub-solar at ±tilt.
     // At 90° tilt + summer: the north pole is the hottest point (Uranus-like).
-    let season_angle = (uniforms.season - 0.5) * 2.0; // [-1, 1]
+    let season_angle = (season - 0.5) * 2.0; // [-1, 1]
     let sub_solar_lat = uniforms.axial_tilt_rad * season_angle;
 
     // Thermal latitude: angular distance from the sub-solar point
@@ -166,13 +166,13 @@ fn wind_direction_vec(latitude_rad: f32) -> vec3<f32> {
     return normalize(vec3<f32>(wind_x, wind_y, 0.3));
 }
 
-fn compute_moisture(sphere_pos: vec3<f32>, height: f32) -> f32 {
+fn compute_moisture(sphere_pos: vec3<f32>, height: f32, season: f32) -> f32 {
     let tilt = uniforms.axial_tilt_rad;
     let tilted_y = sphere_pos.y * cos(tilt) + sphere_pos.z * sin(tilt);
     let effective_lat = asin(clamp(tilted_y, -1.0, 1.0));
 
     // Shift Hadley cells with thermal equator (same sub-solar shift as temperature)
-    let season_angle = (uniforms.season - 0.5) * 2.0;
+    let season_angle = (season - 0.5) * 2.0;
     let sub_solar_lat = tilt * season_angle;
     let thermal_lat = effective_lat - sub_solar_lat;
 
@@ -236,10 +236,11 @@ fn compute_moisture(sphere_pos: vec3<f32>, height: f32) -> f32 {
 // Replaces discrete Whittaker lookup with smooth 2D interpolation.
 // Temperature × moisture → color via 3×2 anchor grid.
 
-fn gradient_color(temp_c: f32, moisture_cm: f32, variation: f32) -> vec3<f32> {
-    // Temperature interpolation weights
-    let t_cold = smooth_step(-8.0, 10.0, temp_c);   // 0 = cold, 1 = temperate+
-    let t_hot = smooth_step(10.0, 28.0, temp_c);     // 0 = temperate, 1 = hot
+fn gradient_color(mean_temp: f32, mean_moisture: f32, seasonal_temp: f32, variation: f32) -> vec3<f32> {
+    // Biome classification uses MEAN ANNUAL temperature/moisture
+    // so biome type stays stable across seasons
+    let t_cold = smooth_step(-8.0, 10.0, mean_temp);   // 0 = cold, 1 = temperate+
+    let t_hot = smooth_step(10.0, 28.0, mean_temp);     // 0 = temperate, 1 = hot
 
     // Anchor colors (3 temp levels × 2 moisture levels)
     let cold_dry = vec3<f32>(0.58, 0.38, 0.25);  // Rust/Mars-like cold desert
@@ -254,21 +255,26 @@ fn gradient_color(temp_c: f32, moisture_cm: f32, variation: f32) -> vec3<f32> {
     let wet_color = mix(cold_wet, mix(mid_wet, hot_wet, t_hot), t_cold);
 
     // Moisture interpolation — low threshold so typical temperate land (50-100cm) is green
-    let moist_t = smooth_step(10.0, 90.0, moisture_cm);
+    let moist_t = smooth_step(10.0, 90.0, mean_moisture);
     var base = mix(dry_color, wet_color, moist_t);
 
-    // Season modulation: winter shifts green→brown, cold→whiter
-    let season = uniforms.season; // 0=winter, 1=summer
+    // Seasonal color modulation — subtle shifts, NOT biome changes
+    // Uses temperature deviation from annual mean
+    let temp_deviation = seasonal_temp - mean_temp;
     let green_amount = max(base.g - max(base.r, base.b), 0.0);
     if (green_amount > 0.05) {
-        // Vegetated areas: shift toward golden-brown in winter
-        let winter_shift = vec3<f32>(0.12, -0.04, -0.06) * (1.0 - season) * green_amount * 3.0;
-        base += winter_shift;
+        // Winter (negative deviation): subtle golden-brown (deciduous leaf loss)
+        // Summer (positive deviation): slightly more vibrant
+        let winter_factor = clamp(-temp_deviation / 20.0, 0.0, 1.0);
+        let summer_factor = clamp(temp_deviation / 20.0, 0.0, 1.0);
+        let winter_shift = vec3<f32>(0.06, -0.02, -0.03) * winter_factor * green_amount * 2.0;
+        let summer_shift = vec3<f32>(-0.01, 0.02, 0.0) * summer_factor * green_amount;
+        base += winter_shift + summer_shift;
     }
-    if (temp_c < 5.0) {
-        // Cold regions: whiter in winter
-        let cold_winter = mix(base, vec3<f32>(0.80, 0.82, 0.85), (1.0 - season) * 0.3 * (1.0 - t_cold));
-        base = cold_winter;
+    if (seasonal_temp < 5.0 && mean_temp < 15.0) {
+        // Cold regions: whiter in winter (snow cover is seasonal)
+        let cold_winter = clamp(-temp_deviation / 15.0, 0.0, 1.0);
+        base = mix(base, vec3<f32>(0.80, 0.82, 0.85), cold_winter * 0.25 * (1.0 - t_cold));
     }
 
     // Per-pixel noise variation for natural texture
@@ -387,7 +393,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     if (is_ocean) {
         // Smooth ocean gradient: shallow → deep with continuous depth color
-        let ocean_temp = compute_temperature(rotated, height);
+        let ocean_temp = compute_temperature(rotated, height, uniforms.season);
         let depth = clamp((uniforms.ocean_level - height) / max(uniforms.ocean_level + 1.0, 0.5), 0.0, 1.0);
 
         // 3-stop depth gradient: turquoise shelf → mid blue → deep navy
@@ -404,11 +410,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let ice_color = mix(vec3<f32>(0.65, 0.75, 0.85), vec3<f32>(0.88, 0.92, 0.96), clamp(-ocean_temp / 15.0, 0.0, 1.0));
         surface_color = mix(ocean_color, ice_color, ice_blend);
     } else {
-        let temp = compute_temperature(rotated, height);
-        let moisture = compute_moisture(rotated, height);
+        // Mean annual climate for biome classification (stable across seasons)
+        let mean_temp = compute_temperature(rotated, height, 0.5);
+        let mean_moisture = compute_moisture(rotated, height, 0.5);
+        // Seasonal climate for color modulation only
+        let seasonal_temp = compute_temperature(rotated, height, uniforms.season);
 
-        // Continuous gradient coloring — no biome IDs, no boundaries
-        surface_color = gradient_color(temp, moisture, color_var);
+        // Continuous gradient coloring — biome type from mean, color shift from season
+        surface_color = gradient_color(mean_temp, mean_moisture, seasonal_temp, color_var);
 
         // Ice/snow overlay: only for genuinely glaciated land (very cold + high altitude or extreme cold)
         // Tundra (cold flat land) stays brown/tan from gradient_color, NOT white
@@ -416,8 +425,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let ice_moisture_threshold = 15.0 + 40.0 * (1.0 - uniforms.ocean_fraction);
         // Ice requires BOTH extreme cold AND either high altitude or very high moisture
         let altitude_ice = smooth_step(0.3, 0.6, land_height); // high terrain gets ice easier
-        let cold_factor = smooth_step(-15.0, -30.0, temp);
-        let ice_blend = cold_factor * max(altitude_ice, smooth_step(ice_moisture_threshold * 0.7, ice_moisture_threshold, moisture));
+        let cold_factor = smooth_step(-15.0, -30.0, seasonal_temp);
+        let ice_blend = cold_factor * max(altitude_ice, smooth_step(ice_moisture_threshold * 0.7, ice_moisture_threshold, mean_moisture));
         let ice_color = vec3<f32>(0.90, 0.93, 0.97) + vec3<f32>(0.02) * color_var;
         surface_color = mix(surface_color, ice_color, ice_blend);
 
@@ -426,7 +435,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let rock_line = snow_line - 0.10;
         let alpine_line = rock_line - 0.10;
 
-        if (land_height > snow_line && temp < 15.0) {
+        if (land_height > snow_line && seasonal_temp < 15.0) {
             let blend = smooth_step(snow_line, snow_line + 0.10, land_height);
             surface_color = mix(surface_color, vec3<f32>(0.92, 0.94, 0.98), blend);
         } else if (land_height > rock_line) {
@@ -447,8 +456,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Debug views
     if (uniforms.view_mode > 0u) {
-        let temp = compute_temperature(rotated, height);
-        let moisture = compute_moisture(rotated, height);
+        let temp = compute_temperature(rotated, height, uniforms.season);
+        let moisture = compute_moisture(rotated, height, uniforms.season);
         var debug_color: vec3<f32>;
 
         switch (uniforms.view_mode) {
@@ -463,10 +472,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 if (m < 0.5) { debug_color = mix(vec3<f32>(0.6, 0.4, 0.1), vec3<f32>(0.1, 0.6, 0.1), m * 2.0); }
                 else { debug_color = mix(vec3<f32>(0.1, 0.6, 0.1), vec3<f32>(0.1, 0.2, 0.8), (m - 0.5) * 2.0); }
             }
-            case 4u: { debug_color = gradient_color(temp, moisture, 0.0) * 1.3; }
+            case 4u: {
+                let mean_t = compute_temperature(rotated, height, 0.5);
+                let mean_m = compute_moisture(rotated, height, 0.5);
+                debug_color = gradient_color(mean_t, mean_m, mean_t, 0.0) * 1.3;
+            }
             case 5u: {
                 if (is_ocean) {
-                    if (compute_temperature(rotated, height) < -2.0) { debug_color = vec3<f32>(1.0); }
+                    if (compute_temperature(rotated, height, uniforms.season) < -2.0) { debug_color = vec3<f32>(1.0); }
                     else { debug_color = vec3<f32>(0.0, 0.2, 0.8); }
                 } else {
                     if (temp < -15.0) { debug_color = vec3<f32>(0.9, 0.95, 1.0); }
@@ -509,8 +522,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 if (is_ocean) {
                     debug_color = vec3<f32>(0.05, 0.05, 0.1); // Water = very smooth (dark)
                 } else {
-                    let rt = compute_temperature(rotated, height);
-                    let rm = compute_moisture(rotated, height);
+                    let rt = compute_temperature(rotated, height, uniforms.season);
+                    let rm = compute_moisture(rotated, height, uniforms.season);
                     var r: f32;
                     if (rt < 0.0) { r = 0.15; }
                     else if (rt < 10.0) { r = 0.55; }
@@ -547,10 +560,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let h_dot_v = max(dot(half_vec, view_dir), 0.0);
 
     // Roughness and Fresnel base reflectance
-    let ocean_temp = compute_temperature(rotated, height);
+    let ocean_temp = compute_temperature(rotated, height, uniforms.season);
     let ocean_ice = is_ocean && ocean_temp < -2.0;
-    let temp_for_rough = compute_temperature(rotated, height);
-    let moist_for_rough = compute_moisture(rotated, height);
+    let temp_for_rough = compute_temperature(rotated, height, uniforms.season);
+    let moist_for_rough = compute_moisture(rotated, height, uniforms.season);
     let roughness = compute_roughness(temp_for_rough, moist_for_rough, is_ocean, ocean_ice);
     let f0 = select(0.04, 0.06, is_ocean); // Water has stronger Fresnel at glancing angles
 
