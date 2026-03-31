@@ -280,21 +280,17 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     let s = uniforms.cloud_seed;
     let seed_off = vec3<f32>(s, fract(s * 1.618) * 89.0, fract(s * 2.618) * 83.0);
 
-    // === Step 1: Domain-warp the sample position (Quilez technique) ===
-    // Feeds noise into itself → organic, non-repetitive cloud shapes
+    // === Step 1: Two noise bases with different character ===
     let p_base = sphere_pos * 5.0 + seed_off;
+
+    // --- Stratus layer: domain-warped fBm (smooth, flowing) ---
     let warp = vec3<f32>(
         snoise(p_base * 0.7 + vec3<f32>(31.7, 0.0, 0.0)),
         snoise(p_base * 0.7 + vec3<f32>(0.0, 47.3, 0.0)),
         snoise(p_base * 0.7 + vec3<f32>(0.0, 0.0, 73.1))
-    ) * 0.6;
+    ) * 0.5;
     let warped_p = p_base + warp;
 
-    // === Step 2: Dual-noise cloud shapes ===
-    // Mix standard fBm (smooth stratus) with ridged noise (puffy cumulus).
-    // A spatial blend varies the mix so clouds aren't all the same type.
-
-    // Standard fBm: smooth, flowing clouds (stratus-like)
     var fbm_val = 0.0;
     var freq = 1.0;
     var amp = 1.0;
@@ -307,18 +303,19 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     }
     fbm_val = fbm_val / amp_sum * 0.5 + 0.5; // [0, 1]
 
-    // Ridged noise: puffy, cellular cumulus shapes (1-abs creates rounded peaks)
-    let rp = warped_p + vec3<f32>(13.7, 7.3, 21.1); // offset to decorrelate
+    // --- Cumulus layer: ridged noise on UN-warped position (puffy, no swirls) ---
+    let rp = p_base + vec3<f32>(13.7, 7.3, 21.1); // decorrelate, but NO domain warp
     let r1 = 1.0 - abs(snoise(rp * 1.0));
     let r2 = 1.0 - abs(snoise(rp * 2.1 + vec3<f32>(5.3, 1.7, 3.1)));
     let r3 = 1.0 - abs(snoise(rp * 4.4 + vec3<f32>(2.1, 8.5, 0.7)));
     let r4 = 1.0 - abs(snoise(rp * 9.2 + vec3<f32>(7.1, 3.3, 5.9)));
-    let ridged_val = (r1 * 0.4 + r2 * 0.3 + r3 * 0.2 + r4 * 0.1);
-    let ridged_shaped = ridged_val * ridged_val; // square for sharper puffy shapes
+    let ridged_val = r1 * 0.4 + r2 * 0.3 + r3 * 0.2 + r4 * 0.1;
+    let ridged_shaped = ridged_val * ridged_val; // square for puffy blobs with clear gaps
 
-    // Spatial blend: varies which cloud type dominates per region
-    // Low-frequency noise determines if this area has smooth or puffy clouds
-    let type_blend = snoise(sphere_pos * 1.8 + seed_off * 0.15 + vec3<f32>(97.0, 41.0, 63.0)) * 0.5 + 0.5;
+    // === Step 2: Spatial blend — which cloud type dominates per region ===
+    // Biased toward ridged (0.6 center) so puffy cumulus is more common
+    let type_noise = snoise(sphere_pos * 1.8 + seed_off * 0.15 + vec3<f32>(97.0, 41.0, 63.0));
+    let type_blend = clamp(type_noise * 0.4 + 0.6, 0.0, 1.0); // 0.2–1.0, centered at 0.6
     let noise_val = mix(fbm_val, ridged_shaped, type_blend);
 
     // === Step 3: Climate + terrain modulated local coverage ===
