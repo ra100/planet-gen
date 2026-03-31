@@ -490,12 +490,22 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Combine
     var lit_color = ambient + (diffuse + specular) * n_dot_l;
 
-    // Rim darkening (limb effect — atmosphere placeholder)
-    let geo_n_dot_v = max(dot(normal, view_dir), 0.0);
-    lit_color *= pow(geo_n_dot_v, 0.12);
-
     // Simple tonemap to prevent HDR clipping on specular
     lit_color = lit_color / (lit_color + vec3<f32>(1.0));
+
+    // Atmospheric scattering — single-scatter Rayleigh approximation
+    // Uses geometric normal (not terrain-perturbed) for limb thickness
+    let geo_n_dot_v = max(dot(normal, view_dir), 0.0);
+    let atmosphere_thickness = 1.0 - geo_n_dot_v; // thicker at limb
+    let rayleigh_color = vec3<f32>(0.3, 0.5, 1.0); // blue sky scatter
+
+    // Wrap lighting so atmosphere glows even slightly past the terminator
+    let n_dot_l_atm = max(dot(normal, light), 0.0) * 0.5 + 0.5;
+    let atm_illuminated = rayleigh_color * n_dot_l_atm;
+
+    // Opacity scales with limb angle and atmosphere density
+    let atm_opacity = pow(atmosphere_thickness, 3.0) * uniforms.atmosphere_density;
+    lit_color = mix(lit_color, atm_illuminated, clamp(atm_opacity, 0.0, 0.6));
 
     return vec4<f32>(lit_color, 1.0);
 }
