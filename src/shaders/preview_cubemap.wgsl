@@ -651,19 +651,20 @@ fn starfield(ndc: vec2<f32>, sun_dir: vec3<f32>) -> vec3<f32> {
         bg += star_color * brightness;
     }
 
-    // Sun orb: angular distance between pixel view direction and sun direction
-    // Background pixels look PAST the planet into space (-Z direction)
-    let view_dir = normalize(vec3<f32>(ndc.x, ndc.y, -1.0));
-    let sun_angle = acos(clamp(dot(view_dir, sun_dir), -1.0, 1.0));
+    // Sun orb: project sun direction to screen space for perfect circle
+    if (sun_dir.z < -0.01) { // sun is behind the planet (visible in background)
+        let sun_screen = vec2<f32>(sun_dir.x, sun_dir.y) / (-sun_dir.z);
+        let sun_dist = length(ndc - sun_screen);
 
-    // Sun disc (~0.5° angular radius, like real sun)
-    let sun_radius = 0.03;
-    let sun_core = 1.0 - smooth_step(0.0, sun_radius, sun_angle);
-    bg += vec3<f32>(3.0, 2.8, 2.2) * sun_core;
+        // Sun disc
+        let sun_radius = 0.06;
+        let sun_core = 1.0 - smooth_step(0.0, sun_radius, sun_dist);
+        bg += vec3<f32>(3.0, 2.8, 2.2) * sun_core;
 
-    // Tight glow halo
-    let glow = exp(-sun_angle * sun_angle * 200.0) * 0.25;
-    bg += vec3<f32>(1.0, 0.9, 0.6) * glow;
+        // Tight glow halo
+        let glow = exp(-sun_dist * sun_dist * 30.0) * 0.2;
+        bg += vec3<f32>(1.0, 0.9, 0.6) * glow;
+    }
 
     return bg;
 }
