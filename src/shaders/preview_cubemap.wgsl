@@ -285,8 +285,35 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     let s = uniforms.cloud_seed;
     let seed_off = vec3<f32>(s, fract(s * 1.618) * 89.0, fract(s * 2.618) * 83.0);
 
+    // === Step 0b: Vortex warp — storms twist the noise field ===
+    // Rotate sample position around storm centers so cloud texture itself spirals.
+    var vortex_sphere = sphere_pos;
+    let n_storms_warp = i32(min(uniforms.storm_count, 8.0));
+    if (n_storms_warp > 0) {
+        for (var i = 0; i < 8; i++) {
+            if (i >= n_storms_warp) { break; }
+            let fi = f32(i);
+            let slat = (30.0 + fract(sin(fi * 127.1 + s) * 43758.5) * 25.0) * 3.14159 / 180.0;
+            let slon = fract(sin(fi * 311.7 + s * 1.3) * 23421.6) * 6.28318;
+            let sign_y = select(-1.0, 1.0, i % 2 == 0);
+            let center = normalize(vec3<f32>(
+                cos(slat) * cos(slon), sin(slat) * sign_y, cos(slat) * sin(slon)
+            ));
+            let d = acos(clamp(dot(sphere_pos, center), -1.0, 1.0));
+            let base_sigma = 22.0 + fract(sin(fi * 73.1 + s * 0.7) * 19283.3) * 12.0;
+            let storm_sigma = base_sigma / max(uniforms.storm_size * uniforms.storm_size, 0.1);
+            let influence = exp(-d * d * storm_sigma);
+
+            // Tangent rotation: rotate position around storm center axis
+            // Stronger rotation near center (1/d falloff), Coriolis-correct direction
+            let rotation_amount = influence * sign_y * 0.8 / max(d * 8.0, 0.3);
+            let tangent = cross(center, sphere_pos);
+            vortex_sphere = normalize(vortex_sphere + tangent * rotation_amount * 0.03);
+        }
+    }
+
     // === Step 1: Two noise bases with different character ===
-    let p_base = sphere_pos * 5.0 + seed_off;
+    let p_base = vortex_sphere * 5.0 + seed_off;
 
     // --- Stratus layer: domain-warped fBm (smooth, flowing) ---
     let warp = vec3<f32>(
@@ -426,9 +453,10 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
             let to_pt = sphere_pos - center * dot(sphere_pos, center);
             let angle = atan2(dot(to_pt, ty), dot(to_pt, tx));
 
-            // Eye: clear center (larger, more visible)
+            // Eye: clear center with noisy edge
             let eye_r = (0.03 + fract(sin(fi * 53.7 + s * 0.3) * 31415.9) * 0.02) * uniforms.storm_size;
-            let eye_mask = smooth_step(eye_r * 0.3, eye_r * 1.2, d);
+            let eye_noise = snoise(sphere_pos * 30.0 + seed_off + vec3<f32>(fi * 11.0, 0.0, 0.0)) * eye_r * 0.4;
+            let eye_mask = smooth_step((eye_r + eye_noise) * 0.3, (eye_r + eye_noise) * 1.2, d);
 
             // Dense eye wall ring
             let wall_dist = abs(d - eye_r * 1.3);
