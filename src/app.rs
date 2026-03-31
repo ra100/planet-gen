@@ -191,7 +191,7 @@ impl PlanetGenApp {
         let mut terrain = self.terrain_compute.generate(
             &self.gpu,
             &plates,
-            512,
+            self.preview_resolution,
             self.params.seed,
             amplitude,
             frequency,
