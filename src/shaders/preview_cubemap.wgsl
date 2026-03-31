@@ -652,7 +652,8 @@ fn starfield(ndc: vec2<f32>, sun_dir: vec3<f32>) -> vec3<f32> {
     }
 
     // Sun orb: angular distance between pixel view direction and sun direction
-    let view_dir = normalize(vec3<f32>(ndc.x, ndc.y, 1.0));
+    // Background pixels look PAST the planet into space (-Z direction)
+    let view_dir = normalize(vec3<f32>(ndc.x, ndc.y, -1.0));
     let sun_angle = acos(clamp(dot(view_dir, sun_dir), -1.0, 1.0));
 
     // Sun disc (~0.5° angular radius, like real sun)
