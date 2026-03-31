@@ -623,38 +623,94 @@ fn fresnel_schlick(h_dot_v: f32, f0: f32) -> f32 {
     return f0 + (1.0 - f0) * pow(1.0 - h_dot_v, 5.0);
 }
 
+// ---- Starfield + sun orb background ----
+fn starfield(ndc: vec2<f32>, sun_dir: vec3<f32>) -> vec3<f32> {
+    var bg = vec3<f32>(0.005, 0.005, 0.015); // very dark blue-black
+
+    // Stars: hash-based bright dots at pseudo-random positions
+    // Quantize ndc to a grid, hash each cell to decide if it has a star
+    let star_scale = 120.0; // density: higher = more stars
+    let cell = floor(ndc * star_scale);
+    let cell_uv = fract(ndc * star_scale); // position within cell [0,1]
+
+    // Hash cell coordinates to get pseudo-random star position + brightness
+    let h1 = fract(sin(dot(cell, vec2<f32>(127.1, 311.7))) * 43758.5453);
+    let h2 = fract(sin(dot(cell, vec2<f32>(269.5, 183.3))) * 28461.6432);
+    let h3 = fract(sin(dot(cell, vec2<f32>(419.2, 371.9))) * 59182.7314);
+
+    // Star exists if hash exceeds threshold (~15% of cells have a star)
+    if (h1 > 0.85) {
+        let star_pos = vec2<f32>(h2, h3); // random position in cell
+        let dist = length(cell_uv - star_pos);
+        let star_size = 0.03 + h1 * 0.04; // tiny points
+        let brightness = (1.0 - smooth_step(0.0, star_size, dist)) * (0.4 + h2 * 0.6);
+        // Slight color variation: warm (h3<0.3), blue (h3>0.7), white (middle)
+        var star_color = vec3<f32>(1.0);
+        if (h3 < 0.3) { star_color = vec3<f32>(1.0, 0.9, 0.7); }
+        else if (h3 > 0.7) { star_color = vec3<f32>(0.7, 0.85, 1.0); }
+        bg += star_color * brightness;
+    }
+
+    // Sun orb: bright disc at the light direction projected onto screen
+    // Project light_dir to 2D screen position (view-space: camera looks along -Z)
+    // sun_dir is already in view space (same space as ndc)
+    if (sun_dir.z > 0.0) { // sun is in front of the camera
+        let sun_ndc = vec2<f32>(sun_dir.x, sun_dir.y) / sun_dir.z;
+        let sun_dist = length(ndc - sun_ndc);
+
+        // Sun disc
+        let sun_radius = 0.04;
+        let sun_core = 1.0 - smooth_step(0.0, sun_radius, sun_dist);
+        bg += vec3<f32>(3.0, 2.8, 2.2) * sun_core; // bright warm white, will tonemap
+
+        // Sun glow halo
+        let glow = exp(-sun_dist * sun_dist * 15.0) * 0.4;
+        bg += vec3<f32>(1.0, 0.85, 0.5) * glow;
+
+        // Subtle bloom
+        let bloom = exp(-sun_dist * 3.0) * 0.08;
+        bg += vec3<f32>(1.0, 0.9, 0.7) * bloom;
+    }
+
+    return bg;
+}
+
 // ---- Main fragment shader ----
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let background = vec3<f32>(0.0, 0.0, 0.0);
     let pan = vec2<f32>(uniforms.pan_x, uniforms.pan_y);
     let ndc = ((in.uv - 0.5) * 2.0 / 0.85 - pan) / uniforms.zoom;
     let r2 = dot(ndc, ndc);
+
+    let sun_dir = normalize(uniforms.light_dir);
 
     let atm_h = uniforms.atmosphere_height;
     let atm_radius = 1.0 + atm_h;
     let has_atm = uniforms.atmosphere_density > 0.001 && atm_h > 0.001;
     let outer_r = select(1.005, atm_radius + 0.015, has_atm);
 
-    // Miss everything — outside both planet and atmosphere
+    // Miss everything — outside both planet and atmosphere → show starfield
     if (r2 > outer_r * outer_r) {
-        return vec4<f32>(background, 1.0);
+        let bg = starfield(ndc, sun_dir);
+        let bg_tm = bg / (bg + vec3<f32>(1.0)); // tonemap sun HDR
+        return vec4<f32>(bg_tm, 1.0);
     }
 
-    let sun_dir = normalize(uniforms.light_dir);
     let hit_planet = r2 < 1.0;
 
     // Atmosphere-only ring (between planet edge and outer atmosphere boundary)
     if (!hit_planet) {
+        let bg = starfield(ndc, sun_dir);
+        let bg_tm = bg / (bg + vec3<f32>(1.0));
         if (!has_atm || uniforms.view_mode != 0u) {
-            return vec4<f32>(background, 1.0);
+            return vec4<f32>(bg_tm, 1.0);
         }
         let z_atm = sqrt(max(atm_radius * atm_radius - r2, 0.0));
         let scatter = ray_march_atmosphere(ndc, z_atm, -z_atm, sun_dir);
         var ring_color = scatter.in_scatter;
         ring_color = ring_color / (ring_color + vec3<f32>(1.0)); // tonemap
         let edge = 1.0 - smooth_step(atm_radius - 0.015, atm_radius, sqrt(r2));
-        return vec4<f32>(mix(background, ring_color, edge), 1.0);
+        return vec4<f32>(mix(bg_tm, ring_color, edge), 1.0);
     }
 
     // Planet surface hit
@@ -958,8 +1014,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Edge AA at planet boundary (when no atmosphere provides the transition)
     if (!has_atm) {
+        let edge_bg = starfield(ndc, sun_dir);
+        let edge_bg_tm = edge_bg / (edge_bg + vec3<f32>(1.0));
         let edge_aa = 1.0 - smooth_step(0.99, 1.0, sqrt(r2));
-        lit_color = mix(background, lit_color, edge_aa);
+        lit_color = mix(edge_bg_tm, lit_color, edge_aa);
     }
 
     return vec4<f32>(lit_color, 1.0);
