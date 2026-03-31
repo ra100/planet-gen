@@ -303,20 +303,26 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     }
     fbm_val = fbm_val / amp_sum * 0.5 + 0.5; // [0, 1]
 
-    // --- Cumulus layer: ridged noise on UN-warped position (puffy, no swirls) ---
-    let rp = p_base + vec3<f32>(13.7, 7.3, 21.1); // decorrelate, but NO domain warp
-    let r1 = 1.0 - abs(snoise(rp * 1.0));
-    let r2 = 1.0 - abs(snoise(rp * 2.1 + vec3<f32>(5.3, 1.7, 3.1)));
-    let r3 = 1.0 - abs(snoise(rp * 4.4 + vec3<f32>(2.1, 8.5, 0.7)));
-    let r4 = 1.0 - abs(snoise(rp * 9.2 + vec3<f32>(7.1, 3.3, 5.9)));
-    let ridged_val = r1 * 0.4 + r2 * 0.3 + r3 * 0.2 + r4 * 0.1;
-    let ridged_shaped = ridged_val * ridged_val; // square for puffy blobs with clear gaps
+    // --- Cumulus layer: clamped-positive peaks (isolated blobs, NOT webby ridges) ---
+    // max(noise, 0) keeps only positive peaks → scattered rounded blobs
+    let cp = p_base + vec3<f32>(13.7, 7.3, 21.1); // decorrelate, NO domain warp
+    var cumulus_val = 0.0;
+    var c_freq = 1.0;
+    var c_amp = 1.0;
+    var c_amp_sum = 0.0;
+    for (var i = 0; i < 4; i++) {
+        cumulus_val += max(snoise(cp * c_freq), 0.0) * c_amp;
+        c_amp_sum += c_amp;
+        c_freq *= 2.3;
+        c_amp *= 0.5;
+    }
+    cumulus_val = cumulus_val / c_amp_sum; // [0, ~0.5] — mostly low with isolated peaks
+    cumulus_val = pow(cumulus_val, 1.3); // round off peaks for softer blobs
 
-    // === Step 2: Spatial blend — which cloud type dominates per region ===
-    // Biased toward ridged (0.6 center) so puffy cumulus is more common
+    // === Step 2: Spatial blend — smooth stratus vs puffy cumulus per region ===
     let type_noise = snoise(sphere_pos * 1.8 + seed_off * 0.15 + vec3<f32>(97.0, 41.0, 63.0));
-    let type_blend = clamp(type_noise * 0.4 + 0.6, 0.0, 1.0); // 0.2–1.0, centered at 0.6
-    let noise_val = mix(fbm_val, ridged_shaped, type_blend);
+    let type_blend = clamp(type_noise * 0.45 + 0.5, 0.0, 1.0); // 0.05–0.95, centered at 0.5
+    let noise_val = mix(fbm_val, cumulus_val, type_blend);
 
     // === Step 3: Climate + terrain modulated local coverage ===
     // All influences adjust the Schneider THRESHOLD, not density amplitude.
