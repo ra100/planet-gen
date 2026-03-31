@@ -573,11 +573,24 @@ impl eframe::App for PlanetGenApp {
                     self.needs_render = true;
                 }
 
-                // Scroll: zoom
+                // Scroll: zoom toward cursor position
                 if response.hovered() {
                     let scroll = ui.input(|i| i.smooth_scroll_delta.y);
                     if scroll != 0.0 {
-                        self.zoom = (self.zoom * (1.0 + scroll * 0.005)).clamp(0.1, 20.0);
+                        let zoom_old = self.zoom;
+                        let zoom_new = (zoom_old * (1.0 + scroll * 0.005)).clamp(0.1, 20.0);
+                        // Keep the NDC point under the cursor fixed during zoom
+                        if let Some(cursor_pos) = response.hover_pos() {
+                            let rect = response.rect;
+                            let cx = (cursor_pos.x - rect.min.x) / rect.width() - 0.5;
+                            let cy = (cursor_pos.y - rect.min.y) / rect.height() - 0.5;
+                            let sndc_x = cx * 2.0 / 0.85;
+                            let sndc_y = cy * 2.0 / 0.85;
+                            let ratio = zoom_new / zoom_old;
+                            self.pan[0] = sndc_x - (sndc_x - self.pan[0]) * ratio;
+                            self.pan[1] = sndc_y - (sndc_y - self.pan[1]) * ratio;
+                        }
+                        self.zoom = zoom_new;
                         self.needs_render = true;
                     }
                 }
