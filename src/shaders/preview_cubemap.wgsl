@@ -625,7 +625,7 @@ fn fresnel_schlick(h_dot_v: f32, f0: f32) -> f32 {
 
 // ---- Starfield + sun orb background ----
 fn starfield(ndc: vec2<f32>, sun_dir: vec3<f32>) -> vec3<f32> {
-    var bg = vec3<f32>(0.005, 0.005, 0.015); // very dark blue-black
+    var bg = vec3<f32>(0.0, 0.0, 0.0); // pure black space
 
     // Stars: hash-based bright dots at pseudo-random positions
     // Quantize ndc to a grid, hash each cell to decide if it has a star
@@ -663,13 +663,9 @@ fn starfield(ndc: vec2<f32>, sun_dir: vec3<f32>) -> vec3<f32> {
         let sun_core = 1.0 - smooth_step(0.0, sun_radius, sun_dist);
         bg += vec3<f32>(3.0, 2.8, 2.2) * sun_core; // bright warm white, will tonemap
 
-        // Sun glow halo
-        let glow = exp(-sun_dist * sun_dist * 15.0) * 0.4;
-        bg += vec3<f32>(1.0, 0.85, 0.5) * glow;
-
-        // Subtle bloom
-        let bloom = exp(-sun_dist * 3.0) * 0.08;
-        bg += vec3<f32>(1.0, 0.9, 0.7) * bloom;
+        // Small tight glow around sun
+        let glow = exp(-sun_dist * sun_dist * 80.0) * 0.3;
+        bg += vec3<f32>(1.0, 0.9, 0.6) * glow;
     }
 
     return bg;
