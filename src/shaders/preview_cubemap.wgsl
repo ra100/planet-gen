@@ -292,12 +292,12 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     let weather_mask = smooth_step(-0.15, 0.35, weather - subtropical_clear);
 
     // ================================================================
-    // CYCLONE SYSTEMS — large spiral storms at mid-latitudes
+    // CYCLONE SYSTEMS — messy, asymmetric spiral storms
     // ================================================================
     var storm = 0.0;
-    for (var i = 0; i < 6; i++) {
+    for (var i = 0; i < 4; i++) {
         let fi = f32(i);
-        let slat = (30.0 + fract(sin(fi * 127.1 + s) * 43758.5) * 25.0) * 3.14159 / 180.0;
+        let slat = (32.0 + fract(sin(fi * 127.1 + s) * 43758.5) * 22.0) * 3.14159 / 180.0;
         let slon = fract(sin(fi * 311.7 + s * 1.3) * 23421.6) * 6.28318;
         let sign_y = select(-1.0, 1.0, i % 2 == 0);
         let center = normalize(vec3<f32>(
@@ -308,24 +308,36 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
 
         let d = acos(clamp(dot(sphere_pos, center), -1.0, 1.0));
 
-        // Spiral arms in tangent plane
+        // Tangent plane for spiral angle
         let up = vec3<f32>(0.0, 1.0, 0.0);
         let tx = normalize(cross(up, center));
         let ty = cross(center, tx);
         let to_pt = sphere_pos - center * dot(sphere_pos, center);
         let angle = atan2(dot(to_pt, ty), dot(to_pt, tx));
 
-        // Tighter spiral with more arms for realism
-        let spiral_arm = cos((angle * sign_y - d * 18.0) * 2.0) * 0.5 + 0.5;
+        // NOISE-PERTURBED spiral: break perfect geometry
+        let angle_noise = snoise(sphere_pos * 5.0 + seed_off + vec3<f32>(fi * 31.0, 0.0, 0.0)) * 0.8;
+        let perturbed_angle = angle + angle_noise;
 
-        // BIGGER storms: lower values = larger radius
-        let storm_size = 15.0 + fract(sin(fi * 73.1 + s * 0.7) * 19283.3) * 20.0;
-        let falloff = exp(-d * d * storm_size);
+        // Logarithmic spiral with noise-modulated arm thickness
+        let spiral_phase = perturbed_angle * sign_y - log(max(d, 0.001)) * 4.0;
+        let arm_noise = snoise(sphere_pos * 10.0 + seed_off + vec3<f32>(fi * 23.0, 7.0, 0.0)) * 0.3;
+        let spiral_raw = cos(spiral_phase * 2.5 + arm_noise) * 0.5 + 0.5;
+        // Sharpen arms: make them narrower bands, not smooth sine
+        let spiral_arm = smooth_step(0.3, 0.6, spiral_raw);
 
-        // Dense eye wall + thinner outer bands
-        let eye = 1.0 - exp(-d * d * 800.0); // clear eye at center
-        let bands = snoise(sphere_pos * 15.0 + seed_off + vec3<f32>(fi * 17.0, 0.0, 0.0)) * 0.25 + 0.75;
-        storm += falloff * spiral_arm * bands * eye;
+        // Storm envelope (Gaussian falloff)
+        let storm_radius = 18.0 + fract(sin(fi * 73.1 + s * 0.7) * 19283.3) * 15.0;
+        let falloff = exp(-d * d * storm_radius);
+
+        // Cloud texture within arms (ridged noise for puffy structure)
+        let arm_detail = (1.0 - abs(snoise(sphere_pos * 18.0 + seed_off + vec3<f32>(fi * 17.0, 0.0, 0.0)))) * 0.5
+                       + (1.0 - abs(snoise(sphere_pos * 36.0 + seed_off + vec3<f32>(fi * 41.0, 3.0, 0.0)))) * 0.3
+                       + 0.2;
+
+        // Small eye
+        let eye = smooth_step(0.02, 0.06, d);
+        storm += falloff * spiral_arm * arm_detail * eye;
     }
     storm = clamp(storm, 0.0, 1.0);
 
@@ -391,9 +403,9 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
 
     density = clamp(density, 0.0, 1.0);
 
-    // Coverage threshold
+    // Coverage threshold — sharper edges for more defined clouds
     let threshold = 1.0 - coverage;
-    return smooth_step(threshold, threshold + 0.25, density);
+    return smooth_step(threshold, threshold + 0.15, density);
 }
 
 // ---- Continuous gradient biome coloring ----
@@ -756,19 +768,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let cloud_sfc_h = textureSample(height_tex, height_sampler, cloud_world).r;
         let cloud_density = compute_cloud_density(cloud_world, cloud_sfc_h);
 
-        if (cloud_density > 0.01) {
-            // Sun lighting with depth-dependent shading
+        if (cloud_density > 0.05) {
+            // Clouds are bright white. Only sun angle creates variation.
             let sun_dot = max(dot(cloud_dir, sun_dir), 0.0);
-            // Thin clouds: brighter, more translucent. Thick clouds: darker bases (self-shadow)
-            let thickness = cloud_density * cloud_density; // non-linear thickness
-            let top_lit = sun_dot * 0.85 + 0.15;
-            let base_darken = 1.0 - thickness * 0.35; // thick cloud bases are darker
-            let cloud_bright = top_lit * base_darken;
-            // Thin clouds slightly blue-tinted (sky through), thick clouds warm white
-            let thin_tint = vec3<f32>(0.85, 0.90, 0.97);
-            let thick_tint = vec3<f32>(1.0, 0.98, 0.95);
-            let cloud_color = mix(thin_tint, thick_tint, thickness) * cloud_bright;
-            let cloud_alpha = cloud_density * 0.9;
+            // Terminator: smooth day/night transition on clouds
+            let cloud_lit = smooth_step(-0.05, 0.15, sun_dot);
+            let cloud_color = vec3<f32>(0.95, 0.95, 0.95) * (cloud_lit * 0.85 + 0.12);
+            // Opacity: thin clouds are transparent, thick clouds are opaque
+            let cloud_alpha = smooth_step(0.05, 0.5, cloud_density) * 0.92;
             lit_color = mix(lit_color, cloud_color, cloud_alpha);
         }
     }
