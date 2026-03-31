@@ -260,49 +260,74 @@ fn compute_moisture(sphere_pos: vec3<f32>, height: f32, season: f32) -> f32 {
 
 // ---- Cloud density function ----
 // Returns 0.0 (no cloud) to 1.0 (dense overcast).
-// Combines fBm noise with climate moisture, latitude-based cloud types, and orographic lift.
+// Combines multi-octave fBm with domain warping, climate moisture, and orographic lift.
 fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     let coverage = uniforms.cloud_coverage;
     if (coverage <= 0.0) { return 0.0; }
 
-    // Seed offset: spread cloud pattern away from terrain noise
+    // Bounded seed offset: golden ratio hash keeps offset in [0, 97) regardless of seed magnitude
     let s = uniforms.cloud_seed;
-    let seed_off = vec3<f32>(s * 0.0371, s * 0.0593, s * 0.0127);
+    let phi = 1.618033;
+    let seed_off = vec3<f32>(
+        fract(s * phi) * 97.0,
+        fract(s * phi * phi) * 89.0,
+        fract(s * phi * phi * phi) * 83.0
+    );
 
-    // === Layer 1: Cumulus / stratus — large systems, 3-octave fBm ===
-    let p = sphere_pos + seed_off;
-    let fbm = snoise(p * 2.1) * 0.5
-            + snoise(p * 4.3 + vec3<f32>(5.1, 0.0, 3.7)) * 0.3
-            + snoise(p * 8.7 + vec3<f32>(2.4, 6.1, 1.3)) * 0.2;
-    let cumulus = fbm * 0.5 + 0.5; // remap [-1,1] → [0,1]
+    // Domain warping: distort sample position for organic cloud edges
+    let warp1 = snoise(sphere_pos * 2.0 + seed_off) * 0.15;
+    let warp2 = snoise(sphere_pos * 3.5 + seed_off + vec3<f32>(50.0, 30.0, 70.0)) * 0.10;
+    let warped = sphere_pos + vec3<f32>(warp1, warp2, warp1 * 0.7);
 
-    // === Layer 2: Cirrus — thin E–W streaks at high latitudes ===
-    // Compress Y axis to stretch features into latitude bands
-    let ps = sphere_pos * vec3<f32>(1.0, 0.35, 1.0) + seed_off * 1.7 + vec3<f32>(23.0, 11.0, 7.0);
-    let cirrus_raw = snoise(ps * 7.0) * 0.5 + snoise(ps * 14.5) * 0.25;
-    // Only keep the sharp peaks — thin wisps
-    let cirrus = smooth_step(0.55, 0.85, cirrus_raw * 0.5 + 0.5);
+    // === Layer 1: Cumulus / stratocumulus — 4-octave fBm with detail ===
+    let p = warped + seed_off;
+    let o1 = snoise(p * 2.5) * 0.40;
+    let o2 = snoise(p * 5.0 + vec3<f32>(5.1, 0.0, 3.7)) * 0.25;
+    let o3 = snoise(p * 10.0 + vec3<f32>(2.4, 6.1, 1.3)) * 0.20;
+    let o4 = snoise(p * 20.0 + vec3<f32>(8.3, 1.7, 4.9)) * 0.15;
+    let cumulus = (o1 + o2 + o3 + o4) * 0.5 + 0.5;
 
-    // Blend cloud type by latitude: cumulus in tropics, cirrus above 45°
+    // === Layer 2: Cirrus — thin wispy streaks ===
+    // Compress Y to elongate features E–W; separate seed region
+    let ps = warped * vec3<f32>(1.0, 0.3, 1.0) + seed_off * 1.3 + vec3<f32>(23.0, 11.0, 7.0);
+    let c1 = snoise(ps * 8.0) * 0.5;
+    let c2 = snoise(ps * 16.0 + vec3<f32>(3.7, 0.5, 8.3)) * 0.3;
+    let c3 = snoise(ps * 32.0 + vec3<f32>(1.1, 5.5, 2.7)) * 0.2;
+    let cirrus_raw = c1 + c2 + c3;
+    // Threshold to get thin filaments
+    let cirrus = smooth_step(0.3, 0.7, cirrus_raw * 0.5 + 0.5);
+
+    // === Layer 3: Small convective puffs (scattered cumulus) ===
+    let pp = warped + seed_off * 0.7 + vec3<f32>(41.0, 17.0, 63.0);
+    let puff_noise = snoise(pp * 15.0) * 0.6 + snoise(pp * 30.0) * 0.4;
+    let puffs = smooth_step(0.35, 0.65, puff_noise * 0.5 + 0.5) * 0.6;
+
+    // Blend cloud types by latitude, with overlap everywhere
     let tilt = uniforms.axial_tilt_rad;
     let tilted_y = sphere_pos.y * cos(tilt) + sphere_pos.z * sin(tilt);
     let lat_rad  = asin(clamp(tilted_y, -1.0, 1.0));
     let lat_deg  = abs(lat_rad) * 180.0 / 3.14159;
-    let cirrus_blend = smooth_step(30.0, 65.0, lat_deg);
-    let base_cloud = mix(cumulus, max(cumulus * 0.35, cirrus), cirrus_blend);
+    // Tropics: mostly cumulus + puffs. Mid-lat: mix. High-lat: cirrus dominant
+    let tropical = smooth_step(35.0, 15.0, lat_deg);      // 1 in tropics
+    let midlat   = 1.0 - abs(lat_deg - 45.0) / 30.0;     // peaks at 45°
+    let polar    = smooth_step(50.0, 75.0, lat_deg);       // 1 near poles
+    let base_cloud = cumulus * (0.5 + 0.4 * tropical)
+                   + cirrus * (0.15 + 0.6 * polar + 0.25 * clamp(midlat, 0.0, 1.0))
+                   + puffs * (0.3 + 0.5 * tropical);
+    let base_norm = clamp(base_cloud, 0.0, 1.0);
 
-    // === Climate: moisture modulation ===
-    // Low moisture (desert) → almost no clouds; high moisture → dense coverage
+    // === Climate: moisture modulation (softened to avoid hard latitude bands) ===
     let moisture = compute_moisture(sphere_pos, height, 0.5);
-    let moisture_factor = smooth_step(15.0, 110.0, moisture);
-    let noise_weighted = base_cloud * mix(0.2, 1.0, moisture_factor);
+    let moisture_factor = smooth_step(25.0, 140.0, moisture);
+    // Mix noise and moisture so noise can still produce clouds in drier areas
+    let noise_weighted = base_norm * (0.35 + 0.65 * moisture_factor);
 
     // === Orographic lift: upwind mountains trigger condensation ===
     let wind = wind_direction_vec(lat_rad);
     let tangent_wind = normalize(wind - sphere_pos * dot(wind, sphere_pos));
     let upwind_pos = normalize(sphere_pos + tangent_wind * 0.04);
     let upwind_h = textureSample(height_tex, height_sampler, upwind_pos).r;
-    let orographic = smooth_step(0.04, 0.22, max(upwind_h - uniforms.ocean_level, 0.0)) * 0.22;
+    let orographic = smooth_step(0.04, 0.22, max(upwind_h - uniforms.ocean_level, 0.0)) * 0.18;
 
     let total = clamp(noise_weighted + orographic, 0.0, 1.0);
 

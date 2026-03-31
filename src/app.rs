@@ -421,17 +421,17 @@ impl eframe::App for PlanetGenApp {
                     self.needs_render = true;
                 }
                 ui.horizontal(|ui| {
-                    let mut seed_i64 = self.cloud_seed as i64;
-                    if ui.add(egui::DragValue::new(&mut seed_i64).prefix("Seed: ")).changed() {
-                        self.cloud_seed = seed_i64.clamp(0, u32::MAX as i64) as u32;
-                        self.needs_render = true;
-                    }
                     if ui.small_button("🎲").on_hover_text("Randomize cloud pattern").clicked() {
                         let t = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
                             .subsec_nanos();
                         self.cloud_seed = t ^ (self.cloud_seed.wrapping_mul(2654435761));
+                        self.needs_render = true;
+                    }
+                    let mut seed_i64 = self.cloud_seed as i64;
+                    if ui.add(egui::DragValue::new(&mut seed_i64).prefix("Seed: ")).changed() {
+                        self.cloud_seed = seed_i64.clamp(0, u32::MAX as i64) as u32;
                         self.needs_render = true;
                     }
                 });
