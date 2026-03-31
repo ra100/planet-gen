@@ -258,163 +258,76 @@ fn compute_moisture(sphere_pos: vec3<f32>, height: f32, season: f32) -> f32 {
     return clamp(moisture, 0.0, 400.0);
 }
 
-// ---- Cloud density function ----
-// Multi-layer cloud system: cyclone spirals, ITCZ convection, marine stratocumulus,
-// fair-weather cumulus, cirrus wisps. Climate-driven by moisture + temperature.
+// ---- Cloud density (Schneider remap + domain-warped fBm) ----
+// Based on HZD/Quilez/Skybolt research. See docs/research/cloud-layer-rendering.md
+//
+// Key technique: climate controls the coverage THRESHOLD, not density amplitude.
+// This prevents latitude banding while keeping climate-correlated placement.
+
+fn cloud_remap(value: f32, old_min: f32, old_max: f32, new_min: f32, new_max: f32) -> f32 {
+    return new_min + (clamp(value, old_min, old_max) - old_min)
+           / max(old_max - old_min, 0.001) * (new_max - new_min);
+}
 
 fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
-    let coverage = uniforms.cloud_coverage;
-    if (coverage <= 0.0) { return 0.0; }
+    let cov_slider = uniforms.cloud_coverage;
+    if (cov_slider <= 0.0) { return 0.0; }
+
+    // Linearize slider response (slight expansion at low end)
+    let coverage = pow(cov_slider, 0.8);
 
     // Seed offset: pre-hashed on CPU via seed_to_offset() → always in [0, 97)
     let s = uniforms.cloud_seed;
     let seed_off = vec3<f32>(s, fract(s * 1.618) * 89.0, fract(s * 2.618) * 83.0);
 
-    // --- Climate data ---
-    let tilt = uniforms.axial_tilt_rad;
-    let tilted_y = sphere_pos.y * cos(tilt) + sphere_pos.z * sin(tilt);
-    let lat_rad = asin(clamp(tilted_y, -1.0, 1.0));
-    let lat_deg = abs(lat_rad) * 180.0 / 3.14159;
-    let moisture = compute_moisture(sphere_pos, height, 0.5);
-    let temp = compute_temperature(sphere_pos, height, 0.5);
-    let is_ocean = height < uniforms.ocean_level;
-    let moisture_w = smooth_step(30.0, 120.0, moisture);
+    // === Step 1: Domain-warp the sample position (Quilez technique) ===
+    // Feeds noise into itself → organic, non-repetitive cloud shapes
+    let p_base = sphere_pos * 5.0 + seed_off;
+    let warp = vec3<f32>(
+        snoise(p_base * 0.7 + vec3<f32>(31.7, 0.0, 0.0)),
+        snoise(p_base * 0.7 + vec3<f32>(0.0, 47.3, 0.0)),
+        snoise(p_base * 0.7 + vec3<f32>(0.0, 0.0, 73.1))
+    ) * 0.6;
+    let warped_p = p_base + warp;
 
-    // ================================================================
-    // WEATHER PATTERN — large-scale clear/cloudy zones (breaks banding)
-    // ================================================================
-    let wp = sphere_pos + seed_off * 0.3;
-    let weather = snoise(wp * 1.5) * 0.45
-                + snoise(wp * 3.0 + vec3<f32>(17.0, 5.0, 31.0)) * 0.35
-                + snoise(wp * 6.0 + vec3<f32>(7.0, 23.0, 11.0)) * 0.20;
-    // Subtropical highs: force clear sky at ~25-35° (descending Hadley air)
-    let subtropical_clear = exp(-((lat_deg - 30.0) * (lat_deg - 30.0)) / 80.0) * 0.5;
-    let weather_mask = smooth_step(-0.15, 0.35, weather - subtropical_clear);
-
-    // ================================================================
-    // CYCLONE SYSTEMS — cloud masses with loose spiral tendency
-    // ================================================================
-    var storm = 0.0;
-    for (var i = 0; i < 4; i++) {
-        let fi = f32(i);
-        let slat = (32.0 + fract(sin(fi * 127.1 + s) * 43758.5) * 22.0) * 3.14159 / 180.0;
-        let slon = fract(sin(fi * 311.7 + s * 1.3) * 23421.6) * 6.28318;
-        let sign_y = select(-1.0, 1.0, i % 2 == 0);
-        let center = normalize(vec3<f32>(
-            cos(slat) * cos(slon),
-            sin(slat) * sign_y,
-            cos(slat) * sin(slon)
-        ));
-
-        let d = acos(clamp(dot(sphere_pos, center), -1.0, 1.0));
-
-        // Tangent plane (avoid degenerate cross product near poles)
-        let up = select(vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0, 1.0, 0.0), abs(center.y) < 0.9);
-        let tx = normalize(cross(up, center));
-        let ty = cross(center, tx);
-        let to_pt = sphere_pos - center * dot(sphere_pos, center);
-        let angle = atan2(dot(to_pt, ty), dot(to_pt, tx));
-
-        // Storm envelope
-        let storm_radius = 20.0 + fract(sin(fi * 73.1 + s * 0.7) * 19283.3) * 15.0;
-        let falloff = exp(-d * d * storm_radius);
-
-        // PRIMARY: cloud texture (ridged noise = puffy cloud shapes)
-        let cp = sphere_pos + seed_off + vec3<f32>(fi * 17.0, 0.0, 0.0);
-        let cloud_tex = (1.0 - abs(snoise(cp * 8.0))) * 0.45
-                      + (1.0 - abs(snoise(cp * 16.0 + vec3<f32>(3.1, 7.2, 1.5)))) * 0.35
-                      + (1.0 - abs(snoise(cp * 32.0 + vec3<f32>(5.7, 2.3, 8.1)))) * 0.20;
-
-        // SECONDARY: spiral is just a soft density bias (NOT hard bands)
-        let spiral_phase = angle * sign_y - log(max(d, 0.005)) * 3.5;
-        let spiral_bias = cos(spiral_phase * 2.0) * 0.25 + 0.75; // range 0.5–1.0
-
-        // Small eye
-        let eye = smooth_step(0.015, 0.05, d);
-
-        storm += falloff * cloud_tex * spiral_bias * eye;
+    // === Step 2: 5-octave fBm on warped position ===
+    var noise_val = 0.0;
+    var freq = 1.0;
+    var amp = 1.0;
+    var amp_sum = 0.0;
+    for (var i = 0; i < 5; i++) {
+        noise_val += snoise(warped_p * freq) * amp;
+        amp_sum += amp;
+        freq *= 2.1;
+        amp *= 0.52;
     }
-    storm = clamp(storm, 0.0, 1.0);
+    noise_val = noise_val / amp_sum; // normalize to roughly [-1, 1]
+    noise_val = noise_val * 0.5 + 0.5; // remap to [0, 1]
 
-    // ================================================================
-    // ITCZ CONVECTION — towering cumulonimbus clusters near equator
-    // ================================================================
-    let p = sphere_pos + seed_off;
-    let cb1 = 1.0 - abs(snoise(p * 4.0));
-    let cb2 = 1.0 - abs(snoise(p * 8.0 + vec3<f32>(5.1, 3.3, 1.7)));
-    let cb3 = snoise(p * 16.0 + vec3<f32>(2.4, 6.1, 1.3)) * 0.15;
-    let convective = cb1 * 0.5 + cb2 * 0.35 + cb3;
-    let conv_shaped = max(convective * convective - 0.1, 0.0) * 1.2; // sharpen, more clear gaps
-    let itcz_w = smooth_step(18.0, 5.0, lat_deg) * smooth_step(18.0, 26.0, temp);
-    let itcz_cloud = conv_shaped * itcz_w;
+    // === Step 3: Climate-modulated local coverage ===
+    // Domain-warp the climate lookup to break latitude bands
+    let climate_warp = vec3<f32>(
+        snoise(sphere_pos * 2.5 + vec3<f32>(200.0, 0.0, 0.0)),
+        snoise(sphere_pos * 2.5 + vec3<f32>(0.0, 300.0, 0.0)),
+        snoise(sphere_pos * 2.5 + vec3<f32>(0.0, 0.0, 400.0))
+    ) * 0.12;
+    let warped_climate_pos = normalize(sphere_pos + climate_warp);
 
-    // ================================================================
-    // STRATOCUMULUS — marine patches over cool oceans
-    // ================================================================
-    let ps = sphere_pos + seed_off * 0.6 + vec3<f32>(33.0, 7.0, 51.0);
-    let sc1 = snoise(ps * 10.0);
-    let sc2 = snoise(ps * 20.0 + vec3<f32>(4.1, 2.7, 6.3)) * 0.4;
-    let sc_pattern = smooth_step(-0.1, 0.35, sc1 + sc2);
-    let sc_temp_w = smooth_step(8.0, 14.0, temp) * smooth_step(22.0, 16.0, temp);
-    let sc_lat_w = smooth_step(15.0, 25.0, lat_deg) * smooth_step(45.0, 35.0, lat_deg);
-    let ocean_f = select(0.0, 1.0, is_ocean);
-    let stratocumulus = sc_pattern * sc_temp_w * sc_lat_w * ocean_f * 0.55;
+    // Get moisture at warped position, normalize to [0, 1]
+    let moisture = compute_moisture(warped_climate_pos, height, 0.5);
+    let moisture_norm = clamp(moisture / 300.0, 0.0, 1.0);
 
-    // ================================================================
-    // FAIR-WEATHER CUMULUS — small isolated puffs
-    // ================================================================
-    let pp = sphere_pos + seed_off * 0.8 + vec3<f32>(41.0, 17.0, 63.0);
-    let puff1 = 1.0 - abs(snoise(pp * 12.0));
-    let puff2 = 1.0 - abs(snoise(pp * 24.0 + vec3<f32>(7.3, 1.9, 4.1)));
-    let puff = smooth_step(0.7, 0.9, puff1 * 0.6 + puff2 * 0.4);
-    let land_f = select(0.0, 1.0, !is_ocean);
-    let warm_w = smooth_step(10.0, 25.0, temp);
-    let fair_cu = puff * (0.2 + 0.3 * land_f * warm_w) * moisture_w;
+    // Blend global coverage with climate: noise drives shape, climate nudges placement
+    // At coverage=0.5: dry regions get ~0.38, wet regions get ~0.62
+    let local_coverage = mix(coverage, moisture_norm, 0.35);
 
-    // ================================================================
-    // CIRRUS — thin ice-crystal wisps at jet stream
-    // ================================================================
-    let pc = sphere_pos * vec3<f32>(1.0, 0.7, 1.0) + seed_off + vec3<f32>(50.0, 30.0, 70.0);
-    let ci1 = snoise(pc * 6.0);
-    let ci2 = snoise(pc * 12.0 + vec3<f32>(3.7, 1.1, 8.3)) * 0.5;
-    let cirrus = smooth_step(0.4, 0.75, (ci1 + ci2) * 0.4 + 0.5) * 0.35;
-    let cirrus_w = smooth_step(25.0, 50.0, lat_deg);
+    // === Step 4: Schneider remap ===
+    // remap(noise, 1-cov, 1, 0, 1) * cov
+    // - Lighter thin clouds, denser large clouds
+    // - Linear visual response across coverage range
+    let density = cloud_remap(noise_val, 1.0 - local_coverage, 1.0, 0.0, 1.0) * local_coverage;
 
-    // ================================================================
-    // Combine all layers — weather pattern modulates, not gates
-    // ================================================================
-    // Moisture softens but doesn't zero out (even deserts have some clouds)
-    let moist_mod = 0.3 + 0.7 * moisture_w;
-    // Weather pattern provides spatial variation, not hard cutoff
-    let weather_mod = 0.2 + 0.8 * weather_mask;
-
-    var density = storm  // cyclones are self-contained
-               + (itcz_cloud * 0.8
-                + stratocumulus * 0.7
-                + fair_cu * 0.6
-                + cirrus * cirrus_w * 0.5) * weather_mod * moist_mod;
-
-    // Orographic lift
-    let wind = wind_direction_vec(lat_rad);
-    let tangent_wind = normalize(wind - sphere_pos * dot(wind, sphere_pos));
-    let upwind_pos = normalize(sphere_pos + tangent_wind * 0.04);
-    let upwind_h = textureSample(height_tex, height_sampler, upwind_pos).r;
-    density += smooth_step(0.04, 0.22, max(upwind_h - uniforms.ocean_level, 0.0)) * 0.15;
-
-    // Global base cloud layer — fills in at high coverage values
-    // fBm noise that provides ubiquitous cloud potential
-    let gp = sphere_pos + seed_off * 0.4 + vec3<f32>(71.0, 13.0, 47.0);
-    let global_base = snoise(gp * 3.0) * 0.4
-                    + snoise(gp * 7.0 + vec3<f32>(3.0, 9.0, 1.0)) * 0.3
-                    + snoise(gp * 14.0 + vec3<f32>(6.0, 2.0, 8.0)) * 0.2;
-    let global_cloud = smooth_step(-0.1, 0.4, global_base * 0.5 + 0.5) * moist_mod * 0.5;
-    density = max(density, global_cloud);
-
-    density = clamp(density, 0.0, 1.0);
-
-    // Coverage threshold — quadratic for usable range
-    let threshold = (1.0 - coverage) * (1.0 - coverage);
-    return smooth_step(threshold, threshold + 0.12, density);
+    return max(density, 0.0);
 }
 
 // ---- Continuous gradient biome coloring ----
@@ -766,9 +679,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Combine
     var lit_color = ambient + (diffuse + specular) * n_dot_l;
 
-    // ---- Cloud shell (rendered before atmosphere so atm scattering wraps over clouds) ----
+    // ---- Cloud shell (Beer-Lambert opacity + self-shadowing) ----
     if (uniforms.cloud_coverage > 0.001) {
-        // Find where the view ray hits the cloud shell sphere (always above surface)
         let cloud_r = 1.0 + uniforms.cloud_altitude;
         let z_cloud = sqrt(max(cloud_r * cloud_r - r2, 0.0));
         let cloud_dir = normalize(vec3<f32>(ndc.x, ndc.y, z_cloud));
@@ -777,23 +689,32 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let cloud_sfc_h = textureSample(height_tex, height_sampler, cloud_world).r;
         let cloud_density = compute_cloud_density(cloud_world, cloud_sfc_h);
 
-        if (cloud_density > 0.03) {
-            let sun_dot = max(dot(cloud_dir, sun_dir), 0.0);
-            let cloud_lit = smooth_step(-0.05, 0.2, sun_dot);
+        if (cloud_density > 0.01) {
+            // Beer-Lambert opacity: thin clouds translucent, thick clouds opaque
+            let optical_depth = cloud_density * 4.5;
+            let cloud_alpha = 1.0 - exp(-optical_depth);
 
-            // Cloud-top roughness noise: breaks up flat surfaces
-            let ctn = snoise(cloud_world * 20.0) * 0.12
-                    + snoise(cloud_world * 40.0) * 0.08;
-            // Self-shadowing: thick clouds have darker bases, brighter tops
-            let thickness = cloud_density;
-            let top_bright = 0.95 + ctn; // bright cloud tops with bumpy texture
-            let base_shadow = mix(0.6, top_bright, thickness); // thin=darker, thick=brighter tops
+            // Self-shadowing: sample density toward the sun to approximate light depth
+            let shadow_pos = normalize(cloud_world + sun_dir * 0.03);
+            let shadow_h = textureSample(height_tex, height_sampler, shadow_pos).r;
+            let shadow_density = compute_cloud_density(shadow_pos, shadow_h);
+            let shadow = exp(-shadow_density * 2.5);
 
-            let brightness = base_shadow * (cloud_lit * 0.82 + 0.15);
-            let cloud_color = vec3<f32>(brightness, brightness, brightness * 1.01);
+            // Cloud color: warm white (lit) → blue-grey (shadow)
+            let lit_cloud = vec3<f32>(0.95, 0.95, 0.93);
+            let shadow_cloud = vec3<f32>(0.55, 0.58, 0.65);
+            var cloud_color = mix(shadow_cloud, lit_cloud, shadow);
 
-            // Alpha: continuous ramp, thin clouds translucent
-            let cloud_alpha = smooth_step(0.03, 0.4, cloud_density) * 0.93;
+            // Day/night: smooth terminator
+            let sun_facing = max(dot(cloud_dir, sun_dir), 0.0);
+            let day_factor = smooth_step(-0.05, 0.2, sun_facing);
+            cloud_color *= day_factor * 0.85 + 0.12;
+
+            // Silver lining: bright backlit cloud edges (Henyey-Greenstein forward scatter)
+            let cos_theta = dot(normalize(cloud_world), sun_dir);
+            let hg = henyey_greenstein(cos_theta, 0.7);
+            cloud_color += vec3<f32>(hg * cloud_density * 0.12);
+
             lit_color = mix(lit_color, cloud_color, cloud_alpha);
         }
     }
