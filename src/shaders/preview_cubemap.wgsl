@@ -388,8 +388,8 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
             let base_sigma = 22.0 + fract(sin(fi * 73.1 + s * 0.7) * 19283.3) * 12.0;
             let storm_sigma = base_sigma / max(uniforms.storm_size * uniforms.storm_size, 0.1);
             let falloff = exp(-d * d * storm_sigma);
-            // Just boost coverage in the storm area (no spiral yet)
-            local_coverage += falloff * 0.4;
+            // Strong coverage boost — storms should be dramatically cloudier
+            local_coverage += falloff * 0.7;
         }
     }
 
@@ -426,18 +426,23 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
             let to_pt = sphere_pos - center * dot(sphere_pos, center);
             let angle = atan2(dot(to_pt, ty), dot(to_pt, tx));
 
-            // Eye: clear center
-            let eye_r = (0.025 + fract(sin(fi * 53.7 + s * 0.3) * 31415.9) * 0.02) * uniforms.storm_size;
-            let eye_mask = smooth_step(eye_r * 0.5, eye_r, d); // 0 at center, 1 outside eye
+            // Eye: clear center (larger, more visible)
+            let eye_r = (0.03 + fract(sin(fi * 53.7 + s * 0.3) * 31415.9) * 0.02) * uniforms.storm_size;
+            let eye_mask = smooth_step(eye_r * 0.3, eye_r * 1.2, d);
 
-            // Spiral arm mask: carves gaps between arms
-            // Coriolis: CCW in NH (sign_y=1), CW in SH (sign_y=-1)
+            // Dense eye wall ring
+            let wall_dist = abs(d - eye_r * 1.3);
+            let eye_wall_boost = exp(-wall_dist * wall_dist / (eye_r * eye_r * 0.5)) * near_storm * 0.4;
+            density += eye_wall_boost;
+
+            // Spiral arm mask: deep carving between arms
             let spiral_phase = angle * sign_y - log(max(d, 0.003)) * 3.5;
             let spiral_raw = cos(spiral_phase * 2.0); // -1 to 1
-            // Stronger spiral near storm, fading to no effect far away
-            let spiral_fade = smooth_step(eye_r * 1.5, eye_r * 4.0, d); // no spiral in eye
-            let gap_depth = near_storm * spiral_fade * 0.55; // how deep gaps are carved
-            let spiral_mask = 1.0 - gap_depth * (1.0 - (spiral_raw * 0.5 + 0.5)); // 1=arm, reduced=gap
+            let spiral_fade = smooth_step(eye_r * 1.5, eye_r * 5.0, d);
+            // Deep gaps (up to 80% density removal between arms)
+            let gap_depth = near_storm * spiral_fade * 0.8;
+            let arm_shape = spiral_raw * 0.5 + 0.5; // 0=gap, 1=arm
+            let spiral_mask = 1.0 - gap_depth * (1.0 - arm_shape);
 
             density *= mix(1.0, spiral_mask * eye_mask, near_storm);
         }
