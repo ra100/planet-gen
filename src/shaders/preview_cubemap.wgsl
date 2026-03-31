@@ -854,15 +854,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         var ocean_color = mix(near_shore, mix(mid_ocean, deep_ocean, abyss), shelf);
         ocean_color += vec3<f32>(0.0, 0.015, 0.02) * color_var;
 
-        // Improved polar ice: noisy edge, subsurface blue, seasonal extent
-        let ice_edge_noise = snoise(rotated * 15.0) * 3.0 + snoise(rotated * 30.0) * 1.5;
-        let ice_temp_threshold = 3.0 + ice_edge_noise; // organic, jagged ice edge
+        // Improved polar ice: subtle noisy edge, bright ice
+        let ice_edge_noise = snoise(rotated * 12.0) * 1.5;
+        let ice_temp_threshold = 3.0 + ice_edge_noise;
         let ice_blend = smooth_step(ice_temp_threshold, ice_temp_threshold - 8.0, ocean_temp);
-        // Thick ice: subsurface blue. Thin ice: translucent dark showing ocean below
-        let thick_ice = vec3<f32>(0.82, 0.90, 0.96); // blue-white
-        let thin_ice = mix(ocean_color, vec3<f32>(0.70, 0.80, 0.90), 0.5); // ocean showing through
+        // Thick ice: bright blue-white. Thin ice: shows ocean through
+        let thick_ice = vec3<f32>(0.90, 0.94, 0.98);
+        let thin_ice = mix(ocean_color, vec3<f32>(0.82, 0.88, 0.94), 0.6);
         let ice_thickness = smooth_step(ice_temp_threshold - 3.0, ice_temp_threshold - 12.0, ocean_temp);
-        let ice_color = mix(thin_ice, thick_ice, ice_thickness) + vec3<f32>(0.02) * color_var;
+        let ice_color = mix(thin_ice, thick_ice, ice_thickness) + vec3<f32>(0.015) * color_var;
         surface_color = mix(ocean_color, ice_color, ice_blend);
     } else {
         // Mean annual climate for biome classification (stable across seasons)
@@ -878,13 +878,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let land_height = (height - uniforms.ocean_level) / max(1.0 - uniforms.ocean_level, 0.01);
         let ice_moisture_threshold = 15.0 + 40.0 * (1.0 - uniforms.ocean_fraction);
         let altitude_ice = smooth_step(0.3, 0.6, land_height);
-        // Noisy ice boundary for organic edge
-        let land_ice_noise = snoise(rotated * 12.0) * 4.0;
+        // Noisy ice boundary with subtler noise
+        let land_ice_noise = snoise(rotated * 10.0) * 2.0;
         let cold_factor = smooth_step(-12.0 + land_ice_noise, -28.0, seasonal_temp);
         let ice_blend = cold_factor * max(altitude_ice, smooth_step(ice_moisture_threshold * 0.7, ice_moisture_threshold, mean_moisture));
-        // Glacier blue for thick ice, fresh snow white for thin
-        let glacier_blue = vec3<f32>(0.78, 0.88, 0.96);
-        let fresh_snow = vec3<f32>(0.92, 0.94, 0.97) + vec3<f32>(0.02) * color_var;
+        // Bright glacier blue + fresh snow
+        let glacier_blue = vec3<f32>(0.85, 0.92, 0.98);
+        let fresh_snow = vec3<f32>(0.95, 0.96, 0.98) + vec3<f32>(0.015) * color_var;
         let land_ice_color = mix(fresh_snow, glacier_blue, altitude_ice * cold_factor);
         surface_color = mix(surface_color, land_ice_color, ice_blend);
 
