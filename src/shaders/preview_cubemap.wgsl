@@ -663,10 +663,10 @@ fn compute_urban_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     let cn3 = snoise(sphere_pos * 180.0 + vec3<f32>(3.1, 8.7, 1.3)) * 0.5 + 0.5;
     let city_noise = cn1 * 0.5 + cn2 * 0.3 + cn3 * 0.2;
 
-    // Combine score with noise and threshold by development level
-    let urban_raw = score * city_noise;
-    let threshold = (1.0 - dev) * 0.4; // lower threshold = more cities visible
-    return smooth_step(threshold, threshold + 0.12, urban_raw);
+    // Combine: square the noise for sharper city clusters (not uniform smear)
+    let urban_raw = score * city_noise * city_noise;
+    let threshold = (1.0 - dev) * 0.3;
+    return smooth_step(threshold, threshold + 0.08, urban_raw);
 }
 
 // ---- Starfield + sun orb background ----
@@ -833,12 +833,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
 
-    // Day-side urban grey patches
+    // Day-side urban grey patches (dark concrete/asphalt tone)
     if (uniforms.night_lights > 0.0 && !is_ocean) {
         let urban = compute_urban_density(rotated, height);
         if (urban > 0.01) {
-            let grey = vec3<f32>(0.42, 0.40, 0.38);
-            surface_color = mix(surface_color, grey, urban * 0.7 * uniforms.night_lights);
+            let concrete = vec3<f32>(0.30, 0.30, 0.31); // cool dark grey
+            // Darken toward concrete rather than full replace — preserves some surface variation
+            let darkened = mix(surface_color * 0.5, concrete, 0.6);
+            surface_color = mix(surface_color, darkened, urban * uniforms.night_lights);
         }
     }
 
