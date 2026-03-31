@@ -315,8 +315,16 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
             let slat = (30.0 + fract(sin(fi * 127.1 + s) * 43758.5) * 25.0) * 3.14159 / 180.0;
             let slon = fract(sin(fi * 311.7 + s * 1.3) * 23421.6) * 6.28318;
             let sign_y = select(-1.0, 1.0, i % 2 == 0);
-            let center = normalize(vec3<f32>(
+            let raw_center = vec3<f32>(
                 cos(slat) * cos(slon), sin(slat) * sign_y, cos(slat) * sin(slon)
+            );
+            // Rotate storm center by axial tilt so storms track tilted circulation
+            let ct = cos(uniforms.axial_tilt_rad);
+            let st = sin(uniforms.axial_tilt_rad);
+            let center = normalize(vec3<f32>(
+                raw_center.x,
+                raw_center.y * ct - raw_center.z * st,
+                raw_center.y * st + raw_center.z * ct
             ));
             let d = acos(clamp(dot(sphere_pos, center), -1.0, 1.0));
             let base_sigma = 22.0 + fract(sin(fi * 73.1 + s * 0.7) * 19283.3) * 12.0;
@@ -424,8 +432,16 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
             let slat = (30.0 + fract(sin(fi * 127.1 + s) * 43758.5) * 25.0) * 3.14159 / 180.0;
             let slon = fract(sin(fi * 311.7 + s * 1.3) * 23421.6) * 6.28318;
             let sign_y = select(-1.0, 1.0, i % 2 == 0);
-            let center = normalize(vec3<f32>(
+            let raw_center = vec3<f32>(
                 cos(slat) * cos(slon), sin(slat) * sign_y, cos(slat) * sin(slon)
+            );
+            // Rotate storm center by axial tilt so storms track tilted circulation
+            let ct = cos(uniforms.axial_tilt_rad);
+            let st = sin(uniforms.axial_tilt_rad);
+            let center = normalize(vec3<f32>(
+                raw_center.x,
+                raw_center.y * ct - raw_center.z * st,
+                raw_center.y * st + raw_center.z * ct
             ));
             let d = acos(clamp(dot(sphere_pos, center), -1.0, 1.0));
             let base_sigma = 22.0 + fract(sin(fi * 73.1 + s * 0.7) * 19283.3) * 12.0;
@@ -454,8 +470,16 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
             let slat = (30.0 + fract(sin(fi * 127.1 + s) * 43758.5) * 25.0) * 3.14159 / 180.0;
             let slon = fract(sin(fi * 311.7 + s * 1.3) * 23421.6) * 6.28318;
             let sign_y = select(-1.0, 1.0, i % 2 == 0);
-            let center = normalize(vec3<f32>(
+            let raw_center = vec3<f32>(
                 cos(slat) * cos(slon), sin(slat) * sign_y, cos(slat) * sin(slon)
+            );
+            // Rotate storm center by axial tilt so storms track tilted circulation
+            let ct = cos(uniforms.axial_tilt_rad);
+            let st = sin(uniforms.axial_tilt_rad);
+            let center = normalize(vec3<f32>(
+                raw_center.x,
+                raw_center.y * ct - raw_center.z * st,
+                raw_center.y * st + raw_center.z * ct
             ));
             let d = acos(clamp(dot(sphere_pos, center), -1.0, 1.0));
             let base_sigma = 22.0 + fract(sin(fi * 73.1 + s * 0.7) * 19283.3) * 12.0;
