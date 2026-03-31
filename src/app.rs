@@ -26,6 +26,7 @@ pub struct PlanetGenApp {
     light_azimuth: f32,   // sun horizontal angle in radians
     light_elevation: f32, // sun vertical angle in radians
     height_scale: f32,    // normal map height exaggeration
+    show_atmosphere: bool, // toggle atmosphere rendering
     view_mode: u32,
     preview_resolution: u32,
     needs_terrain: bool,   // full terrain recompute (plates + compute + erosion)
@@ -63,6 +64,7 @@ impl PlanetGenApp {
             light_azimuth: -0.5,
             light_elevation: 0.3,
             height_scale: 3.0,
+            show_atmosphere: true,
             view_mode: 0,
             preview_resolution: crate::preview::DEFAULT_PREVIEW_SIZE,
             needs_terrain: true,
@@ -103,8 +105,8 @@ impl PlanetGenApp {
             axial_tilt_rad: self.params.axial_tilt_deg.to_radians(),
             view_mode: self.view_mode,
             season: self.season,
-            atmosphere_density: self.derived.atmosphere_strength,
-            atmosphere_height: 0.0,
+            atmosphere_density: if self.show_atmosphere { self.derived.atmosphere_strength } else { 0.0 },
+            atmosphere_height: 0.02 + 0.02 * self.derived.atmosphere_strength,
             height_scale: self.height_scale,
         }
     }
@@ -371,6 +373,13 @@ impl eframe::App for PlanetGenApp {
                 if ui.add(egui::Slider::new(&mut self.height_scale, 0.5..=10.0)
                     .text("Relief"))
                     .on_hover_text("How pronounced terrain relief appears in lighting. 1 = subtle, 5 = dramatic")
+                    .changed()
+                {
+                    self.needs_render = true;
+                }
+
+                if ui.checkbox(&mut self.show_atmosphere, "Atmosphere")
+                    .on_hover_text("Toggle atmospheric scattering (blue limb glow, red sunsets)")
                     .changed()
                 {
                     self.needs_render = true;

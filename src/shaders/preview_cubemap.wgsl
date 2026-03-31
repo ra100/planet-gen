@@ -40,12 +40,57 @@ fn vs_main(@builtin(vertex_index) idx: u32) -> VertexOutput {
     return out;
 }
 
-fn intersect_sphere(uv: vec2<f32>) -> vec3<f32> {
-    let ndc = (uv - 0.5) * 2.0 / 0.85;
-    let r2 = dot(ndc, ndc);
-    if (r2 > 1.0) { return vec3<f32>(0.0, 0.0, 0.0); }
-    let z = sqrt(1.0 - r2);
-    return vec3<f32>(ndc.x, ndc.y, z);
+// ---- Ray-marched atmosphere ----
+
+struct ScatterResult {
+    in_scatter: vec3<f32>,
+    transmittance: vec3<f32>,
+}
+
+fn ray_march_atmosphere(
+    ndc: vec2<f32>,
+    z_start: f32,
+    z_end: f32,
+    sun_dir: vec3<f32>,
+) -> ScatterResult {
+    // Rayleigh scattering coefficients — wavelength-dependent (λ^-4 ratio)
+    let beta = vec3<f32>(1.0, 2.4, 5.8) * uniforms.atmosphere_density;
+    let scale_h = max(uniforms.atmosphere_height * 0.5, 0.003);
+
+    // Rayleigh phase function: angle between sun and view direction (0,0,1)
+    let cos_theta = sun_dir.z;
+    let phase = 0.05968 * (1.0 + cos_theta * cos_theta); // 3/(16π)
+
+    let steps = 8;
+    let step_len = (z_start - z_end) / f32(steps);
+
+    var optical_depth = vec3<f32>(0.0);
+    var in_scatter = vec3<f32>(0.0);
+
+    for (var i = 0; i < steps; i++) {
+        let z = z_start - (f32(i) + 0.5) * step_len;
+        let pos = vec3<f32>(ndc.x, ndc.y, z);
+        let altitude = length(pos) - 1.0;
+
+        if (altitude < 0.0) { continue; }
+
+        let density = exp(-altitude / scale_h);
+        optical_depth += beta * density * abs(step_len);
+
+        // Sun illumination at this point (airmass approximation)
+        let sun_cos = max(dot(normalize(pos), sun_dir), 0.0);
+        let sun_od = beta * density * scale_h / max(sun_cos, 0.12);
+
+        let view_transmit = exp(-optical_depth);
+        let sun_transmit = exp(-sun_od);
+
+        in_scatter += view_transmit * sun_transmit * density * phase * abs(step_len);
+    }
+
+    var result: ScatterResult;
+    result.in_scatter = in_scatter * beta * 25.0;
+    result.transmittance = exp(-optical_depth);
+    return result;
 }
 
 // ---- Temperature ----
@@ -286,12 +331,38 @@ fn fresnel_schlick(h_dot_v: f32, f0: f32) -> f32 {
 // ---- Main fragment shader ----
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let hit = intersect_sphere(in.uv);
-    if (length(hit) < 0.01) {
-        return vec4<f32>(0.02, 0.02, 0.05, 1.0);
+    let background = vec3<f32>(0.02, 0.02, 0.05);
+    let ndc = (in.uv - 0.5) * 2.0 / 0.85;
+    let r2 = dot(ndc, ndc);
+
+    let atm_h = uniforms.atmosphere_height;
+    let atm_radius = 1.0 + atm_h;
+    let has_atm = uniforms.atmosphere_density > 0.001 && atm_h > 0.001;
+    let outer_r = select(1.005, atm_radius + 0.015, has_atm);
+
+    // Miss everything — outside both planet and atmosphere
+    if (r2 > outer_r * outer_r) {
+        return vec4<f32>(background, 1.0);
     }
 
-    let normal = normalize(hit);
+    let sun_dir = normalize(uniforms.light_dir);
+    let hit_planet = r2 < 1.0;
+
+    // Atmosphere-only ring (between planet edge and outer atmosphere boundary)
+    if (!hit_planet) {
+        if (!has_atm || uniforms.view_mode != 0u) {
+            return vec4<f32>(background, 1.0);
+        }
+        let z_atm = sqrt(max(atm_radius * atm_radius - r2, 0.0));
+        let scatter = ray_march_atmosphere(ndc, z_atm, -z_atm, sun_dir);
+        var ring_color = scatter.in_scatter;
+        ring_color = ring_color / (ring_color + vec3<f32>(1.0)); // tonemap
+        let edge = 1.0 - smooth_step(atm_radius - 0.015, atm_radius, sqrt(r2));
+        return vec4<f32>(mix(background, ring_color, edge), 1.0);
+    }
+
+    // Planet surface hit
+    let normal = normalize(vec3<f32>(ndc.x, ndc.y, sqrt(1.0 - r2)));
     let rotated = (uniforms.rotation * vec4<f32>(normal, 0.0)).xyz;
 
     // Sample height from pre-computed cubemap
@@ -490,22 +561,22 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Combine
     var lit_color = ambient + (diffuse + specular) * n_dot_l;
 
-    // Simple tonemap to prevent HDR clipping on specular
+    // Ray-marched atmosphere (in HDR space, before tonemapping)
+    if (has_atm) {
+        let z_atm = sqrt(max(atm_radius * atm_radius - r2, 0.0));
+        let z_surface = sqrt(1.0 - r2);
+        let scatter = ray_march_atmosphere(ndc, z_atm, z_surface, sun_dir);
+        lit_color = lit_color * scatter.transmittance + scatter.in_scatter;
+    }
+
+    // Tonemap (Reinhard)
     lit_color = lit_color / (lit_color + vec3<f32>(1.0));
 
-    // Atmospheric scattering — single-scatter Rayleigh approximation
-    // Uses geometric normal (not terrain-perturbed) for limb thickness
-    let geo_n_dot_v = max(dot(normal, view_dir), 0.0);
-    let atmosphere_thickness = 1.0 - geo_n_dot_v; // thicker at limb
-    let rayleigh_color = vec3<f32>(0.3, 0.5, 1.0); // blue sky scatter
-
-    // Wrap lighting so atmosphere glows even slightly past the terminator
-    let n_dot_l_atm = max(dot(normal, light), 0.0) * 0.5 + 0.5;
-    let atm_illuminated = rayleigh_color * n_dot_l_atm;
-
-    // Opacity scales with limb angle and atmosphere density
-    let atm_opacity = pow(atmosphere_thickness, 3.0) * uniforms.atmosphere_density;
-    lit_color = mix(lit_color, atm_illuminated, clamp(atm_opacity, 0.0, 0.6));
+    // Edge AA at planet boundary (when no atmosphere provides the transition)
+    if (!has_atm) {
+        let edge_aa = 1.0 - smooth_step(0.99, 1.0, sqrt(r2));
+        lit_color = mix(background, lit_color, edge_aa);
+    }
 
     return vec4<f32>(lit_color, 1.0);
 }
