@@ -272,13 +272,6 @@ impl eframe::App for PlanetGenApp {
             ctx.request_repaint();
         }
 
-        if self.needs_terrain {
-            self.regenerate_terrain();
-        }
-        if self.needs_render {
-            self.render_preview(ctx);
-        }
-
         egui::SidePanel::left("params_panel")
             .resizable(true)
             .default_width(280.0)
@@ -672,6 +665,15 @@ impl eframe::App for PlanetGenApp {
                 });
             }
         });
+
+        // Run expensive GPU work AFTER UI so input events (mouse-up) are processed first.
+        // This prevents sliders from "sticking" during terrain regeneration.
+        if self.needs_terrain {
+            self.regenerate_terrain();
+        }
+        if self.needs_render {
+            self.render_preview(ctx);
+        }
     }
 }
 
