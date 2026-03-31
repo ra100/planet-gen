@@ -652,6 +652,8 @@ fn compute_roughness(temp_c: f32, moisture_cm: f32, is_ocean: bool, is_ice: bool
     roughness -= snow_smooth; // snow smooths it
     roughness += desert_rough * 0.25; // desert roughens
     roughness -= vegetation * 0.15; // dense vegetation slightly smoother
+    // Per-pixel noise breaks up visible biome boundaries
+    roughness += snoise(vec3<f32>(temp_c * 0.1, moisture_cm * 0.01, temp_c * 0.05)) * 0.08;
     return clamp(roughness, 0.15, 0.85);
 }
 
@@ -992,21 +994,29 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 }
             }
             case 7u: {
-                // Roughness visualization
+                // Roughness visualization (uses actual compute_roughness)
+                let rt = compute_temperature(rotated, height, uniforms.season);
+                let rm = compute_moisture(rotated, height, uniforms.season);
+                let r = compute_roughness(rt, rm, is_ocean, is_ocean && rt < -2.0);
+                debug_color = vec3<f32>(r, r, r);
+            }
+            case 8u: {
+                // AO visualization
+                let ao_val = select(1.0, compute_ao(rotated), !is_ocean);
+                debug_color = vec3<f32>(ao_val, ao_val, ao_val);
+            }
+            case 9u: {
+                // Cloud density visualization
+                let cd = compute_cloud_density(rotated, height);
+                debug_color = vec3<f32>(cd, cd, cd);
+            }
+            case 10u: {
+                // City lights / urban density visualization
                 if (is_ocean) {
-                    debug_color = vec3<f32>(0.05, 0.05, 0.1); // Water = very smooth (dark)
+                    debug_color = vec3<f32>(0.0, 0.0, 0.1);
                 } else {
-                    let rt = compute_temperature(rotated, height, uniforms.season);
-                    let rm = compute_moisture(rotated, height, uniforms.season);
-                    var r: f32;
-                    if (rt < 0.0) { r = 0.15; }
-                    else if (rt < 10.0) { r = 0.55; }
-                    else if (rm < 25.0) { r = 0.85; }
-                    else if (rm < 100.0) { r = 0.60; }
-                    else { r = 0.50; }
-                    r += snoise(rotated * 10.0) * 0.1;
-                    r = clamp(r, 0.0, 1.0);
-                    debug_color = vec3<f32>(r, r, r);
+                    let urban = compute_urban_density(rotated, height);
+                    debug_color = vec3<f32>(urban, urban * 0.8, 0.0);
                 }
             }
             default: { debug_color = surface_color; }
