@@ -14,6 +14,10 @@ struct Uniforms {
     atmosphere_density: f32, // 0.0 = none, 1.0 = Earth-like (reserved)
     atmosphere_height: f32,  // scale height in planet radii (reserved)
     height_scale: f32,       // normal map height exaggeration
+    zoom: f32,               // viewport zoom (1.0 = default)
+    pan_x: f32,              // viewport pan in NDC units
+    pan_y: f32,
+    _pad1: f32,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -333,8 +337,9 @@ fn fresnel_schlick(h_dot_v: f32, f0: f32) -> f32 {
 // ---- Main fragment shader ----
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let background = vec3<f32>(0.02, 0.02, 0.05);
-    let ndc = (in.uv - 0.5) * 2.0 / 0.85;
+    let background = vec3<f32>(0.0, 0.0, 0.0);
+    let pan = vec2<f32>(uniforms.pan_x, uniforms.pan_y);
+    let ndc = ((in.uv - 0.5) * 2.0 / 0.85 - pan) / uniforms.zoom;
     let r2 = dot(ndc, ndc);
 
     let atm_h = uniforms.atmosphere_height;

@@ -27,6 +27,8 @@ pub struct PlanetGenApp {
     light_elevation: f32, // sun vertical angle in radians
     height_scale: f32,    // normal map height exaggeration
     show_atmosphere: bool, // toggle atmosphere rendering
+    zoom: f32,            // viewport zoom level
+    pan: [f32; 2],        // viewport pan in NDC units
     view_mode: u32,
     preview_resolution: u32,
     needs_terrain: bool,   // full terrain recompute (plates + compute + erosion)
@@ -65,6 +67,8 @@ impl PlanetGenApp {
             light_elevation: 0.3,
             height_scale: 3.0,
             show_atmosphere: true,
+            zoom: 1.0,
+            pan: [0.0, 0.0],
             view_mode: 0,
             preview_resolution: crate::preview::DEFAULT_PREVIEW_SIZE,
             needs_terrain: true,
@@ -108,6 +112,10 @@ impl PlanetGenApp {
             atmosphere_density: if self.show_atmosphere { self.derived.atmosphere_strength } else { 0.0 },
             atmosphere_height: 0.02 + 0.02 * self.derived.atmosphere_strength,
             height_scale: self.height_scale,
+            zoom: self.zoom,
+            pan_x: self.pan[0],
+            pan_y: self.pan[1],
+            _pad1: 0.0,
         }
     }
 
@@ -524,7 +532,7 @@ impl eframe::App for PlanetGenApp {
 
                 ui.separator();
                 ui.small(format!("GPU: {}", self.gpu.adapter_name()));
-                ui.small("Drag preview to rotate");
+                ui.small("Drag to rotate • Scroll to zoom • Middle-drag to pan");
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -544,7 +552,8 @@ impl eframe::App for PlanetGenApp {
                     egui::Color32::WHITE,
                 );
 
-                if response.dragged() {
+                // Left-drag: rotate planet
+                if response.dragged_by(egui::PointerButton::Primary) {
                     let delta = response.drag_delta();
                     self.rotation_y += delta.x * 0.01;
                     self.rotation_x -= delta.y * 0.01;
@@ -552,6 +561,31 @@ impl eframe::App for PlanetGenApp {
                         -std::f32::consts::FRAC_PI_2 + 0.1,
                         std::f32::consts::FRAC_PI_2 - 0.1,
                     );
+                    self.needs_render = true;
+                }
+
+                // Middle-drag: pan viewport
+                if response.dragged_by(egui::PointerButton::Middle) {
+                    let delta = response.drag_delta();
+                    let ndc_per_pixel = 2.0 / (0.85 * size);
+                    self.pan[0] -= delta.x * ndc_per_pixel;
+                    self.pan[1] -= delta.y * ndc_per_pixel;
+                    self.needs_render = true;
+                }
+
+                // Scroll: zoom
+                if response.hovered() {
+                    let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+                    if scroll != 0.0 {
+                        self.zoom = (self.zoom * (1.0 + scroll * 0.005)).clamp(0.1, 20.0);
+                        self.needs_render = true;
+                    }
+                }
+
+                // Double-click: reset zoom and pan
+                if response.double_clicked_by(egui::PointerButton::Middle) {
+                    self.zoom = 1.0;
+                    self.pan = [0.0, 0.0];
                     self.needs_render = true;
                 }
             } else {

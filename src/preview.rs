@@ -20,6 +20,10 @@ pub struct PreviewUniforms {
     pub atmosphere_density: f32, // 0.0 = none, 1.0 = Earth-like (reserved for future)
     pub atmosphere_height: f32,  // scale height in planet radii (reserved for future)
     pub height_scale: f32,       // normal map height exaggeration (1.0 = subtle, 5.0 = dramatic)
+    pub zoom: f32,               // viewport zoom (1.0 = default, >1 = zoomed in)
+    pub pan_x: f32,              // viewport pan in NDC units
+    pub pan_y: f32,
+    pub _pad1: f32,
 }
 
 pub struct PreviewRenderer {
