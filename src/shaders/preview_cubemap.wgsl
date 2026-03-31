@@ -1051,6 +1051,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Combine — tint direct light by star color
     var lit_color = ambient + (diffuse + specular) * n_dot_l * s_color;
 
+    // Ice/snow ambient boost: high-albedo surfaces scatter skylight strongly
+    // Without this, Reinhard tonemap crushes snow to grey
+    if (surface_color.r > 0.95 || surface_color.g > 0.95) {
+        let ice_boost = max(max(surface_color.r, surface_color.g) - 0.95, 0.0) * 3.0;
+        lit_color += surface_color * ice_boost * s_color * 0.15;
+    }
+
     // Cloud shadow on surface: darken where clouds above block sunlight
     if (uniforms.cloud_coverage > 0.001) {
         // Offset toward sun to approximate shadow projection angle
