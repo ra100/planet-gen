@@ -363,6 +363,35 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     return max(density, 0.0);
 }
 
+// High-altitude cirrus: thin ice-crystal wisps at jet stream altitudes.
+// Separate from main cloud layer — rendered at a higher shell.
+fn compute_cirrus_density(sphere_pos: vec3<f32>) -> f32 {
+    let cov = uniforms.cloud_coverage;
+    if (cov <= 0.0) { return 0.0; }
+
+    let s = uniforms.cloud_seed;
+    let seed_off = vec3<f32>(s, fract(s * 1.618) * 89.0, fract(s * 2.618) * 83.0);
+
+    // Slight E-W elongation (jet stream alignment)
+    let p = sphere_pos * vec3<f32>(1.0, 0.6, 1.0) * 6.0 + seed_off + vec3<f32>(50.0, 30.0, 70.0);
+
+    // 3-octave high-frequency noise
+    let ci = snoise(p) * 0.5
+           + snoise(p * 2.1 + vec3<f32>(3.7, 1.1, 8.3)) * 0.3
+           + snoise(p * 4.4 + vec3<f32>(1.3, 5.9, 2.1)) * 0.2;
+    let ci_norm = ci * 0.5 + 0.5;
+
+    // Cirrus more common at mid-to-high latitudes
+    let tilt = uniforms.axial_tilt_rad;
+    let tilted_y = sphere_pos.y * cos(tilt) + sphere_pos.z * sin(tilt);
+    let lat_deg = abs(asin(clamp(tilted_y, -1.0, 1.0))) * 180.0 / 3.14159;
+    let lat_boost = smooth_step(20.0, 50.0, lat_deg) * 0.15;
+
+    let cirrus_cov = cov * 0.4 + lat_boost; // cirrus coverage is fraction of main
+    let density = cloud_remap(ci_norm, 1.0 - cirrus_cov, 1.0, 0.0, 1.0) * cirrus_cov;
+    return max(density, 0.0);
+}
+
 // ---- Continuous gradient biome coloring ----
 // Replaces discrete Whittaker lookup with smooth 2D interpolation.
 // Temperature × moisture → color via 3×2 anchor grid.
@@ -712,43 +741,72 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Combine
     var lit_color = ambient + (diffuse + specular) * n_dot_l;
 
-    // ---- Cloud shell (Beer-Lambert opacity + self-shadowing) ----
+    // ---- Two-layer cloud rendering ----
+    // Layer 1 (low): cumulus/stratus at ~0.01 planet radii above surface
+    // Layer 2 (high): cirrus at ~0.03 planet radii (jet stream altitude)
     if (uniforms.cloud_coverage > 0.001) {
-        let cloud_r = 1.0 + uniforms.cloud_altitude;
-        let z_cloud = sqrt(max(cloud_r * cloud_r - r2, 0.0));
-        let cloud_dir = normalize(vec3<f32>(ndc.x, ndc.y, z_cloud));
-        let cloud_world = (uniforms.rotation * vec4<f32>(cloud_dir, 0.0)).xyz;
+        // === Low cloud layer (cumulus / stratus / weather systems) ===
+        let low_alt = max(uniforms.cloud_altitude, 0.01);
+        let low_r = 1.0 + low_alt;
+        let z_low = sqrt(max(low_r * low_r - r2, 0.0));
+        let low_dir = normalize(vec3<f32>(ndc.x, ndc.y, z_low));
+        let low_world = (uniforms.rotation * vec4<f32>(low_dir, 0.0)).xyz;
 
-        let cloud_sfc_h = textureSample(height_tex, height_sampler, cloud_world).r;
-        let cloud_density = compute_cloud_density(cloud_world, cloud_sfc_h);
+        let low_sfc_h = textureSample(height_tex, height_sampler, low_world).r;
+        let low_density = compute_cloud_density(low_world, low_sfc_h);
 
-        if (cloud_density > 0.01) {
-            // Beer-Lambert opacity: thin clouds translucent, thick clouds opaque
-            let optical_depth = cloud_density * 4.5;
-            let cloud_alpha = 1.0 - exp(-optical_depth);
+        if (low_density > 0.01) {
+            // Beer-Lambert opacity
+            let low_alpha = 1.0 - exp(-low_density * 4.5);
 
-            // Self-shadowing: sample density toward the sun to approximate light depth
-            let shadow_pos = normalize(cloud_world + sun_dir * 0.03);
+            // Self-shadowing
+            let shadow_pos = normalize(low_world + sun_dir * 0.03);
             let shadow_h = textureSample(height_tex, height_sampler, shadow_pos).r;
             let shadow_density = compute_cloud_density(shadow_pos, shadow_h);
             let shadow = exp(-shadow_density * 2.5);
 
-            // Cloud color: warm white (lit) → blue-grey (shadow)
+            // Warm white (lit) → blue-grey (shadow)
             let lit_cloud = vec3<f32>(0.95, 0.95, 0.93);
             let shadow_cloud = vec3<f32>(0.55, 0.58, 0.65);
-            var cloud_color = mix(shadow_cloud, lit_cloud, shadow);
+            var low_color = mix(shadow_cloud, lit_cloud, shadow);
 
-            // Day/night: smooth terminator
-            let sun_facing = max(dot(cloud_dir, sun_dir), 0.0);
+            // Day/night terminator
+            let sun_facing = max(dot(low_dir, sun_dir), 0.0);
             let day_factor = smooth_step(-0.05, 0.2, sun_facing);
-            cloud_color *= day_factor * 0.85 + 0.12;
+            low_color *= day_factor * 0.85 + 0.12;
 
-            // Silver lining: bright backlit cloud edges (Henyey-Greenstein forward scatter)
-            let cos_theta = dot(normalize(cloud_world), sun_dir);
+            // Silver lining
+            let cos_theta = dot(normalize(low_world), sun_dir);
             let hg = henyey_greenstein(cos_theta, 0.7);
-            cloud_color += vec3<f32>(hg * cloud_density * 0.12);
+            low_color += vec3<f32>(hg * low_density * 0.12);
 
-            lit_color = mix(lit_color, cloud_color, cloud_alpha);
+            lit_color = mix(lit_color, low_color, low_alpha);
+        }
+
+        // === High cloud layer (cirrus — thin, icy, translucent) ===
+        let high_alt = low_alt * 3.0; // cirrus at ~3x the low cloud altitude
+        let high_r = 1.0 + high_alt;
+        let z_high = sqrt(max(high_r * high_r - r2, 0.0));
+        let high_dir = normalize(vec3<f32>(ndc.x, ndc.y, z_high));
+        let high_world = (uniforms.rotation * vec4<f32>(high_dir, 0.0)).xyz;
+
+        let cirrus_density = compute_cirrus_density(high_world);
+
+        if (cirrus_density > 0.01) {
+            // Cirrus: much thinner optical depth, more translucent
+            let ci_alpha = 1.0 - exp(-cirrus_density * 2.0);
+
+            // Cirrus color: ice-white, less self-shadowing (thin layer)
+            let ci_sun = max(dot(high_dir, sun_dir), 0.0);
+            let ci_day = smooth_step(-0.05, 0.2, ci_sun);
+            var ci_color = vec3<f32>(0.92, 0.93, 0.96) * (ci_day * 0.8 + 0.15);
+
+            // Forward scattering stronger for thin ice crystals
+            let ci_cos = dot(normalize(high_world), sun_dir);
+            let ci_hg = henyey_greenstein(ci_cos, 0.8);
+            ci_color += vec3<f32>(ci_hg * cirrus_density * 0.18);
+
+            lit_color = mix(lit_color, ci_color, ci_alpha * 0.7);
         }
     }
 
