@@ -626,8 +626,10 @@ impl eframe::App for PlanetGenApp {
                     ui.label("Resolution:");
                     for (res, label) in &resolutions {
                         if ui.selectable_label(self.preview_resolution == *res, *label).clicked() {
-                            self.preview_resolution = *res;
-                            self.needs_render = true;
+                            if self.preview_resolution != *res {
+                                self.preview_resolution = *res;
+                                self.needs_terrain = true; // recompute cubemap at new resolution
+                            }
                         }
                     }
                 });
