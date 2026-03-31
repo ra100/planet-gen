@@ -342,17 +342,14 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     // Start with global coverage blended with moisture
     var local_coverage = mix(coverage, moisture_norm, 0.35);
 
-    // Ocean boost: warm oceans have more evaporation → more clouds
-    let is_ocean = height < uniforms.ocean_level;
-    if (is_ocean) {
-        let warm_ocean = smooth_step(5.0, 25.0, temp) * 0.08;
-        local_coverage += warm_ocean;
-    } else {
-        // Continental interiors: slightly drier (less marine moisture)
-        let land_height = (height - uniforms.ocean_level) / max(1.0 - uniforms.ocean_level, 0.01);
-        let interior_dry = smooth_step(0.0, 0.15, land_height) * 0.06;
-        local_coverage -= interior_dry;
-    }
+    // Ocean/land influence: smooth transition at coastlines (no hard cutoff)
+    // ocean_factor: 1.0 = deep ocean, 0.0 = well inland, smooth gradient at coast
+    let ocean_factor = smooth_step(0.03, -0.02, height - uniforms.ocean_level);
+    // Warm oceans boost clouds; inland areas slightly drier
+    let warm_ocean = smooth_step(5.0, 25.0, temp) * 0.08 * ocean_factor;
+    let land_height = max(height - uniforms.ocean_level, 0.0) / max(1.0 - uniforms.ocean_level, 0.01);
+    let interior_dry = smooth_step(0.0, 0.15, land_height) * 0.06 * (1.0 - ocean_factor);
+    local_coverage += warm_ocean - interior_dry;
 
     // Orographic lift: mountains force air up → condensation on windward side
     let tilt = uniforms.axial_tilt_rad;
