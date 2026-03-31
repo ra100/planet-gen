@@ -38,6 +38,7 @@ pub struct PlanetGenApp {
     cloud_coverage: f32,
     cloud_seed: u32,
     cloud_type: f32,
+    storm_count: u32,
     view_mode: u32,
     preview_resolution: u32,
     needs_terrain: bool,   // full terrain recompute (plates + compute + erosion)
@@ -87,6 +88,7 @@ impl PlanetGenApp {
             cloud_coverage: 0.5,
             cloud_seed: default_cloud_seed,
             cloud_type: 0.5,
+            storm_count: 0,
             view_mode: 0,
             preview_resolution: crate::preview::DEFAULT_PREVIEW_SIZE,
             needs_terrain: true,
@@ -137,7 +139,7 @@ impl PlanetGenApp {
             cloud_seed: crate::preview::seed_to_offset(self.cloud_seed)[0],
             cloud_altitude: 0.008,
             cloud_type: self.cloud_type,
-            _pad2: 0.0,
+            storm_count: self.storm_count as f32,
         }
     }
 
@@ -439,6 +441,15 @@ impl eframe::App for PlanetGenApp {
                     .on_hover_text("Cloud style: 0 = smooth flowing stratus, 1 = puffy cumulus blobs")
                     .changed()
                 {
+                    self.needs_render = true;
+                }
+                let mut storms_i32 = self.storm_count as i32;
+                if ui.add(egui::Slider::new(&mut storms_i32, 0..=8)
+                    .text("Storms"))
+                    .on_hover_text("Number of cyclone storm systems. 0 = none, 4 = Earth-like, 8 = stormy planet")
+                    .changed()
+                {
+                    self.storm_count = storms_i32 as u32;
                     self.needs_render = true;
                 }
 

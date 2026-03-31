@@ -21,7 +21,7 @@ struct Uniforms {
     cloud_seed: f32,
     cloud_altitude: f32,
     cloud_type: f32,         // 0.0 = smooth stratus, 1.0 = puffy cumulus
-    _pad2: f32,
+    storm_count: f32,        // 0-8 cyclone systems
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -366,6 +366,47 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     // Warm convection: warmer areas produce more convective cloud potential
     let convection_boost = smooth_step(15.0, 30.0, temp) * 0.05;
     local_coverage += convection_boost;
+
+    // === Step 3b: Cyclone storm coverage boost ===
+    // Storms add local coverage (not separate density) so existing noise creates the texture.
+    let n_storms = i32(min(uniforms.storm_count, 8.0));
+    if (n_storms > 0) {
+        let tilt_s = uniforms.axial_tilt_rad;
+        for (var i = 0; i < 8; i++) {
+            if (i >= n_storms) { break; }
+            let fi = f32(i);
+            // Pseudo-random storm center
+            let slat = (30.0 + fract(sin(fi * 127.1 + s) * 43758.5) * 25.0) * 3.14159 / 180.0;
+            let slon = fract(sin(fi * 311.7 + s * 1.3) * 23421.6) * 6.28318;
+            let sign_y = select(-1.0, 1.0, i % 2 == 0); // alternate hemispheres
+            let center = normalize(vec3<f32>(
+                cos(slat) * cos(slon),
+                sin(slat) * sign_y,
+                cos(slat) * sin(slon)
+            ));
+
+            // Great-circle distance
+            let d = acos(clamp(dot(sphere_pos, center), -1.0, 1.0));
+
+            // Gaussian storm envelope (radius ~15-20° on sphere)
+            let storm_sigma = 22.0 + fract(sin(fi * 73.1 + s * 0.7) * 19283.3) * 12.0;
+            let falloff = exp(-d * d * storm_sigma);
+
+            // Soft spiral bias via tangent-plane angle (Coriolis-correct)
+            let up_s = select(vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0, 1.0, 0.0), abs(center.y) < 0.9);
+            let tx = normalize(cross(up_s, center));
+            let ty = cross(center, tx);
+            let to_pt = sphere_pos - center * dot(sphere_pos, center);
+            let angle = atan2(dot(to_pt, ty), dot(to_pt, tx));
+
+            // Coriolis: CCW in NH (sign_y=1), CW in SH (sign_y=-1)
+            let spiral = cos((angle * sign_y - log(max(d, 0.003)) * 3.0) * 2.0);
+            let spiral_bias = spiral * 0.15 + 0.85; // soft 0.7–1.0 range
+
+            // Add to local coverage
+            local_coverage += falloff * spiral_bias * 0.35;
+        }
+    }
 
     local_coverage = clamp(local_coverage, 0.0, 1.0);
 

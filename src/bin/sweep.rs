@@ -170,7 +170,7 @@ fn generate_planet_png(
         cloud_seed: 0.0,
         cloud_altitude: 0.008,
         cloud_type: 0.5,
-        _pad2: 0.0,
+        storm_count: 0.0,
     };
 
     renderer.render(gpu, &uniforms, &cubemap_view, render_size)
