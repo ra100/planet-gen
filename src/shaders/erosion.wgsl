@@ -128,8 +128,18 @@ fn accumulate_flow(@builtin(global_invocation_id) id: vec3<u32>) {
     let idx = id.y * res + id.x;
     let h = input_height[idx];
 
-    // Start with base rainfall
-    var w = 1.0;
+    // Moisture-weighted rainfall: varies with position to create
+    // wet (tropical) vs dry (desert) erosion patterns.
+    // Use noise-based spatial variation — correlates roughly with latitude
+    // but works across all cubemap faces without needing face ID.
+    let moisture_pos = vec3<f32>(f32(x) * 0.02, f32(y) * 0.02, f32(params.seed) * 0.001);
+    let moisture_noise = snoise(moisture_pos * 1.5) * 0.3 + snoise(moisture_pos * 3.0) * 0.2;
+    // Latitude proxy: y/resolution maps roughly to latitude on most faces
+    let lat_proxy = abs(f32(y) / f32(res) - 0.5) * 2.0; // 0 at equator, 1 at poles
+    // Hadley-like moisture: wet equator, dry subtropics (~0.5), wet mid-lat, dry poles
+    let subtropical_dry = exp(-((lat_proxy - 0.35) * (lat_proxy - 0.35)) / 0.03) * 0.6;
+    let base_moisture = 1.0 - subtropical_dry + moisture_noise;
+    var w = clamp(base_moisture, 0.2, 1.5);
 
     let offsets = array<vec2<i32>, 8>(
         vec2<i32>(-1, -1), vec2<i32>(0, -1), vec2<i32>(1, -1),
@@ -190,12 +200,19 @@ fn erode(@builtin(global_invocation_id) id: vec3<u32>) {
 
     var new_h = h;
 
+    // Moisture factor for erosion strength: wet areas erode more, dry areas stay sharp
+    let moist_pos = vec3<f32>(f32(x) * 0.02, f32(y) * 0.02, f32(params.seed) * 0.001);
+    let moist_n = snoise(moist_pos * 1.5) * 0.3 + snoise(moist_pos * 3.0) * 0.2;
+    let lat_p = abs(f32(y) / f32(res) - 0.5) * 2.0;
+    let sub_dry = exp(-((lat_p - 0.35) * (lat_p - 0.35)) / 0.03) * 0.6;
+    let moist_factor = clamp(1.0 - sub_dry + moist_n, 0.3, 1.3);
+
     if (drainage > params.channel_threshold) {
         // === Channel carving ===
         // Stream-power: E = K * A^0.5 * S — concentrated flow cuts valleys
         let stream_power = sqrt(drainage) * slope;
         if (stream_power > params.min_slope) {
-            let erosion = min(stream_power * params.erosion_rate, slope * 0.5);
+            let erosion = min(stream_power * params.erosion_rate * moist_factor, slope * 0.5);
             new_h -= erosion;
         }
 
@@ -208,10 +225,9 @@ fn erode(@builtin(global_invocation_id) id: vec3<u32>) {
         }
     } else {
         // === Gentle weathering ===
-        // Very slight peak softening — move toward neighbor average by tiny amount
-        // Only at peaks (higher than average neighbors)
+        // Very slight peak softening — scaled by moisture (wet = more weathering)
         if (h > avg_neighbor) {
-            let soften = (h - avg_neighbor) * 0.02;
+            let soften = (h - avg_neighbor) * 0.02 * moist_factor;
             new_h -= soften;
         }
     }
