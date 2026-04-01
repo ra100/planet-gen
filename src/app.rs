@@ -45,6 +45,7 @@ pub struct PlanetGenApp {
     star_color_temp: f32,
     city_light_hue: f32,
     view_mode: u32,
+    tectonics_mode: u32, // 0 = Quick, 1 = Classified
     preview_resolution: u32,
     needs_terrain: bool,   // full terrain recompute (plates + compute + erosion)
     terrain_pending: bool, // true = overlay painted, next frame does the work
@@ -106,6 +107,7 @@ impl PlanetGenApp {
             star_color_temp: 0.5,
             city_light_hue: 0.0,
             view_mode: 0,
+            tectonics_mode: 0,
             preview_resolution: crate::preview::DEFAULT_PREVIEW_SIZE,
             needs_terrain: true,
             terrain_pending: false,
@@ -203,6 +205,7 @@ impl PlanetGenApp {
             tectonics_factor: self.derived.tectonics_factor,
             continental_scale: self.continental_scale,
             num_plates_override: self.num_plates_override,
+            tectonics_mode: self.tectonics_mode,
         });
 
         let (amplitude, frequency, octaves, gain, lacunarity) = self.terrain_params();

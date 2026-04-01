@@ -692,6 +692,7 @@ mod tests {
             tectonics_factor: 0.85,
             continental_scale: 1.0,
             num_plates_override: 0,
+            tectonics_mode: 0,
         });
 
         let terrain = pipeline.generate(
@@ -717,6 +718,7 @@ mod tests {
             tectonics_factor: 0.85,
             continental_scale: 1.0,
             num_plates_override: 0,
+            tectonics_mode: 0,
         });
 
         let terrain = pipeline.generate(
@@ -753,6 +755,7 @@ mod tests {
             tectonics_factor: 0.85,
             continental_scale: 1.0,
             num_plates_override: 0,
+            tectonics_mode: 0,
         });
 
         let terrain = pipeline.generate(

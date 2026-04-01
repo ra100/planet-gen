@@ -119,6 +119,7 @@ fn generate_planet_png(
         tectonics_factor: derived.tectonics_factor,
         continental_scale: preset.continental_scale,
         num_plates_override: 0,
+        tectonics_mode: 0,
     });
 
     // Terrain params from spectral exponents

@@ -38,6 +38,7 @@ fn main() {
             tectonics_factor: derived.tectonics_factor,
             continental_scale: 1.0,
             num_plates_override: 0,
+            tectonics_mode: 0,
         });
         let mut terrain = terrain_compute.generate(
             &gpu, &plates, warmup_res, seed, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0,
@@ -63,6 +64,7 @@ fn main() {
             tectonics_factor: derived.tectonics_factor,
             continental_scale: 1.0,
             num_plates_override: 0,
+            tectonics_mode: 0,
         });
         let plates_ms = t0.elapsed().as_secs_f64() * 1000.0;
 

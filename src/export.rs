@@ -609,6 +609,7 @@ pub fn run_export(
         tectonics_factor: derived.tectonics_factor,
         continental_scale,
         num_plates_override: 0,
+        tectonics_mode: 0,
     });
 
     // --- Phase 2: Generate terrain (tiled) ---
@@ -947,6 +948,7 @@ mod tests {
             tectonics_factor: 0.85,
             continental_scale: 1.0,
             num_plates_override: 0,
+            tectonics_mode: 0,
         });
 
         // Generate directly at 64x64

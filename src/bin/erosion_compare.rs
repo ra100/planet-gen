@@ -37,6 +37,7 @@ fn main() {
         tectonics_factor: derived.tectonics_factor,
         continental_scale: 1.0,
         num_plates_override: 0,
+        tectonics_mode: 0,
     });
 
     // Terrain params
