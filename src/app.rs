@@ -749,28 +749,18 @@ impl eframe::App for PlanetGenApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some(ref tex) = self.texture_handle {
-                // Fill panel with square image (1:1 pixels), centered
+                // Square image aligned left, 1:1 pixel ratio
                 let available = ui.available_size();
                 let size = available.x.min(available.y);
 
-                // Center the square in the panel
-                let offset_x = (available.x - size) * 0.5;
-                let offset_y = (available.y - size) * 0.5;
-
-                // Allocate full panel for interaction (drag, scroll work everywhere)
                 let (response, painter) = ui.allocate_painter(
-                    available,
+                    egui::Vec2::splat(size),
                     egui::Sense::click_and_drag(),
                 );
 
-                // Draw image centered within the response rect
-                let img_rect = egui::Rect::from_min_size(
-                    egui::pos2(response.rect.min.x + offset_x, response.rect.min.y + offset_y),
-                    egui::Vec2::splat(size),
-                );
                 painter.image(
                     tex.id(),
-                    img_rect,
+                    response.rect,
                     egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                     egui::Color32::WHITE,
                 );
@@ -863,10 +853,16 @@ impl eframe::App for PlanetGenApp {
             self.terrain_pending = false;
             self.regenerate_terrain();
         }
-        // Progressive erosion: apply one batch per frame, then re-render
-        if self.erosion_remaining > 0 {
+        // Progressive erosion: apply one batch per frame, but skip when mouse is
+        // pressed to avoid blocking input processing (prevents slider sticking)
+        let mouse_busy = ctx.input(|i| {
+            i.pointer.any_pressed() || i.pointer.any_down()
+        });
+        if self.erosion_remaining > 0 && !mouse_busy {
             self.erode_batch();
-            ctx.request_repaint(); // keep processing next batch
+            ctx.request_repaint();
+        } else if self.erosion_remaining > 0 {
+            ctx.request_repaint(); // retry next frame when mouse released
         }
         if self.needs_render {
             self.render_preview(ctx);
