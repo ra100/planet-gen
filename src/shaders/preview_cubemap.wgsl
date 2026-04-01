@@ -867,11 +867,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let depth_noise = snoise(rotated * 8.0) * 0.02;
         let depth = clamp((uniforms.ocean_level - h_avg) / max(uniforms.ocean_level + 1.0, 0.5) + depth_noise, 0.0, 1.0);
 
-        let near_shore = vec3<f32>(0.10, 0.35, 0.42);
-        let mid_ocean  = vec3<f32>(0.06, 0.18, 0.42);
+        let near_shore = vec3<f32>(0.07, 0.22, 0.38);
+        let mid_ocean  = vec3<f32>(0.05, 0.16, 0.40);
         let deep_ocean = vec3<f32>(0.02, 0.05, 0.20);
-        // Wider smoothstep transitions reduce visibility of ridges
-        let shelf = smoothstep(0.0, 0.20, depth);
+        // Start shelf transition above zero to avoid ghosting fringe at coastlines
+        let shelf = smoothstep(0.02, 0.20, depth);
         let abyss = smoothstep(0.20, 0.7, depth);
         var ocean_color = mix(near_shore, mix(mid_ocean, deep_ocean, abyss), shelf);
         ocean_color += vec3<f32>(0.0, 0.015, 0.02) * color_var;
