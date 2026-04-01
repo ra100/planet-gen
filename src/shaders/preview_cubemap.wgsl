@@ -856,9 +856,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if (is_ocean) {
         // Smooth ocean gradient: shallow → deep with continuous depth color
         let ocean_temp = compute_temperature(rotated, height, uniforms.season);
-        // Add noise to depth to break up hard tectonic plate boundaries on ocean floor
-        let depth_noise = snoise(rotated * 8.0) * 0.03 + snoise(rotated * 16.0) * 0.015;
-        let depth = clamp((uniforms.ocean_level - height) / max(uniforms.ocean_level + 1.0, 0.5) + depth_noise, 0.0, 1.0);
+        // Blur ocean depth by averaging neighbors — smooths tectonic plate boundaries
+        let blur_step = 0.04;
+        let h_avg = (height
+            + textureSample(height_tex, height_sampler, rotated + vec3<f32>(blur_step, 0.0, 0.0)).r
+            + textureSample(height_tex, height_sampler, rotated - vec3<f32>(blur_step, 0.0, 0.0)).r
+            + textureSample(height_tex, height_sampler, rotated + vec3<f32>(0.0, blur_step, 0.0)).r
+            + textureSample(height_tex, height_sampler, rotated - vec3<f32>(0.0, blur_step, 0.0)).r
+        ) / 5.0;
+        let depth_noise = snoise(rotated * 8.0) * 0.02;
+        let depth = clamp((uniforms.ocean_level - h_avg) / max(uniforms.ocean_level + 1.0, 0.5) + depth_noise, 0.0, 1.0);
 
         let near_shore = vec3<f32>(0.10, 0.35, 0.42);
         let mid_ocean  = vec3<f32>(0.06, 0.18, 0.42);
