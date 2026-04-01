@@ -749,17 +749,28 @@ impl eframe::App for PlanetGenApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some(ref tex) = self.texture_handle {
-                // Fill the entire panel (planet centered by the shader's NDC mapping)
+                // Fill panel with square image (1:1 pixels), centered
                 let available = ui.available_size();
+                let size = available.x.min(available.y);
 
+                // Center the square in the panel
+                let offset_x = (available.x - size) * 0.5;
+                let offset_y = (available.y - size) * 0.5;
+
+                // Allocate full panel for interaction (drag, scroll work everywhere)
                 let (response, painter) = ui.allocate_painter(
                     available,
                     egui::Sense::click_and_drag(),
                 );
 
+                // Draw image centered within the response rect
+                let img_rect = egui::Rect::from_min_size(
+                    egui::pos2(response.rect.min.x + offset_x, response.rect.min.y + offset_y),
+                    egui::Vec2::splat(size),
+                );
                 painter.image(
                     tex.id(),
-                    response.rect,
+                    img_rect,
                     egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                     egui::Color32::WHITE,
                 );
