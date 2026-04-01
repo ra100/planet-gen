@@ -276,12 +276,12 @@ Three-tier tectonic simulation with UI toggle between modes. Each tier adds real
 | Task | 内容 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
 | 8a.1 | Research: survey tectonic plate simulation techniques (boundary classification, subduction, rifts, transform faults) | Research doc in docs/research/ with techniques and references | - | cc:TODO |
-| 8a.2 | UI: Add "Tectonics Mode" dropdown (Quick / Simulated / Convection) in Advanced Tweaks | Dropdown visible, defaults to Quick (current behavior) | - | cc:TODO |
-| 8a.3 | Boundary classification: categorize plate boundaries as convergent (subduction), divergent (rift), or transform based on plate velocity vectors | Each boundary has a type; visible in Plates debug view | 8a.1 | cc:TODO |
-| 8a.4 | Subduction zones: one plate dives under another → deep ocean trench + volcanic arc on overriding plate | Visible trench-arc pairs at convergent ocean-continent boundaries | 8a.3 | cc:TODO |
-| 8a.5 | Rift valleys: divergent boundaries create widening gaps with volcanic activity | Visible rift features at divergent boundaries | 8a.3 | cc:TODO |
-| 8a.6 | Transform faults: lateral sliding creates offset ridges, no mountains | Transform boundaries look different from convergent | 8a.3 | cc:TODO |
-| 8a.7 | Performance + visual comparison: benchmark Quick vs Simulated, screenshot comparison | Timing data + visual comparison in docs/research/ | 8a.4, 8a.5, 8a.6 | cc:TODO |
+| 8a.2 | UI: Add "Tectonics Mode" dropdown (Quick / Classified) in Advanced Tweaks | Dropdown visible, defaults to Quick (current behavior) | - | cc:完了 228e3d1 |
+| 8a.3 | Plate velocities: physics-derived Euler pole rotation, tangent to sphere, magnitude from tectonics_factor | dot(velocity, center) < 0.1 for all plates; velocity scales with tectonics_factor | - | cc:完了 4535bfa |
+| 8a.4 | Boundary classification: convergent/divergent/transform from relative velocity in GPU shader; Quick mode unchanged | Classified mode shows distinct terrain per boundary type | 8a.3 | cc:完了 228e3d1 |
+| 8a.5 | Subduction + rift + transform terrain: trench+arc at ocean-continent, broad plateau at cont-cont, rift valley at divergent | Visible terrain differences at each boundary type in Classified mode | 8a.4 | cc:完了 228e3d1 |
+| 8a.6 | Performance benchmark: Quick vs Classified at 768px in perf_bench, PASS/WARN against 50ms budget | Timing printed by perf_bench binary | 8a.4, 8a.5 | cc:完了 0f1609d |
+| 8a.7 | Performance + visual comparison: screenshot comparison and docs/research/ update | docs/research/performance-analysis.md updated | 8a.6 | cc:TODO |
 
 ### Phase 8b: Plate Motion Simulation (continental drift)
 
