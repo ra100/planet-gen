@@ -856,13 +856,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if (is_ocean) {
         // Smooth ocean gradient: shallow → deep with continuous depth color
         let ocean_temp = compute_temperature(rotated, height, uniforms.season);
-        let depth = clamp((uniforms.ocean_level - height) / max(uniforms.ocean_level + 1.0, 0.5), 0.0, 1.0);
+        // Add noise to depth to break up hard tectonic plate boundaries on ocean floor
+        let depth_noise = snoise(rotated * 8.0) * 0.03 + snoise(rotated * 16.0) * 0.015;
+        let depth = clamp((uniforms.ocean_level - height) / max(uniforms.ocean_level + 1.0, 0.5) + depth_noise, 0.0, 1.0);
 
         let near_shore = vec3<f32>(0.10, 0.35, 0.42);
         let mid_ocean  = vec3<f32>(0.06, 0.18, 0.42);
         let deep_ocean = vec3<f32>(0.02, 0.05, 0.20);
-        let shelf = smoothstep(0.0, 0.15, depth);
-        let abyss = smoothstep(0.15, 0.7, depth);
+        // Wider smoothstep transitions reduce visibility of ridges
+        let shelf = smoothstep(0.0, 0.20, depth);
+        let abyss = smoothstep(0.20, 0.7, depth);
         var ocean_color = mix(near_shore, mix(mid_ocean, deep_ocean, abyss), shelf);
         ocean_color += vec3<f32>(0.0, 0.015, 0.02) * color_var;
 
