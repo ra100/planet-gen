@@ -233,10 +233,12 @@ fn erode(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 
     // Add roughening noise to eroded lowland areas (weathered rock texture)
+    // Fade out near coastline (land_height < 0.05) to prevent speckled shorelines
     let land_height = h - params.ocean_level;
-    if (land_height > 0.0 && land_height < 0.3) {
+    if (land_height > 0.05 && land_height < 0.3) {
+        let coast_fade = smoothstep(0.05, 0.10, land_height); // no noise at coastline
         let erosion_factor = drainage / max(params.channel_threshold, 1.0);
-        let rough_amount = min(erosion_factor, 1.0) * 0.008;
+        let rough_amount = min(erosion_factor, 1.0) * 0.005 * coast_fade;
         let pos = vec3<f32>(f32(x) * 0.1 + f32(params.seed) * 0.01, f32(y) * 0.1, 0.0);
         let roughness = snoise(pos * 2.0);
         new_h += roughness * rough_amount;
