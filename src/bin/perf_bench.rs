@@ -3,6 +3,8 @@
 //!
 //! Outputs CSV to stdout with columns:
 //!   resolution, plates_ms, compute_ms, erosion_ms, upload_ms, total_ms
+//!
+//! Also prints a Quick vs Classified comparison at 768px.
 
 use planet_gen::gpu::GpuContext;
 use planet_gen::planet::{DerivedProperties, PlanetParams};
@@ -92,6 +94,61 @@ fn main() {
             "{},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1}",
             res, plates_ms, compute_ms, erosion_ms, upload_ms, total_ms, erosion_per_iter
         );
+    }
+
+    // --- Quick vs Classified comparison at 768px ---
+    eprintln!("\nBenchmarking Quick vs Classified at 768x768...");
+    let bench_res = 768u32;
+
+    let plates_quick = generate_plates(&PlateGenParams {
+        seed,
+        mass_earth: params.mass_earth,
+        ocean_fraction: effective_ocean,
+        tectonics_factor: derived.tectonics_factor,
+        continental_scale: 1.0,
+        num_plates_override: 0,
+        tectonics_mode: 0,
+    });
+    let plates_classified = generate_plates(&PlateGenParams {
+        seed,
+        mass_earth: params.mass_earth,
+        ocean_fraction: effective_ocean,
+        tectonics_factor: derived.tectonics_factor,
+        continental_scale: 1.0,
+        num_plates_override: 0,
+        tectonics_mode: 1,
+    });
+
+    // Quick mode timing
+    let t_quick = Instant::now();
+    let _terrain_quick = terrain_compute.generate(
+        &gpu, &plates_quick, bench_res, seed, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0, 0,
+    );
+    let quick_ms = t_quick.elapsed().as_secs_f64() * 1000.0;
+
+    // Classified mode timing
+    let t_classified = Instant::now();
+    let _terrain_classified = terrain_compute.generate(
+        &gpu, &plates_classified, bench_res, seed, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0, 1,
+    );
+    let classified_ms = t_classified.elapsed().as_secs_f64() * 1000.0;
+
+    let overhead_ms = classified_ms - quick_ms;
+    let overhead_pct = overhead_ms / quick_ms * 100.0;
+
+    println!();
+    println!("mode,resolution,compute_ms");
+    println!("Quick,{},{:.1}", bench_res, quick_ms);
+    println!("Classified,{},{:.1}", bench_res, classified_ms);
+    println!();
+    eprintln!(
+        "Quick: {:.1}ms  Classified: {:.1}ms  Overhead: {:.1}ms ({:.1}%)",
+        quick_ms, classified_ms, overhead_ms, overhead_pct
+    );
+    if overhead_ms < 50.0 {
+        eprintln!("PASS: Classified overhead < 50ms budget");
+    } else {
+        eprintln!("WARN: Classified overhead {:.1}ms exceeds 50ms budget", overhead_ms);
     }
 
     eprintln!("Done.");
