@@ -938,10 +938,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             surface_color = mix(surface_color, alpine, blend);
         }
 
-        // Beach transition
-        if (land_height < 0.03) {
-            let beach_blend = smooth_step(0.03, 0.0, land_height);
-            surface_color = mix(surface_color, vec3<f32>(0.74, 0.68, 0.48), beach_blend * 0.6);
+        // Beach transition — very subtle, only at close zoom
+        if (land_height < 0.015) {
+            let beach_blend = smooth_step(0.015, 0.0, land_height);
+            surface_color = mix(surface_color, vec3<f32>(0.55, 0.52, 0.42), beach_blend * 0.3);
         }
     }
 
