@@ -255,8 +255,11 @@ Benchmarking and optimization infrastructure.
 
 | Task | 内容 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
-| 7.5.1 | Performance benchmark binary: `src/bin/perf_bench.rs` — runs terrain generation (plates, compute, erosion, upload) at 256/512/768/1024/2048 resolutions, outputs CSV timing table | Binary runs with `cargo run --bin perf_bench`, outputs CSV with columns: resolution, plates_ms, compute_ms, erosion_ms, upload_ms, total_ms | Phase 5 | cc:完了 [b3cfbf6] |
-| 7.5.2 | Investigate and document performance bottlenecks from benchmark data | Written analysis in docs/research/ identifying dominant phases and optimization targets | 7.5.1 | cc:完了 |
+| 7.5.1 | Performance benchmark binary: `src/bin/perf_bench.rs` | `cargo run --release --bin perf_bench` outputs CSV timing | Phase 5 | cc:完了 [b3cfbf6] |
+| 7.5.2 | Document performance bottlenecks | Analysis in docs/research/performance-analysis.md | 7.5.1 | cc:完了 [d30ea78] |
+| 7.5.3 | Resolution-adaptive erosion: scale iterations with resolution (256→5, 512→10, 768→15, 1024+→25) | 2K generation under 4s; visual quality similar at each resolution | - | cc:TODO |
+| 7.5.4 | Progressive terrain: show un-eroded preview immediately, apply erosion in batches (5 iters/batch), re-render after each batch | Planet visible within 100ms of parameter change; erosion refines progressively | 7.5.3 | cc:TODO |
+| 7.5.5 | Re-run perf_bench after optimizations, compare before/after | Updated performance-analysis.md with comparison table | 7.5.3, 7.5.4 | cc:TODO |
 
 ---
 
