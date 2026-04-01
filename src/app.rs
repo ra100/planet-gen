@@ -216,7 +216,15 @@ impl PlanetGenApp {
         let t2 = Instant::now();
         let effective_ocean = self.derived.ocean_fraction * (1.0 - self.water_loss);
         let ocean_level = -1.0 + 2.0 * effective_ocean;
-        self.erosion_pipeline.erode(&self.gpu, &mut terrain, self.erosion_iterations, ocean_level);
+        // Resolution-adaptive erosion: scale iterations with resolution to avoid
+        // O(n²) blowup at high res. User's slider (default 25) is the base quality.
+        let adaptive_iters = match self.preview_resolution {
+            r if r <= 256 => (self.erosion_iterations as f32 * 0.2) as u32,
+            r if r <= 512 => (self.erosion_iterations as f32 * 0.4) as u32,
+            r if r <= 768 => (self.erosion_iterations as f32 * 0.6) as u32,
+            _ => self.erosion_iterations, // 1024+ gets full quality
+        }.max(1);
+        self.erosion_pipeline.erode(&self.gpu, &mut terrain, adaptive_iters, ocean_level);
         let t_erosion = t2.elapsed();
 
         let t3 = Instant::now();
@@ -224,8 +232,8 @@ impl PlanetGenApp {
         let t_upload = t3.elapsed();
 
         eprintln!(
-            "[terrain {}px] plates: {:.0}ms, compute: {:.0}ms, erosion: {:.0}ms, upload: {:.0}ms, total: {:.0}ms",
-            self.preview_resolution,
+            "[terrain {}px, {} erosion iters] plates: {:.0}ms, compute: {:.0}ms, erosion: {:.0}ms, upload: {:.0}ms, total: {:.0}ms",
+            self.preview_resolution, adaptive_iters,
             t_plates.as_secs_f64() * 1000.0,
             t_compute.as_secs_f64() * 1000.0,
             t_erosion.as_secs_f64() * 1000.0,
