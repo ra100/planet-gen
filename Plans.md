@@ -267,7 +267,47 @@ Benchmarking and optimization infrastructure.
 
 ---
 
-## Phase 8: Polish & Distribution
+## Phase 8: Advanced Tectonics
+
+Three-tier tectonic simulation with UI toggle between modes. Each tier adds realism at the cost of computation time.
+
+### Phase 8a: Better Boundary Physics (improve current Voronoi system)
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 8a.1 | Research: survey tectonic plate simulation techniques (boundary classification, subduction, rifts, transform faults) | Research doc in docs/research/ with techniques and references | - | cc:TODO |
+| 8a.2 | UI: Add "Tectonics Mode" dropdown (Quick / Simulated / Convection) in Advanced Tweaks | Dropdown visible, defaults to Quick (current behavior) | - | cc:TODO |
+| 8a.3 | Boundary classification: categorize plate boundaries as convergent (subduction), divergent (rift), or transform based on plate velocity vectors | Each boundary has a type; visible in Plates debug view | 8a.1 | cc:TODO |
+| 8a.4 | Subduction zones: one plate dives under another → deep ocean trench + volcanic arc on overriding plate | Visible trench-arc pairs at convergent ocean-continent boundaries | 8a.3 | cc:TODO |
+| 8a.5 | Rift valleys: divergent boundaries create widening gaps with volcanic activity | Visible rift features at divergent boundaries | 8a.3 | cc:TODO |
+| 8a.6 | Transform faults: lateral sliding creates offset ridges, no mountains | Transform boundaries look different from convergent | 8a.3 | cc:TODO |
+| 8a.7 | Performance + visual comparison: benchmark Quick vs Simulated, screenshot comparison | Timing data + visual comparison in docs/research/ | 8a.4, 8a.5, 8a.6 | cc:TODO |
+
+### Phase 8b: Plate Motion Simulation (continental drift)
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 8b.1 | Research: plate motion algorithms (Euler poles, velocity fields on sphere, collision detection) | Research doc with algorithm selection and tradeoffs | Phase 8a | cc:TODO |
+| 8b.2 | Plate velocity field: assign motion vectors to each plate, compute relative velocities at boundaries | Velocity vectors visible in Plates debug view | 8b.1 | cc:TODO |
+| 8b.3 | Time-stepping: iterate plate positions over N geological timesteps, accumulate collision/rift history | "Geological age" slider controls timesteps (0=young, 1=ancient) | 8b.2 | cc:TODO |
+| 8b.4 | Collision history → terrain: accumulated collisions build mountain chains, rifts create ocean basins | Older planets have more complex terrain from plate history | 8b.3 | cc:TODO |
+| 8b.5 | Continental assembly/breakup: plates merge at collisions, split at rifts over time | Supercontinents form and break apart with age slider | 8b.4 | cc:TODO |
+| 8b.6 | Performance + visual comparison: benchmark all 3 modes | Timing + visual comparison updated | 8b.5 | cc:TODO |
+
+### Phase 8c: Mantle Convection (future goal)
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 8c.1 | Research: simplified mantle convection models suitable for real-time (Rayleigh-Bénard on sphere) | Research doc with feasibility assessment | Phase 8b | cc:TODO |
+| 8c.2 | Convection cell simulation: compute upwelling/downwelling zones on sphere surface | Convection pattern visible in new debug view | 8c.1 | cc:TODO |
+| 8c.3 | Derive plate boundaries from convection: plates form between convection cells, motion driven by drag | Plates emerge naturally from convection pattern | 8c.2 | cc:TODO |
+| 8c.4 | Integration: convection → plates → boundaries → terrain pipeline | Full convection-driven planet generation works end-to-end | 8c.3 | cc:TODO |
+
+---
+
+## Phase 9: Polish & Distribution
+
+Error handling, cross-platform builds, and documentation.
 
 Error handling, cross-platform builds, and documentation.
 
