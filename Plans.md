@@ -258,8 +258,8 @@ Benchmarking and optimization infrastructure.
 | 7.5.1 | Performance benchmark binary: `src/bin/perf_bench.rs` | `cargo run --release --bin perf_bench` outputs CSV timing | Phase 5 | cc:完了 [b3cfbf6] |
 | 7.5.2 | Document performance bottlenecks | Analysis in docs/research/performance-analysis.md | 7.5.1 | cc:完了 [d30ea78] |
 | 7.5.3 | Resolution-adaptive erosion: scale iterations with resolution (256→5, 512→10, 768→15, 1024+→25) | 2K generation under 4s; visual quality similar at each resolution | - | cc:完了 [5d7b697] |
-| 7.5.4 | Progressive terrain: show un-eroded preview immediately, apply erosion in batches (5 iters/batch), re-render after each batch | Planet visible within 100ms of parameter change; erosion refines progressively | 7.5.3 | cc:WIP |
-| 7.5.5 | Re-run perf_bench after optimizations, compare before/after | Updated performance-analysis.md with comparison table | 7.5.3, 7.5.4 | cc:TODO |
+| 7.5.4 | Progressive terrain: show un-eroded preview immediately, apply erosion in batches (5 iters/batch), re-render after each batch | Planet visible within 100ms of parameter change; erosion refines progressively | 7.5.3 | cc:完了 [b8d86f7] |
+| 7.5.5 | Re-run perf_bench after optimizations, compare before/after | Updated performance-analysis.md with comparison table | 7.5.3, 7.5.4 | cc:完了 |
 
 ---
 
