@@ -49,6 +49,10 @@ pub struct PlanetGenApp {
     terrain_pending: bool, // true = overlay painted, next frame does the work
     needs_render: bool,    // just re-render sphere from cached cubemap
     cached_cubemap_view: Option<wgpu::TextureView>,
+    // Progressive erosion state
+    erosion_terrain: Option<crate::terrain_compute::TectonicTerrain>,
+    erosion_remaining: u32,
+    erosion_ocean_level: f32,
     // Export state
     planet_name: String,
     export_resolution: u32,
@@ -104,6 +108,9 @@ impl PlanetGenApp {
             terrain_pending: false,
             needs_render: true,
             cached_cubemap_view: None,
+            erosion_terrain: None,
+            erosion_remaining: 0,
+            erosion_ocean_level: 0.0,
             planet_name: format!("planet_{}", PlanetParams::default().seed),
             export_resolution: export::DEFAULT_EXPORT_RESOLUTION,
             export_handle: None,
@@ -181,9 +188,8 @@ impl PlanetGenApp {
 
     fn regenerate_terrain(&mut self) {
         use std::time::Instant;
-        let t_total = Instant::now();
-
         let t0 = Instant::now();
+
         let plates = generate_plates(&PlateGenParams {
             seed: self.params.seed,
             mass_earth: self.params.mass_earth,
@@ -192,11 +198,9 @@ impl PlanetGenApp {
             continental_scale: self.continental_scale,
             num_plates_override: self.num_plates_override,
         });
-        let t_plates = t0.elapsed();
 
-        let t1 = Instant::now();
         let (amplitude, frequency, octaves, gain, lacunarity) = self.terrain_params();
-        let mut terrain = self.terrain_compute.generate(
+        let terrain = self.terrain_compute.generate(
             &self.gpu,
             &plates,
             self.preview_resolution,
@@ -211,37 +215,54 @@ impl PlanetGenApp {
             self.warp_strength,
             self.detail_scale,
         );
-        let t_compute = t1.elapsed();
 
-        let t2 = Instant::now();
         let effective_ocean = self.derived.ocean_fraction * (1.0 - self.water_loss);
         let ocean_level = -1.0 + 2.0 * effective_ocean;
-        // Resolution-adaptive erosion: scale iterations with resolution to avoid
-        // O(n²) blowup at high res. User's slider (default 25) is the base quality.
+
+        // Show un-eroded terrain immediately
+        self.cached_cubemap_view = Some(self.preview_renderer.upload_terrain(&self.gpu, &terrain));
+
+        // Schedule progressive erosion
         let adaptive_iters = match self.preview_resolution {
             r if r <= 256 => (self.erosion_iterations as f32 * 0.2) as u32,
             r if r <= 512 => (self.erosion_iterations as f32 * 0.4) as u32,
             r if r <= 768 => (self.erosion_iterations as f32 * 0.6) as u32,
-            _ => self.erosion_iterations, // 1024+ gets full quality
+            _ => self.erosion_iterations,
         }.max(1);
-        self.erosion_pipeline.erode(&self.gpu, &mut terrain, adaptive_iters, ocean_level);
-        let t_erosion = t2.elapsed();
-
-        let t3 = Instant::now();
-        self.cached_cubemap_view = Some(self.preview_renderer.upload_terrain(&self.gpu, &terrain));
-        let t_upload = t3.elapsed();
+        self.erosion_terrain = Some(terrain);
+        self.erosion_remaining = adaptive_iters;
+        self.erosion_ocean_level = ocean_level;
 
         eprintln!(
-            "[terrain {}px, {} erosion iters] plates: {:.0}ms, compute: {:.0}ms, erosion: {:.0}ms, upload: {:.0}ms, total: {:.0}ms",
-            self.preview_resolution, adaptive_iters,
-            t_plates.as_secs_f64() * 1000.0,
-            t_compute.as_secs_f64() * 1000.0,
-            t_erosion.as_secs_f64() * 1000.0,
-            t_upload.as_secs_f64() * 1000.0,
-            t_total.elapsed().as_secs_f64() * 1000.0,
+            "[terrain {}px] plates+compute: {:.0}ms, scheduling {} erosion iters progressively",
+            self.preview_resolution, t0.elapsed().as_secs_f64() * 1000.0, adaptive_iters,
         );
 
         self.needs_terrain = false;
+        self.needs_render = true;
+    }
+
+    /// Apply a batch of erosion iterations and re-render. Called each frame.
+    fn erode_batch(&mut self) {
+        use std::time::Instant;
+        let batch_size = 5u32;
+        let iters = batch_size.min(self.erosion_remaining);
+
+        if let Some(ref mut terrain) = self.erosion_terrain {
+            let t = Instant::now();
+            self.erosion_pipeline.erode(&self.gpu, terrain, iters, self.erosion_ocean_level);
+            self.cached_cubemap_view = Some(self.preview_renderer.upload_terrain(&self.gpu, terrain));
+            self.erosion_remaining -= iters;
+
+            eprintln!(
+                "[erosion batch] {} iters in {:.0}ms, {} remaining",
+                iters, t.elapsed().as_secs_f64() * 1000.0, self.erosion_remaining,
+            );
+        }
+
+        if self.erosion_remaining == 0 {
+            self.erosion_terrain = None;
+        }
         self.needs_render = true;
     }
 
@@ -834,6 +855,11 @@ impl eframe::App for PlanetGenApp {
         } else if self.terrain_pending {
             self.terrain_pending = false;
             self.regenerate_terrain();
+        }
+        // Progressive erosion: apply one batch per frame, then re-render
+        if self.erosion_remaining > 0 {
+            self.erode_batch();
+            ctx.request_repaint(); // keep processing next batch
         }
         if self.needs_render {
             self.render_preview(ctx);
