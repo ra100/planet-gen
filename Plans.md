@@ -249,6 +249,17 @@ Post-Blender visual enhancements for cinematic renders.
 
 ---
 
+## Phase 7.5: Performance
+
+Benchmarking and optimization infrastructure.
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 7.5.1 | Performance benchmark binary: `src/bin/perf_bench.rs` — runs terrain generation (plates, compute, erosion, upload) at 256/512/768/1024/2048 resolutions, outputs CSV timing table | Binary runs with `cargo run --bin perf_bench`, outputs CSV with columns: resolution, plates_ms, compute_ms, erosion_ms, upload_ms, total_ms | Phase 5 | cc:TODO |
+| 7.5.2 | Investigate and document performance bottlenecks from benchmark data | Written analysis in docs/research/ identifying dominant phases and optimization targets | 7.5.1 | cc:TODO |
+
+---
+
 ## Phase 8: Polish & Distribution
 
 Error handling, cross-platform builds, and documentation.
