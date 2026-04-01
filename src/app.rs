@@ -47,6 +47,7 @@ pub struct PlanetGenApp {
     preview_resolution: u32,
     needs_terrain: bool,   // full terrain recompute (plates + compute + erosion)
     terrain_pending: bool, // true = overlay painted, next frame does the work
+    terrain_start: Option<std::time::Instant>, // when terrain gen started (for overlay delay)
     needs_render: bool,    // just re-render sphere from cached cubemap
     cached_cubemap_view: Option<wgpu::TextureView>,
     // Progressive erosion state
@@ -106,6 +107,7 @@ impl PlanetGenApp {
             preview_resolution: crate::preview::DEFAULT_PREVIEW_SIZE,
             needs_terrain: true,
             terrain_pending: false,
+            terrain_start: None,
             needs_render: true,
             cached_cubemap_view: None,
             erosion_terrain: None,
@@ -262,6 +264,7 @@ impl PlanetGenApp {
 
         if self.erosion_remaining == 0 {
             self.erosion_terrain = None;
+            self.terrain_start = None;
         }
         self.needs_render = true;
     }
@@ -822,8 +825,9 @@ impl eframe::App for PlanetGenApp {
                 });
             }
 
-            // Loading overlay centered on the full panel
-            if self.terrain_pending {
+            // Loading overlay — only show if generation takes >1s
+            let gen_elapsed = self.terrain_start.map(|t| t.elapsed().as_secs_f32()).unwrap_or(0.0);
+            if (self.terrain_pending || self.erosion_remaining > 0) && gen_elapsed > 1.0 {
                 let panel_rect = ui.max_rect();
                 let painter = ui.painter();
                 painter.rect_filled(
@@ -848,6 +852,7 @@ impl eframe::App for PlanetGenApp {
         if self.needs_terrain && !self.terrain_pending {
             self.terrain_pending = true;
             self.needs_terrain = false;
+            self.terrain_start = Some(std::time::Instant::now());
             ctx.request_repaint();
         } else if self.terrain_pending {
             self.terrain_pending = false;
