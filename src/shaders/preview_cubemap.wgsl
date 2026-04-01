@@ -866,13 +866,23 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         var ocean_color = mix(near_shore, mix(mid_ocean, deep_ocean, abyss), shelf);
         ocean_color += vec3<f32>(0.0, 0.015, 0.02) * color_var;
 
-        // Polar sea ice: noisy edge, sharper transition
+        // Polar sea ice: noisy edge, thickness variation, surface texture
         let ice_edge_noise = snoise(rotated * 12.0) * 1.5;
         let ice_temp_threshold = 3.0 + ice_edge_noise;
-        let ice_blend = smooth_step(ice_temp_threshold, ice_temp_threshold - 5.0, ocean_temp); // sharper: 5°C band
+        let ice_blend = smooth_step(ice_temp_threshold, ice_temp_threshold - 5.0, ocean_temp);
         ice_amount = ice_blend;
-        // Ice color: always bright HDR (the override handles PBR brightness)
-        let ice_color = vec3<f32>(1.15, 1.18, 1.25) + vec3<f32>(0.015) * color_var;
+
+        // Thickness: thin edges (blue-grey), thick pack ice (bright white)
+        let ice_thickness = smooth_step(ice_temp_threshold - 1.0, ice_temp_threshold - 8.0, ocean_temp);
+        let thin_ice = vec3<f32>(0.85, 0.92, 1.05);  // blue-grey, semi-translucent look
+        let thick_ice = vec3<f32>(1.15, 1.18, 1.22);  // bright pack ice
+        var ice_color = mix(thin_ice, thick_ice, ice_thickness);
+
+        // Pressure ridges and surface roughness (real ice isn't flat)
+        let ridge_noise = snoise(rotated * 25.0) * 0.06 + snoise(rotated * 50.0) * 0.03;
+        ice_color += vec3<f32>(ridge_noise) * ice_thickness; // ridges more visible on thick ice
+
+        ice_color += vec3<f32>(0.015) * color_var;
         surface_color = mix(ocean_color, ice_color, ice_blend);
     } else {
         // Mean annual climate for biome classification (stable across seasons)
@@ -888,8 +898,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let land_height = (height - uniforms.ocean_level) / max(1.0 - uniforms.ocean_level, 0.01);
         let land_ice_noise = snoise(rotated * 10.0) * 2.0;
 
-        // Pure cold-based snow: very cold land gets snow regardless of moisture
-        let cold_snow = smooth_step(-5.0 + land_ice_noise, -20.0, seasonal_temp);
+        // Snow covers land below 0°C (like reality — polar land is white)
+        let cold_snow = smooth_step(2.0 + land_ice_noise, -8.0, seasonal_temp);
         // Altitude bonus: high terrain gets snow easier
         let altitude_bonus = smooth_step(0.3, 0.6, land_height) * smooth_step(5.0, -5.0, seasonal_temp);
         let ice_blend = max(cold_snow, altitude_bonus);
