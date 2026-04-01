@@ -137,7 +137,7 @@ fn generate_planet_png(
     let lacunarity = 1.9 + 0.2 * rotation_factor;
 
     let terrain = compute.generate(
-        gpu, &plates, 512, seed, amplitude, frequency, octaves, gain, lacunarity, 1.0, 0.10, 1.0, 1.0,
+        gpu, &plates, 512, seed, amplitude, frequency, octaves, gain, lacunarity, 1.0, 0.10, 1.0, 1.0, 0,
     );
 
     let cubemap_view = renderer.upload_terrain(gpu, &terrain);

@@ -346,7 +346,7 @@ mod tests {
             num_plates_override: 0,
             tectonics_mode: 0,
         });
-        let terrain = compute.generate(&gpu, &plates, 64, 42, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0);
+        let terrain = compute.generate(&gpu, &plates, 64, 42, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0, 0);
 
         // Upload and render
         let renderer = PreviewRenderer::new(&gpu);

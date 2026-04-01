@@ -22,6 +22,10 @@ pub struct TerrainGenParams {
     pub boundary_width: f32,   // sigma for boundary influence spread (0.10 = default)
     pub warp_strength: f32,    // domain warp intensity (1.0 = default)
     pub detail_scale: f32,     // fBm detail noise intensity (1.0 = default)
+    pub tectonics_mode: u32,   // 0 = Quick (mountains only), 1 = Classified
+    pub _pad0: u32,            // alignment padding
+    pub _pad1: u32,
+    pub _pad2: u32,
 }
 
 /// Generated tectonic heightmap for all 6 cube faces.
@@ -227,6 +231,7 @@ impl TerrainComputePipeline {
         boundary_width: f32,
         warp_strength: f32,
         detail_scale: f32,
+        tectonics_mode: u32,
     ) -> TectonicTerrain {
         let total_pixels = (resolution * resolution) as usize;
         let buffer_size = (total_pixels * std::mem::size_of::<f32>()) as u64;
@@ -274,6 +279,10 @@ impl TerrainComputePipeline {
                 boundary_width,
                 warp_strength,
                 detail_scale,
+                tectonics_mode,
+                _pad0: 0,
+                _pad1: 0,
+                _pad2: 0,
             };
 
             let params_buffer =
@@ -696,7 +705,7 @@ mod tests {
         });
 
         let terrain = pipeline.generate(
-            &gpu, &plates, 64, 42, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0,
+            &gpu, &plates, 64, 42, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0, 0,
         );
 
         assert_eq!(terrain.faces.len(), 6);
@@ -722,7 +731,7 @@ mod tests {
         });
 
         let terrain = pipeline.generate(
-            &gpu, &plates, 64, 42, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0,
+            &gpu, &plates, 64, 42, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0, 0,
         );
 
         // Collect all heights
@@ -759,7 +768,7 @@ mod tests {
         });
 
         let terrain = pipeline.generate(
-            &gpu, &plates, 64, 42, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0,
+            &gpu, &plates, 64, 42, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0, 0,
         );
 
         let all_heights: Vec<f32> = terrain.faces.iter().flat_map(|f| f.iter().copied()).collect();

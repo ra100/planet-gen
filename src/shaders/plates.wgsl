@@ -27,6 +27,10 @@ struct GenParams {
     boundary_width: f32,   // sigma for boundary influence spread
     warp_strength: f32,    // domain warp intensity
     detail_scale: f32,     // fBm detail noise intensity
+    tectonics_mode: u32,   // 0 = Quick, 1 = Classified
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 @group(0) @binding(0) var<storage, read> plates: array<Plate>;
@@ -198,7 +202,13 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let info = find_nearest_plates(sphere_pos);
 
     let boundary_dist = info.second_dist - info.nearest_dist; // Small = near boundary
-    let boundary_type = classify_boundary(sphere_pos, info.nearest_idx, info.second_idx);
+    // In Classified mode, derive boundary type from relative plate velocities.
+    // In Quick mode, set boundary_type to -1.0 (always convergent / mountain).
+    let boundary_type: f32 = select(
+        -1.0,
+        classify_boundary(sphere_pos, info.nearest_idx, info.second_idx),
+        params.tectonics_mode == 1u
+    );
 
     let is_continental = info.nearest_type > 0.5;
     let neighbor_continental = info.second_type > 0.5;

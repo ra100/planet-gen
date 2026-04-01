@@ -348,6 +348,10 @@ fn generate_terrain_tiled(
                     boundary_width: 0.10,
                     warp_strength: 1.0,
                     detail_scale: 1.0,
+                    tectonics_mode: 0,
+                    _pad0: 0,
+                    _pad1: 0,
+                    _pad2: 0,
                 };
 
                 let tile_data = terrain_pipeline.dispatch_tile(gpu, plates_buffer, &params);
@@ -952,7 +956,7 @@ mod tests {
         });
 
         // Generate directly at 64x64
-        let direct = pipeline.generate(&gpu, &plates, 64, 42, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0);
+        let direct = pipeline.generate(&gpu, &plates, 64, 42, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0, 0);
 
         // Generate tiled at 64x64 (2x2 tiles of 32)
         let plates_buffer = pipeline.create_plates_buffer(&gpu, &plates);

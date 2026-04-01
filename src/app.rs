@@ -223,6 +223,7 @@ impl PlanetGenApp {
             self.boundary_width,
             self.warp_strength,
             self.detail_scale,
+            self.tectonics_mode,
         );
 
         let effective_ocean = self.derived.ocean_fraction * (1.0 - self.water_loss);
@@ -576,6 +577,26 @@ impl eframe::App for PlanetGenApp {
                             self.num_plates_override = plates_i32 as u32;
                             self.needs_terrain = true;
                         }
+
+                        ui.horizontal(|ui| {
+                            ui.label("Tectonics Mode:");
+                            let mode_labels = ["Quick", "Classified"];
+                            for (i, label) in mode_labels.iter().enumerate() {
+                                if ui.selectable_label(self.tectonics_mode == i as u32, *label)
+                                    .on_hover_text(if i == 0 {
+                                        "Quick: mountain ridges at all boundaries (fast, default)"
+                                    } else {
+                                        "Classified: convergent/divergent/transform terrain types"
+                                    })
+                                    .clicked()
+                                {
+                                    if self.tectonics_mode != i as u32 {
+                                        self.tectonics_mode = i as u32;
+                                        self.needs_terrain = true;
+                                    }
+                                }
+                            }
+                        });
 
                         if ui.add(egui::Slider::new(&mut self.mountain_scale, 0.0..=3.0)
                             .text("Mountain Height"))

@@ -41,7 +41,7 @@ fn main() {
             tectonics_mode: 0,
         });
         let mut terrain = terrain_compute.generate(
-            &gpu, &plates, warmup_res, seed, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0,
+            &gpu, &plates, warmup_res, seed, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0, 0,
         );
         erosion_pipeline.erode(&gpu, &mut terrain, 5, ocean_level);
         let _ = preview_renderer.upload_terrain(&gpu, &terrain);
@@ -71,7 +71,7 @@ fn main() {
         // Compute (terrain generation)
         let t1 = Instant::now();
         let mut terrain = terrain_compute.generate(
-            &gpu, &plates, res, seed, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0,
+            &gpu, &plates, res, seed, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0, 0,
         );
         let compute_ms = t1.elapsed().as_secs_f64() * 1000.0;
 
