@@ -26,6 +26,10 @@ struct Uniforms {
     night_lights: f32,       // 0.0 = pristine, 1.0 = urbanized
     star_color_temp: f32,    // 0.0 = blue, 0.5 = sun, 1.0 = red dwarf
     city_light_hue: f32,    // 0.0 = warm amber, 0.5 = white, 1.0 = cool blue
+    show_ao: f32,           // 1.0 = enabled, 0.0 = disabled
+    _pad4a: f32,
+    _pad4b: f32,
+    _pad4c: f32,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -1062,7 +1066,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let diffuse = surface_color * (1.0 - f) / 3.14159;
 
     // Ambient (subtle, directional — slightly brighter on the lit hemisphere)
-    let ao = select(1.0, compute_ao(rotated), !is_ocean); // AO only on land
+    let ao = select(1.0, compute_ao(rotated), !is_ocean && uniforms.show_ao > 0.5);
     let ambient = surface_color * (0.06 + 0.04 * max(dot(normal, light), 0.0)) * ao;
 
     // Combine — tint direct light by star color

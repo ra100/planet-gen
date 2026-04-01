@@ -32,6 +32,8 @@ pub struct PreviewUniforms {
     pub night_lights: f32,       // 0.0 = pristine, 1.0 = heavily urbanized
     pub star_color_temp: f32,    // 0.0 = blue hot star, 0.5 = sun-like, 1.0 = red dwarf
     pub city_light_hue: f32,    // 0.0 = warm amber, 0.5 = white, 1.0 = cool blue
+    pub show_ao: f32,           // 1.0 = AO enabled, 0.0 = disabled
+    pub _pad4: [f32; 3],
 }
 
 pub struct PreviewRenderer {
@@ -378,6 +380,8 @@ mod tests {
             night_lights: 0.0,
             star_color_temp: 0.5,
             city_light_hue: 0.0,
+            show_ao: 1.0,
+            _pad4: [0.0; 3],
         };
 
         let size = 256;

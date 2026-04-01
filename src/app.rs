@@ -27,6 +27,7 @@ pub struct PlanetGenApp {
     light_elevation: f32, // sun vertical angle in radians
     height_scale: f32,    // normal map height exaggeration
     show_atmosphere: bool, // toggle atmosphere rendering
+    show_ao: bool,         // toggle ambient occlusion
     zoom: f32,            // viewport zoom level
     pan: [f32; 2],        // viewport pan in NDC units
     // Advanced terrain tweaks
@@ -88,6 +89,7 @@ impl PlanetGenApp {
             light_elevation: 0.3,
             height_scale: 3.0,
             show_atmosphere: true,
+            show_ao: true,
             zoom: 1.0,
             pan: [0.0, 0.0],
             mountain_scale: 1.0,
@@ -163,6 +165,8 @@ impl PlanetGenApp {
             night_lights: self.night_lights,
             star_color_temp: self.star_color_temp,
             city_light_hue: self.city_light_hue,
+            show_ao: if self.show_ao { 1.0 } else { 0.0 },
+            _pad4: [0.0; 3],
         }
     }
 
@@ -479,6 +483,13 @@ impl eframe::App for PlanetGenApp {
 
                 if ui.checkbox(&mut self.show_atmosphere, "Atmosphere")
                     .on_hover_text("Toggle atmospheric scattering (blue limb glow, red sunsets)")
+                    .changed()
+                {
+                    self.needs_render = true;
+                }
+
+                if ui.checkbox(&mut self.show_ao, "Ambient Occlusion")
+                    .on_hover_text("Darken terrain valleys and crevices for depth")
                     .changed()
                 {
                     self.needs_render = true;

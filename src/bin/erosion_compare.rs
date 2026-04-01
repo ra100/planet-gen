@@ -107,6 +107,8 @@ fn main() {
                 night_lights: 0.0,
                 star_color_temp: 0.5,
                 city_light_hue: 0.0,
+                show_ao: 1.0,
+                _pad4: [0.0; 3],
             };
 
             let pixels = renderer.render(&gpu, &uniforms, &cubemap_view, render_size);
