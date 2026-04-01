@@ -945,13 +945,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
 
-    // Polar coastline softening: when ice covers both land and sea,
-    // blend surface_color toward uniform ice at the coastline to hide hard edges
-    if (ice_amount > 0.3) {
-        let coast_dist = abs(height - uniforms.ocean_level);
-        let coast_soften = 1.0 - smooth_step(0.0, 0.06, coast_dist); // 1 at coastline, 0 away
-        let uniform_ice = vec3<f32>(1.12, 1.16, 1.22); // neutral ice color
-        surface_color = mix(surface_color, uniform_ice, coast_soften * ice_amount * 0.8);
+    // Polar coastline softening: ONLY in genuinely frozen regions (not mountain snow)
+    // Check that ocean is also frozen before blending coastline
+    if (ice_amount > 0.3 && is_ocean == false) {
+        let coast_temp = compute_temperature(rotated, uniforms.ocean_level, uniforms.season);
+        if (coast_temp < 0.0) { // only if the ocean here would also be frozen
+            let coast_dist = abs(height - uniforms.ocean_level);
+            let coast_soften = 1.0 - smooth_step(0.0, 0.06, coast_dist);
+            let uniform_ice = vec3<f32>(1.12, 1.16, 1.22);
+            surface_color = mix(surface_color, uniform_ice, coast_soften * ice_amount * 0.8);
+        }
     }
 
     // Day-side urban grey patches (dark concrete/asphalt tone)
