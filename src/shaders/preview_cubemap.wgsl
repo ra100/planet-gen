@@ -415,12 +415,16 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     let tilt = uniforms.axial_tilt_rad;
     let tilted_y = sphere_pos.y * cos(tilt) + sphere_pos.z * sin(tilt);
     let lat_rad = asin(clamp(tilted_y, -1.0, 1.0));
-    let wind = wind_direction_vec(lat_rad);
-    let tangent_wind = normalize(wind - sphere_pos * dot(wind, sphere_pos));
-    let upwind_pos = normalize(sphere_pos + tangent_wind * 0.04);
-    let upwind_h = textureSample(height_tex, height_sampler, upwind_pos).r;
-    let mountain_lift = smooth_step(0.04, 0.25, max(upwind_h - uniforms.ocean_level, 0.0));
-    local_coverage += mountain_lift * 0.12;
+    // Orographic lift: only well inland (not at coast edge) to prevent coastline-tracing clouds
+    let current_h = textureSample(height_tex, height_sampler, sphere_pos).r;
+    if (current_h > uniforms.ocean_level + 0.03) {
+        let wind = wind_direction_vec(lat_rad);
+        let tangent_wind = normalize(wind - sphere_pos * dot(wind, sphere_pos));
+        let upwind_pos = normalize(sphere_pos + tangent_wind * 0.06);
+        let upwind_h = textureSample(height_tex, height_sampler, upwind_pos).r;
+        let mountain_lift = smooth_step(0.08, 0.30, max(upwind_h - uniforms.ocean_level, 0.0));
+        local_coverage += mountain_lift * 0.10;
+    }
 
     // Warm convection: warmer areas produce more convective cloud potential
     let convection_boost = smooth_step(15.0, 30.0, temp) * 0.05;
