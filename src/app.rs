@@ -749,11 +749,11 @@ impl eframe::App for PlanetGenApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some(ref tex) = self.texture_handle {
+                // Fill the entire panel (planet centered by the shader's NDC mapping)
                 let available = ui.available_size();
-                let size = available.x.min(available.y);
 
                 let (response, painter) = ui.allocate_painter(
-                    egui::Vec2::splat(size),
+                    available,
                     egui::Sense::click_and_drag(),
                 );
 
@@ -779,7 +779,8 @@ impl eframe::App for PlanetGenApp {
                 // Middle-drag: pan viewport
                 if response.dragged_by(egui::PointerButton::Middle) {
                     let delta = response.drag_delta();
-                    let ndc_per_pixel = 2.0 / (0.85 * size);
+                    let shorter = available.x.min(available.y);
+                    let ndc_per_pixel = 2.0 / (0.85 * shorter);
                     self.pan[0] += delta.x * ndc_per_pixel;
                     self.pan[1] += delta.y * ndc_per_pixel;
                     self.needs_render = true;
@@ -820,27 +821,22 @@ impl eframe::App for PlanetGenApp {
                 });
             }
 
-            // Loading overlay when terrain is regenerating (centered on preview image)
+            // Loading overlay centered on the full panel
             if self.terrain_pending {
-                if self.texture_handle.is_some() {
-                    let available = ui.available_size();
-                    let img_size = available.x.min(available.y);
-                    let min = ui.min_rect().min;
-                    let img_rect = egui::Rect::from_min_size(min, egui::Vec2::splat(img_size));
-                    let painter = ui.painter();
-                    painter.rect_filled(
-                        img_rect,
-                        0.0,
-                        egui::Color32::from_rgba_premultiplied(0, 0, 0, 140),
-                    );
-                    painter.text(
-                        img_rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        format!("Generating terrain ({}px)...", self.preview_resolution),
-                        egui::FontId::proportional(18.0),
-                        egui::Color32::WHITE,
-                    );
-                }
+                let panel_rect = ui.max_rect();
+                let painter = ui.painter();
+                painter.rect_filled(
+                    panel_rect,
+                    0.0,
+                    egui::Color32::from_rgba_premultiplied(0, 0, 0, 140),
+                );
+                painter.text(
+                    panel_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    format!("Generating terrain ({}px)...", self.preview_resolution),
+                    egui::FontId::proportional(18.0),
+                    egui::Color32::WHITE,
+                );
             }
         });
 
