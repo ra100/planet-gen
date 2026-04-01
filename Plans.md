@@ -214,9 +214,12 @@ Terrain rendering improvements and additional visual features.
 
 | Task | 内容 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
-| 5.8.1 | Ambient occlusion in terrain valleys: darken crevices and low areas for depth | Visible darkening in valleys and steep terrain | Phase 4.8 | cc:TODO |
+| 5.8.1 | Ambient occlusion in terrain valleys + toggle checkbox | Visible darkening in valleys, toggleable via UI | Phase 4.8 | cc:完了 [88f83f1] |
 | 5.8.2 | Export cloud + night light layers as textures: add cloud density and city lights to 8K export pipeline | Cloud and night light PNGs exported alongside albedo/normal/roughness | Phase 5, 5.6, 5.7 | cc:TODO |
-| 5.8.3 | Better polar ice rendering: improved ice caps with gradual transition, snow coverage, seasonal variation | Realistic polar ice that responds to season slider | Phase 4 | cc:TODO |
+| 5.8.3 | Polar ice: NASA-like rendering — thickness variation, pressure ridges, land snow at 0°C, coastline blending | Realistic polar ice with thin/thick variation and smooth transitions | Phase 4 | cc:完了 [b3f4961] |
+| 5.8.4 | Smooth roughness map: continuous smooth_step + noise variation, fix blocky biome boundaries | No visible hard edges in roughness debug view | Phase 4 | cc:完了 [ae4cbbc] |
+| 5.8.5 | Ocean plate boundary smoothing: blur depth + noise to soften tectonic ridges on ocean floor | No hard lines visible in ocean coloring | Phase 4.8 | cc:完了 [9138df7] |
+| 5.8.6 | Fix speckled coastlines: erosion roughening noise fades near ocean level | Clean coastlines without tiny land/water cells | Phase 4.8 | cc:完了 [b48cd68] |
 
 ---
 
