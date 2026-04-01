@@ -1057,6 +1057,42 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                     debug_color = vec3<f32>(urban, urban * 0.8, 0.0);
                 }
             }
+            case 11u: {
+                // Boundary type proxy: use height gradient magnitude and sign to visualize
+                // tectonic boundary character. Red=convergent (steep rise), blue=divergent
+                // (rift drop), green=transform (lateral offset, low gradient).
+                // Samples neighbours to compute gradient vector, then classifies.
+                let bstep = 0.008;
+                let h_r = textureSample(height_tex, height_sampler, rotated + vec3<f32>(bstep, 0.0, 0.0)).r;
+                let h_l = textureSample(height_tex, height_sampler, rotated - vec3<f32>(bstep, 0.0, 0.0)).r;
+                let h_u = textureSample(height_tex, height_sampler, rotated + vec3<f32>(0.0, bstep, 0.0)).r;
+                let h_d = textureSample(height_tex, height_sampler, rotated - vec3<f32>(0.0, bstep, 0.0)).r;
+                let grad_x = (h_r - h_l) * 0.5;
+                let grad_y = (h_u - h_d) * 0.5;
+                let grad_mag = sqrt(grad_x * grad_x + grad_y * grad_y);
+                // Classify: strong positive rise → convergent (red), strong negative → divergent (blue),
+                // high grad_mag but mixed sign → transform (green).
+                let rise = (h_r - h_l + h_u - h_d) * 0.25; // net rise
+                let convergent_str = clamp(rise * 20.0, 0.0, 1.0);
+                let divergent_str  = clamp(-rise * 20.0, 0.0, 1.0);
+                let transform_str  = clamp(grad_mag * 15.0 - convergent_str - divergent_str, 0.0, 1.0);
+                debug_color = vec3<f32>(convergent_str, transform_str, divergent_str);
+            }
+            case 12u: {
+                // Snow/ice coverage — show ice_amount as grayscale
+                debug_color = vec3<f32>(ice_amount, ice_amount, ice_amount);
+            }
+            case 13u: {
+                // Terrain normals — visualize shading_normal as RGB (normal map style)
+                var n: vec3<f32>;
+                if (is_ocean) {
+                    n = normal;
+                } else {
+                    n = compute_terrain_normal(rotated, normal);
+                }
+                // Remap from [-1,1] to [0,1] for display
+                debug_color = n * 0.5 + vec3<f32>(0.5);
+            }
             default: { debug_color = surface_color; }
         }
         return vec4<f32>(debug_color, 1.0);

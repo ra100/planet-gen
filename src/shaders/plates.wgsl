@@ -287,10 +287,16 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             height += ridge_height + (ridge_noise + ridge_detail) * b_influence * ridge_mask;
         } else if (is_continental && !neighbor_continental) {
             // R5: Oceanic-continental convergence → volcanic chain (Andes)
+            // The arc forms ~35% inland from the boundary, not at the coastline.
+            // Shift the influence peak by subtracting an inland offset from boundary_dist
+            // before computing the Gaussian, so the mountain ridge peaks further into the continent.
+            let inland_offset = params.boundary_width * 0.35;
+            let arc_dist = boundary_dist - inland_offset; // shifted so peak is inland
+            let arc_influence = boundary_influence(arc_dist, params.boundary_width * 0.7);
             // Volcanic arc shares the same ridged multifractal so spacing matches geology.
-            let volcanic_height = 0.55 * params.mountain_scale * b_influence * abs(boundary_type) * ridge_mask;
+            let volcanic_height = 0.55 * params.mountain_scale * arc_influence * abs(boundary_type) * ridge_mask;
             let volcanic_noise = snoise(raw_pos * 12.0 + seed_offset(params.seed + 200u)) * 0.15;
-            height += volcanic_height + volcanic_noise * b_influence * ridge_mask;
+            height += volcanic_height + volcanic_noise * arc_influence * ridge_mask;
         } else if (!is_continental && neighbor_continental) {
             // R5: Ocean trench on the oceanic side of subduction
             height -= 0.25 * b_influence * abs(boundary_type);
