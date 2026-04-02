@@ -102,7 +102,7 @@ impl PlanetGenApp {
             show_ice: true,
             show_biomes: true,
             show_clouds: true,
-            show_cities: false,
+            show_cities: true,
             show_erosion: true,
             zoom: 1.0,
             pan: [0.0, 0.0],
@@ -163,7 +163,9 @@ impl PlanetGenApp {
             ],
             ocean_level,
             base_temp_c: self.derived.base_temperature_c,
-            ocean_fraction: effective_ocean,
+            // Use physics ocean_fraction for climate (moisture, clouds), not effective_ocean.
+            // water_loss only affects sea level (ocean_level), not atmospheric moisture.
+            ocean_fraction: self.derived.ocean_fraction,
             axial_tilt_rad: self.params.axial_tilt_deg.to_radians(),
             view_mode: self.view_mode,
             season: self.season,
