@@ -48,3 +48,4 @@ output/
 
 /target
 .claude/logs/
+docs/research/.claude
