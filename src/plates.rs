@@ -20,8 +20,6 @@ pub struct PlateGenParams {
     pub continental_scale: f32,
     /// Override plate count (0 = auto from physics).
     pub num_plates_override: u32,
-    /// Tectonics mode: 0 = Quick (mountains only), 1 = Classified (convergent/divergent/transform).
-    pub tectonics_mode: u32,
 }
 
 /// Generate tectonic plates from planet parameters.
@@ -169,7 +167,6 @@ mod tests {
             tectonics_factor: 0.85,
             continental_scale: 1.0,
             num_plates_override: 0,
-            tectonics_mode: 0,
         };
         let plates = generate_plates(&params);
         assert!(
@@ -188,7 +185,6 @@ mod tests {
             tectonics_factor: 0.85,
             continental_scale: 1.0,
             num_plates_override: 0,
-            tectonics_mode: 0,
         };
         let plates = generate_plates(&params);
         let continental = plates.iter().filter(|p| p.plate_type > 0.5).count();
@@ -208,7 +204,6 @@ mod tests {
             tectonics_factor: 0.85,
             continental_scale: 1.0,
             num_plates_override: 0,
-            tectonics_mode: 0,
         };
         let plates = generate_plates(&params);
         for (i, p) in plates.iter().enumerate() {
@@ -230,7 +225,6 @@ mod tests {
             tectonics_factor: 0.85,
             continental_scale: 1.0,
             num_plates_override: 0,
-            tectonics_mode: 0,
         });
         let p2 = generate_plates(&PlateGenParams {
             seed: 999,
@@ -239,7 +233,6 @@ mod tests {
             tectonics_factor: 0.85,
             continental_scale: 1.0,
             num_plates_override: 0,
-            tectonics_mode: 0,
         });
         let diff: f32 = p1.iter().zip(p2.iter())
             .map(|(a, b)| {
@@ -260,7 +253,6 @@ mod tests {
             tectonics_factor: 0.2,
             continental_scale: 1.0,
             num_plates_override: 0,
-            tectonics_mode: 0,
         });
         assert!(
             plates.len() <= 8,
@@ -278,7 +270,6 @@ mod tests {
             tectonics_factor: 0.85,
             continental_scale: 1.0,
             num_plates_override: 0,
-            tectonics_mode: 1,
         };
         let plates = generate_plates(&params);
         for (i, p) in plates.iter().enumerate() {
@@ -300,7 +291,6 @@ mod tests {
             tectonics_factor: 0.1,
             continental_scale: 1.0,
             num_plates_override: 0,
-            tectonics_mode: 1,
         });
         let plates_high = generate_plates(&PlateGenParams {
             seed: 42,
@@ -309,7 +299,6 @@ mod tests {
             tectonics_factor: 1.0,
             continental_scale: 1.0,
             num_plates_override: 0,
-            tectonics_mode: 1,
         });
         let avg_low: f32 = plates_low.iter()
             .map(|p| (p.velocity[0].powi(2) + p.velocity[1].powi(2) + p.velocity[2].powi(2)).sqrt())
@@ -333,7 +322,6 @@ mod tests {
             tectonics_factor: 0.85,
             continental_scale: 1.0,
             num_plates_override: 8,
-            tectonics_mode: 1,
         };
         let plates = generate_plates(&params);
         for (i, p) in plates.iter().enumerate() {

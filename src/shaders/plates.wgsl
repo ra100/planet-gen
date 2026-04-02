@@ -27,10 +27,10 @@ struct GenParams {
     boundary_width: f32,   // sigma for boundary influence spread
     warp_strength: f32,    // domain warp intensity
     detail_scale: f32,     // fBm detail noise intensity
-    tectonics_mode: u32,   // 0 = Quick, 1 = Classified
     _pad0: u32,
     _pad1: u32,
     _pad2: u32,
+    _pad3: u32,
 }
 
 @group(0) @binding(0) var<storage, read> plates: array<Plate>;
@@ -126,8 +126,7 @@ fn find_nearest_plates(sphere_pos: vec3<f32>) -> PlateInfo {
         // Three octaves: large-scale concavities + medium bends + fine irregularity.
         let plate_offset = vec3<f32>(f32(i) * 17.3, f32(i) * 31.7, f32(i) * 43.1);
         let bias = snoise(sphere_pos * 2.0 + plate_offset) * 0.08
-                 + snoise(sphere_pos * 4.5 + plate_offset * 2.0) * 0.05
-                 + snoise(sphere_pos * 9.0 + plate_offset * 3.0) * 0.025;
+                 + snoise(sphere_pos * 4.5 + plate_offset * 2.0) * 0.04;
         d += bias;
 
         if (d < info.nearest_dist) {
@@ -202,144 +201,101 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let info = find_nearest_plates(sphere_pos);
 
     let boundary_dist = info.second_dist - info.nearest_dist; // Small = near boundary
-    // In Classified mode, derive boundary type from relative plate velocities.
-    // In Quick mode, set boundary_type to -1.0 (always convergent / mountain).
-    let boundary_type: f32 = select(
-        -1.0,
-        classify_boundary(sphere_pos, info.nearest_idx, info.second_idx),
-        params.tectonics_mode == 1u
-    );
+    let boundary_type = classify_boundary(sphere_pos, info.nearest_idx, info.second_idx);
 
     let is_continental = info.nearest_type > 0.5;
     let neighbor_continental = info.second_type > 0.5;
 
-    // --- Pass 2: Generate height ---
-    // Architecture: plate type BIASES the elevation but doesn't determine it.
-    // A noise-based continental mask creates the actual coastlines — continental
-    // plates are mostly land but can have bays/gulfs/inland seas. Oceanic plates
-    // are mostly ocean but can have island chains.
+    // --- Pass 2: Generate height via crustal thickness + isostasy ---
+    // Each plate carries a crustal thickness field that varies via per-plate noise.
+    // Isostasy converts thickness to surface elevation. This produces a natural
+    // bimodal height distribution where water level changes reveal terrain
+    // gradually — no puzzle pieces.
 
-    // Step 1: Plate type bias — stronger separation for distinct ocean/land levels
-    let plate_bias: f32 = select(-0.35, 0.30, is_continental);
+    // Step 1: Base crustal thickness per plate type (conceptual km)
+    // Global low-frequency noise offsets the base thickness smoothly across the globe.
+    // This prevents puzzle-piece behavior (different areas at different heights)
+    // without creating discrete per-plate jumps that cause enclave artifacts.
+    let base_offset = snoise(raw_pos * 1.5 + seed_offset(params.seed + 2000u));
+    let base_thickness: f32 = select(7.0, 35.0, is_continental)
+        + base_offset * select(0.5, 4.0, is_continental);
+    let neighbor_base: f32 = select(7.0, 35.0, neighbor_continental)
+        + base_offset * select(0.5, 4.0, neighbor_continental);
 
-    // Step 2: Domain-warped continental noise creates the actual coastline shapes
-    // This is INDEPENDENT of Voronoi cell boundaries — creates bays, gulfs,
-    // peninsulas, and inland seas that break the convex cell shape.
+    // Step 2: Gentle intra-plate thickness variation (plains, low hills, basins)
+    // Low frequencies + low amplitude = broad smooth terrain, no speckle
+    let t_n1 = snoise(raw_pos * 2.0 + seed_offset(params.seed + 1000u));
+    let t_n2 = snoise(raw_pos * 4.0 + seed_offset(params.seed + 1010u)) * 0.4;
+    let thickness_noise = (t_n1 + t_n2) / 1.4; // ~-1..+1
+
+    // Step 3: Tectonic boundary forces
+    let convergence = smoothstep(0.0, -0.5, boundary_type);
+    let divergence = smoothstep(0.0, 0.5, boundary_type);
+    let broad_b = smoothstep(0.25, 0.0, boundary_dist);
+    let b_influence = boundary_influence(boundary_dist, params.boundary_width);
+
+    // Gentle base variation (continental plains ±2km, oceanic abyssal plains ±0.3km)
+    let base_amp: f32 = select(0.3, 2.0, is_continental);
+    let neighbor_base_amp: f32 = select(0.3, 2.0, neighbor_continental);
+
+    // Mountain ranges: ridged multifractal concentrated at convergent boundaries
+    // Creates linear ridge features (not uniform noise) where plates collide
+    let mountain_zone = convergence * broad_b;
+    let ridge = ridged_multifractal(
+        raw_pos * 3.5 + seed_offset(params.seed + 2000u), 5, 2.2, 2.0, 1.0
+    );
+    let mountain_add: f32 = ridge * mountain_zone * params.mountain_scale
+        * select(4.0, 14.0, is_continental);
+    let neighbor_mountain: f32 = ridge * mountain_zone * params.mountain_scale
+        * select(4.0, 14.0, neighbor_continental);
+
+    // Rift thinning at divergent boundaries
+    let rift_thin = divergence * broad_b;
+
+    let own_thickness = base_thickness + thickness_noise * base_amp
+        + mountain_add - rift_thin * 2.0;
+    let neighbor_thickness = neighbor_base + thickness_noise * neighbor_base_amp
+        + neighbor_mountain - rift_thin * 2.0;
+
+    // Step 4: Margin blending — smooth transition at boundaries
+    let margin_blend = smoothstep(0.0, 0.10, boundary_dist);
+    let boundary_mid = (own_thickness + neighbor_thickness) * 0.5;
+    var thickness = mix(boundary_mid, own_thickness, margin_blend);
+
+    // Narrow ocean features (trenches, ridges, island arcs)
+    if (convergence > 0.01) {
+        if (!is_continental && neighbor_continental) {
+            thickness -= 3.0 * b_influence * convergence;
+        } else if (!is_continental && !neighbor_continental) {
+            let arc_noise = snoise(raw_pos * 10.0 + seed_offset(params.seed + 300u));
+            if (arc_noise > 0.0) {
+                thickness += 6.0 * params.mountain_scale * b_influence * convergence * arc_noise;
+            }
+        }
+    }
+    if (divergence > 0.01 && !is_continental) {
+        thickness += 2.0 * b_influence * divergence;
+    }
+
+    // Step 5: Isostatic conversion — thickness → surface elevation
+    let T_ref: f32 = 18.0;
+    var height = (thickness - T_ref) * 0.025;
+
+    // Step 6: Coastline detail — gentle irregularity at continental margins
     let coast_warp_val = snoise(raw_pos * 1.5 + seed_offset(params.seed + 600u));
-    let coast_pos = raw_pos + vec3<f32>(coast_warp_val) * 0.15;
-
-    // Three octaves for coastline shape — fine detail breaks up smooth blobs
+    let coast_pos = raw_pos + vec3<f32>(coast_warp_val) * 0.12;
     let coast_n1 = snoise(coast_pos * 2.5 + seed_offset(params.seed + 700u));
-    let coast_n2 = snoise(coast_pos * 5.0 + seed_offset(params.seed + 710u)) * 0.4;
-    let coast_n3 = snoise(coast_pos * 10.0 + seed_offset(params.seed + 720u)) * 0.15;
-    let coastal_noise = coast_n1 + coast_n2 + coast_n3;
+    let coast_n2 = snoise(coast_pos * 5.0 + seed_offset(params.seed + 710u)) * 0.3;
+    let coastal_noise = coast_n1 + coast_n2;
+    height += coastal_noise * 0.04;
 
-    // Combine plate bias + coastal noise for elevation base
-    // Continental plates: bias +0.25 + noise → mostly positive (land)
-    // Oceanic plates: bias -0.25 + noise → mostly negative (ocean)
-    // The noise creates crossovers: bays on continental, islands on oceanic
-    var height = plate_bias + coastal_noise * 0.35;
-
-    // Step 3: Regional geology within the established land/ocean pattern
-    let interior_factor = clamp(boundary_dist * 8.0, 0.0, 1.0);
-    let is_land = height > 0.0;
-
-    // Blend between land and ocean features using smooth height-based weight
+    // Step 7: Additional geology
     let land_weight = smooth_step(-0.05, 0.05, height);
 
-    // Continental interior elevation: land rises from coast toward center
-    // Uses distance from plate boundary as proxy for "how far inland"
-    let inland_factor = smooth_step(0.0, 0.15, height) * interior_factor;
-
-    // Highland terrain: large-scale basins and uplands within continents
-    let highland = snoise(raw_pos * 4.0 + seed_offset(params.seed + 800u));
-    let highland2 = snoise(raw_pos * 7.0 + seed_offset(params.seed + 810u)) * 0.5;
-    // Interior highlands: stronger further from coast
-    height += (highland + highland2) * 0.15 * inland_factor;
-    // Plateau uplift in continental interiors
-    height += smooth_step(0.3, 0.7, highland) * 0.12 * inland_factor;
-
-    // Seamounts: rare underwater volcanoes — high threshold, low amplitude
+    // Seamounts: rare underwater volcanoes
     let seamount = snoise(raw_pos * 8.0 + seed_offset(params.seed + 900u));
     let seamount_h = smooth_step(0.78, 0.95, seamount) * 0.3;
     height += seamount_h * (1.0 - land_weight);
-
-    // --- Boundary terrain (R4-R7, R10) ---
-    let b_influence = boundary_influence(boundary_dist, params.boundary_width);
-
-    // Ridge variation: ridged multifractal produces sharp crests with natural gaps at valleys.
-    // Evaluated at boundary-zone scale (freq 5.0 base) with 5 octaves for multi-scale detail.
-    // The seed offset shifts the ridge pattern per-planet without changing the overall form.
-    let ridge_pos = raw_pos * 5.0 + seed_offset(params.seed + 150u);
-    let rmf = ridged_multifractal(ridge_pos, 5, 2.0, 2.0, 1.0);
-    // rmf is in ~0–1; treat values below 0.25 as valley gaps (natural passes/breaks).
-    let ridge_mask = smooth_step(0.25, 0.55, rmf);
-
-    if (boundary_type < -0.3) {
-        // CONVERGENT boundary
-        if (is_continental && neighbor_continental) {
-            // R4: Continental-continental collision → mountain range (Himalayas)
-            // Ridge height driven by ridged multifractal for sharp, varied peaks.
-            let ridge_height = 0.7 * params.mountain_scale * b_influence * abs(boundary_type) * ridge_mask;
-            // Fine surface detail on top — only adds texture where ridges exist.
-            let ridge_noise = snoise(raw_pos * 15.0 + seed_offset(params.seed + 100u)) * 0.15;
-            let ridge_detail = snoise(raw_pos * 30.0 + seed_offset(params.seed + 110u)) * 0.06;
-            height += ridge_height + (ridge_noise + ridge_detail) * b_influence * ridge_mask;
-        } else if (is_continental && !neighbor_continental) {
-            // R5: Oceanic-continental convergence → volcanic chain (Andes)
-            // The arc forms ~35% inland from the boundary, not at the coastline.
-            // Shift the influence peak by subtracting an inland offset from boundary_dist
-            // before computing the Gaussian, so the mountain ridge peaks further into the continent.
-            let inland_offset = params.boundary_width * 0.35;
-            let arc_dist = boundary_dist - inland_offset; // shifted so peak is inland
-            let arc_influence = boundary_influence(arc_dist, params.boundary_width * 0.7);
-            // Volcanic arc shares the same ridged multifractal so spacing matches geology.
-            let volcanic_height = 0.55 * params.mountain_scale * arc_influence * abs(boundary_type) * ridge_mask;
-            let volcanic_noise = snoise(raw_pos * 12.0 + seed_offset(params.seed + 200u)) * 0.15;
-            height += volcanic_height + volcanic_noise * arc_influence * ridge_mask;
-        } else if (!is_continental && neighbor_continental) {
-            // R5: Ocean trench on the oceanic side of subduction
-            height -= 0.25 * b_influence * abs(boundary_type);
-        } else {
-            // R10: Oceanic-oceanic convergence → island arc
-            let arc_height = 0.35 * params.mountain_scale * b_influence * abs(boundary_type);
-            // Create arc-shaped elevation (islands above sea level)
-            let arc_noise = snoise(raw_pos * 10.0 + seed_offset(params.seed + 300u));
-            if (arc_noise > 0.0) {
-                height += arc_height * arc_noise;
-            }
-        }
-    } else if (boundary_type > 0.3) {
-        // R6: DIVERGENT boundary
-        if (is_continental) {
-            // Rift valley on land (East Africa)
-            height -= 0.15 * b_influence * boundary_type;
-        } else {
-            // Mid-ocean ridge (underwater)
-            height += 0.15 * b_influence * boundary_type;
-        }
-    } else {
-        // R7: TRANSFORM boundary — subtle offset
-        let offset_noise = snoise(raw_pos * 8.0 + seed_offset(params.seed + 400u));
-        height += offset_noise * 0.05 * b_influence;
-    }
-
-    // Continental margin transition (R9)
-    // Smooth slope from continental shelf to ocean basin
-    if (is_continental) {
-        let margin_width = 0.04;
-        if (boundary_dist < margin_width && !neighbor_continental) {
-            let margin_t = boundary_dist / margin_width;
-            // Passive margin (smooth) vs active margin (steep) based on boundary type
-            if (boundary_type < -0.2) {
-                // Active margin (steep, convergent)
-                height = mix(-0.2, height, margin_t * margin_t);
-            } else {
-                // Passive margin (gentle slope)
-                height = mix(-0.1, height, margin_t);
-            }
-        }
-    }
 
     // R11: Volcanic hotspots (1-3 independent of plates)
     let hotspot_count = 2u;
@@ -354,23 +310,20 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         }
     }
 
-    // R13: fBm detail noise on top of geological structure
+    // R13: fBm detail noise — subtle texture on top of geological structure
     let detail = detail_noise(raw_pos);
-    let detail_mix = mix(0.3, 1.5, smooth_step(-0.1, 0.5, height));
+    let detail_mix = mix(0.1, 1.2, smooth_step(-0.1, 0.5, height));
     height += detail * detail_mix * params.detail_scale;
 
-    // Hypsometric profile: shape the height distribution to match real geology
-    // Land: coastal plains stay flat, interior rises, mountains amplified
-    // Ocean: deeper floor, steep continental slope
+    // Hypsometric profile: flatten plains, amplify mountains, deepen oceans
     if (height > 0.0) {
-        // Power curve: keeps coastal areas (low h) near sea level,
-        // amplifies interior and mountain heights nonlinearly
         let h_cap = 1.5 * max(params.mountain_scale, 1.0);
         let h_norm = min(height, h_cap);
-        height = pow(h_norm / h_cap, 1.4) * h_cap * 1.3;
+        let t = h_norm / h_cap;
+        // Power 1.8: strong flattening of low areas (plains), sharp mountain peaks
+        height = pow(t, 1.8) * h_cap * 1.5;
     } else {
-        // Deepen and shape ocean floor
-        height *= 1.2;
+        height *= 1.3;
     }
 
     let idx = id.y * res + id.x;

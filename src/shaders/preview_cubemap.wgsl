@@ -860,23 +860,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if (is_ocean) {
         // Smooth ocean gradient: shallow → deep with continuous depth color
         let ocean_temp = compute_temperature(rotated, height, uniforms.season);
-        // Blur ocean depth by averaging neighbors — smooths tectonic plate boundaries
-        let blur_step = 0.04;
-        let h_avg = (height
-            + textureSample(height_tex, height_sampler, rotated + vec3<f32>(blur_step, 0.0, 0.0)).r
-            + textureSample(height_tex, height_sampler, rotated - vec3<f32>(blur_step, 0.0, 0.0)).r
-            + textureSample(height_tex, height_sampler, rotated + vec3<f32>(0.0, blur_step, 0.0)).r
-            + textureSample(height_tex, height_sampler, rotated - vec3<f32>(0.0, blur_step, 0.0)).r
-        ) / 5.0;
+        // Depth from continuous terrain slope — gradual dome means smooth gradient
+        let raw_depth = (uniforms.ocean_level - height) / max(uniforms.ocean_level + 1.0, 0.5);
+        let depth = clamp(raw_depth, 0.0, 1.0);
         let depth_noise = snoise(rotated * 8.0) * 0.02;
-        let depth = clamp((uniforms.ocean_level - h_avg) / max(uniforms.ocean_level + 1.0, 0.5) + depth_noise, 0.0, 1.0);
 
         let near_shore = vec3<f32>(0.07, 0.22, 0.38);
-        let mid_ocean  = vec3<f32>(0.05, 0.16, 0.40);
-        let deep_ocean = vec3<f32>(0.02, 0.05, 0.20);
-        // Start shelf transition above zero to avoid ghosting fringe at coastlines
-        let shelf = smoothstep(0.02, 0.20, depth);
-        let abyss = smoothstep(0.20, 0.7, depth);
+        let mid_ocean  = vec3<f32>(0.04, 0.14, 0.36);
+        let deep_ocean = vec3<f32>(0.02, 0.06, 0.22);
+        let shelf = smoothstep(0.02, 0.18, depth + depth_noise);
+        let abyss = smoothstep(0.18, 0.55, depth);
         var ocean_color = mix(near_shore, mix(mid_ocean, deep_ocean, abyss), shelf);
         ocean_color += vec3<f32>(0.0, 0.015, 0.02) * color_var;
 

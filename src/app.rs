@@ -45,7 +45,6 @@ pub struct PlanetGenApp {
     star_color_temp: f32,
     city_light_hue: f32,
     view_mode: u32,
-    tectonics_mode: u32, // 0 = Quick, 1 = Classified
     preview_resolution: u32,
     needs_terrain: bool,   // full terrain recompute (plates + compute + erosion)
     terrain_pending: bool, // true = overlay painted, next frame does the work
@@ -107,7 +106,6 @@ impl PlanetGenApp {
             star_color_temp: 0.5,
             city_light_hue: 0.0,
             view_mode: 0,
-            tectonics_mode: 0,
             preview_resolution: crate::preview::DEFAULT_PREVIEW_SIZE,
             needs_terrain: true,
             terrain_pending: false,
@@ -205,7 +203,6 @@ impl PlanetGenApp {
             tectonics_factor: self.derived.tectonics_factor,
             continental_scale: self.continental_scale,
             num_plates_override: self.num_plates_override,
-            tectonics_mode: self.tectonics_mode,
         });
 
         let (amplitude, frequency, octaves, gain, lacunarity) = self.terrain_params();
@@ -223,7 +220,6 @@ impl PlanetGenApp {
             self.boundary_width,
             self.warp_strength,
             self.detail_scale,
-            self.tectonics_mode,
         );
 
         let effective_ocean = self.derived.ocean_fraction * (1.0 - self.water_loss);
@@ -577,26 +573,6 @@ impl eframe::App for PlanetGenApp {
                             self.num_plates_override = plates_i32 as u32;
                             self.needs_terrain = true;
                         }
-
-                        ui.horizontal(|ui| {
-                            ui.label("Tectonics Mode:");
-                            let mode_labels = ["Quick", "Classified"];
-                            for (i, label) in mode_labels.iter().enumerate() {
-                                if ui.selectable_label(self.tectonics_mode == i as u32, *label)
-                                    .on_hover_text(if i == 0 {
-                                        "Quick: mountain ridges at all boundaries (fast, default)"
-                                    } else {
-                                        "Classified: convergent/divergent/transform terrain types"
-                                    })
-                                    .clicked()
-                                {
-                                    if self.tectonics_mode != i as u32 {
-                                        self.tectonics_mode = i as u32;
-                                        self.needs_terrain = true;
-                                    }
-                                }
-                            }
-                        });
 
                         if ui.add(egui::Slider::new(&mut self.mountain_scale, 0.0..=3.0)
                             .text("Mountain Height"))
