@@ -90,18 +90,18 @@ impl PlanetGenApp {
             rotation_y: 0.0,
             rotation_x: 0.0,
             continental_scale: 1.0,
-            water_loss: 0.0,
+            water_loss: 0.5,
             season: 0.5,
             erosion_iterations: 25,
             light_azimuth: -0.5,
             light_elevation: 0.3,
             height_scale: 3.0,
             show_atmosphere: false,
-            show_ao: false,
-            show_water: false,
-            show_ice: false,
-            show_biomes: false,
-            show_clouds: false,
+            show_ao: true,
+            show_water: true,
+            show_ice: true,
+            show_biomes: true,
+            show_clouds: true,
             show_cities: false,
             show_erosion: false,
             zoom: 1.0,
@@ -140,7 +140,9 @@ impl PlanetGenApp {
 
     fn build_uniforms(&self) -> PreviewUniforms {
         let effective_ocean = self.derived.ocean_fraction * (1.0 - self.water_loss);
-        let ocean_level = -1.0 + 2.0 * effective_ocean;
+        // Map effective_ocean [0,1] to ocean_level across full terrain height range
+        // 0.0 → -0.5 (all land), ~0.45 → Earth-like, 0.7 → 0.69 (near-total ocean)
+        let ocean_level = -0.5 + 1.7 * effective_ocean;
 
         let cy = self.rotation_y.cos();
         let sy = self.rotation_y.sin();
@@ -247,7 +249,9 @@ impl PlanetGenApp {
         );
 
         let effective_ocean = self.derived.ocean_fraction * (1.0 - self.water_loss);
-        let ocean_level = -1.0 + 2.0 * effective_ocean;
+        // Map effective_ocean [0,1] to ocean_level across full terrain height range
+        // 0.0 → -0.5 (all land), ~0.45 → Earth-like, 0.7 → 0.69 (near-total ocean)
+        let ocean_level = -0.5 + 1.7 * effective_ocean;
 
         // Show un-eroded terrain immediately
         self.cached_cubemap_view = Some(self.preview_renderer.upload_terrain(&self.gpu, &terrain));
