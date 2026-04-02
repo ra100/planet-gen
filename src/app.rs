@@ -66,6 +66,14 @@ pub struct PlanetGenApp {
     // Export state
     planet_name: String,
     export_resolution: u32,
+    // Export layer toggles
+    export_albedo: bool,
+    export_roughness: bool,
+    export_clouds: bool,
+    export_height: bool,
+    export_emission: bool,
+    export_water_mask: bool,
+    export_normals: bool,
     export_handle: Option<ExportHandle>,
     export_status: String,
     export_progress: f32,
@@ -132,6 +140,13 @@ impl PlanetGenApp {
             erosion_ocean_level: 0.0,
             planet_name: format!("planet_{}", PlanetParams::default().seed),
             export_resolution: export::DEFAULT_EXPORT_RESOLUTION,
+            export_albedo: true,
+            export_roughness: true,
+            export_clouds: true,
+            export_height: true,
+            export_emission: true,
+            export_water_mask: false,
+            export_normals: false,
             export_handle: None,
             export_status: String::new(),
             export_progress: 0.0,
@@ -516,26 +531,80 @@ impl eframe::App for PlanetGenApp {
                 }
 
                 ui.separator();
-                ui.label("Render Layers");
-                for (flag, label, tip) in [
-                    (&mut self.show_water, "Water / Ocean", "Ocean surface with depth shading and specular"),
-                    (&mut self.show_ice, "Ice Caps", "Polar and altitude ice rendering"),
-                    (&mut self.show_biomes, "Biome Colors", "Temperature/moisture-driven biome coloring"),
-                    (&mut self.show_clouds, "Clouds", "Cloud layer rendering"),
-                    (&mut self.show_atmosphere, "Atmosphere", "Atmospheric scattering (blue limb glow, red sunsets)"),
-                    (&mut self.show_cities, "City Lights", "Night-side city lights and day-side urban patches"),
-                    (&mut self.show_ao, "Ambient Occlusion", "Darken terrain valleys and crevices for depth"),
-                ] {
-                    if ui.checkbox(flag, label).on_hover_text(tip).changed() {
+                egui::CollapsingHeader::new("Render Layers")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                    for (flag, label, tip) in [
+                        (&mut self.show_water, "Water / Ocean", "Ocean surface with depth shading and specular"),
+                        (&mut self.show_ice, "Ice Caps", "Polar and altitude ice rendering"),
+                        (&mut self.show_biomes, "Biome Colors", "Temperature/moisture-driven biome coloring"),
+                        (&mut self.show_clouds, "Clouds", "Cloud layer rendering"),
+                        (&mut self.show_atmosphere, "Atmosphere", "Atmospheric scattering (blue limb glow, red sunsets)"),
+                        (&mut self.show_cities, "City Lights", "Night-side city lights and day-side urban patches"),
+                    ] {
+                        if ui.checkbox(flag, label).on_hover_text(tip).changed() {
+                            self.needs_render = true;
+                        }
+                    }
+                    if ui.checkbox(&mut self.show_erosion, "Erosion")
+                        .on_hover_text("Hydraulic erosion carving rivers and valleys")
+                        .changed()
+                    {
+                        self.needs_terrain = true;
+                    }
+
+                    ui.separator();
+                    // View mode selection
+                    let export_views: &[(u32, &str)] = &[
+                        (0, "ALL"), (1, "Height"), (7, "Roughness"),
+                        (9, "Clouds"), (10, "Emission"), (13, "Normals"),
+                    ];
+                    ui.label("Export Maps");
+                    ui.horizontal_wrapped(|ui| {
+                        for &(idx, label) in export_views {
+                            if ui.selectable_label(self.view_mode == idx, label).clicked() {
+                                self.view_mode = idx;
+                                self.needs_render = true;
+                            }
+                        }
+                    });
+
+                    let debug_views: &[(u32, &str)] = &[
+                        (8, "AO"), (6, "Plates"), (2, "Temp"), (3, "Moisture"),
+                        (4, "Biome"), (5, "Ocean/Ice"), (11, "Boundary"), (12, "Snow"),
+                    ];
+                    ui.label("Debug Views");
+                    ui.horizontal_wrapped(|ui| {
+                        for &(idx, label) in debug_views {
+                            if ui.selectable_label(self.view_mode == idx, label).clicked() {
+                                self.view_mode = idx;
+                                self.needs_render = true;
+                            }
+                        }
+                    });
+
+                    ui.add_space(4.0);
+                    let resolutions: [(u32, &str); 5] = [
+                        (256, "256"), (512, "512"), (768, "768"), (1024, "1K"), (2048, "2K"),
+                    ];
+                    ui.horizontal(|ui| {
+                        ui.label("Resolution:");
+                        for (res, label) in &resolutions {
+                            if ui.selectable_label(self.preview_resolution == *res, *label).clicked() {
+                                if self.preview_resolution != *res {
+                                    self.preview_resolution = *res;
+                                    self.needs_terrain = true;
+                                }
+                            }
+                        }
+                    });
+
+                    if ui.button("Reset rotation").clicked() {
+                        self.rotation_y = 0.0;
+                        self.rotation_x = 0.0;
                         self.needs_render = true;
                     }
-                }
-                if ui.checkbox(&mut self.show_erosion, "Erosion")
-                    .on_hover_text("Hydraulic erosion carving rivers and valleys")
-                    .changed()
-                {
-                    self.needs_terrain = true; // erosion requires full terrain recompute
-                }
+                });
 
                 ui.separator();
                 ui.label("Clouds");
@@ -688,6 +757,17 @@ impl eframe::App for PlanetGenApp {
                     });
 
                 ui.separator();
+                ui.small(format!("GPU: {}", self.gpu.adapter_name()));
+                ui.small("Drag to rotate • Scroll to zoom • Middle-drag to pan");
+                }); // ScrollArea
+            });
+
+        // Right panel: Derived Properties + Export
+        egui::SidePanel::right("info_panel")
+            .resizable(true)
+            .default_width(220.0)
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.heading("Derived Properties");
                 ui.separator();
 
@@ -742,71 +822,6 @@ impl eframe::App for PlanetGenApp {
                 }
 
                 ui.separator();
-                ui.heading("View");
-                ui.separator();
-
-                // Export views: correspond to exportable texture layers
-                let export_views: &[(u32, &str)] = &[
-                    (0, "Normal"), (1, "Height"), (7, "Roughness"), (8, "AO"),
-                    (9, "Clouds"), (10, "Cities"), (13, "Normals"),
-                ];
-                ui.label("Export Views");
-                ui.horizontal_wrapped(|ui| {
-                    for &(idx, label) in export_views {
-                        if ui.selectable_label(self.view_mode == idx, label).clicked() {
-                            self.view_mode = idx;
-                            self.needs_render = true;
-                        }
-                    }
-                });
-                // Debug views: diagnostic visualizations
-                let debug_views: &[(u32, &str)] = &[
-                    (6, "Plates"), (2, "Temperature"), (3, "Moisture"), (4, "Biome"),
-                    (5, "Ocean/Ice"), (11, "Boundary Type"), (12, "Snow/Ice"),
-                ];
-                ui.label("Debug Views");
-                ui.horizontal_wrapped(|ui| {
-                    for &(idx, label) in debug_views {
-                        if ui.selectable_label(self.view_mode == idx, label).clicked() {
-                            self.view_mode = idx;
-                            self.needs_render = true;
-                        }
-                    }
-                });
-
-                ui.add_space(4.0);
-
-                let resolutions: [(u32, &str); 5] = [
-                    (256, "256"), (512, "512"), (768, "768"), (1024, "1K"), (2048, "2K"),
-                ];
-                ui.horizontal(|ui| {
-                    ui.label("Resolution:");
-                    for (res, label) in &resolutions {
-                        if ui.selectable_label(self.preview_resolution == *res, *label).clicked() {
-                            if self.preview_resolution != *res {
-                                self.preview_resolution = *res;
-                                self.needs_terrain = true; // recompute cubemap at new resolution
-                            }
-                        }
-                    }
-                });
-
-                ui.add_space(4.0);
-
-                ui.horizontal(|ui| {
-                    if ui.button("Reset rotation").clicked() {
-                        self.rotation_y = 0.0;
-                        self.rotation_x = 0.0;
-                        self.needs_render = true;
-                    }
-                    if ui.button("Face sun").clicked() {
-                        self.rotation_y = 0.0;
-                        self.rotation_x = 0.0;
-                        self.needs_render = true;
-                    }
-                });
-
-                ui.separator();
                 ui.heading("Export");
                 ui.separator();
 
@@ -815,17 +830,29 @@ impl eframe::App for PlanetGenApp {
                     ui.text_edit_singleline(&mut self.planet_name);
                 });
 
-                let resolutions: [(u32, &str); 3] = [
+                let export_resolutions: [(u32, &str); 3] = [
                     (2048, "2K"), (4096, "4K"), (8192, "8K"),
                 ];
                 ui.horizontal(|ui| {
                     ui.label("Resolution:");
-                    for (res, label) in &resolutions {
+                    for (res, label) in &export_resolutions {
                         if ui.selectable_label(self.export_resolution == *res, *label).clicked() {
                             self.export_resolution = *res;
                         }
                     }
                 });
+
+                ui.separator();
+                ui.label("Export Layers:");
+                ui.checkbox(&mut self.export_albedo, "Albedo (with AO)");
+                ui.checkbox(&mut self.export_roughness, "Roughness");
+                ui.checkbox(&mut self.export_clouds, "Clouds");
+                ui.checkbox(&mut self.export_height, "Height");
+                ui.checkbox(&mut self.export_emission, "Emission (city lights)");
+                ui.checkbox(&mut self.export_water_mask, "Water Mask");
+                ui.checkbox(&mut self.export_normals, "Normals");
+
+                ui.separator();
 
                 let is_exporting = self.export_handle.is_some();
 
@@ -844,10 +871,6 @@ impl eframe::App for PlanetGenApp {
                         ui.small(&self.export_status);
                     }
                 }
-
-                ui.separator();
-                ui.small(format!("GPU: {}", self.gpu.adapter_name()));
-                ui.small("Drag to rotate • Scroll to zoom • Middle-drag to pan");
                 }); // ScrollArea
             });
 
