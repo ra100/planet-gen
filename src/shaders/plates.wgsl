@@ -37,13 +37,23 @@ struct GenParams {
 @group(0) @binding(1) var<uniform> params: GenParams;
 @group(0) @binding(2) var<storage, read_write> heightmap: array<f32>;
 
-// Hash seed to offset for fBm detail
+// PCG-style hash for seed offsets — much better randomization than golden ratio
+fn pcg_hash(input: u32) -> u32 {
+    var h = input * 747796405u + 2891336453u;
+    h = ((h >> ((h >> 28u) + 4u)) ^ h) * 277803737u;
+    h = (h >> 22u) ^ h;
+    return h;
+}
+
 fn seed_offset(s: u32) -> vec3<f32> {
-    let phi = 1.618033988;
-    let x = fract(f32(s) * phi) * 97.0;
-    let y = fract(f32(s) * phi * phi) * 89.0;
-    let z = fract(f32(s) * phi * phi * phi) * 83.0;
-    return vec3<f32>(x, y, z);
+    let h1 = pcg_hash(s);
+    let h2 = pcg_hash(s + 1u);
+    let h3 = pcg_hash(s + 2u);
+    return vec3<f32>(
+        f32(h1 & 0xFFFFu) / 655.35,  // 0-100 range
+        f32(h2 & 0xFFFFu) / 655.35,
+        f32(h3 & 0xFFFFu) / 655.35
+    );
 }
 
 fn smooth_step(edge0: f32, edge1: f32, x: f32) -> f32 {
@@ -77,24 +87,23 @@ fn ridged_multifractal(p: vec3<f32>, octaves: i32, lacunarity: f32, gain: f32, o
     return sum / max_val; // Normalise to ~0–1
 }
 
-// Domain warping for natural plate boundaries — multi-octave for fractal coastlines
+// Domain warping for fractal coastlines — seed-dependent
 fn warp_position(pos: vec3<f32>) -> vec3<f32> {
-    // Three octaves of warping: large sweeps + medium bends + fine irregularity
     let warp1 = vec3<f32>(
-        snoise(pos * 1.2 + vec3<f32>(31.7, 0.0, 0.0)),
-        snoise(pos * 1.2 + vec3<f32>(0.0, 47.3, 0.0)),
-        snoise(pos * 1.2 + vec3<f32>(0.0, 0.0, 73.1))
-    ) * 0.20; // Large-scale sweeps
+        snoise(pos * 1.2 + seed_offset(params.seed + 5000u)),
+        snoise(pos * 1.2 + seed_offset(params.seed + 5001u)),
+        snoise(pos * 1.2 + seed_offset(params.seed + 5002u))
+    ) * 0.20;
     let warp2 = vec3<f32>(
-        snoise(pos * 3.0 + vec3<f32>(13.1, 0.0, 0.0)),
-        snoise(pos * 3.0 + vec3<f32>(0.0, 19.7, 0.0)),
-        snoise(pos * 3.0 + vec3<f32>(0.0, 0.0, 29.3))
-    ) * 0.10; // Medium-scale bends
+        snoise(pos * 3.0 + seed_offset(params.seed + 5010u)),
+        snoise(pos * 3.0 + seed_offset(params.seed + 5011u)),
+        snoise(pos * 3.0 + seed_offset(params.seed + 5012u))
+    ) * 0.10;
     let warp3 = vec3<f32>(
-        snoise(pos * 7.0 + vec3<f32>(7.3, 0.0, 0.0)),
-        snoise(pos * 7.0 + vec3<f32>(0.0, 11.9, 0.0)),
-        snoise(pos * 7.0 + vec3<f32>(0.0, 0.0, 17.1))
-    ) * 0.04; // Fine-scale irregularity
+        snoise(pos * 7.0 + seed_offset(params.seed + 5020u)),
+        snoise(pos * 7.0 + seed_offset(params.seed + 5021u)),
+        snoise(pos * 7.0 + seed_offset(params.seed + 5022u))
+    ) * 0.04;
     let w = params.warp_strength;
     return normalize(pos + (warp1 + warp2 + warp3) * w);
 }
@@ -195,107 +204,105 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     );
 
     let raw_pos = cube_to_sphere(params.face, uv);
-    let sphere_pos = warp_position(raw_pos); // Domain warping for natural boundaries
 
-    // --- Pass 1: Find plates and boundary info ---
-    let info = find_nearest_plates(sphere_pos);
-
-    let boundary_dist = info.second_dist - info.nearest_dist; // Small = near boundary
-    let boundary_type = classify_boundary(sphere_pos, info.nearest_idx, info.second_idx);
-
-    let is_continental = info.nearest_type > 0.5;
-    let neighbor_continental = info.second_type > 0.5;
-
-    // --- Pass 2: Physics-based elevation from continuous noise + tectonic forces ---
-    // Planet physics drive terrain character:
-    //   gravity → max mountain height (Mars: low g → Olympus Mons 21km)
-    //   tectonics → boundary force strength (stagnant lid → no convergent uplift)
-    //   age → terrain smoothness (young=sharp, old=peneplain)
-
-    // Gravity factor: lower gravity allows taller mountains
-    // Earth g=9.81 → factor 1.0, Mars g=3.72 → factor 2.6
+    // Physics parameters
     let gravity_factor = 9.81 / max(params.surface_gravity, 1.0);
-
-    // Age controls noise character: young = more high-freq detail, old = smoother
     let age = clamp(params.surface_age, 0.0, 1.0);
-    let high_freq_weight = 1.0 - age * 0.7; // young=1.0, old=0.3
-
-    // Step 1: Multi-octave global noise — gentle continent-scale terrain
-    // Base noise creates broad swells (continental shelves, ocean basins)
-    // Mountains come from plate boundaries, not base noise
-    let n1 = snoise(raw_pos * 1.2 + seed_offset(params.seed + 1000u));       // continent-scale
-    let n2 = snoise(raw_pos * 2.5 + seed_offset(params.seed + 1010u)) * 0.4; // sub-continent
-    let n3 = snoise(raw_pos * 5.0 + seed_offset(params.seed + 1020u)) * 0.15 * high_freq_weight;
-    let base_noise = (n1 + n2 + n3) / 1.55;
-    // Moderate base amplitude — mountains will add the dramatic features
-    var thickness = 20.0 + base_noise * 7.0 * gravity_factor;
-
-    // Step 2: Tectonic boundary forces — main source of mountain ranges
-    let convergence = smoothstep(0.0, -0.5, boundary_type);
-    let divergence = smoothstep(0.0, 0.5, boundary_type);
-    let broad_b = smoothstep(0.35, 0.0, boundary_dist); // wide mountain zone
+    let high_freq_weight = 1.0 - age * 0.7;
     let tect = params.tectonics_factor;
 
-    // Noise modulation along boundaries — creates peaks, passes, and gaps
-    // Without this, uplift would be uniform along the boundary (unnatural)
-    let m_n1 = snoise(raw_pos * 3.0 + seed_offset(params.seed + 3000u)) * 0.5 + 0.5; // 0..1
-    let m_n2 = snoise(raw_pos * 7.0 + seed_offset(params.seed + 3010u)) * 0.25 + 0.75; // 0.5..1.0
-    let uplift_vary = m_n1 * m_n2; // creates natural variation along ranges
+    // Domain warp for complex geological shapes (coastlines, mountain curves)
+    let wpos = warp_position(raw_pos);
 
-    // Convergent uplift — THE main mountain builder
-    // Earth: up to 10km uplift → through isostasy ≈ 0.25 height units
-    thickness += convergence * broad_b * uplift_vary
-        * params.mountain_scale * 10.0 * tect * gravity_factor;
+    // === Layer 1: Continental terrain — defines land/ocean geography ===
+    // Low persistence fBm: first octave dominates → large coherent continents
+    // Higher octaves add coastline complexity without fragmenting land masses
+    let c1 = snoise(wpos * 1.0 + seed_offset(params.seed + 1000u));         // continent-scale
+    let c2 = snoise(wpos * 2.0 + seed_offset(params.seed + 1010u)) * 0.20;  // sub-continent shape
+    let c3 = snoise(wpos * 4.0 + seed_offset(params.seed + 1020u)) * 0.06;  // coastline bays/peninsulas
+    let c4 = snoise(wpos * 8.0 + seed_offset(params.seed + 1030u)) * 0.02 * high_freq_weight; // fine coast
+    let continental_raw = (c1 + c2 + c3 + c4) / 1.28;
+    // Strong bimodal shaping: pow(0.35) creates plateau-like continents
+    // Land is solidly above sea level, ocean solidly below — fewer channels
+    let continental = sign(continental_raw) * pow(abs(continental_raw), 0.35);
+    var height = continental * params.amplitude * 0.35;
 
-    // Divergent: rift valleys and mid-ocean ridges
-    thickness -= divergence * broad_b * 3.0 * tect;
+    // === Layer 2: Highland/lowland variation within continents ===
+    let highland = snoise(wpos * 4.0 + seed_offset(params.seed + 1100u)) * 0.10
+                 + snoise(wpos * 8.0 + seed_offset(params.seed + 1110u)) * 0.04 * high_freq_weight;
+    let on_land = smooth_step(-0.05, 0.05, height);
+    height += highland * on_land;
 
-    // Step 3: Isostatic conversion — thickness → surface elevation
-    let T_ref: f32 = 20.0;
-    var height = (thickness - T_ref) * 0.025;
+    // === Layer 3: Mountain ranges — noise-positioned, NOT plate boundaries ===
+    // Mountain zone noise: creates broad bands where mountains can form
+    // tectonics_factor controls how mountainous the planet is
+    let mz1 = snoise(wpos * 2.0 + seed_offset(params.seed + 2000u));
+    let mz2 = snoise(wpos * 4.0 + seed_offset(params.seed + 2010u)) * 0.3;
+    let mountain_zone = smooth_step(0.1, 0.5, (mz1 + mz2) * 0.5 + 0.5) * tect;
 
-    // Step 4: Coastline detail — reduced for old planets
-    let coast_warp_val = snoise(raw_pos * 1.5 + seed_offset(params.seed + 600u));
-    let coast_pos = raw_pos + vec3<f32>(coast_warp_val) * 0.12;
-    let coast_n1 = snoise(coast_pos * 2.5 + seed_offset(params.seed + 700u));
-    let coast_n2 = snoise(coast_pos * 5.0 + seed_offset(params.seed + 710u)) * 0.3 * high_freq_weight;
-    let coastal_noise = coast_n1 + coast_n2;
-    height += coastal_noise * 0.04;
+    // Domain-warped ridged multifractal — warp breaks grid alignment
+    let mt_so = seed_offset(params.seed + 6000u);
+    let mt_warp = vec3<f32>(
+        snoise(raw_pos * 2.0 + vec3<f32>(53.7, 0.0, 0.0) + mt_so),
+        snoise(raw_pos * 2.0 + vec3<f32>(0.0, 71.3, 0.0) + mt_so),
+        snoise(raw_pos * 2.0 + vec3<f32>(0.0, 0.0, 97.1) + mt_so)
+    ) * 0.15;
+    let mpos = raw_pos + mt_warp;
+    let ridge = ridged_multifractal(
+        mpos * 5.0 + seed_offset(params.seed + 2100u),
+        5, 2.2, 2.0, 1.0
+    );
 
-    // Step 5: Additional geology
-    let land_weight = smooth_step(-0.05, 0.05, height);
+    // Mountains only on land and near-coast (not deep ocean)
+    let mountain_base = smooth_step(-0.08, 0.02, height);
+    height += ridge * mountain_zone * mountain_base
+        * params.mountain_scale * 0.35 * gravity_factor;
 
-    // Seamounts: rare underwater volcanoes
+    // === Layer 4: Ocean floor variation ===
+    let ocean_floor = smooth_step(0.0, -0.1, height);
+    let of1 = snoise(raw_pos * 3.5 + seed_offset(params.seed + 3000u)) * 0.04;
+    let of2 = snoise(raw_pos * 7.0 + seed_offset(params.seed + 3010u)) * 0.015;
+    // Mid-ocean ridge: broad elevated zone from separate noise
+    let mor = smooth_step(0.3, 0.7, snoise(raw_pos * 1.8 + seed_offset(params.seed + 3100u)) * 0.5 + 0.5) * 0.06;
+    height += (of1 + of2 + mor) * ocean_floor;
+
+    // === Layer 5: Seamounts and volcanic hotspots ===
     let seamount = snoise(raw_pos * 8.0 + seed_offset(params.seed + 900u));
     let seamount_h = smooth_step(0.78, 0.95, seamount) * 0.3;
-    height += seamount_h * (1.0 - land_weight);
+    height += seamount_h * ocean_floor;
 
-    // Volcanic hotspots — more numerous and larger on stagnant lid worlds (Mars, Venus)
-    // Low tectonics → heat escapes through fewer, bigger plumes instead of spreading along ridges
-    let hotspot_count = u32(3.0 + (1.0 - tect) * 5.0); // 3 (active tectonics) to 8 (stagnant lid)
-    let hotspot_radius = 0.02 + (1.0 - tect) * 0.04;    // wider on stagnant lid
-    let hotspot_height = 0.4 * gravity_factor;             // taller on low-gravity worlds
+    let hotspot_count = u32(3.0 + (1.0 - tect) * 5.0);
+    let hotspot_radius = 0.02 + (1.0 - tect) * 0.04;
+    let hotspot_height_val = 0.4 * gravity_factor;
     for (var h = 0u; h < hotspot_count; h++) {
         let hx = seed_offset(params.seed + 500u + h * 10u);
         let hotspot_center = normalize(hx);
-        let hotspot_dist = 1.0 - dot(sphere_pos, hotspot_center);
+        let hotspot_dist = 1.0 - dot(wpos, hotspot_center);
         if (hotspot_dist < hotspot_radius) {
-            let volcano_h = hotspot_height * (1.0 - hotspot_dist / hotspot_radius);
+            let volcano_h = hotspot_height_val * (1.0 - hotspot_dist / hotspot_radius);
             height = max(height, volcano_h);
         }
     }
 
-    // R13: fBm detail noise — scaled by age (old planets smoother) and gravity
+    // === Layer 6: Fine detail — elevation-dependent ===
+    // Elevation-dependent detail: still varies but plains aren't dead smooth
     let detail = detail_noise(raw_pos);
-    let detail_mix = mix(0.1, 1.2, smooth_step(-0.1, 0.5, height));
-    height += detail * detail_mix * params.detail_scale * high_freq_weight * gravity_factor;
+    let detail_weight = mix(0.5, 1.3, smooth_step(-0.02, 0.2, height));
+    height += detail * detail_weight * params.detail_scale * high_freq_weight * gravity_factor;
 
-    // Hypsometric profile: gentle shaping — preserve mountain/plain contrast
+    // === Coastline detail — domain-warped for natural shorelines ===
+    let coast_warp_val = snoise(raw_pos * 1.5 + seed_offset(params.seed + 600u));
+    let coast_pos = raw_pos + vec3<f32>(coast_warp_val) * 0.12;
+    let coast_n = snoise(coast_pos * 2.5 + seed_offset(params.seed + 700u))
+                + snoise(coast_pos * 5.0 + seed_offset(params.seed + 710u)) * 0.3 * high_freq_weight;
+    let near_coast = smooth_step(0.08, 0.0, abs(height));
+    height += coast_n * 0.03 * near_coast;
+
+    // === Hypsometric shaping ===
     if (height > 0.0) {
         let h_cap = 1.5 * max(params.mountain_scale, 1.0) * gravity_factor;
         let h_norm = min(height, h_cap);
         let t = h_norm / h_cap;
-        // Power 1.3: mild compression, mountains stay prominent
         height = pow(t, 1.3) * h_cap;
     } else {
         height *= 1.2;
