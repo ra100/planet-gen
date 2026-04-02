@@ -958,7 +958,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // Land ice/snow (gated by show_ice)
         if (uniforms.show_ice > 0.5) {
             let land_ice_noise = snoise(rotated * 10.0) * 2.0;
-            let cold_snow = smooth_step(2.0 + land_ice_noise, -8.0, seasonal_temp);
+            // Snow requires sustained freezing — threshold -3°C (was 2°C which is too warm,
+            // caused snow to trace coastline because any slight elevation cooled below 2°C)
+            let cold_snow = smooth_step(-3.0 + land_ice_noise, -12.0, seasonal_temp);
             let altitude_bonus = smooth_step(0.3, 0.6, land_height) * smooth_step(5.0, -5.0, seasonal_temp);
             var ice_blend = max(cold_snow, altitude_bonus);
             ice_blend *= slope_factor * altitude_dryness;
