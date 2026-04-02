@@ -686,8 +686,8 @@ fn compute_roughness(temp_c: f32, moisture_cm: f32, is_ocean: bool, is_ice: bool
     roughness -= snow_smooth; // snow smooths it
     roughness += desert_rough * 0.25; // desert roughens
     roughness -= vegetation * 0.15; // dense vegetation slightly smoother
-    // Per-pixel noise breaks up visible biome boundaries
-    roughness += snoise(vec3<f32>(temp_c * 0.1, moisture_cm * 0.01, temp_c * 0.05)) * 0.08;
+    // Per-pixel noise from spatial position (NOT temp/moisture which creates sharp biome edges)
+    roughness += snoise(vec3<f32>(temp_c * 0.02 + moisture_cm * 0.005, moisture_cm * 0.01 - temp_c * 0.01, temp_c * 0.015)) * 0.06;
     return clamp(roughness, 0.15, 0.85);
 }
 
@@ -773,11 +773,12 @@ fn compute_urban_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     // Combine dots + webs
     let city_pattern = max(dots * dots2 * 1.5, webs * 0.6);
 
-    // Quadratic dev ramp: 0.01→0.0001 (sparse), 0.1→0.01, 0.5→0.25, 1.0→1.0
-    let dev_scaled = dev * dev;
+    // Cubic dev ramp: very sparse at low values, rapidly grows near 1.0
+    // 0.01→0.000001, 0.1→0.001, 0.5→0.125, 1.0→1.0
+    let dev_scaled = dev * dev * dev;
     let urban_raw = score * city_pattern;
-    let threshold = (1.0 - dev_scaled) * 0.35;
-    return smooth_step(threshold, threshold + 0.06, urban_raw);
+    let threshold = (1.0 - dev_scaled) * 0.45;
+    return smooth_step(threshold, threshold + 0.04, urban_raw);
 }
 
 // ---- Starfield + sun orb background ----
@@ -1105,13 +1106,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 debug_color = vec3<f32>(cd, cd, cd);
             }
             case 10u: {
-                // City lights / urban density visualization
-                if (is_ocean) {
-                    debug_color = vec3<f32>(0.0, 0.0, 0.1);
-                } else {
-                    let urban = compute_urban_density(rotated, height);
-                    debug_color = vec3<f32>(urban, urban * 0.8, 0.0);
-                }
+                // Emission export: city lights only, everything else black
+                let urban = compute_urban_density(rotated, height);
+                debug_color = vec3<f32>(urban, urban * 0.8, urban * 0.3);
             }
             case 11u: {
                 // Boundary type proxy: use height gradient magnitude and sign to visualize
