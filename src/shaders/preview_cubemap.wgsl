@@ -945,15 +945,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let elev_tint = mix(0.65, 1.35, h_for_tint);
         surface_color *= elev_tint;
 
-        // Slope computation (reused for snow + altitude zonation)
-        let stp_s = 0.06;
+        // Slope computation for snow reduction (finer sampling step for less patchiness)
+        let stp_s = 0.015;
         let sh_e = textureSample(height_tex, height_sampler, rotated + vec3<f32>(stp_s, 0.0, 0.0)).r;
         let sh_w = textureSample(height_tex, height_sampler, rotated + vec3<f32>(-stp_s, 0.0, 0.0)).r;
         let sh_n = textureSample(height_tex, height_sampler, rotated + vec3<f32>(0.0, stp_s, 0.0)).r;
         let sh_s = textureSample(height_tex, height_sampler, rotated + vec3<f32>(0.0, -stp_s, 0.0)).r;
         let slope = max(abs(sh_e - sh_w), abs(sh_n - sh_s)) / (2.0 * stp_s);
-        let slope_factor = smooth_step(5.0, 2.0, slope); // steep = less snow
-        let altitude_dryness = smooth_step(0.75, 0.55, land_height); // extreme peaks too dry
+        // Subtle snow reduction on slopes (not elimination — mix with 0.4 floor)
+        let slope_factor = mix(0.4, 1.0, smooth_step(6.0, 2.5, slope));
+        // Only the very highest peaks lose snow (threshold raised from 0.75 to 0.9)
+        let altitude_dryness = smooth_step(0.95, 0.80, land_height);
 
         // Land ice/snow (gated by show_ice)
         if (uniforms.show_ice > 0.5) {
