@@ -526,6 +526,119 @@ fn cube_to_sphere(face: u32, u: f32, v: f32) -> [f32; 3] {
     [x / len, y / len, z / len]
 }
 
+/// Inverse of cube_to_sphere: given a 3D direction, find which cube face and UV.
+fn direction_to_face_uv(dx: f32, dy: f32, dz: f32) -> (usize, f32, f32) {
+    let ax = dx.abs();
+    let ay = dy.abs();
+    let az = dz.abs();
+
+    let (face, s, t) = if ax >= ay && ax >= az {
+        if dx > 0.0 {
+            (0, -dz / ax, -dy / ax)     // +X
+        } else {
+            (1, dz / ax, -dy / ax)      // -X
+        }
+    } else if ay >= ax && ay >= az {
+        if dy > 0.0 {
+            (2, dx / ay, dz / ay)        // +Y
+        } else {
+            (3, dx / ay, -dz / ay)       // -Y
+        }
+    } else if dz > 0.0 {
+        (4, dx / az, -dy / az)           // +Z
+    } else {
+        (5, -dx / az, -dy / az)          // -Z
+    };
+
+    let u = ((s + 1.0) * 0.5).clamp(0.0, 1.0);
+    let v = ((t + 1.0) * 0.5).clamp(0.0, 1.0);
+    (face, u, v)
+}
+
+/// Convert 6 cubemap faces to a single equirectangular image with bilinear interpolation.
+/// `channels` is 1 for grayscale, 4 for RGBA.
+fn cubemap_to_equirect(
+    faces: &[Vec<f32>; 6],
+    face_res: u32,
+    channels: usize,
+) -> (Vec<f32>, u32, u32) {
+    let eq_w = (face_res * 2) as usize;
+    let eq_h = face_res as usize;
+    let res = face_res as usize;
+    let mut result = vec![0.0f32; eq_w * eq_h * channels];
+
+    for y in 0..eq_h {
+        let lat = std::f32::consts::PI * (0.5 - y as f32 / (eq_h - 1).max(1) as f32);
+        for x in 0..eq_w {
+            let lon = 2.0 * std::f32::consts::PI * (x as f32 / eq_w as f32) - std::f32::consts::PI;
+
+            let dx = lat.cos() * lon.sin();
+            let dy = lat.sin();
+            let dz = lat.cos() * lon.cos();
+
+            let (face, u, v) = direction_to_face_uv(dx, dy, dz);
+
+            // Bilinear interpolation
+            let fx = u * (res - 1) as f32;
+            let fy = v * (res - 1) as f32;
+            let ix = (fx as usize).min(res - 2);
+            let iy = (fy as usize).min(res - 2);
+            let frac_x = fx - ix as f32;
+            let frac_y = fy - iy as f32;
+
+            let fd = &faces[face];
+            for c in 0..channels {
+                let tl = fd[(iy * res + ix) * channels + c];
+                let tr = fd[(iy * res + ix + 1) * channels + c];
+                let bl = fd[((iy + 1) * res + ix) * channels + c];
+                let br = fd[((iy + 1) * res + ix + 1) * channels + c];
+
+                let top = tl + (tr - tl) * frac_x;
+                let bot = bl + (br - bl) * frac_x;
+                result[(y * eq_w + x) * channels + c] = top + (bot - top) * frac_y;
+            }
+        }
+    }
+
+    (result, eq_w as u32, eq_h as u32)
+}
+
+fn export_equirect_png_rgba(data: &[f32], width: u32, height: u32, path: &Path) -> Result<(), String> {
+    let mut img = image::RgbaImage::new(width, height);
+    for y in 0..height {
+        for x in 0..width {
+            let idx = (y * width + x) as usize * 4;
+            let r = (data[idx].clamp(0.0, 1.0) * 255.0) as u8;
+            let g = (data[idx + 1].clamp(0.0, 1.0) * 255.0) as u8;
+            let b = (data[idx + 2].clamp(0.0, 1.0) * 255.0) as u8;
+            let a = (data[idx + 3].clamp(0.0, 1.0) * 255.0) as u8;
+            img.put_pixel(x, y, image::Rgba([r, g, b, a]));
+        }
+    }
+    img.save(path).map_err(|e| format!("PNG write error: {e}"))
+}
+
+fn export_equirect_png_gray(data: &[f32], width: u32, height: u32, path: &Path) -> Result<(), String> {
+    let mut img = image::GrayImage::new(width, height);
+    for y in 0..height {
+        for x in 0..width {
+            let v = (data[(y * width + x) as usize].clamp(0.0, 1.0) * 255.0) as u8;
+            img.put_pixel(x, y, image::Luma([v]));
+        }
+    }
+    img.save(path).map_err(|e| format!("PNG write error: {e}"))
+}
+
+fn export_equirect_exr(data: &[f32], width: u32, height: u32, path: &Path) -> Result<(), String> {
+    let w = width as usize;
+    let h = height as usize;
+    exr::prelude::write_rgba_file(path, w, h, |x, y| {
+        let v = data[y * w + x];
+        (v, v, v, 1.0)
+    })
+    .map_err(|e| format!("EXR write error: {e}"))
+}
+
 fn generate_ice_mask(
     heightmap: &[f32],
     face: u32,
@@ -593,7 +706,7 @@ pub fn run_export(
     std::fs::create_dir_all(&planet_dir).map_err(|e| format!("Failed to create output dir: {e}"))?;
 
     let effective_ocean = derived.ocean_fraction * (1.0 - water_loss);
-    let ocean_level = -1.0 + 2.0 * effective_ocean;
+    let ocean_level = -0.5 + 1.7 * effective_ocean; // match app.rs formula
     let (amplitude, frequency, octaves, gain, lacunarity) = terrain_params;
 
     // Compute total steps for progress:
@@ -682,188 +795,104 @@ pub fn run_export(
         "ao map",
     );
 
-    // --- Phase 5: Generate maps and export per face ---
+    // --- Phase 5: Generate all maps per face, store in memory ---
+    let tile_size = coordinator.tile_size;
+    let full_res = coordinator.face_resolution;
+
+    let mut all_heights: [Vec<f32>; 6] = Default::default();
+    let mut all_normals: [Vec<f32>; 6] = Default::default();
+    let mut all_roughness: [Vec<f32>; 6] = Default::default();
+    let mut all_albedo: [Vec<f32>; 6] = Default::default();
+    let mut all_ao: [Vec<f32>; 6] = Default::default();
+    let mut all_ocean: [Vec<f32>; 6] = Default::default();
+
     for face in 0..6u32 {
-        if cancel.load(Ordering::Relaxed) {
-            return Err("Cancelled".into());
-        }
+        if cancel.load(Ordering::Relaxed) { return Err("Cancelled".into()); }
 
         let face_data = &terrain.faces[face as usize];
+        let heightmap_buffer = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("export heightmap"),
+            contents: bytemuck::cast_slice(face_data),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
 
-        // Upload full-face heightmap to GPU as read-only storage
-        let heightmap_buffer =
-            gpu.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("export heightmap"),
-                    contents: bytemuck::cast_slice(face_data),
-                    usage: wgpu::BufferUsages::STORAGE,
-                });
+        all_heights[face as usize] = face_data.clone();
 
-        let tile_size = coordinator.tile_size;
-        let full_res = coordinator.face_resolution;
-
-        // -- Height EXR --
-        progress.advance(&format!("Exporting height face {face}"));
-        export_height_exr(
-            face_data,
-            full_res,
-            &planet_dir.join(format!("face{face}_height.exr")),
-        )?;
-
-        // -- Normal map (tiled) --
         let normal_bytes = generate_map_tiled(
-            gpu,
-            &normal_pipeline,
-            &heightmap_buffer,
-            &coordinator,
-            |offset_x, offset_y| NormalMapParams {
-                resolution: tile_size,
-                height_scale: 50.0,
-                tile_offset_x: offset_x,
-                tile_offset_y: offset_y,
-                full_resolution: full_res,
-                _pad0: 0,
-                _pad1: 0,
-                _pad2: 0,
-            },
-            16, // vec4<f32> = 16 bytes
-            &mut progress,
-            "Normal",
-            face,
-            cancel,
+            gpu, &normal_pipeline, &heightmap_buffer, &coordinator,
+            |ox, oy| NormalMapParams {
+                resolution: tile_size, height_scale: 50.0,
+                tile_offset_x: ox, tile_offset_y: oy,
+                full_resolution: full_res, _pad0: 0, _pad1: 0, _pad2: 0,
+            }, 16, &mut progress, "Normal", face, cancel,
         )?;
-        progress.advance(&format!("Exporting normal face {face}"));
-        let normal_floats: &[f32] = bytemuck::cast_slice(&normal_bytes);
-        export_png_rgba(
-            normal_floats,
-            full_res,
-            &planet_dir.join(format!("face{face}_normal.png")),
-        )?;
+        all_normals[face as usize] = bytemuck::cast_slice::<u8, f32>(&normal_bytes).to_vec();
 
-        // -- Roughness map (tiled) --
         let roughness_bytes = generate_map_tiled(
-            gpu,
-            &roughness_pipeline,
-            &heightmap_buffer,
-            &coordinator,
-            |offset_x, offset_y| RoughnessMapParams {
-                face,
-                resolution: tile_size,
-                seed: params.seed,
-                base_temp_c: derived.base_temperature_c,
-                ocean_level,
+            gpu, &roughness_pipeline, &heightmap_buffer, &coordinator,
+            |ox, oy| RoughnessMapParams {
+                face, resolution: tile_size, seed: params.seed,
+                base_temp_c: derived.base_temperature_c, ocean_level,
                 ocean_fraction: effective_ocean,
-                tile_offset_x: offset_x,
-                tile_offset_y: offset_y,
-                full_resolution: full_res,
-                _pad0: 0,
-                _pad1: 0,
-                _pad2: 0,
-            },
-            4, // f32 = 4 bytes
-            &mut progress,
-            "Roughness",
-            face,
-            cancel,
+                tile_offset_x: ox, tile_offset_y: oy,
+                full_resolution: full_res, _pad0: 0, _pad1: 0, _pad2: 0,
+            }, 4, &mut progress, "Roughness", face, cancel,
         )?;
-        progress.advance(&format!("Exporting roughness face {face}"));
-        let roughness_floats: &[f32] = bytemuck::cast_slice(&roughness_bytes);
-        export_png_gray(
-            roughness_floats,
-            full_res,
-            &planet_dir.join(format!("face{face}_roughness.png")),
-        )?;
+        all_roughness[face as usize] = bytemuck::cast_slice::<u8, f32>(&roughness_bytes).to_vec();
 
-        // -- Albedo map (tiled) --
         let albedo_bytes = generate_map_tiled(
-            gpu,
-            &albedo_pipeline,
-            &heightmap_buffer,
-            &coordinator,
-            |offset_x, offset_y| AlbedoMapParams {
-                face,
-                resolution: tile_size,
-                seed: params.seed,
-                base_temp_c: derived.base_temperature_c,
-                ocean_level,
+            gpu, &albedo_pipeline, &heightmap_buffer, &coordinator,
+            |ox, oy| AlbedoMapParams {
+                face, resolution: tile_size, seed: params.seed,
+                base_temp_c: derived.base_temperature_c, ocean_level,
                 ocean_fraction: effective_ocean,
                 axial_tilt_rad: params.axial_tilt_deg.to_radians(),
                 season: config.season,
-                tile_offset_x: offset_x,
-                tile_offset_y: offset_y,
-                full_resolution: full_res,
-                _pad0: 0,
-            },
-            16, // vec4<f32>
-            &mut progress,
-            "Albedo",
-            face,
-            cancel,
+                tile_offset_x: ox, tile_offset_y: oy,
+                full_resolution: full_res, _pad0: 0,
+            }, 16, &mut progress, "Albedo", face, cancel,
         )?;
-        progress.advance(&format!("Exporting albedo face {face}"));
-        let albedo_floats: &[f32] = bytemuck::cast_slice(&albedo_bytes);
-        export_png_rgba(
-            albedo_floats,
-            full_res,
-            &planet_dir.join(format!("face{face}_albedo.png")),
-        )?;
+        all_albedo[face as usize] = bytemuck::cast_slice::<u8, f32>(&albedo_bytes).to_vec();
 
-        // -- Ocean mask (CPU) --
-        progress.advance(&format!("Exporting ocean mask face {face}"));
-        let ocean_mask = generate_ocean_mask(face_data, ocean_level);
-        export_png_gray(
-            &ocean_mask,
-            full_res,
-            &planet_dir.join(format!("face{face}_ocean_mask.png")),
-        )?;
-
-        // -- Ice mask (CPU) --
-        progress.advance(&format!("Exporting ice mask face {face}"));
-        let ice_mask = generate_ice_mask(
-            face_data,
-            face,
-            full_res,
-            params.axial_tilt_deg.to_radians(),
-            derived.base_temperature_c,
-            ocean_level,
-            effective_ocean,
-        );
-        export_png_gray(
-            &ice_mask,
-            full_res,
-            &planet_dir.join(format!("face{face}_ice_mask.png")),
-        )?;
-
-        // -- AO map (tiled) --
         let ao_bytes = generate_map_tiled(
-            gpu,
-            &ao_pipeline,
-            &heightmap_buffer,
-            &coordinator,
-            |offset_x, offset_y| AoMapParams {
-                face,
-                full_resolution: full_res,
-                ao_strength: 30.0,
-                ocean_level,
-                tile_offset_x: offset_x,
-                tile_offset_y: offset_y,
-                resolution: tile_size,
-                _pad0: 0,
-            },
-            4, // f32 = 4 bytes
-            &mut progress,
-            "AO",
-            face,
-            cancel,
+            gpu, &ao_pipeline, &heightmap_buffer, &coordinator,
+            |ox, oy| AoMapParams {
+                face, full_resolution: full_res, ao_strength: 30.0, ocean_level,
+                tile_offset_x: ox, tile_offset_y: oy,
+                resolution: tile_size, _pad0: 0,
+            }, 4, &mut progress, "AO", face, cancel,
         )?;
-        progress.advance(&format!("Exporting AO face {face}"));
-        let ao_floats: &[f32] = bytemuck::cast_slice(&ao_bytes);
-        export_png_gray(
-            ao_floats,
-            full_res,
-            &planet_dir.join(format!("face{face}_ao.png")),
-        )?;
+        all_ao[face as usize] = bytemuck::cast_slice::<u8, f32>(&ao_bytes).to_vec();
+
+        all_ocean[face as usize] = generate_ocean_mask(face_data, ocean_level);
+
+        progress.advance(&format!("Face {face} maps generated"));
     }
+
+    // --- Phase 6: Convert cubemap to equirectangular and export ---
+    progress.advance("Converting height to equirectangular...");
+    let (eq_h, eq_w, eq_ht) = cubemap_to_equirect(&all_heights, full_res, 1);
+    export_equirect_exr(&eq_h, eq_w, eq_ht, &planet_dir.join("height.exr"))?;
+
+    progress.advance("Converting albedo to equirectangular...");
+    let (eq_a, _, _) = cubemap_to_equirect(&all_albedo, full_res, 4);
+    export_equirect_png_rgba(&eq_a, eq_w, eq_ht, &planet_dir.join("albedo.png"))?;
+
+    progress.advance("Converting normal to equirectangular...");
+    let (eq_n, _, _) = cubemap_to_equirect(&all_normals, full_res, 4);
+    export_equirect_png_rgba(&eq_n, eq_w, eq_ht, &planet_dir.join("normal.png"))?;
+
+    progress.advance("Converting roughness to equirectangular...");
+    let (eq_r, _, _) = cubemap_to_equirect(&all_roughness, full_res, 1);
+    export_equirect_png_gray(&eq_r, eq_w, eq_ht, &planet_dir.join("roughness.png"))?;
+
+    progress.advance("Converting AO to equirectangular...");
+    let (eq_ao, _, _) = cubemap_to_equirect(&all_ao, full_res, 1);
+    export_equirect_png_gray(&eq_ao, eq_w, eq_ht, &planet_dir.join("ao.png"))?;
+
+    progress.advance("Converting water mask to equirectangular...");
+    let (eq_o, _, _) = cubemap_to_equirect(&all_ocean, full_res, 1);
+    export_equirect_png_gray(&eq_o, eq_w, eq_ht, &planet_dir.join("water_mask.png"))?;
 
     let _ = progress_tx.send(ExportProgress::Complete);
     Ok(planet_dir)
@@ -1031,13 +1060,13 @@ mod tests {
         assert!(result.is_ok(), "Export failed: {:?}", result.err());
 
         let planet_dir = tmp_dir.join("test_planet");
-        assert!(planet_dir.join("face0_height.exr").exists());
-        assert!(planet_dir.join("face0_albedo.png").exists());
-        assert!(planet_dir.join("face0_normal.png").exists());
-        assert!(planet_dir.join("face0_roughness.png").exists());
-        assert!(planet_dir.join("face0_ocean_mask.png").exists());
-        assert!(planet_dir.join("face0_ice_mask.png").exists());
-        assert!(planet_dir.join("face5_height.exr").exists());
+        // Equirectangular output files
+        assert!(planet_dir.join("height.exr").exists());
+        assert!(planet_dir.join("albedo.png").exists());
+        assert!(planet_dir.join("normal.png").exists());
+        assert!(planet_dir.join("roughness.png").exists());
+        assert!(planet_dir.join("water_mask.png").exists());
+        assert!(planet_dir.join("ao.png").exists());
 
         // Check last progress was Complete
         let mut last = None;
