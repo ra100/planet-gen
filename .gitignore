@@ -47,3 +47,4 @@ output/
 # Added by cargo
 
 /target
+.claude/logs/
