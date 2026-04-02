@@ -136,7 +136,7 @@ fn generate_planet_png(
     let lacunarity = 1.9 + 0.2 * rotation_factor;
 
     let terrain = compute.generate(
-        gpu, &plates, 512, seed, amplitude, frequency, octaves, gain, lacunarity, 1.0, 0.10, 1.0, 1.0,
+        gpu, &plates, 512, seed, amplitude, frequency, octaves, gain, lacunarity, 1.0, 0.10, 1.0, 1.0, derived.surface_gravity, derived.tectonics_factor, derived.surface_age,
     );
 
     let cubemap_view = renderer.upload_terrain(gpu, &terrain);
@@ -176,7 +176,13 @@ fn generate_planet_png(
         star_color_temp: 0.5,
         city_light_hue: 0.0,
         show_ao: 1.0,
-        _pad4: [0.0; 3],
+        show_water: 1.0,
+        show_ice: 1.0,
+        show_biomes: 1.0,
+        show_clouds: 0.0,
+        show_atmosphere_layer: 0.0,
+        show_cities: 0.0,
+        _pad5: 0.0,
     };
 
     renderer.render(gpu, &uniforms, &cubemap_view, render_size)

@@ -33,7 +33,14 @@ pub struct PreviewUniforms {
     pub star_color_temp: f32,    // 0.0 = blue hot star, 0.5 = sun-like, 1.0 = red dwarf
     pub city_light_hue: f32,    // 0.0 = warm amber, 0.5 = white, 1.0 = cool blue
     pub show_ao: f32,           // 1.0 = AO enabled, 0.0 = disabled
-    pub _pad4: [f32; 3],
+    // Layer toggles (1.0 = enabled, 0.0 = disabled)
+    pub show_water: f32,
+    pub show_ice: f32,
+    pub show_biomes: f32,
+    pub show_clouds: f32,
+    pub show_atmosphere_layer: f32,
+    pub show_cities: f32,
+    pub _pad5: f32,
 }
 
 pub struct PreviewRenderer {
@@ -345,7 +352,7 @@ mod tests {
             continental_scale: 1.0,
             num_plates_override: 0,
         });
-        let terrain = compute.generate(&gpu, &plates, 64, 42, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0);
+        let terrain = compute.generate(&gpu, &plates, 64, 42, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0, 9.81, 0.85, 0.2);
 
         // Upload and render
         let renderer = PreviewRenderer::new(&gpu);
@@ -381,7 +388,13 @@ mod tests {
             star_color_temp: 0.5,
             city_light_hue: 0.0,
             show_ao: 1.0,
-            _pad4: [0.0; 3],
+            show_water: 1.0,
+            show_ice: 1.0,
+            show_biomes: 1.0,
+            show_clouds: 0.0,
+            show_atmosphere_layer: 0.0,
+            show_cities: 0.0,
+            _pad5: 0.0,
         };
 
         let size = 256;

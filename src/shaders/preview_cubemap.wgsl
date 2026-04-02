@@ -27,9 +27,14 @@ struct Uniforms {
     star_color_temp: f32,    // 0.0 = blue, 0.5 = sun, 1.0 = red dwarf
     city_light_hue: f32,    // 0.0 = warm amber, 0.5 = white, 1.0 = cool blue
     show_ao: f32,           // 1.0 = enabled, 0.0 = disabled
-    _pad4a: f32,
-    _pad4b: f32,
-    _pad4c: f32,
+    // Layer toggles (1.0 = enabled, 0.0 = disabled)
+    show_water: f32,
+    show_ice: f32,
+    show_biomes: f32,
+    show_clouds: f32,
+    show_atmosphere_layer: f32,
+    show_cities: f32,
+    _pad5: f32,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -564,6 +569,13 @@ fn compute_cirrus_density(sphere_pos: vec3<f32>) -> f32 {
     return max(density, 0.0);
 }
 
+// Clean grayscale elevation — pure height visualization
+// Maps terrain range (~-0.5 to ~0.8) to full 0..1 grayscale
+fn height_color(h: f32, ocean_level: f32) -> vec3<f32> {
+    let v = clamp((h + 0.5) / 1.3, 0.0, 1.0);
+    return vec3<f32>(v, v, v);
+}
+
 // ---- Continuous gradient biome coloring ----
 // Replaces discrete Whittaker lookup with smooth 2D interpolation.
 // Temperature × moisture → color via 3×2 anchor grid.
@@ -828,7 +840,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if (!hit_planet) {
         let bg = starfield(ndc, sun_dir, s_color);
         let bg_tm = bg / (bg + vec3<f32>(1.0));
-        if (!has_atm || uniforms.view_mode != 0u) {
+        if (!has_atm || uniforms.show_atmosphere_layer < 0.5 || uniforms.view_mode != 0u) {
             return vec4<f32>(bg_tm, 1.0);
         }
         let z_atm = sqrt(max(atm_radius * atm_radius - r2, 0.0));
@@ -857,10 +869,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var surface_color: vec3<f32>;
     var ice_amount = 0.0; // tracks ice coverage for HDR override
 
-    if (is_ocean) {
+    // Base layer: when biomes OFF, always show clean grayscale elevation for everything
+    if (uniforms.show_biomes < 0.5 && uniforms.show_water < 0.5) {
+        // Pure elevation mode — no ocean/land distinction, just height
+        surface_color = height_color(height, uniforms.ocean_level);
+    } else if (is_ocean && uniforms.show_water > 0.5) {
         // Smooth ocean gradient: shallow → deep with continuous depth color
         let ocean_temp = compute_temperature(rotated, height, uniforms.season);
-        // Depth from continuous terrain slope — gradual dome means smooth gradient
         let raw_depth = (uniforms.ocean_level - height) / max(uniforms.ocean_level + 1.0, 0.5);
         let depth = clamp(raw_depth, 0.0, 1.0);
         let depth_noise = snoise(rotated * 8.0) * 0.02;
@@ -873,64 +888,79 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         var ocean_color = mix(near_shore, mix(mid_ocean, deep_ocean, abyss), shelf);
         ocean_color += vec3<f32>(0.0, 0.015, 0.02) * color_var;
 
-        // Polar sea ice: noisy edge, thickness variation, surface texture
-        let ice_edge_noise = snoise(rotated * 12.0) * 1.5;
-        let ice_temp_threshold = 3.0 + ice_edge_noise;
-        let ice_blend = smooth_step(ice_temp_threshold, ice_temp_threshold - 5.0, ocean_temp);
-        ice_amount = ice_blend;
+        // Polar sea ice (gated by show_ice)
+        if (uniforms.show_ice > 0.5) {
+            let ice_edge_noise = snoise(rotated * 12.0) * 1.5;
+            let ice_temp_threshold = 3.0 + ice_edge_noise;
+            let ice_blend = smooth_step(ice_temp_threshold, ice_temp_threshold - 5.0, ocean_temp);
+            ice_amount = ice_blend;
 
-        // Thickness: thin edges (blue-grey), thick pack ice (bright white)
-        let ice_thickness = smooth_step(ice_temp_threshold - 1.0, ice_temp_threshold - 8.0, ocean_temp);
-        let thin_ice = vec3<f32>(0.85, 0.92, 1.05);  // blue-grey, semi-translucent look
-        let thick_ice = vec3<f32>(1.15, 1.18, 1.22);  // bright pack ice
-        var ice_color = mix(thin_ice, thick_ice, ice_thickness);
-
-        // Pressure ridges and surface roughness (real ice isn't flat)
-        let ridge_noise = snoise(rotated * 25.0) * 0.06 + snoise(rotated * 50.0) * 0.03;
-        ice_color += vec3<f32>(ridge_noise) * ice_thickness; // ridges more visible on thick ice
-
-        ice_color += vec3<f32>(0.015) * color_var;
-        surface_color = mix(ocean_color, ice_color, ice_blend);
+            let ice_thickness = smooth_step(ice_temp_threshold - 1.0, ice_temp_threshold - 8.0, ocean_temp);
+            let thin_ice = vec3<f32>(0.85, 0.92, 1.05);
+            let thick_ice = vec3<f32>(1.15, 1.18, 1.22);
+            var ice_color = mix(thin_ice, thick_ice, ice_thickness);
+            let ridge_noise = snoise(rotated * 25.0) * 0.06 + snoise(rotated * 50.0) * 0.03;
+            ice_color += vec3<f32>(ridge_noise) * ice_thickness;
+            ice_color += vec3<f32>(0.015) * color_var;
+            ocean_color = mix(ocean_color, ice_color, ice_blend);
+        }
+        surface_color = ocean_color;
+    } else if (is_ocean) {
+        // Water OFF but biomes ON: show height-based grayscale for below-sea-level
+        surface_color = height_color(height, uniforms.ocean_level);
     } else {
-        // Mean annual climate for biome classification (stable across seasons)
-        let mean_temp = compute_temperature(rotated, height, 0.5);
-        let mean_moisture = compute_moisture(rotated, height, 0.5);
-        // Seasonal climate for color modulation only
+        // Land: biome coloring or height ramp
         let seasonal_temp = compute_temperature(rotated, height, uniforms.season);
+        if (uniforms.show_biomes > 0.5) {
+            let mean_temp = compute_temperature(rotated, height, 0.5);
+            let mean_moisture = compute_moisture(rotated, height, 0.5);
+            surface_color = gradient_color(mean_temp, mean_moisture, seasonal_temp, color_var);
+        } else {
+            surface_color = height_color(height, uniforms.ocean_level);
+        }
 
-        // Continuous gradient coloring — biome type from mean, color shift from season
-        surface_color = gradient_color(mean_temp, mean_moisture, seasonal_temp, color_var);
-
-        // Land ice/snow: temperature is primary driver, altitude/moisture secondary
+        // Elevation tinting: darken lowlands, lighten highlands
+        // Uses raw height for strong contrast on dry worlds (Mars, Venus)
         let land_height = (height - uniforms.ocean_level) / max(1.0 - uniforms.ocean_level, 0.01);
-        let land_ice_noise = snoise(rotated * 10.0) * 2.0;
+        let h_for_tint = clamp((height + 0.5) / 1.0, 0.0, 1.0);
+        let elev_tint = mix(0.65, 1.35, h_for_tint);
+        surface_color *= elev_tint;
 
-        // Snow covers land below 0°C (like reality — polar land is white)
-        let cold_snow = smooth_step(2.0 + land_ice_noise, -8.0, seasonal_temp);
-        // Altitude bonus: high terrain gets snow easier
-        let altitude_bonus = smooth_step(0.3, 0.6, land_height) * smooth_step(5.0, -5.0, seasonal_temp);
-        let ice_blend = max(cold_snow, altitude_bonus);
-        ice_amount = max(ice_amount, ice_blend);
+        // Land ice/snow (gated by show_ice)
+        if (uniforms.show_ice > 0.5) {
+            let land_ice_noise = snoise(rotated * 10.0) * 2.0;
+            let cold_snow = smooth_step(2.0 + land_ice_noise, -8.0, seasonal_temp);
+            let altitude_bonus = smooth_step(0.3, 0.6, land_height) * smooth_step(5.0, -5.0, seasonal_temp);
+            let ice_blend = max(cold_snow, altitude_bonus);
+            ice_amount = max(ice_amount, ice_blend);
 
-        // HDR bright snow (override handles PBR brightness)
-        let glacier_blue = vec3<f32>(1.05, 1.15, 1.25);
-        let fresh_snow = vec3<f32>(1.20, 1.22, 1.25) + vec3<f32>(0.015) * color_var;
-        let land_ice_color = mix(fresh_snow, glacier_blue, land_height * cold_snow);
-        surface_color = mix(surface_color, land_ice_color, ice_blend);
+            let glacier_blue = vec3<f32>(1.05, 1.15, 1.25);
+            let fresh_snow = vec3<f32>(1.20, 1.22, 1.25) + vec3<f32>(0.015) * color_var;
+            let land_ice_color = mix(fresh_snow, glacier_blue, land_height * cold_snow);
+            surface_color = mix(surface_color, land_ice_color, ice_blend);
+        }
 
-        // Altitude zonation — only the highest peaks get snow/rock
-        let snow_line = 0.85 + 0.10 * (1.0 - abs(effective_lat) / 1.5708);
-        let rock_line = snow_line - 0.10;
-        let alpine_line = rock_line - 0.10;
+        // Altitude zonation — visible mountain coloring at moderate heights
+        let snow_line = 0.55 + 0.15 * (1.0 - abs(effective_lat) / 1.5708);
+        let rock_line = snow_line - 0.12;
+        let alpine_line = rock_line - 0.12;
+        let highland_line = 0.15; // brown highlands visible early
+
+        // Highlands: darken/brown tint for elevated terrain (visible at moderate heights)
+        if (land_height > highland_line && land_height <= alpine_line) {
+            let blend = smooth_step(highland_line, highland_line + 0.15, land_height);
+            let highland = mix(surface_color, surface_color * vec3<f32>(0.85, 0.78, 0.70), 0.6);
+            surface_color = mix(surface_color, highland, blend);
+        }
 
         if (land_height > snow_line && seasonal_temp < 15.0) {
-            let blend = smooth_step(snow_line, snow_line + 0.10, land_height);
+            let blend = smooth_step(snow_line, snow_line + 0.08, land_height);
             surface_color = mix(surface_color, vec3<f32>(1.15, 1.18, 1.22), blend);
         } else if (land_height > rock_line) {
-            let blend = smooth_step(rock_line, rock_line + 0.10, land_height);
+            let blend = smooth_step(rock_line, rock_line + 0.08, land_height);
             surface_color = mix(surface_color, vec3<f32>(0.50, 0.48, 0.44) + vec3<f32>(0.04) * color_var, blend);
         } else if (land_height > alpine_line) {
-            let blend = smooth_step(alpine_line, alpine_line + 0.10, land_height);
+            let blend = smooth_step(alpine_line, alpine_line + 0.08, land_height);
             let alpine = mix(surface_color, vec3<f32>(0.48, 0.52, 0.35), 0.5);
             surface_color = mix(surface_color, alpine, blend);
         }
@@ -942,9 +972,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
 
-    // Polar coastline softening: ONLY in genuinely frozen regions (not mountain snow)
-    // Check that ocean is also frozen before blending coastline
-    if (ice_amount > 0.3 && is_ocean == false) {
+    // Polar coastline softening (gated by show_ice)
+    if (uniforms.show_ice > 0.5 && ice_amount > 0.3 && is_ocean == false) {
         let coast_temp = compute_temperature(rotated, uniforms.ocean_level, uniforms.season);
         if (coast_temp < 0.0) { // only if the ocean here would also be frozen
             let coast_dist = abs(height - uniforms.ocean_level);
@@ -954,8 +983,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
 
-    // Day-side urban grey patches (dark concrete/asphalt tone)
-    if (uniforms.night_lights > 0.0 && !is_ocean) {
+    // Day-side urban grey patches (gated by show_cities)
+    if (uniforms.show_cities > 0.5 && uniforms.night_lights > 0.0 && !is_ocean) {
         let urban = compute_urban_density(rotated, height);
         if (urban > 0.01) {
             let concrete = vec3<f32>(0.30, 0.30, 0.31); // cool dark grey
@@ -1137,8 +1166,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Combine — tint direct light by star color
     var lit_color = ambient + (diffuse + specular) * n_dot_l * s_color;
 
-    // Cloud shadow on surface: darken where clouds above block sunlight
-    if (uniforms.cloud_coverage > 0.001) {
+    // Cloud shadow on surface (gated by show_clouds)
+    if (uniforms.show_clouds > 0.5 && uniforms.cloud_coverage > 0.001) {
         let shadow_sample_pos = normalize(rotated + sun_dir * 0.015);
         let shadow_sfc_h = textureSample(height_tex, height_sampler, shadow_sample_pos).r;
         let cloud_above = compute_cloud_density(shadow_sample_pos, shadow_sfc_h);
@@ -1147,17 +1176,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         lit_color *= mix(1.0, surface_shadow, 0.65);
     }
 
-    // Ice/snow brightness override: uses tracked ice_amount (not surface_color detection)
-    // so partial ice blend still gets brightened instead of staying grey.
-    if (ice_amount > 0.01) {
+    // Ice/snow brightness override (gated by show_ice)
+    if (uniforms.show_ice > 0.5 && ice_amount > 0.01) {
         let ice_lit = s_color * (n_dot_l * 3.5 + 1.0); // HDR bright → tonemaps to white
         lit_color = mix(lit_color, ice_lit, ice_amount);
     }
 
-    // ---- Night-side city lights (rendered before clouds so clouds occlude them) ----
-    var city_glow_through = vec3<f32>(0.0); // stored for scatter through clouds
+    // ---- Night-side city lights (gated by show_cities) ----
+    var city_glow_through = vec3<f32>(0.0);
     var city_glow_amount = 0.0;
-    if (uniforms.night_lights > 0.0 && !is_ocean) {
+    if (uniforms.show_cities > 0.5 && uniforms.night_lights > 0.0 && !is_ocean) {
         let night_factor = smooth_step(0.05, -0.1, n_dot_l);
         if (night_factor > 0.01) {
             let urban = compute_urban_density(rotated, height);
@@ -1186,10 +1214,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
 
-    // ---- Two-layer cloud rendering ----
-    // Layer 1 (low): cumulus/stratus at ~0.01 planet radii above surface
-    // Layer 2 (high): cirrus at ~0.03 planet radii (jet stream altitude)
-    if (uniforms.cloud_coverage > 0.001) {
+    // ---- Two-layer cloud rendering (gated by show_clouds) ----
+    if (uniforms.show_clouds > 0.5 && uniforms.cloud_coverage > 0.001) {
         // === Low cloud layer (cumulus / stratus / weather systems) ===
         let low_alt = max(uniforms.cloud_altitude, 0.01);
         let low_r = 1.0 + low_alt;
@@ -1255,14 +1281,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
 
-    // City light scatter through clouds: soft glow on top of cloud layer
-    if (city_glow_amount > 0.05) {
+    // City light scatter through clouds (needs both cities and clouds)
+    if (uniforms.show_cities > 0.5 && uniforms.show_clouds > 0.5 && city_glow_amount > 0.05) {
         let scatter_strength = (1.0 - exp(-city_glow_amount * 2.0)) * 0.4; // thicker clouds scatter more
         lit_color += city_glow_through * scatter_strength;
     }
 
-    // Ray-marched atmosphere (in HDR space, before tonemapping)
-    if (has_atm) {
+    // Ray-marched atmosphere (gated by show_atmosphere_layer)
+    if (has_atm && uniforms.show_atmosphere_layer > 0.5) {
         let z_atm = sqrt(max(atm_radius * atm_radius - r2, 0.0));
         let z_surface = sqrt(1.0 - r2);
         let scatter = ray_march_atmosphere(ndc, z_atm, z_surface, sun_dir);

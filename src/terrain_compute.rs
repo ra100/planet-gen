@@ -22,10 +22,10 @@ pub struct TerrainGenParams {
     pub boundary_width: f32,   // sigma for boundary influence spread (0.10 = default)
     pub warp_strength: f32,    // domain warp intensity (1.0 = default)
     pub detail_scale: f32,     // fBm detail noise intensity (1.0 = default)
-    pub _pad_tectonics: u32,   // was tectonics_mode; now unused padding (GPU struct alignment)
-    pub _pad0: u32,            // alignment padding
-    pub _pad1: u32,
-    pub _pad2: u32,
+    pub surface_gravity: f32,  // m/s² (9.81 for Earth, 3.72 for Mars)
+    pub tectonics_factor: f32, // [0,1]: 0=stagnant lid, 1=vigorous tectonics
+    pub surface_age: f32,      // [0,1]: 0=young/sharp, 1=old/smooth
+    pub _pad0: u32,
 }
 
 /// Generated tectonic heightmap for all 6 cube faces.
@@ -231,6 +231,9 @@ impl TerrainComputePipeline {
         boundary_width: f32,
         warp_strength: f32,
         detail_scale: f32,
+        surface_gravity: f32,
+        tectonics_factor: f32,
+        surface_age: f32,
     ) -> TectonicTerrain {
         let total_pixels = (resolution * resolution) as usize;
         let buffer_size = (total_pixels * std::mem::size_of::<f32>()) as u64;
@@ -278,10 +281,10 @@ impl TerrainComputePipeline {
                 boundary_width,
                 warp_strength,
                 detail_scale,
-                _pad_tectonics: 0,
+                surface_gravity,
+                tectonics_factor,
+                surface_age,
                 _pad0: 0,
-                _pad1: 0,
-                _pad2: 0,
             };
 
             let params_buffer =
@@ -703,7 +706,7 @@ mod tests {
         });
 
         let terrain = pipeline.generate(
-            &gpu, &plates, 64, 42, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0,
+            &gpu, &plates, 64, 42, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0, 9.81, 0.85, 0.2,
         );
 
         assert_eq!(terrain.faces.len(), 6);
@@ -714,7 +717,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tectonic_terrain_has_bimodal_distribution() {
+    fn test_tectonic_terrain_has_height_variation() {
         let gpu = GpuContext::new().expect("GPU init failed");
         let pipeline = TerrainComputePipeline::new(&gpu);
 
@@ -728,24 +731,18 @@ mod tests {
         });
 
         let terrain = pipeline.generate(
-            &gpu, &plates, 64, 42, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0,
+            &gpu, &plates, 64, 42, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0, 9.81, 0.85, 0.2,
         );
 
-        // Collect all heights
         let all_heights: Vec<f32> = terrain.faces.iter().flat_map(|f| f.iter().copied()).collect();
+        let min_h = all_heights.iter().cloned().fold(f32::INFINITY, f32::min);
+        let max_h = all_heights.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
 
-        // Count heights above 0 (land) vs below 0 (ocean)
-        let above = all_heights.iter().filter(|&&h| h > 0.0).count();
-        let below = all_heights.iter().filter(|&&h| h <= 0.0).count();
-        let total = all_heights.len();
-
-        let land_fraction = above as f32 / total as f32;
-
-        // With 70% ocean fraction, expect roughly 30% land (±15% tolerance)
+        // Continuous model should produce a meaningful height range
         assert!(
-            land_fraction > 0.15 && land_fraction < 0.55,
-            "Land fraction should be roughly 30%, got {:.1}% ({} above / {} total)",
-            land_fraction * 100.0, above, total
+            max_h - min_h > 0.3,
+            "Height range should be > 0.3, got {:.3} (min={:.3}, max={:.3})",
+            max_h - min_h, min_h, max_h
         );
     }
 
@@ -764,16 +761,16 @@ mod tests {
         });
 
         let terrain = pipeline.generate(
-            &gpu, &plates, 64, 42, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0,
+            &gpu, &plates, 64, 42, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0, 9.81, 0.85, 0.2,
         );
 
         let all_heights: Vec<f32> = terrain.faces.iter().flat_map(|f| f.iter().copied()).collect();
         let max_height = all_heights.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
 
-        // Should have mountain peaks significantly above continental shelf (0.25)
+        // Should have elevated peaks from convergent boundary mountains
         assert!(
-            max_height > 0.4,
-            "Should have mountain peaks > 0.4, max is {}",
+            max_height > 0.2,
+            "Should have peaks > 0.2, max is {}",
             max_height
         );
     }

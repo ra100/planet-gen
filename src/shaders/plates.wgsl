@@ -27,10 +27,10 @@ struct GenParams {
     boundary_width: f32,   // sigma for boundary influence spread
     warp_strength: f32,    // domain warp intensity
     detail_scale: f32,     // fBm detail noise intensity
+    surface_gravity: f32,  // m/s² (lower gravity → taller mountains)
+    tectonics_factor: f32, // [0,1]: boundary force strength
+    surface_age: f32,      // [0,1]: 0=young/sharp, 1=old/smooth
     _pad0: u32,
-    _pad1: u32,
-    _pad2: u32,
-    _pad3: u32,
 }
 
 @group(0) @binding(0) var<storage, read> plates: array<Plate>;
@@ -206,90 +206,63 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let is_continental = info.nearest_type > 0.5;
     let neighbor_continental = info.second_type > 0.5;
 
-    // --- Pass 2: Generate height via crustal thickness + isostasy ---
-    // Each plate carries a crustal thickness field that varies via per-plate noise.
-    // Isostasy converts thickness to surface elevation. This produces a natural
-    // bimodal height distribution where water level changes reveal terrain
-    // gradually — no puzzle pieces.
+    // --- Pass 2: Physics-based elevation from continuous noise + tectonic forces ---
+    // Planet physics drive terrain character:
+    //   gravity → max mountain height (Mars: low g → Olympus Mons 21km)
+    //   tectonics → boundary force strength (stagnant lid → no convergent uplift)
+    //   age → terrain smoothness (young=sharp, old=peneplain)
 
-    // Step 1: Base crustal thickness per plate type (conceptual km)
-    // Global low-frequency noise offsets the base thickness smoothly across the globe.
-    // This prevents puzzle-piece behavior (different areas at different heights)
-    // without creating discrete per-plate jumps that cause enclave artifacts.
-    let base_offset = snoise(raw_pos * 1.5 + seed_offset(params.seed + 2000u));
-    let base_thickness: f32 = select(7.0, 35.0, is_continental)
-        + base_offset * select(0.5, 4.0, is_continental);
-    let neighbor_base: f32 = select(7.0, 35.0, neighbor_continental)
-        + base_offset * select(0.5, 4.0, neighbor_continental);
+    // Gravity factor: lower gravity allows taller mountains
+    // Earth g=9.81 → factor 1.0, Mars g=3.72 → factor 2.6
+    let gravity_factor = 9.81 / max(params.surface_gravity, 1.0);
 
-    // Step 2: Gentle intra-plate thickness variation (plains, low hills, basins)
-    // Low frequencies + low amplitude = broad smooth terrain, no speckle
-    let t_n1 = snoise(raw_pos * 2.0 + seed_offset(params.seed + 1000u));
-    let t_n2 = snoise(raw_pos * 4.0 + seed_offset(params.seed + 1010u)) * 0.4;
-    let thickness_noise = (t_n1 + t_n2) / 1.4; // ~-1..+1
+    // Age controls noise character: young = more high-freq detail, old = smoother
+    let age = clamp(params.surface_age, 0.0, 1.0);
+    let high_freq_weight = 1.0 - age * 0.7; // young=1.0, old=0.3
 
-    // Step 3: Tectonic boundary forces
+    // Step 1: Multi-octave global noise — gentle continent-scale terrain
+    // Base noise creates broad swells (continental shelves, ocean basins)
+    // Mountains come from plate boundaries, not base noise
+    let n1 = snoise(raw_pos * 1.2 + seed_offset(params.seed + 1000u));       // continent-scale
+    let n2 = snoise(raw_pos * 2.5 + seed_offset(params.seed + 1010u)) * 0.4; // sub-continent
+    let n3 = snoise(raw_pos * 5.0 + seed_offset(params.seed + 1020u)) * 0.15 * high_freq_weight;
+    let base_noise = (n1 + n2 + n3) / 1.55;
+    // Moderate base amplitude — mountains will add the dramatic features
+    var thickness = 20.0 + base_noise * 7.0 * gravity_factor;
+
+    // Step 2: Tectonic boundary forces — main source of mountain ranges
     let convergence = smoothstep(0.0, -0.5, boundary_type);
     let divergence = smoothstep(0.0, 0.5, boundary_type);
-    let broad_b = smoothstep(0.25, 0.0, boundary_dist);
-    let b_influence = boundary_influence(boundary_dist, params.boundary_width);
+    let broad_b = smoothstep(0.35, 0.0, boundary_dist); // wide mountain zone
+    let tect = params.tectonics_factor;
 
-    // Gentle base variation (continental plains ±2km, oceanic abyssal plains ±0.3km)
-    let base_amp: f32 = select(0.3, 2.0, is_continental);
-    let neighbor_base_amp: f32 = select(0.3, 2.0, neighbor_continental);
+    // Noise modulation along boundaries — creates peaks, passes, and gaps
+    // Without this, uplift would be uniform along the boundary (unnatural)
+    let m_n1 = snoise(raw_pos * 3.0 + seed_offset(params.seed + 3000u)) * 0.5 + 0.5; // 0..1
+    let m_n2 = snoise(raw_pos * 7.0 + seed_offset(params.seed + 3010u)) * 0.25 + 0.75; // 0.5..1.0
+    let uplift_vary = m_n1 * m_n2; // creates natural variation along ranges
 
-    // Mountain ranges: ridged multifractal concentrated at convergent boundaries
-    // Creates linear ridge features (not uniform noise) where plates collide
-    let mountain_zone = convergence * broad_b;
-    let ridge = ridged_multifractal(
-        raw_pos * 3.5 + seed_offset(params.seed + 2000u), 5, 2.2, 2.0, 1.0
-    );
-    let mountain_add: f32 = ridge * mountain_zone * params.mountain_scale
-        * select(4.0, 14.0, is_continental);
-    let neighbor_mountain: f32 = ridge * mountain_zone * params.mountain_scale
-        * select(4.0, 14.0, neighbor_continental);
+    // Convergent uplift — THE main mountain builder
+    // Earth: up to 10km uplift → through isostasy ≈ 0.25 height units
+    thickness += convergence * broad_b * uplift_vary
+        * params.mountain_scale * 10.0 * tect * gravity_factor;
 
-    // Rift thinning at divergent boundaries
-    let rift_thin = divergence * broad_b;
+    // Divergent: rift valleys and mid-ocean ridges
+    thickness -= divergence * broad_b * 3.0 * tect;
 
-    let own_thickness = base_thickness + thickness_noise * base_amp
-        + mountain_add - rift_thin * 2.0;
-    let neighbor_thickness = neighbor_base + thickness_noise * neighbor_base_amp
-        + neighbor_mountain - rift_thin * 2.0;
-
-    // Step 4: Margin blending — smooth transition at boundaries
-    let margin_blend = smoothstep(0.0, 0.10, boundary_dist);
-    let boundary_mid = (own_thickness + neighbor_thickness) * 0.5;
-    var thickness = mix(boundary_mid, own_thickness, margin_blend);
-
-    // Narrow ocean features (trenches, ridges, island arcs)
-    if (convergence > 0.01) {
-        if (!is_continental && neighbor_continental) {
-            thickness -= 3.0 * b_influence * convergence;
-        } else if (!is_continental && !neighbor_continental) {
-            let arc_noise = snoise(raw_pos * 10.0 + seed_offset(params.seed + 300u));
-            if (arc_noise > 0.0) {
-                thickness += 6.0 * params.mountain_scale * b_influence * convergence * arc_noise;
-            }
-        }
-    }
-    if (divergence > 0.01 && !is_continental) {
-        thickness += 2.0 * b_influence * divergence;
-    }
-
-    // Step 5: Isostatic conversion — thickness → surface elevation
-    let T_ref: f32 = 18.0;
+    // Step 3: Isostatic conversion — thickness → surface elevation
+    let T_ref: f32 = 20.0;
     var height = (thickness - T_ref) * 0.025;
 
-    // Step 6: Coastline detail — gentle irregularity at continental margins
+    // Step 4: Coastline detail — reduced for old planets
     let coast_warp_val = snoise(raw_pos * 1.5 + seed_offset(params.seed + 600u));
     let coast_pos = raw_pos + vec3<f32>(coast_warp_val) * 0.12;
     let coast_n1 = snoise(coast_pos * 2.5 + seed_offset(params.seed + 700u));
-    let coast_n2 = snoise(coast_pos * 5.0 + seed_offset(params.seed + 710u)) * 0.3;
+    let coast_n2 = snoise(coast_pos * 5.0 + seed_offset(params.seed + 710u)) * 0.3 * high_freq_weight;
     let coastal_noise = coast_n1 + coast_n2;
     height += coastal_noise * 0.04;
 
-    // Step 7: Additional geology
+    // Step 5: Additional geology
     let land_weight = smooth_step(-0.05, 0.05, height);
 
     // Seamounts: rare underwater volcanoes
@@ -297,33 +270,35 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let seamount_h = smooth_step(0.78, 0.95, seamount) * 0.3;
     height += seamount_h * (1.0 - land_weight);
 
-    // R11: Volcanic hotspots (1-3 independent of plates)
-    let hotspot_count = 2u;
+    // Volcanic hotspots — more numerous and larger on stagnant lid worlds (Mars, Venus)
+    // Low tectonics → heat escapes through fewer, bigger plumes instead of spreading along ridges
+    let hotspot_count = u32(3.0 + (1.0 - tect) * 5.0); // 3 (active tectonics) to 8 (stagnant lid)
+    let hotspot_radius = 0.02 + (1.0 - tect) * 0.04;    // wider on stagnant lid
+    let hotspot_height = 0.4 * gravity_factor;             // taller on low-gravity worlds
     for (var h = 0u; h < hotspot_count; h++) {
         let hx = seed_offset(params.seed + 500u + h * 10u);
         let hotspot_center = normalize(hx);
         let hotspot_dist = 1.0 - dot(sphere_pos, hotspot_center);
-        if (hotspot_dist < 0.02) {
-            // Shield volcano profile
-            let volcano_h = 0.4 * (1.0 - hotspot_dist / 0.02);
+        if (hotspot_dist < hotspot_radius) {
+            let volcano_h = hotspot_height * (1.0 - hotspot_dist / hotspot_radius);
             height = max(height, volcano_h);
         }
     }
 
-    // R13: fBm detail noise — subtle texture on top of geological structure
+    // R13: fBm detail noise — scaled by age (old planets smoother) and gravity
     let detail = detail_noise(raw_pos);
     let detail_mix = mix(0.1, 1.2, smooth_step(-0.1, 0.5, height));
-    height += detail * detail_mix * params.detail_scale;
+    height += detail * detail_mix * params.detail_scale * high_freq_weight * gravity_factor;
 
-    // Hypsometric profile: flatten plains, amplify mountains, deepen oceans
+    // Hypsometric profile: gentle shaping — preserve mountain/plain contrast
     if (height > 0.0) {
-        let h_cap = 1.5 * max(params.mountain_scale, 1.0);
+        let h_cap = 1.5 * max(params.mountain_scale, 1.0) * gravity_factor;
         let h_norm = min(height, h_cap);
         let t = h_norm / h_cap;
-        // Power 1.8: strong flattening of low areas (plains), sharp mountain peaks
-        height = pow(t, 1.8) * h_cap * 1.5;
+        // Power 1.3: mild compression, mountains stay prominent
+        height = pow(t, 1.3) * h_cap;
     } else {
-        height *= 1.3;
+        height *= 1.2;
     }
 
     let idx = id.y * res + id.x;

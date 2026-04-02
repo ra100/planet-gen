@@ -28,6 +28,13 @@ pub struct PlanetGenApp {
     height_scale: f32,    // normal map height exaggeration
     show_atmosphere: bool, // toggle atmosphere rendering
     show_ao: bool,         // toggle ambient occlusion
+    // Layer toggles for Normal view
+    show_water: bool,
+    show_ice: bool,
+    show_biomes: bool,
+    show_clouds: bool,
+    show_cities: bool,
+    show_erosion: bool,
     zoom: f32,            // viewport zoom level
     pan: [f32; 2],        // viewport pan in NDC units
     // Advanced terrain tweaks
@@ -35,6 +42,7 @@ pub struct PlanetGenApp {
     boundary_width: f32,
     warp_strength: f32,
     detail_scale: f32,
+    age_override: Option<f32>, // None = derived from physics, Some = manual override
     num_plates_override: u32, // 0 = auto from physics
     cloud_coverage: f32,
     cloud_seed: u32,
@@ -88,14 +96,21 @@ impl PlanetGenApp {
             light_azimuth: -0.5,
             light_elevation: 0.3,
             height_scale: 3.0,
-            show_atmosphere: true,
-            show_ao: true,
+            show_atmosphere: false,
+            show_ao: false,
+            show_water: false,
+            show_ice: false,
+            show_biomes: false,
+            show_clouds: false,
+            show_cities: false,
+            show_erosion: false,
             zoom: 1.0,
             pan: [0.0, 0.0],
             mountain_scale: 1.0,
             boundary_width: 0.10,
             warp_strength: 1.0,
             detail_scale: 1.0,
+            age_override: None,
             num_plates_override: 0,
             cloud_coverage: 0.5,
             cloud_seed: default_cloud_seed,
@@ -166,7 +181,13 @@ impl PlanetGenApp {
             star_color_temp: self.star_color_temp,
             city_light_hue: self.city_light_hue,
             show_ao: if self.show_ao { 1.0 } else { 0.0 },
-            _pad4: [0.0; 3],
+            show_water: if self.show_water { 1.0 } else { 0.0 },
+            show_ice: if self.show_ice { 1.0 } else { 0.0 },
+            show_biomes: if self.show_biomes { 1.0 } else { 0.0 },
+            show_clouds: if self.show_clouds { 1.0 } else { 0.0 },
+            show_atmosphere_layer: if self.show_atmosphere { 1.0 } else { 0.0 },
+            show_cities: if self.show_cities { 1.0 } else { 0.0 },
+            _pad5: 0.0,
         }
     }
 
@@ -220,6 +241,9 @@ impl PlanetGenApp {
             self.boundary_width,
             self.warp_strength,
             self.detail_scale,
+            self.derived.surface_gravity,
+            self.derived.tectonics_factor,
+            self.age_override.unwrap_or(self.derived.surface_age),
         );
 
         let effective_ocean = self.derived.ocean_fraction * (1.0 - self.water_loss);
@@ -228,20 +252,24 @@ impl PlanetGenApp {
         // Show un-eroded terrain immediately
         self.cached_cubemap_view = Some(self.preview_renderer.upload_terrain(&self.gpu, &terrain));
 
-        // Schedule progressive erosion
-        let adaptive_iters = match self.preview_resolution {
-            r if r <= 256 => (self.erosion_iterations as f32 * 0.2) as u32,
-            r if r <= 512 => (self.erosion_iterations as f32 * 0.4) as u32,
-            r if r <= 768 => (self.erosion_iterations as f32 * 0.6) as u32,
-            _ => self.erosion_iterations,
-        }.max(1);
-        self.erosion_terrain = Some(terrain);
-        self.erosion_remaining = adaptive_iters;
-        self.erosion_ocean_level = ocean_level;
+        // Schedule progressive erosion (skipped when erosion layer is disabled)
+        if self.show_erosion {
+            let adaptive_iters = match self.preview_resolution {
+                r if r <= 256 => (self.erosion_iterations as f32 * 0.2) as u32,
+                r if r <= 512 => (self.erosion_iterations as f32 * 0.4) as u32,
+                r if r <= 768 => (self.erosion_iterations as f32 * 0.6) as u32,
+                _ => self.erosion_iterations,
+            }.max(1);
+            self.erosion_terrain = Some(terrain);
+            self.erosion_remaining = adaptive_iters;
+            self.erosion_ocean_level = ocean_level;
+        } else {
+            self.erosion_remaining = 0;
+        }
 
         eprintln!(
             "[terrain {}px] plates+compute: {:.0}ms, scheduling {} erosion iters progressively",
-            self.preview_resolution, t0.elapsed().as_secs_f64() * 1000.0, adaptive_iters,
+            self.preview_resolution, t0.elapsed().as_secs_f64() * 1000.0, self.erosion_remaining,
         );
 
         self.needs_terrain = false;
@@ -481,18 +509,26 @@ impl eframe::App for PlanetGenApp {
                     self.needs_render = true;
                 }
 
-                if ui.checkbox(&mut self.show_atmosphere, "Atmosphere")
-                    .on_hover_text("Toggle atmospheric scattering (blue limb glow, red sunsets)")
-                    .changed()
-                {
-                    self.needs_render = true;
+                ui.separator();
+                ui.label("Render Layers");
+                for (flag, label, tip) in [
+                    (&mut self.show_water, "Water / Ocean", "Ocean surface with depth shading and specular"),
+                    (&mut self.show_ice, "Ice Caps", "Polar and altitude ice rendering"),
+                    (&mut self.show_biomes, "Biome Colors", "Temperature/moisture-driven biome coloring"),
+                    (&mut self.show_clouds, "Clouds", "Cloud layer rendering"),
+                    (&mut self.show_atmosphere, "Atmosphere", "Atmospheric scattering (blue limb glow, red sunsets)"),
+                    (&mut self.show_cities, "City Lights", "Night-side city lights and day-side urban patches"),
+                    (&mut self.show_ao, "Ambient Occlusion", "Darken terrain valleys and crevices for depth"),
+                ] {
+                    if ui.checkbox(flag, label).on_hover_text(tip).changed() {
+                        self.needs_render = true;
+                    }
                 }
-
-                if ui.checkbox(&mut self.show_ao, "Ambient Occlusion")
-                    .on_hover_text("Darken terrain valleys and crevices for depth")
+                if ui.checkbox(&mut self.show_erosion, "Erosion")
+                    .on_hover_text("Hydraulic erosion carving rivers and valleys")
                     .changed()
                 {
-                    self.needs_render = true;
+                    self.needs_terrain = true; // erosion requires full terrain recompute
                 }
 
                 ui.separator();
@@ -606,6 +642,35 @@ impl eframe::App for PlanetGenApp {
                             self.needs_terrain = true;
                         }
 
+                        // Age override slider
+                        let mut age_val = self.age_override.unwrap_or(self.derived.surface_age);
+                        let mut use_override = self.age_override.is_some();
+                        ui.horizontal(|ui| {
+                            if ui.checkbox(&mut use_override, "").changed() {
+                                if use_override {
+                                    self.age_override = Some(age_val);
+                                } else {
+                                    self.age_override = None;
+                                }
+                                self.needs_terrain = true;
+                            }
+                            if ui.add(egui::Slider::new(&mut age_val, 0.0..=1.0)
+                                .text("Surface Age"))
+                                .on_hover_text("0 = young (sharp ridges, active volcanism), 1 = old (smooth peneplains). Checkbox = override physics")
+                                .changed()
+                            {
+                                self.age_override = Some(age_val);
+                                self.needs_terrain = true;
+                            }
+                        });
+
+                        // Show derived physics info
+                        ui.label(format!("Gravity: {:.1} m/s²  Tectonics: {:.0}%  Age: {:.2}",
+                            self.derived.surface_gravity,
+                            self.derived.tectonics_factor * 100.0,
+                            self.age_override.unwrap_or(self.derived.surface_age),
+                        ));
+
                         ui.separator();
                         if ui.add(egui::Slider::new(&mut self.star_color_temp, 0.0..=1.0)
                             .text("Star Color"))
@@ -674,11 +739,30 @@ impl eframe::App for PlanetGenApp {
                 ui.heading("View");
                 ui.separator();
 
-                let view_labels = ["Normal", "Height", "Temperature", "Moisture", "Biome", "Ocean/Ice", "Plates", "Roughness", "AO", "Clouds", "Cities", "Boundary Type", "Snow/Ice", "Normals"];
+                // Export views: correspond to exportable texture layers
+                let export_views: &[(u32, &str)] = &[
+                    (0, "Normal"), (1, "Height"), (7, "Roughness"), (8, "AO"),
+                    (9, "Clouds"), (10, "Cities"), (13, "Normals"),
+                ];
+                ui.label("Export Views");
                 ui.horizontal_wrapped(|ui| {
-                    for (i, label) in view_labels.iter().enumerate() {
-                        if ui.selectable_label(self.view_mode == i as u32, *label).clicked() {
-                            self.view_mode = i as u32;
+                    for &(idx, label) in export_views {
+                        if ui.selectable_label(self.view_mode == idx, label).clicked() {
+                            self.view_mode = idx;
+                            self.needs_render = true;
+                        }
+                    }
+                });
+                // Debug views: diagnostic visualizations
+                let debug_views: &[(u32, &str)] = &[
+                    (6, "Plates"), (2, "Temperature"), (3, "Moisture"), (4, "Biome"),
+                    (5, "Ocean/Ice"), (11, "Boundary Type"), (12, "Snow/Ice"),
+                ];
+                ui.label("Debug Views");
+                ui.horizontal_wrapped(|ui| {
+                    for &(idx, label) in debug_views {
+                        if ui.selectable_label(self.view_mode == idx, label).clicked() {
+                            self.view_mode = idx;
                             self.needs_render = true;
                         }
                     }

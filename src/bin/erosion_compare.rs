@@ -69,7 +69,7 @@ fn main() {
     for (iterations, erosion_name) in &erosion_levels {
         // Generate fresh terrain for each (erosion modifies in place)
         let mut terrain = compute.generate(
-            &gpu, &plates, 512, seed, amplitude, frequency, octaves, gain, lacunarity, 1.0, 0.10, 1.0, 1.0,
+            &gpu, &plates, 512, seed, amplitude, frequency, octaves, gain, lacunarity, 1.0, 0.10, 1.0, 1.0, 9.81, 0.85, 0.2,
         );
 
         // Apply erosion
@@ -108,7 +108,13 @@ fn main() {
                 star_color_temp: 0.5,
                 city_light_hue: 0.0,
                 show_ao: 1.0,
-                _pad4: [0.0; 3],
+                show_water: 1.0,
+                show_ice: 1.0,
+                show_biomes: 1.0,
+                show_clouds: 0.0,
+                show_atmosphere_layer: 0.0,
+                show_cities: 0.0,
+                _pad5: 0.0,
             };
 
             let pixels = renderer.render(&gpu, &uniforms, &cubemap_view, render_size);

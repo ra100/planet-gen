@@ -208,7 +208,10 @@ Background environment, night-side civilization, and star type lighting.
 
 ---
 
-## Phase 5.8: Visual Polish
+## Phase 5.8: Visual Polish & Layer Toggle System
+
+Plan: [docs/plans/2026-04-02-001-feat-layer-toggle-system-plan.md](docs/plans/2026-04-02-001-feat-layer-toggle-system-plan.md)
+Requirements: [docs/brainstorms/2026-04-02-layer-toggle-system-requirements.md](docs/brainstorms/2026-04-02-layer-toggle-system-requirements.md)
 
 Terrain rendering improvements and additional visual features.
 
