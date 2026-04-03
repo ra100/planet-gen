@@ -323,6 +323,23 @@ Improve terrain variety (mountain ranges, plateaus, valleys), expand biome palet
 
 ---
 
+## Phase 5.15: Cloud Layer Overhaul
+
+Multiple overlaid cloud layers with distinct cloud types, wind-driven warp following atmospheric circulation, and better cloud distribution from the Hadley cell wind model.
+
+Current system: 2 layers (low stratus/cumulus blend + high cirrus), cyclone vortex warp, climate-modulated coverage.
+Target: 3-4 distinct layers, wind-streaked shapes, latitude-coherent cloud bands.
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 5.15.1 | Wind-driven cloud warp: replace random domain warp with wind_direction_vec-based stretching. Low clouds warp along trade winds/westerlies, cirrus along jet stream. Warp strength scales with wind speed at altitude | Cloud shapes visibly elongated along wind direction; trade wind zone clouds streak E-W, westerlies zone W-E | Phase 5.14 | cc:TODO |
+| 5.15.2 | Stratocumulus layer: new mid-level layer between low cumulus and high cirrus. Cellular/honeycomb pattern from abs(noise) with open-cell (marine) and closed-cell (land) variants. Covers subtropical ocean regions | Visible cellular cloud pattern over subtropical oceans; distinct from puffy cumulus and smooth stratus | 5.15.1 | cc:TODO |
+| 5.15.3 | Latitude-banded cloud distribution: ITCZ thick convective band, subtropical clear zone, mid-latitude frontal bands, polar thin overcast. Replace uniform coverage slider with climate-driven baseline + slider as multiplier | Clear subtropical gaps visible; thick ITCZ band; frontal cloud bands at mid-latitudes | 5.15.2 | cc:TODO |
+| 5.15.4 | Per-layer rendering: render low (cumulus/stratus), mid (stratocumulus), and high (cirrus) as separate passes with distinct altitude offsets, opacity, and self-shadow. Each layer casts shadow on layers below | Visible depth parallax between layers; low clouds shadow surface, cirrus shadows low clouds | 5.15.3 | cc:TODO |
+| 5.15.5 | Cloud type from climate: ITCZ → tall cumulonimbus (bright white), subtropics → thin stratocumulus, mid-lat → mixed frontal, polar → thin stratus. Cloud type auto-selected from latitude + moisture, cloud_type slider becomes a bias | Cloud appearance changes with latitude without user intervention; slider fine-tunes | 5.15.4 | cc:TODO |
+
+---
+
 ## Phase 6.0–6.3: HEALPix Orogen Port (ARCHIVED)
 
 HEALPix-based terrain system was fully implemented (Phases 6.0–6.2) and briefly integrated (6.3.1–6.3.3), then reverted at commit `1aac311` in favor of the multi-pass GPU plate pipeline (Phase 5.12). Code archived to branch `archive/healpix-orogen`.
