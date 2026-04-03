@@ -281,16 +281,16 @@ Reference: planet_heightmap_generation/ (JS/WebGL implementation with BFS distan
 
 | Task | 内容 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
-| 5.12.1 | Pass 1 shader: Voronoi plate assignment per pixel + boundary detection | Each pixel stores plate_idx; boundary pixels marked where neighbors differ | - | cc:WIP |
-| 5.12.2 | Pass 2 shader: JFA distance field (ping-pong buffers, O(log n) passes) | Smooth distance-to-boundary field per pixel; no sharp Voronoi edges | 5.12.1 | cc:TODO |
-| 5.12.3 | Rust pipeline: multi-pass dispatch orchestration (buffers, bind groups, sequencing) | All passes dispatch in sequence per face, readback produces TectonicTerrain | 5.12.1, 5.12.2 | cc:TODO |
-| 5.12.4 | Pass 3: stress computation + boundary type classification (convergent/divergent/transform) | Per-pixel stress from plate velocities; boundary type from relative motion dot product | 5.12.3 | cc:TODO |
-| 5.12.5 | Pass 3: collision mountains with asymmetric subduction profiles | Mountains at convergent zones; steeper oceanic side + trench, gentler back-arc plateau | 5.12.4 | cc:TODO |
-| 5.12.6 | Pass 3: fold ridges parallel to plate motion direction | Linear ridge/valley patterns within mountain zones aligned with Euler pole | 5.12.5 | cc:TODO |
-| 5.12.7 | Pass 3: continental shelves + ocean floor from coast distance field | Shelf (0-5 cells), slope (5-12 cells), abyssal plain (12+); active vs passive margin width | 5.12.4 | cc:TODO |
-| 5.12.8 | Pass 3: stress-driven roughness + fBm detail | Craggy near orogens, smooth in cratons; noise amplitude scales with stress | 5.12.5, 5.12.7 | cc:TODO |
-| 5.12.9 | Pass 3: divergent boundaries (mid-ocean ridges, continental rift valleys) | Subtle elevation at divergent; rift depression on land | 5.12.4 | cc:TODO |
-| 5.12.10 | Integration: wire into app.rs, remove old noise terrain, verify <2s preview | Full pipeline end-to-end; fragment shader unchanged; water_loss/moisture sliders work | 5.12.8, 5.12.9 | cc:TODO |
+| 5.12.1 | Pass 1 shader: Voronoi plate assignment per pixel + boundary detection | Each pixel stores plate_idx; boundary pixels marked where neighbors differ | - | cc:完了 [d017196] |
+| 5.12.2 | Pass 2 shader: JFA distance field (ping-pong buffers, O(log n) passes) | Smooth distance-to-boundary field per pixel; no sharp Voronoi edges | 5.12.1 | cc:完了 [d017196] |
+| 5.12.3 | Rust pipeline: multi-pass dispatch orchestration (buffers, bind groups, sequencing) | All passes dispatch in sequence per face, readback produces TectonicTerrain | 5.12.1, 5.12.2 | cc:完了 [d017196] |
+| 5.12.4 | Pass 3: stress computation + boundary type classification (convergent/divergent/transform) | Per-pixel stress from plate velocities; boundary type from relative motion dot product | 5.12.3 | cc:完了 [d017196] |
+| 5.12.5 | Pass 3: collision mountains with asymmetric subduction profiles | Mountains at convergent zones; steeper oceanic side + trench, gentler back-arc plateau | 5.12.4 | cc:完了 [d017196] |
+| 5.12.6 | Pass 3: fold ridges parallel to plate motion direction | Linear ridge/valley patterns within mountain zones aligned with Euler pole | 5.12.5 | cc:完了 [d017196] |
+| 5.12.7 | Pass 3: continental shelves + ocean floor from coast distance field | Shelf (0-5 cells), slope (5-12 cells), abyssal plain (12+); active vs passive margin width | 5.12.4 | cc:完了 [d017196] |
+| 5.12.8 | Pass 3: stress-driven roughness + fBm detail | Craggy near orogens, smooth in cratons; noise amplitude scales with stress | 5.12.5, 5.12.7 | cc:完了 [d017196] |
+| 5.12.9 | Pass 3: divergent boundaries (mid-ocean ridges, continental rift valleys) | Subtle elevation at divergent; rift depression on land | 5.12.4 | cc:完了 [d017196] |
+| 5.12.10 | Integration: wire into app.rs, remove old noise terrain, verify <2s preview | Full pipeline end-to-end; fragment shader unchanged; water_loss/moisture sliders work | 5.12.8, 5.12.9 | cc:完了 [d017196] |
 
 ---
 
