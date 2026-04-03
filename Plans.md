@@ -226,6 +226,52 @@ Terrain rendering improvements and additional visual features.
 
 ---
 
+## Phase 5.9: Pure Noise Terrain Rebuild
+
+Replace Voronoi plate-based terrain with layered noise approach. Plates caused persistent artifacts (noodle ridges, boundary ghosting, puzzle-piece continents).
+
+Plan: [docs/plans/2026-04-02-002-fix-terrain-artifacts-extend-geology-plan.md](docs/plans/2026-04-02-002-fix-terrain-artifacts-extend-geology-plan.md)
+Requirements: [docs/brainstorms/2026-04-02-physics-terrain-rebuild-requirements.md](docs/brainstorms/2026-04-02-physics-terrain-rebuild-requirements.md)
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 5.9.1 | Pure noise terrain: domain-warped continental noise + ridged multifractal mountains + hotspots | Organic continent shapes, no Voronoi artifacts, seed-dependent | Phase 4.8 | cc:完了 [040e7a3] |
+| 5.9.2 | Bimodal shaping: pow(0.35) for solid continents without channel fragmentation | Continents are coherent masses, not torn webs | 5.9.1 | cc:完了 [4aa7fbd] |
+| 5.9.3 | PCG hash for seed offsets: replace golden-ratio hash to eliminate cross-seed correlation | Each seed produces completely different planet | 5.9.1 | cc:完了 [02b2aeb] |
+| 5.9.4 | Full water level range: water_loss=0 → ocean world, water_loss=1 → desert | Water loss slider controls full range of ocean coverage | 5.9.1 | cc:完了 [e9f0fbe] |
+| 5.9.5 | Atmospheric moisture slider: decouple climate wetness from sea level control | Independent control of biome greenness vs water surface | 5.9.4 | cc:完了 [6d96e4b] |
+
+---
+
+## Phase 5.10: Biome Rendering Refinement
+
+Regional color variance, moisture rebalance, and realistic snow rules.
+
+Plan: [docs/plans/2026-04-02-003-feat-biome-rendering-refinement-plan.md](docs/plans/2026-04-02-003-feat-biome-rendering-refinement-plan.md)
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 5.10.1 | Regional color variance: low-freq noise selects biome sub-variants (red/tan/dark sand, emerald/olive forest) | Different desert regions show different sand colors on same planet | Phase 5.9 | cc:完了 [4c3c1ee] |
+| 5.10.2 | Moisture rebalance: soften ocean_fraction scaling so low-water planets aren't all desert | Earth-like planets show recognizable climate zones | 5.10.1 | cc:完了 [4c3c1ee] |
+| 5.10.3 | Slope-aware snow: steep slopes shed snow, extreme peaks above cloud layer too dry | Mountains show patchy snow on ridges, exposed rock on cliffs | 5.10.1 | cc:完了 [4c3c1ee] |
+| 5.10.4 | Fix snow tracing coastline: cold_snow threshold from 2°C to -3°C | Snow only in genuinely cold regions, not near-coast elevated areas | 5.10.3 | cc:完了 [0f9d0b7] |
+| 5.10.5 | Fix roughness pixelation, city density scaling, emission export | Smooth roughness, sparse cities at low dev, clean emission view | 5.10.1 | cc:完了 [c2f23e1] |
+
+---
+
+## Phase 5.11: UI Refactor & Export Overhaul
+
+Right panel for export, collapsible layers, equirectangular EXR export.
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 5.11.1 | UI refactor: right panel for derived properties + export, collapsible render layers | Two-panel layout, export checkboxes for layer selection | Phase 5.10 | cc:完了 [89955c9] |
+| 5.11.2 | Equirectangular export: cubemap-to-equirect conversion with bilinear interpolation | Single 2:1 EXR files instead of 6 cube face files | 5.11.1 | cc:完了 [0b8ca12] |
+| 5.11.3 | All exports as EXR with ZIP16 compression | 32-bit float precision, good compression, universal support | 5.11.2 | cc:完了 [74339e7] |
+| 5.11.4 | All render layers ON by default (water, ice, biomes, clouds, atmosphere, cities, erosion) | App launches with full rendering, not bare terrain | Phase 5.10 | cc:完了 [3a5fa10] |
+
+---
+
 ## Phase 6: Blender Importer Addon
 
 Pure-Python Blender addon that imports generated textures and sets up materials.
