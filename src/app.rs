@@ -3,15 +3,15 @@ use std::sync::Arc;
 
 use crate::export::{self, ExportConfig, ExportHandle, ExportProgress};
 use crate::gpu::GpuContext;
-use crate::healpix_terrain::{self, HealpixTerrainParams};
 use crate::planet::{DerivedProperties, PlanetParams};
-use crate::plate_sim::{self, PlateSimParams};
+use crate::plates::{generate_plates, PlateGenParams};
 use crate::preview::{PreviewRenderer, PreviewUniforms};
-use crate::terrain_compute::ErosionPipeline;
+use crate::terrain_compute::{ErosionPipeline, TerrainComputePipeline};
 
 pub struct PlanetGenApp {
     gpu: Arc<GpuContext>,
     preview_renderer: PreviewRenderer,
+    terrain_compute: TerrainComputePipeline,
     erosion_pipeline: ErosionPipeline,
     texture_handle: Option<egui::TextureHandle>,
     params: PlanetParams,
@@ -85,6 +85,7 @@ pub struct PlanetGenApp {
 impl PlanetGenApp {
     pub fn new(gpu: Arc<GpuContext>) -> Self {
         let preview_renderer = PreviewRenderer::new(&gpu);
+        let terrain_compute = TerrainComputePipeline::new(&gpu);
         let erosion_pipeline = ErosionPipeline::new(&gpu);
         let params = PlanetParams::default();
         let derived = DerivedProperties::from_params(&params);
@@ -92,6 +93,7 @@ impl PlanetGenApp {
         Self {
             gpu,
             preview_renderer,
+            terrain_compute,
             erosion_pipeline,
             texture_handle: None,
             params,
@@ -214,43 +216,62 @@ impl PlanetGenApp {
         }
     }
 
+    fn terrain_params(&self) -> (f32, f32, u32, f32, f32) {
+        // Spectral exponent mapping from research
+        let dist = self.params.star_distance_au;
+        let dist_factor = (dist.ln() / 3.0_f32.ln()).clamp(0.0, 1.0);
+        let base_beta = 1.47 + 0.91 * dist_factor;
+        let beta = (base_beta + 0.3 * self.params.metallicity).clamp(1.2, 3.0);
+        let hurst = (beta - 1.0) / 2.0;
+        let gain = 2.0_f32.powf(-hurst);
+
+        let mass = self.params.mass_earth;
+        let amplitude = 0.6 + 0.6 * mass.powf(0.3).min(2.0);
+        let frequency = (1.0 + 0.5 * mass.powf(0.2)) * self.continental_scale;
+
+        let tilt_factor = self.params.axial_tilt_deg / 90.0;
+        let octaves = (8.0 + 4.0 * tilt_factor * self.derived.tectonics_factor) as u32;
+
+        let rotation_factor = (24.0 / self.params.rotation_period_h).clamp(0.5, 2.0);
+        let lacunarity = 1.9 + 0.2 * rotation_factor;
+
+        (amplitude, frequency, octaves, gain, lacunarity)
+    }
+
     fn regenerate_terrain(&mut self) {
         use std::time::Instant;
         let t0 = Instant::now();
 
-        let effective_ocean = self.derived.ocean_fraction * (1.0 - self.water_loss);
-        let num_plates = if self.num_plates_override > 0 {
-            self.num_plates_override
-        } else {
-            14
-        };
-
-        // HEALPix nside must be power of 2 (nested scheme requirement)
-        let nside = (self.preview_resolution / 8).clamp(16, 256).next_power_of_two().min(256);
-
-        // Phase 6.1: Plate simulation on HEALPix grid
-        let sim = plate_sim::simulate(&PlateSimParams {
-            nside,
+        let plates = generate_plates(&PlateGenParams {
             seed: self.params.seed,
-            num_plates,
-            ocean_fraction: effective_ocean,
-            num_continents: self.num_continents,
-            continent_size_variety: self.continent_size_variety,
+            mass_earth: self.params.mass_earth,
+            ocean_fraction: self.derived.ocean_fraction * (1.0 - self.water_loss),
             tectonics_factor: self.derived.tectonics_factor,
+            continental_scale: self.continental_scale,
+            num_plates_override: self.num_plates_override,
         });
 
-        // Phase 6.2: Terrain generation on HEALPix → cubemap
-        let terrain = healpix_terrain::generate(
-            &sim,
-            &HealpixTerrainParams {
-                seed: self.params.seed,
-                mountain_scale: self.mountain_scale,
-                detail_scale: self.detail_scale,
-            },
+        let (amplitude, frequency, octaves, gain, lacunarity) = self.terrain_params();
+        let terrain = self.terrain_compute.generate(
+            &self.gpu,
+            &plates,
             self.preview_resolution,
+            self.params.seed,
+            amplitude,
+            frequency,
+            octaves,
+            gain,
+            lacunarity,
+            self.mountain_scale,
+            self.boundary_width,
+            self.warp_strength,
+            self.detail_scale,
+            self.derived.surface_gravity,
+            self.derived.tectonics_factor,
+            self.age_override.unwrap_or(self.derived.surface_age),
         );
 
-        // Map effective_ocean [0,1] to ocean_level across full terrain height range
+        let effective_ocean = self.derived.ocean_fraction * (1.0 - self.water_loss);
         let ocean_level = -0.5 + 1.7 * effective_ocean;
 
         // Show un-eroded terrain immediately
@@ -272,8 +293,8 @@ impl PlanetGenApp {
         }
 
         eprintln!(
-            "[terrain {}px nside={}] plate_sim+terrain: {:.0}ms, scheduling {} erosion iters",
-            self.preview_resolution, nside, t0.elapsed().as_secs_f64() * 1000.0, self.erosion_remaining,
+            "[terrain {}px] plates+compute: {:.0}ms, scheduling {} erosion iters progressively",
+            self.preview_resolution, t0.elapsed().as_secs_f64() * 1000.0, self.erosion_remaining,
         );
 
         self.needs_terrain = false;
@@ -337,40 +358,16 @@ impl PlanetGenApp {
             season: self.season,
         };
 
-        let effective_ocean = self.derived.ocean_fraction * (1.0 - self.water_loss);
-        let num_plates = if self.num_plates_override > 0 {
-            self.num_plates_override
-        } else {
-            14
-        };
-
-        // Higher nside for export quality (512 for high-res)
-        let nside = (self.export_resolution / 8).clamp(64, 512).next_power_of_two().min(512);
-
-        let plate_params = PlateSimParams {
-            nside,
-            seed: self.params.seed,
-            num_plates,
-            ocean_fraction: effective_ocean,
-            num_continents: self.num_continents,
-            continent_size_variety: self.continent_size_variety,
-            tectonics_factor: self.derived.tectonics_factor,
-        };
-
-        let healpix_params = HealpixTerrainParams {
-            seed: self.params.seed,
-            mountain_scale: self.mountain_scale,
-            detail_scale: self.detail_scale,
-        };
+        let terrain_params = self.terrain_params();
 
         let handle = export::spawn_export(
             self.gpu.clone(),
             config,
             self.params.clone(),
             self.derived.clone(),
+            self.continental_scale,
             self.water_loss,
-            plate_params,
-            healpix_params,
+            terrain_params,
         );
 
         self.export_handle = Some(handle);
