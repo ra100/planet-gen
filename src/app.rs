@@ -582,6 +582,7 @@ impl eframe::App for PlanetGenApp {
                         (&mut self.show_water, "Water / Ocean", "Ocean surface with depth shading and specular"),
                         (&mut self.show_ice, "Ice Caps", "Polar and altitude ice rendering"),
                         (&mut self.show_biomes, "Biome Colors", "Temperature/moisture-driven biome coloring"),
+                        (&mut self.show_ao, "Ambient Occlusion", "Valley darkening for depth perception"),
                         (&mut self.show_clouds, "Clouds", "Cloud layer rendering"),
                         (&mut self.show_atmosphere, "Atmosphere", "Atmospheric scattering (blue limb glow, red sunsets)"),
                         (&mut self.show_cities, "City Lights", "Night-side city lights and day-side urban patches"),

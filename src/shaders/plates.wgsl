@@ -45,6 +45,11 @@ fn pcg_hash(input: u32) -> u32 {
     return h;
 }
 
+// Hash to [0, 1] — for per-plate character parameters
+fn hash_f32_01(input: u32) -> f32 {
+    return f32(pcg_hash(input) & 0xFFFFu) / 65535.0;
+}
+
 fn seed_offset(s: u32) -> vec3<f32> {
     let h1 = pcg_hash(s);
     let h2 = pcg_hash(s + 1u);
@@ -240,35 +245,62 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 
     var height = plate_height * params.amplitude + noise_detail;
 
-    // === Layer 2: Highland/lowland variation within continents ===
-    let highland = snoise(wpos * 3.0 + seed_offset(params.seed + 1100u)) * 0.14
-                 + snoise(wpos * 6.0 + seed_offset(params.seed + 1110u)) * 0.06 * high_freq_weight;
-    let on_land = smooth_step(-0.05, 0.05, height);
-    height += highland * on_land;
+    // === Per-plate terrain character ===
+    // Each plate gets a unique personality from its index (u32 wrapping is fine for hashing)
+    let plate_id = info.nearest_idx;
+    let plate_char = vec3<f32>(
+        hash_f32_01(params.seed + plate_id * 7u + 100u),  // roughness character (0=smooth, 1=rugged)
+        hash_f32_01(params.seed + plate_id * 7u + 101u),  // plateau tendency (0=peaked, 1=flat-top)
+        hash_f32_01(params.seed + plate_id * 7u + 102u)   // highland coverage (0=lowland, 1=highland)
+    );
 
-    // === Layer 3: Mountain ranges — noise-positioned, NOT plate boundaries ===
-    // Mountain zone noise: creates broad bands where mountains can form
-    // tectonics_factor controls how mountainous the planet is
+    // === Layer 2: Highland/lowland with valleys and foothills ===
+    let on_land = smooth_step(-0.05, 0.05, height);
+
+    // Broad highland zones — per-plate highland coverage varies
+    let highland_scale = 0.10 + plate_char.z * 0.10; // 0.10-0.20 amplitude
+    let hl1 = snoise(wpos * 2.5 + seed_offset(params.seed + 1100u)) * highland_scale;
+    let hl2 = snoise(wpos * 5.0 + seed_offset(params.seed + 1110u)) * 0.05 * high_freq_weight;
+    height += (hl1 + hl2) * on_land;
+
+    // Valleys: negative noise carved between highlands
+    let valley_noise = snoise(wpos * 3.5 + seed_offset(params.seed + 1200u));
+    let valley_depth = smooth_step(0.3, 0.6, -valley_noise) * 0.08; // carve where noise is negative
+    height -= valley_depth * on_land;
+
+    // Foothills: gradual transition from plains to mountain zones
+    let foothill_noise = snoise(wpos * 4.0 + seed_offset(params.seed + 1300u));
+    let foothill_zone = smooth_step(0.0, 0.15, height) * smooth_step(0.30, 0.10, height);
+    height += abs(foothill_noise) * 0.04 * foothill_zone;
+
+    // === Layer 3: Mountain ranges with per-plate character ===
     let mz1 = snoise(wpos * 2.0 + seed_offset(params.seed + 2000u));
     let mz2 = snoise(wpos * 4.0 + seed_offset(params.seed + 2010u)) * 0.3;
     let mountain_zone = smooth_step(0.1, 0.5, (mz1 + mz2) * 0.5 + 0.5) * tect;
 
-    // Domain-warped ridged multifractal — warp breaks grid alignment
+    // Domain-warped ridged multifractal — per-plate warp strength varies
     let mt_so = seed_offset(params.seed + 6000u);
+    let warp_str = 0.10 + plate_char.x * 0.10; // rugged plates get more warp
     let mt_warp = vec3<f32>(
         snoise(raw_pos * 2.0 + vec3<f32>(53.7, 0.0, 0.0) + mt_so),
         snoise(raw_pos * 2.0 + vec3<f32>(0.0, 71.3, 0.0) + mt_so),
         snoise(raw_pos * 2.0 + vec3<f32>(0.0, 0.0, 97.1) + mt_so)
-    ) * 0.15;
+    ) * warp_str;
     let mpos = raw_pos + mt_warp;
+
+    // Per-plate mountain style: vary octaves and lacunarity
+    let ridge_lacunarity = 2.0 + plate_char.x * 0.4; // 2.0-2.4
     let ridge = ridged_multifractal(
         mpos * 5.0 + seed_offset(params.seed + 2100u),
-        5, 2.2, 2.0, 1.0
+        5, ridge_lacunarity, 2.0, 1.0
     );
 
-    // Mountains only on land (not ocean floor or thin boundary strips)
+    // Plateau shaping: some plates get flat-topped mountains
+    let plateau_factor = plate_char.y;
+    let ridge_shaped = mix(ridge, smooth_step(0.2, 0.5, ridge), plateau_factor * 0.7);
+
     let mountain_base = smooth_step(-0.02, 0.05, height);
-    height += ridge * mountain_zone * mountain_base
+    height += ridge_shaped * mountain_zone * mountain_base
         * params.mountain_scale * 0.35 * gravity_factor;
 
     // === Layer 4: Ocean floor variation ===

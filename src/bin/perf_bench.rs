@@ -115,7 +115,7 @@ fn main() {
 
     let t_classified = Instant::now();
     let _terrain_classified = terrain_compute.generate(
-        &gpu, &plates_bench, bench_res, seed, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0, 9.81, 0.85, 0.2,
+        &gpu, &plates_bench, bench_res, seed, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0, 9.81, 0.85, 0.2, 1.0,
     );
     let classified_ms = t_classified.elapsed().as_secs_f64() * 1000.0;
 

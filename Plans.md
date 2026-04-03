@@ -308,6 +308,21 @@ Connect the `num_continents` and `continent_size_variety` UI sliders to the plat
 
 ---
 
+## Phase 5.14: Terrain Features & Biome Overhaul
+
+Improve terrain variety (mountain ranges, plateaus, valleys), expand biome palette with regional character, and add wind-driven climate for physically plausible biome distribution.
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 5.14.1 | Terrain variety: add plateaus (flat-top mountains), broad valleys between highland zones, foothills gradient. Per-plate terrain character via plate-seed noise | Visible plateaus, valleys, foothills; different continents have different terrain character | Phase 5.13 | cc:完了 |
+| 5.14.2 | Expand biome palette: 12 biome anchors (tundra, boreal, temperate deciduous, temperate grassland, savanna, tropical rainforest, tropical seasonal, desert hot, desert cold, Mediterranean, montane, wetland) with smooth temperature×moisture blending | 12 distinct biome types visible across planet; smooth transitions between them | 5.14.1 | cc:完了 |
+| 5.14.3 | Elevation-dependent biome zonation: tropical lowland → montane forest → alpine meadow → rock → snow; arid lowland → arid highland → bare rock; boreal → tundra → ice. Zones shift with latitude | Mountain slopes show 3-4 color bands; equatorial mountains differ from polar mountains | 5.14.2 | cc:完了 |
+| 5.14.4 | Regional continent character: per-plate low-freq noise gives each continent a biome personality — some wetter (jungle continent), some drier (desert continent), some colder (tundra continent). Modulates moisture and temperature bias per plate | Different continents have visibly different dominant biomes at same latitude | 5.14.1 | cc:完了 |
+| 5.14.5 | Wind-driven moisture: improve Hadley wind model with monsoon zones near coasts, stronger rain shadow from mountain barriers, interior continental drying. Ocean proximity gradient from plate boundary distance | Rain shadow clearly visible on leeward mountain sides; interiors drier than coasts; monsoon bands near warm ocean coasts | 5.14.3 | cc:完了 |
+| 5.14.6 | Ocean current approximation: warm poleward currents on western coasts, cold equatorward on eastern coasts (approximated from wind direction + coastline normal). Currents modulate coastal temperature ±5°C and moisture ±20mm | Western coasts slightly warmer and wetter; eastern coasts cooler and drier at same latitude | 5.14.5 | cc:完了 |
+
+---
+
 ## Phase 6.0–6.3: HEALPix Orogen Port (ARCHIVED)
 
 HEALPix-based terrain system was fully implemented (Phases 6.0–6.2) and briefly integrated (6.3.1–6.3.3), then reverted at commit `1aac311` in favor of the multi-pass GPU plate pipeline (Phase 5.12). Code archived to branch `archive/healpix-orogen`.
