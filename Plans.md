@@ -5,321 +5,43 @@ Requirements: [docs/brainstorms/2026-03-29-planet-gen-requirements.md](docs/brai
 
 ---
 
-## Phase 1: Project Scaffold & GPU Hello World
+## Completed Phases (archived)
 
-Bootstrap the Rust project, get wgpu device initialization working, and prove compute shaders run.
+| Phase | Summary | Tasks | Final commit |
+|-------|---------|-------|-------------|
+| 1 | Project scaffold & GPU hello world | 4/4 | [516a8d7] |
+| 2 | Cube-sphere & noise generation | 4/4 | [6b2f515] |
+| 3 | Planet physics & parameter derivation | 4/4 | [a061118] |
+| 3.5 | Terrain & preview fixes | 5/5 | [de1d3f6] |
+| 4 | Biome & surface generation | 9/9 | [c0df99d] |
+| 4.5 | Research alignment fixes | 6/6 | [1112a72] |
+| 4.6 | Physics-driven terrain & climate (Hadley, rain shadow, domain warp) | 4/4 | [d8d7bd3] |
+| 4.7 | Visual control parameters (continental scale, water loss) | 4/4 | [d8d7bd3] |
+| 4.8 | Tectonic plate-driven terrain (Voronoi, boundary classification) | 5/5 | [4c93ee5] |
+| 5 | Tiled full-resolution generation & 8K EXR export | 7/7 | [d8d7bd3] |
+| 5.5 | Preview interaction & visual enhancements (zoom, Mie scattering) | 9/9 | [c56a543] |
+| 5.6 | Cloud layer (Schneider remap, Beer-Lambert, cyclone storms) | 9/9 | [da89ff5] |
+| 5.7 | Starfield, city lights & star color | 5/5 | [a83332d] |
+| 5.8 | Visual polish & layer toggle system (5/6 done) | 5/6 | [b48cd68] |
+| 5.9 | Pure noise terrain rebuild | 5/5 | [6d96e4b] |
+| 5.10 | Biome rendering refinement | 5/5 | [c2f23e1] |
+| 5.11 | UI refactor & equirectangular export | 4/4 | [74339e7] |
+| 5.12 | Multi-pass GPU plate terrain (JFA distance fields) | 10/10 | [d017196] |
+| 5.13 | Wire continent controls to pipeline | 5/5 | [f0b2a06] |
+| 5.14 | Terrain variety, 12-biome system, regional climate, ocean currents | 6/6 | [ba19f5f] |
+| 8.5 | Performance (benchmark, progressive erosion, moisture-weighted) | 6/6 | [edb3904] |
+| 6.0–6.3 | HEALPix orogen port | Archived to branch `archive/healpix-orogen` | [1aac311] reverted |
 
-| Task | 内容 | DoD | Depends | Status |
-|------|------|-----|---------|--------|
-| 1.1 | Rust project init: `cargo init`, add wgpu, egui/eframe, bytemuck, image, exr crate dependencies | `cargo build` succeeds with all deps | - | cc:完了 [9d4314e] |
-| 1.2 | wgpu device singleton: init adapter + device + queue at startup, store in app state | Unit test: device initializes and reports adapter name | 1.1 | cc:完了 [7a188d2] |
-| 1.3 | Minimal compute shader: WGSL shader that writes a gradient to a 256×256 storage texture | Test: shader dispatches, readback buffer contains expected gradient values | 1.2 | cc:完了 [35931ad] |
-| 1.4 | egui app shell: eframe window with a sidebar panel (placeholder sliders) and a main area displaying the compute shader output as a texture | App launches, shows gradient texture in main area and sliders in sidebar | 1.3 | cc:完了 [516a8d7] |
-
----
-
-## Phase 2: Cube-Sphere & Noise Generation
-
-Implement the core geometry representation and fBm terrain generation on the GPU.
-
-| Task | 内容 | DoD | Depends | Status |
-|------|------|-----|---------|--------|
-| 2.1 | Cube-to-sphere mapping: WGSL function `cube_to_sphere(face, uv) → vec3<f32>` with unit tests for all 6 faces | Test: points at face centers and corners map to correct sphere positions; no NaN at edges | Phase 1 | cc:完了 [4a16025] |
-| 2.2 | Simplex/Perlin noise in WGSL: 3D noise function usable in compute shaders | Test: noise output for known seed matches expected range [-1, 1], visually non-uniform | 2.1 | cc:完了 [f905943] |
-| 2.3 | Multi-octave fBm compute shader: 8 octaves of noise applied to all 6 cube faces at 256×256 (preview res) | Test: generates 6 heightmaps, values in expected range, different faces show continuous terrain across edges | 2.2 | cc:完了 [d2a17ec] |
-| 2.4 | Preview renderer: render cube-sphere heightmap as a lit sphere in the egui viewport (render-to-texture → `ui.image()`) | Rotating planet preview visible in app, updates when noise seed changes | 2.3 | cc:完了 [6b2f515] |
-
----
-
-## Phase 3: Planet Physics & Parameter Derivation
-
-Implement the science rules that turn user parameters into planet properties.
-
-| Task | 内容 | DoD | Depends | Status |
-|------|------|-----|---------|--------|
-| 3.1 | Parameter struct: `PlanetParams { star_distance_au, mass_earth, metallicity, axial_tilt_deg, rotation_period_h, seed }` with validation and defaults | Struct compiles, default produces Earth-like values, validation rejects nonsense (negative mass, etc.) | Phase 1 | cc:完了 [e96ddba] |
-| 3.2 | Planet type derivation: frost line calc, planet type classification (hot rocky / terrestrial / icy), tectonic regime (Rayleigh number) | Test: Earth params → terrestrial + plate tectonics; Mars params → stagnant lid; 5 AU → icy | 3.1 | cc:完了 [e96ddba] |
-| 3.3 | Derived properties: surface gravity, base temperature profile (latitude-based), ocean level, atmosphere type | Test: Earth params produce ~9.8 m/s² gravity, ~15°C avg temp, ~71% ocean coverage | 3.2 | cc:完了 [e96ddba] |
-| 3.4 | Wire params to UI: egui sliders for all 6 inputs with ranges (distance: 0.1-50 AU, mass: 0.01-10 M⊕, etc.), derived properties shown as read-only labels | Changing sliders updates derived properties in real-time; tooltips explain each parameter | 3.3 | cc:完了 [a061118] |
+**Total completed: ~120 tasks across 22 phases**
 
 ---
 
-## Phase 3.5: Terrain & Preview Fixes
-
-Fix issues found during user testing. Root cause: terrain params mapped via discrete categories instead of continuous functions, seed hash broken at large values, preview seam from cubemap texel boundaries.
-
-| Task | 内容 | DoD | Depends | Status |
-|------|------|-----|---------|--------|
-| 3.5.1 | Seamless preview: remove cubemap indirection for preview — sample 3D noise directly in the preview fragment shader using sphere position, eliminating face seam artifacts entirely | No visible seam when rotating the planet; preview matches terrain generation output | Phase 2 | cc:完了 [de1d3f6] |
-| 3.5.2 | Continuous parameter→terrain mapping: replace discrete `match` on planet type/tectonics with continuous functions. Use research spectral exponents (β): Earth=2.0, Mars=2.38, Venus=1.47 → persistence = 10^(-β/20). Distance drives base temperature → terrain roughness continuously. Mass drives amplitude via g∝M^0.46 continuously. All 6 slider values should produce visible continuous change | Test: moving any slider by 10% produces a visibly different (but not randomly different) planet. No flat regions where slider has no effect | 3.5.1 | cc:完了 [de1d3f6] |
-| 3.5.3 | Fix seed hash in WGSL: current integer hash may overflow incorrectly in WGSL. Use a float-based hash (fract/sin) or validated u32 hash. Test with seeds 0, 1, 42, 100000, 999999, 4294967295 | Test: all test seeds produce distinct, non-garbage terrain. Adjacent seeds (41,42,43) produce visually different but plausible planets | Phase 2 | cc:完了 [de1d3f6] |
-| 3.5.4 | Meaningful metallicity effect: metallicity shifts the frost line (already in DerivedProperties) and affects terrain spectral exponent β. Higher metallicity → more rocky minerals → rougher terrain (higher β). Should look like a continuous roughness change, not a random seed shift | Test: sweeping metallicity -1→+1 at fixed seed produces a smooth transition from smoother to rougher terrain | 3.5.2 | cc:完了 [de1d3f6] |
-| 3.5.5 | Planet fills preview area: adjust ray-sphere camera/FOV so the planet sphere fills ~85% of the preview render area | Planet visually fills most of the preview square with small margin | 3.5.1 | cc:完了 [de1d3f6] |
-
----
-
-## Phase 4: Biome & Surface Generation
-
-Generate biomes, albedo colors, and surface properties from terrain + planet physics.
-
-| Task | 内容 | DoD | Depends | Status |
-|------|------|-----|---------|--------|
-| 4.1 | Temperature map: latitude + elevation lapse rate + noise → per-pixel temperature on cube faces | Test: temperature decreases from equator to poles and with elevation; values in physically plausible range | Phase 2, 3.3, Phase 3.5 | cc:完了 [c0df99d] |
-| 4.2 | Moisture map: noise-based + ocean proximity bonus + rain shadow from wind direction | Test: moisture higher near oceans, lower in rain shadows behind mountains | 4.1 | cc:完了 [c0df99d] |
-| 4.3 | Whittaker biome lookup: 7×9 table as a GPU texture, sample with (temp, moisture) → biome ID | Test: known (temp, moisture) pairs return correct biome; covers all 15+ biome types | 4.2 | cc:完了 [c0df99d] |
-| 4.4 | Albedo generation: biome ID → base color + noise variation per biome | Test: desert is tan/brown, tropical rainforest is dark green, ice is white; colors vary within each biome | 4.3 | cc:完了 [c0df99d] |
-| 4.5 | Normal map generation: compute normals from heightmap via central differences | Test: normals point outward on flat areas, tilt correctly on slopes | Phase 2 | cc:完了 [6c5c386] |
-| 4.6 | Roughness map: biome-dependent base roughness + noise | Test: water/ice smooth (low roughness), rock/desert rough (high roughness) | 4.3 | cc:完了 [6c5c386] |
-| 4.7 | Ocean & ice masks: threshold height for ocean, threshold temperature for ice caps | Test: ocean mask covers areas below sea level; ice caps at poles for Earth-like params | 4.1 | cc:完了 [c0df99d] |
-| 4.8 | Crater stamping: stamp crater shapes (rim + floor + ejecta) on heightmap, count scaled by derived surface age | Test: older surfaces get more craters; crater shapes have raised rim and depressed floor | Phase 2, 3.2 | cc:完了 [6c5c386] |
-| 4.9 | Preview integration: all maps (albedo, height, biomes) visible in the preview sphere with <1s update at 256×256 | Changing any parameter updates the preview planet within 1 second | 4.4, 4.5, 4.6, 4.7 | cc:完了 [c0df99d] |
-
----
-
-## Phase 4.5: Research Alignment Fixes
-
-Align physics model with research data. Replace heuristic thresholds with research-backed continuous formulas.
-
-| Task | 内容 | DoD | Depends | Status |
-|------|------|-----|---------|--------|
-| 4.5.1 | Continuous tectonic regime: replace binary mass/distance threshold with simplified Rayleigh number estimate. Ra ∝ g·ΔT·D³ — use mass→gravity, distance→ΔT, derive Ra continuously. Tectonics factor [0,1] instead of enum for terrain influence | Test: tectonics factor varies smoothly with mass 0.01→10 and distance 0.1→50; Earth params give ~0.8+, Mars ~0.3 | Phase 4 | cc:完了 [1112a72] |
-| 4.5.2 | Continuous atmosphere + greenhouse feedback: replace discrete mass cutoffs with escape velocity-based retention AND add greenhouse feedback — colder equilibrium planets accumulate more CO₂ → stronger greenhouse, extending habitable zone to ~0.95-1.7 AU instead of current sharp dropoff at ~1.15 AU. Use carbonate-silicate cycle approximation | Test: atmosphere strength transitions smoothly; habitable zone extends to ~1.6 AU without freezing over; Earth at 1.0 AU gives ~15°C, at 1.5 AU gives ~0-5°C (cold but not ice planet) | 4.5.1 | cc:完了 [1112a72] |
-| 4.5.3 | MMSN plausibility check: isolation mass warning in UI | Test: warning shown for implausible mass | 4.5.1 | cc:完了 [1112a72] |
-| 4.5.4 | fBm octaves 8-12 per research | Test: minimum 8 octaves | Phase 4 | cc:完了 [1112a72] |
-| 4.5.5 | Physical ocean fraction from water budget model | Test: Earth ~0.5-0.7 | 4.5.1 | cc:完了 [1112a72] |
-| 4.5.6 | Continental structure: low-freq base + detail fBm, bimodal for plate tectonics | Test: visible continent-scale landmasses | Phase 4 | cc:完了 [1112a72] |
-
----
-
-## Phase 4.6: Physics-Driven Terrain & Climate
-
-Interconnected physical systems: Hadley cell atmospheric circulation, domain warping for geological terrain, rain shadows, and altitude zonation.
-
-Plan: [docs/plans/2026-03-30-002-feat-physics-driven-terrain-plan.md](docs/plans/2026-03-30-002-feat-physics-driven-terrain-plan.md)
-
-| Task | 内容 | DoD | Depends | Status |
-|------|------|-----|---------|--------|
-| 4.6.1 | Hadley cell moisture model: three-cell circulation replacing noise-based moisture, latitude-banded climate zones | Deserts at ~30° N/S, green equatorial band, tilt shifts bands | Phase 4 | cc:完了 [d8d7bd3] |
-| 4.6.2 | Wind direction and rain shadow: wind from Hadley model creates dry leeward zones on mountains | Visible wet/dry asymmetry on mountain ranges | 4.6.1 | cc:完了 [d8d7bd3] |
-| 4.6.3 | Domain warping for geological terrain: warp continental_base noise for ridges, irregular coastlines | Coastlines irregular, mountains rougher than lowlands | Phase 4 | cc:完了 [d8d7bd3] |
-| 4.6.4 | Altitude zonation: forest → alpine → rock → snow bands on mountains, latitude-dependent snow line | Visible horizontal color banding on mountain slopes | 4.6.1 | cc:完了 [d8d7bd3] |
-
----
-
-## Phase 4.7: Visual Control Parameters
-
-Artistic override parameters for continent size, polar ocean ice, and water loss.
-
-Plan: [docs/plans/2026-03-30-001-feat-visual-control-parameters-plan.md](docs/plans/2026-03-30-001-feat-visual-control-parameters-plan.md)
-
-| Task | 内容 | DoD | Depends | Status |
-|------|------|-----|---------|--------|
-| 4.7.1 | Continental scale slider (0.5-4.0): controls frequency of continental_base noise layer | Different continent sizes at different values, preview updates <1s | Phase 4 | cc:完了 [d8d7bd3] |
-| 4.7.2 | Polar ocean ice rendering: ocean rendered as ice when temperature < -2°C | Polar regions show ice on ocean, not just on land | Phase 4 | cc:完了 [d8d7bd3] |
-| 4.7.3 | Water loss slider (0.0-1.0): reduces effective ocean fraction below physics-derived value | Slider reduces ocean coverage smoothly, exposed areas show land biomes | Phase 4 | cc:完了 [d8d7bd3] |
-| 4.7.4 | Uniform struct alignment: ensure PreviewUniforms stays 16-byte aligned with new fields | cargo test passes, no GPU validation errors | 4.7.1, 4.7.3 | cc:完了 [d8d7bd3] |
-
----
-
-## Phase 4.8: Tectonic Plate-Driven Terrain
-
-Replace noise-only heightmap with geologically structured terrain: Voronoi plates on sphere → boundary classification → height from geology → fBm detail. Two-pass GPU compute pipeline producing cubemap texture.
-
-Plan: [docs/plans/2026-03-30-003-feat-tectonic-terrain-plan.md](docs/plans/2026-03-30-003-feat-tectonic-terrain-plan.md)
-Requirements: [docs/brainstorms/2026-03-30-tectonic-terrain-requirements.md](docs/brainstorms/2026-03-30-tectonic-terrain-requirements.md)
-
-| Task | 内容 | DoD | Depends | Status |
-|------|------|-----|---------|--------|
-| 4.8.1 | Plate generation on CPU (Rust): Fibonacci sphere, N=6-16 plates, continental/oceanic types, velocities | Earth params → 10-12 plates, ~30% continental | Phase 4 | cc:完了 [e599cd7] |
-| 4.8.2 | Plate assignment compute shader: Voronoi on sphere, boundary distance and type | Distinct Voronoi regions with classified boundaries | 4.8.1 | cc:完了 [9155677] |
-| 4.8.3 | Height generation compute shader: plate elevation + boundary terrain + fBm detail | Mountains at convergent boundaries, bimodal distribution | 4.8.2 | cc:完了 [9155677] |
-| 4.8.4 | Cubemap preview integration: compute → R16Float cubemap → preview shader | Preview shows geological terrain, all features work | 4.8.3 | cc:完了 [4c93ee5] |
-| 4.8.5 | Voronoi edge warping: domain warp for natural boundaries | Curved irregular plate boundaries | 4.8.2 | cc:完了 [9155677] |
-
----
-
-## Phase 5: Tiled Full-Resolution Generation & Export
-
-Scale from preview (256²) to full 8K (8192²) via tiled generation and export to files.
-
-| Task | 内容 | DoD | Depends | Status |
-|------|------|-----|---------|--------|
-| 5.1 | Tile coordinator: subdivide each face into 16×16 tiles of 512px, dispatch compute shaders per tile with correct UV offsets | Test: 6 × 256 = 1,536 tiles dispatched; adjacent tiles produce seamless output at borders | Phase 4 | cc:完了 [d8d7bd3] |
-| 5.2 | GPU→CPU readback pipeline: read tile results from GPU storage textures to CPU memory, assemble into full-face images | Test: assembled face image matches expected resolution (8192×8192); no visible tile seams | 5.1 | cc:完了 [d8d7bd3] |
-| 5.3 | EXR export: write height/displacement as 16-bit float EXR files (one per face or stitched) | Test: exported EXR opens in Blender, values match GPU output within float precision | 5.2 | cc:完了 [d8d7bd3] |
-| 5.4 | PNG export: write albedo, normal, roughness, ocean mask, ice mask as 8-bit PNG | Test: exported PNGs open correctly, color values match preview visually | 5.2 | cc:完了 [d8d7bd3] |
-| 5.5 | Background generation with progress: full generation runs on background thread, UI shows progress bar (% tiles complete) | Test: UI remains responsive during generation; progress bar updates; cancel button stops generation | 5.1 | cc:完了 [d8d7bd3] |
-| 5.6 | Output directory structure: organize exported files in `<output_dir>/<planet_name>/` with consistent naming | Test: generate produces expected file tree with all 6 map types | 5.3, 5.4 | cc:完了 [d8d7bd3] |
-| 5.7 | Performance validation: full 8K generation completes in <30s on RTX 3080-class GPU | Benchmark: timed generation from start to all files written, meets target | 5.5, 5.6 | cc:完了 [d8d7bd3] |
-
----
-
-## Phase 5.5: Preview Interaction & Visual Enhancements
-
-Viewport controls, atmosphere rendering, and UI polish for the preview.
-
-| Task | 内容 | DoD | Depends | Status |
-|------|------|-----|---------|--------|
-| 5.5.1 | Viewport zoom (scroll wheel) and pan (middle mouse drag) | Zoom in/out, drag planet around viewport | Phase 5 | cc:完了 [03721e1] |
-| 5.5.2 | Inverse drag direction + cursor-centered zoom | Drag feels like moving the planet; zoom centers on cursor | 5.5.1 | cc:完了 [ab10d3d] |
-| 5.5.3 | Fix seasonal biome instability: mean annual climate for biome type, seasonal for color modulation | Forests stay stable across seasons | Phase 4 | cc:完了 [26b54e0] |
-| 5.5.4 | Improve tectonic plate shapes: per-plate noise bias + stronger domain warping | Less convex, more organic plate boundaries | Phase 4.8 | cc:完了 [1d730e5] |
-| 5.5.5 | Advanced Tweaks panel: mountain height, boundary width, shape warp, detail scale, plate count sliders | Exposed terrain controls with tooltips | Phase 4.8 | cc:完了 [1024f30] |
-| 5.5.6 | Fix mountain height clipping at high mountain_scale | No flat plateaus at extreme settings | 5.5.5 | cc:完了 [f787c86] |
-| 5.5.7 | Fix grid-aligned erosion artifacts (MFD flow routing) + scrollable side panel | Smooth erosion on steep terrain | Phase 4.8 | cc:完了 [e073f4e] |
-| 5.5.8 | Fix slider sticking during GPU work: process UI before blocking GPU | Mouse release captured correctly | 5.5.5 | cc:完了 [cb707bf] |
-| 5.5.9 | Mie scattering for atmospheric haze and sun glow (Henyey-Greenstein phase function) | Blue limb glow + bright sun-side haze | Phase 4 | cc:完了 [c56a543] |
-
----
-
-## Phase 5.6: Cloud Layer
-
-Procedural cloud system: Schneider remap, domain-warped fBm, Beer-Lambert opacity, self-shadowing, cyclone storms.
-
-Plan: [docs/plans/2026-03-31-003-feat-cloud-layer-v2-plan.md](docs/plans/2026-03-31-003-feat-cloud-layer-v2-plan.md)
-Requirements: [docs/brainstorms/2026-03-31-cloud-layer-requirements.md](docs/brainstorms/2026-03-31-cloud-layer-requirements.md)
-Research: [docs/research/cloud-layer-rendering.md](docs/research/cloud-layer-rendering.md)
-
-| Task | 内容 | DoD | Depends | Status |
-|------|------|-----|---------|--------|
-| 5.6.1 | Cloud uniforms + UI: coverage slider, seed control, randomize button | Cloud section in sidebar with coverage and seed | Phase 5.5 | cc:完了 [f8722c9] |
-| 5.6.2 | Cloud density: Schneider remap, domain-warped 5-octave fBm, climate threshold modulation | Organic cloud shapes, no latitude banding, linear slider response | 5.6.1 | cc:完了 [0def439] |
-| 5.6.3 | Cloud rendering: Beer-Lambert opacity, self-shadowing, HG silver lining | Bright tops, blue-grey shadows, translucent thin edges | 5.6.2 | cc:完了 [0def439] |
-| 5.6.4 | Terrain-aware clouds: orographic lift, ocean/land influence, convection, weather scale | Clouds cluster over warm oceans and mountain windward sides | 5.6.3 | cc:完了 [de6bd6a] |
-| 5.6.5 | Seasonal clouds: moisture and temperature follow season slider | Cloud patterns shift with seasons | 5.6.4 | cc:完了 [2e0dbea] |
-| 5.6.6 | Two-layer rendering: low cumulus/stratus shell + high cirrus layer with parallax | Visible depth between cloud layers | 5.6.3 | cc:完了 [248c1eb] |
-| 5.6.7 | Cloud shadows on surface + dual-noise cloud types (stratus/cumulus blend) | Surface darkened under clouds, mixed cloud textures | 5.6.3 | cc:完了 [b37ec7c] |
-| 5.6.8 | Cloud type slider: smooth stratus (0) ↔ puffy cumulus (1) | User-controllable cloud style | 5.6.7 | cc:完了 [f6520bb] |
-| 5.6.9 | Cyclone storms: count slider (0-8), size slider, vortex warp, spiral arm carving, Coriolis-correct | Visible storm systems with eye, spiral arms, configurable count/size | 5.6.2 | cc:完了 [da89ff5] |
-
----
-
-## Phase 5.7: Starfield, City Lights & Star Color
-
-Background environment, night-side civilization, and star type lighting.
-
-| Task | 内容 | DoD | Depends | Status |
-|------|------|-----|---------|--------|
-| 5.7.1 | Starfield background with sun orb: hash-based stars, color variation, sun disc with glow | Stars visible behind planet, sun at light_dir position | Phase 5.5 | cc:完了 [361b6de] |
-| 5.7.2 | Night-side city lights + day-side urban grey patches: procedural urban density from climate data | Warm glow on dark side, grey patches on day side, Development slider | Phase 5.6 | cc:完了 [02e4109] |
-| 5.7.3 | City light color slider: warm amber → white LED → cool blue | Configurable night light color | 5.7.2 | cc:完了 [91bd657] |
-| 5.7.4 | Star color temperature slider: blue O-star → sun G-star → red M-dwarf, tints all lighting + clouds + sun orb | Planet illumination matches star type | Phase 5.5 | cc:完了 [9fea2ab] |
-| 5.7.5 | City lights under clouds with scattered glow: dimmed by cloud cover, soft glow through thin clouds | Lights properly occluded, scattered through clouds | 5.7.2, Phase 5.6 | cc:完了 [a83332d] |
-
----
-
-## Phase 5.8: Visual Polish & Layer Toggle System
-
-Plan: [docs/plans/2026-04-02-001-feat-layer-toggle-system-plan.md](docs/plans/2026-04-02-001-feat-layer-toggle-system-plan.md)
-Requirements: [docs/brainstorms/2026-04-02-layer-toggle-system-requirements.md](docs/brainstorms/2026-04-02-layer-toggle-system-requirements.md)
-
-Terrain rendering improvements and additional visual features.
-
-| Task | 内容 | DoD | Depends | Status |
-|------|------|-----|---------|--------|
-| 5.8.1 | Ambient occlusion in terrain valleys + toggle checkbox | Visible darkening in valleys, toggleable via UI | Phase 4.8 | cc:完了 [88f83f1] |
-| 5.8.2 | Export cloud + night light layers as textures: add cloud density and city lights to 8K export pipeline | Cloud and night light PNGs exported alongside albedo/normal/roughness | Phase 5, 5.6, 5.7 | cc:TODO |
-| 5.8.3 | Polar ice: NASA-like rendering — thickness variation, pressure ridges, land snow at 0°C, coastline blending | Realistic polar ice with thin/thick variation and smooth transitions | Phase 4 | cc:完了 [b3f4961] |
-| 5.8.4 | Smooth roughness map: continuous smooth_step + noise variation, fix blocky biome boundaries | No visible hard edges in roughness debug view | Phase 4 | cc:完了 [ae4cbbc] |
-| 5.8.5 | Ocean plate boundary smoothing: blur depth + noise to soften tectonic ridges on ocean floor | No hard lines visible in ocean coloring | Phase 4.8 | cc:完了 [9138df7] |
-| 5.8.6 | Fix speckled coastlines: erosion roughening noise fades near ocean level | Clean coastlines without tiny land/water cells | Phase 4.8 | cc:完了 [b48cd68] |
-
----
-
-## Phase 5.9: Pure Noise Terrain Rebuild
-
-Replace Voronoi plate-based terrain with layered noise approach. Plates caused persistent artifacts (noodle ridges, boundary ghosting, puzzle-piece continents).
-
-Plan: [docs/plans/2026-04-02-002-fix-terrain-artifacts-extend-geology-plan.md](docs/plans/2026-04-02-002-fix-terrain-artifacts-extend-geology-plan.md)
-Requirements: [docs/brainstorms/2026-04-02-physics-terrain-rebuild-requirements.md](docs/brainstorms/2026-04-02-physics-terrain-rebuild-requirements.md)
-
-| Task | 内容 | DoD | Depends | Status |
-|------|------|-----|---------|--------|
-| 5.9.1 | Pure noise terrain: domain-warped continental noise + ridged multifractal mountains + hotspots | Organic continent shapes, no Voronoi artifacts, seed-dependent | Phase 4.8 | cc:完了 [040e7a3] |
-| 5.9.2 | Bimodal shaping: pow(0.35) for solid continents without channel fragmentation | Continents are coherent masses, not torn webs | 5.9.1 | cc:完了 [4aa7fbd] |
-| 5.9.3 | PCG hash for seed offsets: replace golden-ratio hash to eliminate cross-seed correlation | Each seed produces completely different planet | 5.9.1 | cc:完了 [02b2aeb] |
-| 5.9.4 | Full water level range: water_loss=0 → ocean world, water_loss=1 → desert | Water loss slider controls full range of ocean coverage | 5.9.1 | cc:完了 [e9f0fbe] |
-| 5.9.5 | Atmospheric moisture slider: decouple climate wetness from sea level control | Independent control of biome greenness vs water surface | 5.9.4 | cc:完了 [6d96e4b] |
-
----
-
-## Phase 5.10: Biome Rendering Refinement
-
-Regional color variance, moisture rebalance, and realistic snow rules.
-
-Plan: [docs/plans/2026-04-02-003-feat-biome-rendering-refinement-plan.md](docs/plans/2026-04-02-003-feat-biome-rendering-refinement-plan.md)
-
-| Task | 内容 | DoD | Depends | Status |
-|------|------|-----|---------|--------|
-| 5.10.1 | Regional color variance: low-freq noise selects biome sub-variants (red/tan/dark sand, emerald/olive forest) | Different desert regions show different sand colors on same planet | Phase 5.9 | cc:完了 [4c3c1ee] |
-| 5.10.2 | Moisture rebalance: soften ocean_fraction scaling so low-water planets aren't all desert | Earth-like planets show recognizable climate zones | 5.10.1 | cc:完了 [4c3c1ee] |
-| 5.10.3 | Slope-aware snow: steep slopes shed snow, extreme peaks above cloud layer too dry | Mountains show patchy snow on ridges, exposed rock on cliffs | 5.10.1 | cc:完了 [4c3c1ee] |
-| 5.10.4 | Fix snow tracing coastline: cold_snow threshold from 2°C to -3°C | Snow only in genuinely cold regions, not near-coast elevated areas | 5.10.3 | cc:完了 [0f9d0b7] |
-| 5.10.5 | Fix roughness pixelation, city density scaling, emission export | Smooth roughness, sparse cities at low dev, clean emission view | 5.10.1 | cc:完了 [c2f23e1] |
-
----
-
-## Phase 5.11: UI Refactor & Export Overhaul
-
-Right panel for export, collapsible layers, equirectangular EXR export.
-
-| Task | 内容 | DoD | Depends | Status |
-|------|------|-----|---------|--------|
-| 5.11.1 | UI refactor: right panel for derived properties + export, collapsible render layers | Two-panel layout, export checkboxes for layer selection | Phase 5.10 | cc:完了 [89955c9] |
-| 5.11.2 | Equirectangular export: cubemap-to-equirect conversion with bilinear interpolation | Single 2:1 EXR files instead of 6 cube face files | 5.11.1 | cc:完了 [0b8ca12] |
-| 5.11.3 | All exports as EXR with ZIP16 compression | 32-bit float precision, good compression, universal support | 5.11.2 | cc:完了 [74339e7] |
-| 5.11.4 | All render layers ON by default (water, ice, biomes, clouds, atmosphere, cities, erosion) | App launches with full rendering, not bare terrain | Phase 5.10 | cc:完了 [3a5fa10] |
-
----
-
-## Phase 5.12: Multi-Pass GPU Plate Terrain
-
-Replace pure-noise terrain with multi-pass GPU plate system using Jump Flooding Algorithm for smooth distance fields. Mountains form at collision zones, continental shelves from coast distance, stress-driven roughness variation.
-
-Requirements: [docs/brainstorms/2026-04-03-multipass-plate-terrain-requirements.md](docs/brainstorms/2026-04-03-multipass-plate-terrain-requirements.md)
-Reference: planet_heightmap_generation/ (JS/WebGL implementation with BFS distance fields)
-
-| Task | 内容 | DoD | Depends | Status |
-|------|------|-----|---------|--------|
-| 5.12.1 | Pass 1 shader: Voronoi plate assignment per pixel + boundary detection | Each pixel stores plate_idx; boundary pixels marked where neighbors differ | - | cc:完了 [d017196] |
-| 5.12.2 | Pass 2 shader: JFA distance field (ping-pong buffers, O(log n) passes) | Smooth distance-to-boundary field per pixel; no sharp Voronoi edges | 5.12.1 | cc:完了 [d017196] |
-| 5.12.3 | Rust pipeline: multi-pass dispatch orchestration (buffers, bind groups, sequencing) | All passes dispatch in sequence per face, readback produces TectonicTerrain | 5.12.1, 5.12.2 | cc:完了 [d017196] |
-| 5.12.4 | Pass 3: stress computation + boundary type classification (convergent/divergent/transform) | Per-pixel stress from plate velocities; boundary type from relative motion dot product | 5.12.3 | cc:完了 [d017196] |
-| 5.12.5 | Pass 3: collision mountains with asymmetric subduction profiles | Mountains at convergent zones; steeper oceanic side + trench, gentler back-arc plateau | 5.12.4 | cc:完了 [d017196] |
-| 5.12.6 | Pass 3: fold ridges parallel to plate motion direction | Linear ridge/valley patterns within mountain zones aligned with Euler pole | 5.12.5 | cc:完了 [d017196] |
-| 5.12.7 | Pass 3: continental shelves + ocean floor from coast distance field | Shelf (0-5 cells), slope (5-12 cells), abyssal plain (12+); active vs passive margin width | 5.12.4 | cc:完了 [d017196] |
-| 5.12.8 | Pass 3: stress-driven roughness + fBm detail | Craggy near orogens, smooth in cratons; noise amplitude scales with stress | 5.12.5, 5.12.7 | cc:完了 [d017196] |
-| 5.12.9 | Pass 3: divergent boundaries (mid-ocean ridges, continental rift valleys) | Subtle elevation at divergent; rift depression on land | 5.12.4 | cc:完了 [d017196] |
-| 5.12.10 | Integration: wire into app.rs, remove old noise terrain, verify <2s preview | Full pipeline end-to-end; fragment shader unchanged; water_loss/moisture sliders work | 5.12.8, 5.12.9 | cc:完了 [d017196] |
-
----
-
-## Phase 5.13: Wire Continent Controls to Pipeline
-
-Connect the `num_continents` and `continent_size_variety` UI sliders to the plate generation pipeline so they actually influence terrain shape.
-
-| Task | 内容 | DoD | Depends | Status |
-|------|------|-----|---------|--------|
-| 5.13.1 | Add `num_continents` and `continent_size_variety` fields to `PlateGenParams` | Struct compiles with new fields; all call sites updated | Phase 5.12 | cc:完了 [f0b2a06] |
-| 5.13.2 | Wire `num_continents` → continental plate count in `generate_plates()`: override `continental_count = num_continents.min(total_plates)` instead of deriving from ocean_fraction | Changing slider 1→10 changes number of continental plates; ocean_fraction still controls water level independently | 5.13.1 | cc:完了 [f0b2a06] |
-| 5.13.3 | Wire `continent_size_variety` → plate center clustering: when variety > 0, pull a fraction of continental centers toward a seed-derived cluster point, creating one large supercontinent + scattered smaller ones | variety=0 gives roughly equal continents; variety=1 gives one dominant landmass + islands; smooth transition between | 5.13.2 | cc:完了 [f0b2a06] |
-| 5.13.4 | Pass both values from `app.rs::regenerate_terrain()` into `PlateGenParams` | Both sliders trigger terrain regeneration AND their values reach `generate_plates()` | 5.13.1 | cc:完了 [f0b2a06] |
-| 5.13.5 | Test: verify continent controls produce visually distinct results | `cargo test --lib` passes; sweeping num_continents 1→10 at fixed seed shows clear continent count change; sweeping variety 0→1 shows size distribution change | 5.13.4 | cc:完了 [f0b2a06] |
-
----
-
-## Phase 5.14: Terrain Features & Biome Overhaul
-
-Improve terrain variety (mountain ranges, plateaus, valleys), expand biome palette with regional character, and add wind-driven climate for physically plausible biome distribution.
-
-| Task | 内容 | DoD | Depends | Status |
-|------|------|-----|---------|--------|
-| 5.14.1 | Terrain variety: add plateaus (flat-top mountains), broad valleys between highland zones, foothills gradient. Per-plate terrain character via plate-seed noise | Visible plateaus, valleys, foothills; different continents have different terrain character | Phase 5.13 | cc:完了 |
-| 5.14.2 | Expand biome palette: 12 biome anchors (tundra, boreal, temperate deciduous, temperate grassland, savanna, tropical rainforest, tropical seasonal, desert hot, desert cold, Mediterranean, montane, wetland) with smooth temperature×moisture blending | 12 distinct biome types visible across planet; smooth transitions between them | 5.14.1 | cc:完了 |
-| 5.14.3 | Elevation-dependent biome zonation: tropical lowland → montane forest → alpine meadow → rock → snow; arid lowland → arid highland → bare rock; boreal → tundra → ice. Zones shift with latitude | Mountain slopes show 3-4 color bands; equatorial mountains differ from polar mountains | 5.14.2 | cc:完了 |
-| 5.14.4 | Regional continent character: per-plate low-freq noise gives each continent a biome personality — some wetter (jungle continent), some drier (desert continent), some colder (tundra continent). Modulates moisture and temperature bias per plate | Different continents have visibly different dominant biomes at same latitude | 5.14.1 | cc:完了 |
-| 5.14.5 | Wind-driven moisture: improve Hadley wind model with monsoon zones near coasts, stronger rain shadow from mountain barriers, interior continental drying. Ocean proximity gradient from plate boundary distance | Rain shadow clearly visible on leeward mountain sides; interiors drier than coasts; monsoon bands near warm ocean coasts | 5.14.3 | cc:完了 |
-| 5.14.6 | Ocean current approximation: warm poleward currents on western coasts, cold equatorward on eastern coasts (approximated from wind direction + coastline normal). Currents modulate coastal temperature ±5°C and moisture ±20mm | Western coasts slightly warmer and wetter; eastern coasts cooler and drier at same latitude | 5.14.5 | cc:完了 |
+## Open tasks from completed phases
+
+| Task | 内容 | Status |
+|------|------|--------|
+| 5.8.2 | Export cloud + night light layers as textures | cc:TODO |
+| 8a.7 | Performance + visual comparison: screenshot comparison and docs/research/ update | cc:TODO |
 
 ---
 
@@ -340,23 +62,6 @@ Target: 3-4 distinct layers, wind-streaked shapes, latitude-coherent cloud bands
 
 ---
 
-## Phase 6.0–6.3: HEALPix Orogen Port (ARCHIVED)
-
-HEALPix-based terrain system was fully implemented (Phases 6.0–6.2) and briefly integrated (6.3.1–6.3.3), then reverted at commit `1aac311` in favor of the multi-pass GPU plate pipeline (Phase 5.12). Code archived to branch `archive/healpix-orogen`.
-
-Requirements: [docs/brainstorms/2026-04-03-orogen-port-requirements.md](docs/brainstorms/2026-04-03-orogen-port-requirements.md)
-
-| Phase | Summary | Status |
-|-------|---------|--------|
-| 6.0 | HEALPix infrastructure (index/position, neighbors, cubemap resampling) | cc:完了 then archived |
-| 6.1 | Plate simulation (BFS flood fill, distance fields, super-plates, stress) | cc:完了 then archived |
-| 6.2 | Terrain generation (orogeny, shelves, roughness, cubemap pipeline) | cc:完了 then archived |
-| 6.3.1–3 | Integration into app + export | cc:reverted [1aac311] |
-| 6.3.4 | Parameter tuning | cc:cancelled (pipeline reverted) |
-| 6.3.5 | Remove old noise terrain code | cc:cancelled (pipeline reverted) |
-
----
-
 ## Phase 7: Blender Importer Addon
 
 Pure-Python Blender addon that imports generated textures and sets up materials.
@@ -374,8 +79,6 @@ Pure-Python Blender addon that imports generated textures and sets up materials.
 
 ## Phase 8: Advanced Visual Features
 
-Post-Blender visual enhancements for cinematic renders.
-
 | Task | 内容 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
 | 8.1 | Lava glow along plate boundaries: volcanic emission at tectonic faults, tectonic activity slider | Orange-red glow at convergent/divergent boundaries, configurable intensity | Phase 4.8 | cc:TODO |
@@ -386,68 +89,44 @@ Post-Blender visual enhancements for cinematic renders.
 
 ---
 
-## Phase 8.5: Performance
-
-Benchmarking and optimization infrastructure.
-
-| Task | 内容 | DoD | Depends | Status |
-|------|------|-----|---------|--------|
-| 7.5.1 | Performance benchmark binary: `src/bin/perf_bench.rs` | `cargo run --release --bin perf_bench` outputs CSV timing | Phase 5 | cc:完了 [b3cfbf6] |
-| 7.5.2 | Document performance bottlenecks | Analysis in docs/research/performance-analysis.md | 7.5.1 | cc:完了 [d30ea78] |
-| 7.5.3 | Resolution-adaptive erosion: scale iterations with resolution (256→5, 512→10, 768→15, 1024+→25) | 2K generation under 4s; visual quality similar at each resolution | - | cc:完了 [5d7b697] |
-| 7.5.4 | Progressive terrain: show un-eroded preview immediately, apply erosion in batches (5 iters/batch), re-render after each batch | Planet visible within 100ms of parameter change; erosion refines progressively | 7.5.3 | cc:完了 [b8d86f7] |
-| 7.5.5 | Re-run perf_bench after optimizations, compare before/after | Updated performance-analysis.md with comparison table | 7.5.3, 7.5.4 | cc:完了 [c7e75f6] |
-| 7.5.6 | Moisture-weighted erosion: scale erosion strength by latitude-based moisture in erosion.wgsl. Desert mountains stay sharp/craggy, tropical mountains get smooth rounded valleys. Factors: rainfall (primary), slope steepness (secondary) | Visible difference between desert (sharp) and tropical (smooth) mountains at same elevation | Phase 4.8 | cc:完了 [edb3904] |
-
----
-
 ## Phase 9: Advanced Tectonics
 
-Three-tier tectonic simulation with UI toggle between modes. Each tier adds realism at the cost of computation time.
+Three-tier tectonic simulation with UI toggle between modes.
 
-### Phase 8a: Better Boundary Physics (improve current Voronoi system)
-
-| Task | 内容 | DoD | Depends | Status |
-|------|------|-----|---------|--------|
-| 8a.1 | Research: survey tectonic plate simulation techniques (boundary classification, subduction, rifts, transform faults) | Research doc in docs/research/ with techniques and references | - | cc:TODO |
-| 8a.2 | UI: Add "Tectonics Mode" dropdown (Quick / Classified) in Advanced Tweaks | Dropdown visible, defaults to Quick (current behavior) | - | cc:完了 228e3d1 |
-| 8a.3 | Plate velocities: physics-derived Euler pole rotation, tangent to sphere, magnitude from tectonics_factor | dot(velocity, center) < 0.1 for all plates; velocity scales with tectonics_factor | - | cc:完了 4535bfa |
-| 8a.4 | Boundary classification: convergent/divergent/transform from relative velocity in GPU shader; Quick mode unchanged | Classified mode shows distinct terrain per boundary type | 8a.3 | cc:完了 228e3d1 |
-| 8a.5 | Subduction + rift + transform terrain: trench+arc at ocean-continent, broad plateau at cont-cont, rift valley at divergent | Visible terrain differences at each boundary type in Classified mode | 8a.4 | cc:完了 228e3d1 |
-| 8a.6 | Performance benchmark: Quick vs Classified at 768px in perf_bench, PASS/WARN against 50ms budget | Timing printed by perf_bench binary | 8a.4, 8a.5 | cc:完了 0f1609d |
-| 8a.7 | Performance + visual comparison: screenshot comparison and docs/research/ update | docs/research/performance-analysis.md updated | 8a.6 | cc:TODO |
-
-### Phase 8b: Plate Motion Simulation (continental drift)
+### Phase 9a: Better Boundary Physics
 
 | Task | 内容 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
-| 8b.1 | Research: plate motion algorithms (Euler poles, velocity fields on sphere, collision detection) | Research doc with algorithm selection and tradeoffs | Phase 8a | cc:TODO |
-| 8b.2 | Plate velocity field: assign motion vectors to each plate, compute relative velocities at boundaries | Velocity vectors visible in Plates debug view | 8b.1 | cc:TODO |
-| 8b.3 | Time-stepping: iterate plate positions over N geological timesteps, accumulate collision/rift history | "Geological age" slider controls timesteps (0=young, 1=ancient) | 8b.2 | cc:TODO |
-| 8b.4 | Collision history → terrain: accumulated collisions build mountain chains, rifts create ocean basins | Older planets have more complex terrain from plate history | 8b.3 | cc:TODO |
-| 8b.5 | Continental assembly/breakup: plates merge at collisions, split at rifts over time | Supercontinents form and break apart with age slider | 8b.4 | cc:TODO |
-| 8b.6 | Performance + visual comparison: benchmark all 3 modes | Timing + visual comparison updated | 8b.5 | cc:TODO |
+| 9a.1 | Research: survey tectonic plate simulation techniques | Research doc in docs/research/ | - | cc:TODO |
 
-### Phase 8c: Mantle Convection (future goal)
+(8a.2-8a.6 completed: Euler pole velocities, boundary classification, subduction/rift terrain, perf benchmark)
+
+### Phase 9b: Plate Motion Simulation (continental drift)
 
 | Task | 内容 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
-| 8c.1 | Research: simplified mantle convection models suitable for real-time (Rayleigh-Bénard on sphere) | Research doc with feasibility assessment | Phase 8b | cc:TODO |
-| 8c.2 | Convection cell simulation: compute upwelling/downwelling zones on sphere surface | Convection pattern visible in new debug view | 8c.1 | cc:TODO |
-| 8c.3 | Derive plate boundaries from convection: plates form between convection cells, motion driven by drag | Plates emerge naturally from convection pattern | 8c.2 | cc:TODO |
-| 8c.4 | Integration: convection → plates → boundaries → terrain pipeline | Full convection-driven planet generation works end-to-end | 8c.3 | cc:TODO |
+| 9b.1 | Research: plate motion algorithms (Euler poles, velocity fields, collision detection) | Research doc | Phase 9a | cc:TODO |
+| 9b.2 | Plate velocity field: motion vectors per plate, relative velocities at boundaries | Velocity vectors in Plates debug view | 9b.1 | cc:TODO |
+| 9b.3 | Time-stepping: N geological timesteps, accumulate collision/rift history | Geological age slider | 9b.2 | cc:TODO |
+| 9b.4 | Collision history → terrain | Older planets = more complex terrain | 9b.3 | cc:TODO |
+| 9b.5 | Continental assembly/breakup | Supercontinents form and break with age | 9b.4 | cc:TODO |
+
+### Phase 9c: Mantle Convection (future goal)
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 9c.1 | Research: simplified mantle convection (Rayleigh-Bénard on sphere) | Feasibility doc | Phase 9b | cc:TODO |
+| 9c.2 | Convection cell simulation | Pattern visible in debug view | 9c.1 | cc:TODO |
+| 9c.3 | Derive plate boundaries from convection | Plates emerge from convection | 9c.2 | cc:TODO |
+| 9c.4 | Full pipeline integration | End-to-end convection-driven generation | 9c.3 | cc:TODO |
 
 ---
 
 ## Phase 10: Polish & Distribution
 
-Error handling, cross-platform builds, and documentation.
-
-Error handling, cross-platform builds, and documentation.
-
 | Task | 内容 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
-| 8.1 | Error handling: GPU errors (OOM, device lost) caught and displayed in UI; graceful fallback messages for unsupported GPUs | Test: simulate OOM → error message shown, app doesn't crash | Phase 5 | cc:TODO |
-| 8.2 | Cross-platform CI: GitHub Actions builds for Linux, macOS, Windows; artifacts uploaded to releases | CI green on all 3 platforms; downloadable binaries work | Phase 5 | cc:TODO |
-| 8.3 | README: installation instructions, usage guide, parameter reference, example renders | README covers install → first planet → Blender import workflow | 8.2 | cc:TODO |
-| 8.4 | Blender addon packaging: zip file with addon Python files, install instructions | Addon installs via Blender Preferences → Install from File | Phase 6 | cc:TODO |
+| 10.1 | Error handling: GPU OOM/device lost → UI error message | App doesn't crash on GPU errors | Phase 5 | cc:TODO |
+| 10.2 | Cross-platform CI: GitHub Actions for Linux, macOS, Windows | CI green on all 3 | Phase 5 | cc:TODO |
+| 10.3 | README: install, usage guide, parameter reference, example renders | Full documentation | 10.2 | cc:TODO |
+| 10.4 | Blender addon packaging: zip + install instructions | Install via Preferences | Phase 7 | cc:TODO |
