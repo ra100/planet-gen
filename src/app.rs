@@ -225,8 +225,8 @@ impl PlanetGenApp {
             14
         };
 
-        // HEALPix nside: scale with preview resolution, clamped to [16, 256]
-        let nside = (self.preview_resolution / 8).clamp(16, 256);
+        // HEALPix nside must be power of 2 (nested scheme requirement)
+        let nside = (self.preview_resolution / 8).clamp(16, 256).next_power_of_two().min(256);
 
         // Phase 6.1: Plate simulation on HEALPix grid
         let sim = plate_sim::simulate(&PlateSimParams {
@@ -345,7 +345,7 @@ impl PlanetGenApp {
         };
 
         // Higher nside for export quality (512 for high-res)
-        let nside = (self.export_resolution / 8).clamp(64, 512);
+        let nside = (self.export_resolution / 8).clamp(64, 512).next_power_of_two().min(512);
 
         let plate_params = PlateSimParams {
             nside,
