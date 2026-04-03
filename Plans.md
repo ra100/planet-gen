@@ -330,13 +330,13 @@ Orogeny, shelves, stress-driven roughness on HEALPix, then GPU noise detail.
 
 | Task | 内容 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
-| 6.2.1 | Base elevation from plate type + super-plate structure | Continental pixels elevated, oceanic depressed; super-plate blending creates broad continent shapes | Phase 6.1 | cc:TODO |
-| 6.2.2 | Convergent mountain ridges with asymmetric subduction profiles | Mountains at convergent boundaries; steeper subducting side + trench, gentler back-arc plateau | 6.2.1, 6.1.6 | cc:TODO |
-| 6.2.3 | Fold ridges parallel to plate motion direction | Linear ridge/valley patterns within mountain zones; aligned with Euler pole velocity | 6.2.2 | cc:TODO |
-| 6.2.4 | Divergent boundaries: mid-ocean ridges + continental rift valleys | Subtle ocean ridge elevation; land rift depression; stress-modulated | 6.2.1, 6.1.6 | cc:TODO |
-| 6.2.5 | Continental shelf profile from coast distance field | Shelf (0-5 units), slope (5-12), abyssal plain (12+); active vs passive margin width | 6.2.1, 6.1.4 | cc:TODO |
-| 6.2.6 | Stress-driven roughness: GPU noise detail amplitude scales with stress | Craggy near orogens, smooth in cratons; ridged multifractal + fBm layered via GPU compute shader | 6.2.2, 6.2.5 | cc:TODO |
-| 6.2.7 | HEALPix→cubemap pipeline: resample terrain to cubemap, upload as R16Float | Existing fragment shader renders the new terrain; biomes/climate/atmosphere work unchanged | 6.2.6, 6.0.3 | cc:TODO |
+| 6.2.1 | Base elevation from plate type + super-plate structure | Continental pixels elevated, oceanic depressed; super-plate blending creates broad continent shapes | Phase 6.1 | cc:完了 [b8af38f] |
+| 6.2.2 | Convergent mountain ridges with asymmetric subduction profiles | Mountains at convergent boundaries; steeper subducting side + trench, gentler back-arc plateau | 6.2.1, 6.1.6 | cc:完了 [b8af38f] |
+| 6.2.3 | Fold ridges parallel to plate motion direction | Linear ridge/valley patterns within mountain zones; aligned with Euler pole velocity | 6.2.2 | cc:完了 [b8af38f] |
+| 6.2.4 | Divergent boundaries: mid-ocean ridges + continental rift valleys | Subtle ocean ridge elevation; land rift depression; stress-modulated | 6.2.1, 6.1.6 | cc:完了 [b8af38f] |
+| 6.2.5 | Continental shelf profile from coast distance field | Shelf (0-5 units), slope (5-12), abyssal plain (12+); active vs passive margin width | 6.2.1, 6.1.4 | cc:完了 [b8af38f] |
+| 6.2.6 | Stress-driven roughness: GPU noise detail amplitude scales with stress | Craggy near orogens, smooth in cratons; ridged multifractal + fBm layered via GPU compute shader | 6.2.2, 6.2.5 | cc:完了 [b8af38f] |
+| 6.2.7 | HEALPix→cubemap pipeline: resample terrain to cubemap, upload as R16Float | Existing fragment shader renders the new terrain; biomes/climate/atmosphere work unchanged | 6.2.6, 6.0.3 | cc:完了 [b8af38f] |
 
 ---
 
