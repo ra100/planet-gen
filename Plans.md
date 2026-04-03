@@ -294,7 +294,67 @@ Reference: planet_heightmap_generation/ (JS/WebGL implementation with BFS distan
 
 ---
 
-## Phase 6: Blender Importer Addon
+## Phase 6.0: HEALPix Orogen Port — Infrastructure
+
+HEALPix sphere grid module with index↔position conversion, neighbor lookup, and cubemap resampling.
+
+Requirements: [docs/brainstorms/2026-04-03-orogen-port-requirements.md](docs/brainstorms/2026-04-03-orogen-port-requirements.md)
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 6.0.1 | HEALPix module: nested-scheme pixel index ↔ 3D sphere position (vec3) | `healpix::pix2vec(nside, ipix)` and `healpix::vec2pix(nside, vec)` pass unit tests for all 12*nside^2 pixels | - | cc:TODO |
+| 6.0.2 | HEALPix neighbor lookup: 8 neighbors per pixel (SW,W,NW,N,NE,E,SE,S) | `healpix::neighbors(nside, ipix) -> [u32; 8]` correct for interior + edge + corner pixels | 6.0.1 | cc:TODO |
+| 6.0.3 | HEALPix → cubemap resampling: sample HEALPix buffer onto 6-face cubemap | `healpix::to_cubemap(data, nside, face_res) -> [Vec<f32>; 6]` with bilinear interpolation; output matches existing TectonicTerrain format | 6.0.1 | cc:TODO |
+| 6.0.4 | Integration test: generate flat HEALPix buffer, resample to cubemap, render in preview | Preview shows a uniform sphere with no face-boundary seams or distortion artifacts | 6.0.3 | cc:TODO |
+
+---
+
+## Phase 6.1: HEALPix Orogen Port — Plate Simulation
+
+Voronoi plate assignment, BFS distance fields, and super-plate clustering on HEALPix grid.
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 6.1.1 | Plate seed generation on HEALPix: 10-20 seeds from Fibonacci sphere + noise | Seeds well-distributed; continental/oceanic type assigned from ocean_fraction | Phase 6.0 | cc:TODO |
+| 6.1.2 | BFS flood-fill plate assignment with noise perturbation | Each HEALPix pixel assigned to nearest plate; boundaries are organic (not pure Voronoi) | 6.1.1 | cc:TODO |
+| 6.1.3 | BFS distance-to-boundary field (global, all boundaries) | Smooth distance field across entire sphere; no face-boundary artifacts; unit test verifies continuity | 6.1.2 | cc:TODO |
+| 6.1.4 | BFS distance-to-coast field (continental↔oceanic boundaries only) | Separate distance field for shelf/slope profiles; 0 at coast, increasing inland and offshore | 6.1.2 | cc:TODO |
+| 6.1.5 | Super-plate clustering: group 10-20 small plates into 3-5 super-plates | Super-plate assignment per pixel; blend 5% small-plate + 95% super-plate for continent-scale structure | 6.1.2 | cc:TODO |
+| 6.1.6 | Stress computation: collision stress at each pixel from plate velocity × boundary normal | Per-pixel stress field [0,1]; high at convergent, low at divergent/interior; decays with distance | 6.1.3 | cc:TODO |
+
+---
+
+## Phase 6.2: HEALPix Orogen Port — Terrain Generation
+
+Orogeny, shelves, stress-driven roughness on HEALPix, then GPU noise detail.
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 6.2.1 | Base elevation from plate type + super-plate structure | Continental pixels elevated, oceanic depressed; super-plate blending creates broad continent shapes | Phase 6.1 | cc:TODO |
+| 6.2.2 | Convergent mountain ridges with asymmetric subduction profiles | Mountains at convergent boundaries; steeper subducting side + trench, gentler back-arc plateau | 6.2.1, 6.1.6 | cc:TODO |
+| 6.2.3 | Fold ridges parallel to plate motion direction | Linear ridge/valley patterns within mountain zones; aligned with Euler pole velocity | 6.2.2 | cc:TODO |
+| 6.2.4 | Divergent boundaries: mid-ocean ridges + continental rift valleys | Subtle ocean ridge elevation; land rift depression; stress-modulated | 6.2.1, 6.1.6 | cc:TODO |
+| 6.2.5 | Continental shelf profile from coast distance field | Shelf (0-5 units), slope (5-12), abyssal plain (12+); active vs passive margin width | 6.2.1, 6.1.4 | cc:TODO |
+| 6.2.6 | Stress-driven roughness: GPU noise detail amplitude scales with stress | Craggy near orogens, smooth in cratons; ridged multifractal + fBm layered via GPU compute shader | 6.2.2, 6.2.5 | cc:TODO |
+| 6.2.7 | HEALPix→cubemap pipeline: resample terrain to cubemap, upload as R16Float | Existing fragment shader renders the new terrain; biomes/climate/atmosphere work unchanged | 6.2.6, 6.0.3 | cc:TODO |
+
+---
+
+## Phase 6.3: HEALPix Orogen Port — Integration & Tuning
+
+Wire into app, parameter tuning, export support, cleanup.
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 6.3.1 | Wire HEALPix terrain pipeline into app.rs regenerate_terrain() | New pipeline replaces noise terrain for preview; all UI parameters (seed, mountain_scale, etc.) work | Phase 6.2 | cc:TODO |
+| 6.3.2 | Performance profiling: full pipeline < 3s at Nside=256 | Timed end-to-end; BFS + terrain + resample + upload within budget | 6.3.1 | cc:TODO |
+| 6.3.3 | Export support: HEALPix terrain at Nside=512 for high-res export | Export pipeline uses HEALPix terrain → cubemap → equirect EXR; existing maps (albedo, roughness, etc.) work | 6.3.1 | cc:TODO |
+| 6.3.4 | Parameter tuning: mountain height, shelf width, stress decay, noise detail | Earth-like seed produces recognizable tectonic features; visual quality approaches reference | 6.3.1 | cc:TODO |
+| 6.3.5 | Remove old noise terrain code from plates.wgsl (keep as backup branch) | TerrainComputePipeline uses HEALPix exclusively; old single-pass shaders archived | 6.3.4 | cc:TODO |
+
+---
+
+## Phase 7: Blender Importer Addon
 
 Pure-Python Blender addon that imports generated textures and sets up materials.
 
