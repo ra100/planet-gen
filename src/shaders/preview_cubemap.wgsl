@@ -392,15 +392,26 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
         }
     }
 
-    // === Step 1: Two noise bases with different character ===
-    let p_base = vortex_sphere * 5.0 + seed_off;
+    // === Step 0c: Wind-driven warp — clouds stretch along wind direction ===
+    let tilt_c = uniforms.axial_tilt_rad;
+    let tilted_y_c = vortex_sphere.y * cos(tilt_c) + vortex_sphere.z * sin(tilt_c);
+    let cloud_lat = asin(clamp(tilted_y_c, -1.0, 1.0));
+    let cloud_lat_deg = abs(cloud_lat) * 180.0 / 3.14159;
+    let wind_c = wind_direction_vec(cloud_lat);
+    let tangent_c = normalize(wind_c - vortex_sphere * dot(wind_c, vortex_sphere));
+    // Wind stretches cloud shapes: stronger at mid-latitudes (jet stream)
+    let wind_stretch = 0.15 + smooth_step(25.0, 50.0, cloud_lat_deg) * 0.20;
+    let wind_warped = normalize(vortex_sphere + tangent_c * wind_stretch);
 
-    // --- Stratus layer: domain-warped fBm (smooth, flowing) ---
+    // === Step 1: Two noise bases with wind-aligned character ===
+    let p_base = wind_warped * 5.0 + seed_off;
+
+    // --- Stratus layer: wind-aligned fBm (smooth, flowing along wind) ---
     let warp = vec3<f32>(
         snoise(p_base * 0.7 + vec3<f32>(31.7, 0.0, 0.0)),
         snoise(p_base * 0.7 + vec3<f32>(0.0, 47.3, 0.0)),
         snoise(p_base * 0.7 + vec3<f32>(0.0, 0.0, 73.1))
-    ) * 0.5;
+    ) * 0.35; // reduced random warp since wind warp provides directional shape
     let warped_p = p_base + warp;
 
     var fbm_val = 0.0;
@@ -415,9 +426,8 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     }
     fbm_val = fbm_val / amp_sum * 0.5 + 0.5; // [0, 1]
 
-    // --- Cumulus layer: clamped-positive peaks (isolated blobs, NOT webby ridges) ---
-    // max(noise, 0) keeps only positive peaks → scattered rounded blobs
-    let cp = p_base + vec3<f32>(13.7, 7.3, 21.1); // decorrelate, NO domain warp
+    // --- Cumulus layer: clamped-positive peaks (isolated blobs) ---
+    let cp = p_base + vec3<f32>(13.7, 7.3, 21.1);
     var cumulus_val = 0.0;
     var c_freq = 1.0;
     var c_amp = 1.0;
@@ -428,14 +438,35 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
         c_freq *= 2.3;
         c_amp *= 0.5;
     }
-    cumulus_val = cumulus_val / c_amp_sum; // [0, ~0.5] — mostly low with isolated peaks
-    cumulus_val = pow(cumulus_val, 1.3); // round off peaks for softer blobs
+    cumulus_val = cumulus_val / c_amp_sum;
+    cumulus_val = pow(cumulus_val, 1.3);
 
-    // === Step 2: Spatial blend — smooth stratus vs puffy cumulus per region ===
-    // cloud_type uniform (0=stratus, 1=cumulus) sets the center; spatial noise adds local variation
-    let type_noise = snoise(sphere_pos * 1.8 + seed_off * 0.15 + vec3<f32>(97.0, 41.0, 63.0));
-    let type_blend = clamp(type_noise * 0.35 + uniforms.cloud_type, 0.0, 1.0);
-    let noise_val = mix(fbm_val, cumulus_val, type_blend);
+    // --- Stratocumulus: cellular pattern for subtropical marine layer ---
+    let sc_p = p_base * 1.5 + vec3<f32>(41.0, 19.0, 67.0);
+    let sc_cell = abs(snoise(sc_p)) * 0.6 + abs(snoise(sc_p * 2.0)) * 0.3;
+    let sc_val = smooth_step(0.15, 0.5, sc_cell);
+
+    // === Step 2: Climate-driven cloud type selection ===
+    // ITCZ (0-10°): tall cumulus/cumulonimbus
+    // Subtropics (20-35°): stratocumulus marine layer (if ocean) or clear
+    // Mid-latitudes (35-60°): mixed frontal (stratus + cumulus)
+    // Polar (60-90°): thin stratus overcast
+    let itcz_factor = exp(-cloud_lat_deg * cloud_lat_deg / 150.0); // peak at equator
+    let subtropical = smooth_step(15.0, 25.0, cloud_lat_deg) * smooth_step(40.0, 30.0, cloud_lat_deg);
+    let midlat = smooth_step(30.0, 45.0, cloud_lat_deg) * smooth_step(65.0, 55.0, cloud_lat_deg);
+    let polar_c = smooth_step(55.0, 70.0, cloud_lat_deg);
+
+    // Climate picks the dominant type; cloud_type slider biases
+    let type_bias = uniforms.cloud_type; // 0=stratus, 1=cumulus
+    var cumulus_weight = itcz_factor * 0.8 + midlat * 0.4 + type_bias * 0.3;
+    var stratus_weight = midlat * 0.5 + polar_c * 0.7 + (1.0 - type_bias) * 0.2;
+    var sc_weight = subtropical * 0.6;
+    let w_total = max(cumulus_weight + stratus_weight + sc_weight, 0.01);
+    cumulus_weight /= w_total;
+    stratus_weight /= w_total;
+    sc_weight /= w_total;
+
+    let noise_val = fbm_val * stratus_weight + cumulus_val * cumulus_weight + sc_val * sc_weight;
 
     // === Step 3: Climate + terrain modulated local coverage ===
     // All influences adjust the Schneider THRESHOLD, not density amplitude.
@@ -454,12 +485,15 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     let moisture_norm = clamp(moisture / 300.0, 0.0, 1.0);
     let temp = compute_temperature(warped_climate_pos, cloud_h, uniforms.season);
 
-    // Start with global coverage blended with moisture
-    var local_coverage = mix(coverage, moisture_norm, 0.35);
+    // === Latitude-banded cloud distribution ===
+    // ITCZ: thick convective, Subtropics: clear gap, Mid-lat: frontal bands, Polar: thin overcast
+    let lat_coverage_base = itcz_factor * 0.30           // ITCZ: heavy clouds
+        - subtropical * 0.20                               // Subtropical: clear zone (Sahara, Atacama)
+        + midlat * 0.15                                    // Mid-latitude: frontal systems
+        + polar_c * 0.05;                                  // Polar: thin overcast
 
-    // NOTE: No per-pixel ocean/land coverage adjustment — it creates visible
-    // terrain-following edges at coastlines. The moisture model already captures
-    // climate differences between land and ocean.
+    // Coverage slider acts as a multiplier on the climate baseline
+    var local_coverage = (0.2 + lat_coverage_base) * coverage + moisture_norm * 0.25;
 
     // Orographic lift: mountains force air up → condensation on windward side
     let tilt = uniforms.axial_tilt_rad;
@@ -594,22 +628,29 @@ fn compute_cirrus_density(sphere_pos: vec3<f32>) -> f32 {
     let s = uniforms.cloud_seed;
     let seed_off = vec3<f32>(s, fract(s * 1.618) * 89.0, fract(s * 2.618) * 83.0);
 
-    // Slight E-W elongation (jet stream alignment)
-    let p = sphere_pos * vec3<f32>(1.0, 0.6, 1.0) * 6.0 + seed_off + vec3<f32>(50.0, 30.0, 70.0);
+    // Wind-aligned stretching: cirrus follows jet stream (strong at mid-latitudes)
+    let tilt = uniforms.axial_tilt_rad;
+    let tilted_y = sphere_pos.y * cos(tilt) + sphere_pos.z * sin(tilt);
+    let ci_lat = asin(clamp(tilted_y, -1.0, 1.0));
+    let lat_deg = abs(ci_lat) * 180.0 / 3.14159;
+    let jet_wind = wind_direction_vec(ci_lat);
+    let jet_tangent = normalize(jet_wind - sphere_pos * dot(jet_wind, sphere_pos));
+    // Strong jet stream stretch at mid-latitudes
+    let jet_stretch = smooth_step(20.0, 45.0, lat_deg) * 0.30;
+    let ci_sphere = normalize(sphere_pos + jet_tangent * jet_stretch);
 
-    // 3-octave high-frequency noise
+    let p = ci_sphere * 6.0 + seed_off + vec3<f32>(50.0, 30.0, 70.0);
+
+    // 3-octave high-frequency wispy noise
     let ci = snoise(p) * 0.5
            + snoise(p * 2.1 + vec3<f32>(3.7, 1.1, 8.3)) * 0.3
            + snoise(p * 4.4 + vec3<f32>(1.3, 5.9, 2.1)) * 0.2;
     let ci_norm = ci * 0.5 + 0.5;
 
-    // Cirrus more common at mid-to-high latitudes
-    let tilt = uniforms.axial_tilt_rad;
-    let tilted_y = sphere_pos.y * cos(tilt) + sphere_pos.z * sin(tilt);
-    let lat_deg = abs(asin(clamp(tilted_y, -1.0, 1.0))) * 180.0 / 3.14159;
-    let lat_boost = smooth_step(20.0, 50.0, lat_deg) * 0.15;
+    // Cirrus common at mid-to-high latitudes (jet stream), rare at equator and poles
+    let lat_boost = smooth_step(20.0, 45.0, lat_deg) * smooth_step(75.0, 60.0, lat_deg) * 0.18;
 
-    let cirrus_cov = cov * 0.4 + lat_boost; // cirrus coverage is fraction of main
+    let cirrus_cov = cov * 0.35 + lat_boost;
     let density = cloud_remap(ci_norm, 1.0 - cirrus_cov, 1.0, 0.0, 1.0) * cirrus_cov;
     return max(density, 0.0);
 }
