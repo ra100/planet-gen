@@ -25,7 +25,7 @@ pub struct TerrainGenParams {
     pub surface_gravity: f32,  // m/s² (9.81 for Earth, 3.72 for Mars)
     pub tectonics_factor: f32, // [0,1]: 0=stagnant lid, 1=vigorous tectonics
     pub surface_age: f32,      // [0,1]: 0=young/sharp, 1=old/smooth
-    pub _pad0: u32,
+    pub continental_scale: f32, // noise frequency multiplier for continent size (1.0 = default)
 }
 
 /// Generated tectonic heightmap for all 6 cube faces.
@@ -234,6 +234,7 @@ impl TerrainComputePipeline {
         surface_gravity: f32,
         tectonics_factor: f32,
         surface_age: f32,
+        continental_scale: f32,
     ) -> TectonicTerrain {
         let total_pixels = (resolution * resolution) as usize;
         let buffer_size = (total_pixels * std::mem::size_of::<f32>()) as u64;
@@ -284,7 +285,7 @@ impl TerrainComputePipeline {
                 surface_gravity,
                 tectonics_factor,
                 surface_age,
-                _pad0: 0,
+                continental_scale,
             };
 
             let params_buffer =
@@ -530,6 +531,7 @@ impl MultiPassTerrainPipeline {
         surface_gravity: f32,
         tectonics_factor: f32,
         surface_age: f32,
+        continental_scale: f32,
     ) -> TectonicTerrain {
         let total_pixels = (resolution * resolution) as usize;
         let f32_size = std::mem::size_of::<f32>() as u64;
@@ -681,7 +683,7 @@ impl MultiPassTerrainPipeline {
                 full_resolution: resolution,
                 mountain_scale, boundary_width, warp_strength, detail_scale,
                 surface_gravity, tectonics_factor, surface_age,
-                _pad0: 0,
+                continental_scale,
             };
             let terrain_params_buf = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("terrain params"),
@@ -1084,10 +1086,12 @@ mod tests {
             tectonics_factor: 0.85,
             continental_scale: 1.0,
             num_plates_override: 0,
+            num_continents: 0,
+            continent_size_variety: 0.0,
         });
 
         let terrain = pipeline.generate(
-            &gpu, &plates, 64, 42, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0, 9.81, 0.85, 0.2,
+            &gpu, &plates, 64, 42, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0, 9.81, 0.85, 0.2, 1.0,
         );
 
         assert_eq!(terrain.faces.len(), 6);
@@ -1109,10 +1113,12 @@ mod tests {
             tectonics_factor: 0.85,
             continental_scale: 1.0,
             num_plates_override: 0,
+            num_continents: 0,
+            continent_size_variety: 0.0,
         });
 
         let terrain = pipeline.generate(
-            &gpu, &plates, 64, 42, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0, 9.81, 0.85, 0.2,
+            &gpu, &plates, 64, 42, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0, 9.81, 0.85, 0.2, 1.0,
         );
 
         let all_heights: Vec<f32> = terrain.faces.iter().flat_map(|f| f.iter().copied()).collect();
@@ -1139,10 +1145,12 @@ mod tests {
             tectonics_factor: 0.85,
             continental_scale: 1.0,
             num_plates_override: 0,
+            num_continents: 0,
+            continent_size_variety: 0.0,
         });
 
         let terrain = pipeline.generate(
-            &gpu, &plates, 64, 42, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0, 9.81, 0.85, 0.2,
+            &gpu, &plates, 64, 42, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0, 9.81, 0.85, 0.2, 1.0,
         );
 
         let all_heights: Vec<f32> = terrain.faces.iter().flat_map(|f| f.iter().copied()).collect();

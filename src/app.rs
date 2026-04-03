@@ -1,7 +1,7 @@
 use eframe::egui;
 use std::sync::Arc;
 
-use crate::export::{self, ExportConfig, ExportHandle, ExportProgress};
+use crate::export::{self, ExportConfig, ExportHandle, ExportLayers, ExportProgress};
 use crate::gpu::GpuContext;
 use crate::planet::{DerivedProperties, PlanetParams};
 use crate::plates::{generate_plates, PlateGenParams};
@@ -115,7 +115,7 @@ impl PlanetGenApp {
             show_biomes: true,
             show_clouds: true,
             show_cities: true,
-            show_erosion: true,
+            show_erosion: false,
             zoom: 1.0,
             pan: [0.0, 0.0],
             mountain_scale: 1.0,
@@ -249,6 +249,8 @@ impl PlanetGenApp {
             tectonics_factor: self.derived.tectonics_factor,
             continental_scale: self.continental_scale,
             num_plates_override: self.num_plates_override,
+            num_continents: self.num_continents,
+            continent_size_variety: self.continent_size_variety,
         });
 
         let (amplitude, frequency, octaves, gain, lacunarity) = self.terrain_params();
@@ -269,6 +271,7 @@ impl PlanetGenApp {
             self.derived.surface_gravity,
             self.derived.tectonics_factor,
             self.age_override.unwrap_or(self.derived.surface_age),
+            self.continental_scale,
         );
 
         let effective_ocean = self.derived.ocean_fraction * (1.0 - self.water_loss);
@@ -293,8 +296,13 @@ impl PlanetGenApp {
         }
 
         eprintln!(
-            "[terrain {}px] plates+compute: {:.0}ms, scheduling {} erosion iters progressively",
-            self.preview_resolution, t0.elapsed().as_secs_f64() * 1000.0, self.erosion_remaining,
+            "[terrain {}px] plates+compute: {:.0}ms, {} plates ({}c/{}o), continents={}, variety={:.2}, scheduling {} erosion iters",
+            self.preview_resolution, t0.elapsed().as_secs_f64() * 1000.0,
+            plates.len(),
+            plates.iter().filter(|p| p.plate_type > 0.5).count(),
+            plates.iter().filter(|p| p.plate_type <= 0.5).count(),
+            self.num_continents, self.continent_size_variety,
+            self.erosion_remaining,
         );
 
         self.needs_terrain = false;
@@ -356,6 +364,13 @@ impl PlanetGenApp {
             planet_name: self.planet_name.clone(),
             erosion_iterations: self.erosion_iterations,
             season: self.season,
+            layers: ExportLayers {
+                height: self.export_height,
+                albedo: self.export_albedo,
+                normals: self.export_normals,
+                roughness: self.export_roughness,
+                water_mask: self.export_water_mask,
+            },
         };
 
         let terrain_params = self.terrain_params();

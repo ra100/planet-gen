@@ -18,6 +18,20 @@ pub const TILE_SIZE: u32 = 512;
 
 // ============ Config ============
 
+pub struct ExportLayers {
+    pub height: bool,
+    pub albedo: bool,
+    pub normals: bool,
+    pub roughness: bool,
+    pub water_mask: bool,
+}
+
+impl Default for ExportLayers {
+    fn default() -> Self {
+        Self { height: true, albedo: true, normals: true, roughness: true, water_mask: true }
+    }
+}
+
 pub struct ExportConfig {
     pub face_resolution: u32,
     pub tile_size: u32,
@@ -25,6 +39,7 @@ pub struct ExportConfig {
     pub planet_name: String,
     pub erosion_iterations: u32,
     pub season: f32,
+    pub layers: ExportLayers,
 }
 
 // ============ Progress ============
@@ -351,7 +366,7 @@ fn generate_terrain_tiled(
                     surface_gravity: 9.81,
                     tectonics_factor: 0.85,
                     surface_age: 0.2,
-                    _pad0: 0,
+                    continental_scale: 1.0,
                 };
 
                 let tile_data = terrain_pipeline.dispatch_tile(gpu, plates_buffer, &params);
@@ -621,13 +636,17 @@ pub fn run_export(
     let ocean_level = -0.5 + 1.7 * effective_ocean; // match app.rs formula
     let (amplitude, frequency, octaves, gain, lacunarity) = terrain_params;
 
-    // Compute total steps for progress:
-    // terrain tiles + erosion(6) + map tiles(3 maps * tiles_per_face * 6) + file exports(6*6)
+    // Compute total steps for progress based on selected layers
+    let layers = &config.layers;
     let tiles_per_face = coordinator.tiles_per_face();
+    let map_count = [layers.normals, layers.roughness, layers.albedo, layers.albedo /*ao bundled with albedo*/]
+        .iter().filter(|&&b| b).count() as u32;
+    let export_count = [layers.height, layers.albedo, layers.normals, layers.roughness, layers.albedo /*ao*/, layers.water_mask]
+        .iter().filter(|&&b| b).count() as u32;
     let total_steps = coordinator.total_tiles() // terrain generation
         + 6 // erosion
-        + 4 * 6 * tiles_per_face // normal + roughness + albedo + ao tiles
-        + 6 * 7; // file writes (6 faces * 7 map types)
+        + map_count * 6 * tiles_per_face // map tiles for selected layers
+        + 6 * export_count; // file writes
     let mut progress = ProgressTracker::new(progress_tx, total_steps);
 
     // --- Phase 1: Generate plates ---
@@ -638,6 +657,8 @@ pub fn run_export(
         tectonics_factor: derived.tectonics_factor,
         continental_scale,
         num_plates_override: 0,
+        num_continents: 0,
+        continent_size_variety: 0.0,
     });
 
     // --- Phase 2: Generate terrain (tiled) ---
@@ -675,37 +696,27 @@ pub fn run_export(
         ocean_level,
     );
 
-    // --- Phase 4: Create map pipelines ---
-    let normal_pipeline = MapPipeline::new(
-        gpu,
-        include_str!("shaders/normal_map.wgsl"),
-        "normal map",
-    );
-    let roughness_pipeline = MapPipeline::new(
-        gpu,
-        &format!(
-            "{}\n{}\n{}",
+    // --- Phase 4: Create map pipelines (only for selected layers) ---
+    let normal_pipeline = if layers.normals {
+        Some(MapPipeline::new(gpu, include_str!("shaders/normal_map.wgsl"), "normal map"))
+    } else { None };
+    let roughness_pipeline = if layers.roughness {
+        Some(MapPipeline::new(gpu, &format!("{}\n{}\n{}",
             include_str!("shaders/cube_sphere.wgsl"),
             include_str!("shaders/noise.wgsl"),
             include_str!("shaders/roughness_map.wgsl"),
-        ),
-        "roughness map",
-    );
-    let albedo_pipeline = MapPipeline::new(
-        gpu,
-        &format!(
-            "{}\n{}\n{}",
+        ), "roughness map"))
+    } else { None };
+    let albedo_pipeline = if layers.albedo {
+        Some(MapPipeline::new(gpu, &format!("{}\n{}\n{}",
             include_str!("shaders/cube_sphere.wgsl"),
             include_str!("shaders/noise.wgsl"),
             include_str!("shaders/albedo_map.wgsl"),
-        ),
-        "albedo map",
-    );
-    let ao_pipeline = MapPipeline::new(
-        gpu,
-        include_str!("shaders/ao_map.wgsl"),
-        "ao map",
-    );
+        ), "albedo map"))
+    } else { None };
+    let ao_pipeline = if layers.albedo {
+        Some(MapPipeline::new(gpu, include_str!("shaders/ao_map.wgsl"), "ao map"))
+    } else { None };
 
     // --- Phase 5: Generate all maps per face, store in memory ---
     let tile_size = coordinator.tile_size;
@@ -730,81 +741,103 @@ pub fn run_export(
 
         all_heights[face as usize] = face_data.clone();
 
-        let normal_bytes = generate_map_tiled(
-            gpu, &normal_pipeline, &heightmap_buffer, &coordinator,
-            |ox, oy| NormalMapParams {
-                resolution: tile_size, height_scale: 50.0,
-                tile_offset_x: ox, tile_offset_y: oy,
-                full_resolution: full_res, _pad0: 0, _pad1: 0, _pad2: 0,
-            }, 16, &mut progress, "Normal", face, cancel,
-        )?;
-        all_normals[face as usize] = bytemuck::cast_slice::<u8, f32>(&normal_bytes).to_vec();
+        if let Some(ref pipeline) = normal_pipeline {
+            let normal_bytes = generate_map_tiled(
+                gpu, pipeline, &heightmap_buffer, &coordinator,
+                |ox, oy| NormalMapParams {
+                    resolution: tile_size, height_scale: 50.0,
+                    tile_offset_x: ox, tile_offset_y: oy,
+                    full_resolution: full_res, _pad0: 0, _pad1: 0, _pad2: 0,
+                }, 16, &mut progress, "Normal", face, cancel,
+            )?;
+            all_normals[face as usize] = bytemuck::cast_slice::<u8, f32>(&normal_bytes).to_vec();
+        }
 
-        let roughness_bytes = generate_map_tiled(
-            gpu, &roughness_pipeline, &heightmap_buffer, &coordinator,
-            |ox, oy| RoughnessMapParams {
-                face, resolution: tile_size, seed: params.seed,
-                base_temp_c: derived.base_temperature_c, ocean_level,
-                ocean_fraction: effective_ocean,
-                tile_offset_x: ox, tile_offset_y: oy,
-                full_resolution: full_res, _pad0: 0, _pad1: 0, _pad2: 0,
-            }, 4, &mut progress, "Roughness", face, cancel,
-        )?;
-        all_roughness[face as usize] = bytemuck::cast_slice::<u8, f32>(&roughness_bytes).to_vec();
+        if let Some(ref pipeline) = roughness_pipeline {
+            let roughness_bytes = generate_map_tiled(
+                gpu, pipeline, &heightmap_buffer, &coordinator,
+                |ox, oy| RoughnessMapParams {
+                    face, resolution: tile_size, seed: params.seed,
+                    base_temp_c: derived.base_temperature_c, ocean_level,
+                    ocean_fraction: effective_ocean,
+                    tile_offset_x: ox, tile_offset_y: oy,
+                    full_resolution: full_res, _pad0: 0, _pad1: 0, _pad2: 0,
+                }, 4, &mut progress, "Roughness", face, cancel,
+            )?;
+            all_roughness[face as usize] = bytemuck::cast_slice::<u8, f32>(&roughness_bytes).to_vec();
+        }
 
-        let albedo_bytes = generate_map_tiled(
-            gpu, &albedo_pipeline, &heightmap_buffer, &coordinator,
-            |ox, oy| AlbedoMapParams {
-                face, resolution: tile_size, seed: params.seed,
-                base_temp_c: derived.base_temperature_c, ocean_level,
-                ocean_fraction: effective_ocean,
-                axial_tilt_rad: params.axial_tilt_deg.to_radians(),
-                season: config.season,
-                tile_offset_x: ox, tile_offset_y: oy,
-                full_resolution: full_res, _pad0: 0,
-            }, 16, &mut progress, "Albedo", face, cancel,
-        )?;
-        all_albedo[face as usize] = bytemuck::cast_slice::<u8, f32>(&albedo_bytes).to_vec();
+        if let Some(ref pipeline) = albedo_pipeline {
+            let albedo_bytes = generate_map_tiled(
+                gpu, pipeline, &heightmap_buffer, &coordinator,
+                |ox, oy| AlbedoMapParams {
+                    face, resolution: tile_size, seed: params.seed,
+                    base_temp_c: derived.base_temperature_c, ocean_level,
+                    ocean_fraction: effective_ocean,
+                    axial_tilt_rad: params.axial_tilt_deg.to_radians(),
+                    season: config.season,
+                    tile_offset_x: ox, tile_offset_y: oy,
+                    full_resolution: full_res, _pad0: 0,
+                }, 16, &mut progress, "Albedo", face, cancel,
+            )?;
+            all_albedo[face as usize] = bytemuck::cast_slice::<u8, f32>(&albedo_bytes).to_vec();
+        }
 
-        let ao_bytes = generate_map_tiled(
-            gpu, &ao_pipeline, &heightmap_buffer, &coordinator,
-            |ox, oy| AoMapParams {
-                face, full_resolution: full_res, ao_strength: 30.0, ocean_level,
-                tile_offset_x: ox, tile_offset_y: oy,
-                resolution: tile_size, _pad0: 0,
-            }, 4, &mut progress, "AO", face, cancel,
-        )?;
-        all_ao[face as usize] = bytemuck::cast_slice::<u8, f32>(&ao_bytes).to_vec();
+        if let Some(ref pipeline) = ao_pipeline {
+            let ao_bytes = generate_map_tiled(
+                gpu, pipeline, &heightmap_buffer, &coordinator,
+                |ox, oy| AoMapParams {
+                    face, full_resolution: full_res, ao_strength: 30.0, ocean_level,
+                    tile_offset_x: ox, tile_offset_y: oy,
+                    resolution: tile_size, _pad0: 0,
+                }, 4, &mut progress, "AO", face, cancel,
+            )?;
+            all_ao[face as usize] = bytemuck::cast_slice::<u8, f32>(&ao_bytes).to_vec();
+        }
 
-        all_ocean[face as usize] = generate_ocean_mask(face_data, ocean_level);
+        if layers.water_mask {
+            all_ocean[face as usize] = generate_ocean_mask(face_data, ocean_level);
+        }
 
         progress.advance(&format!("Face {face} maps generated"));
     }
 
-    // --- Phase 6: Convert cubemap to equirectangular and export ---
-    progress.advance("Converting height to equirectangular...");
+    // --- Phase 6: Convert cubemap to equirectangular and export (selected layers only) ---
+    // Height is needed for equirect dimensions even if not exported
     let (eq_h, eq_w, eq_ht) = cubemap_to_equirect(&all_heights, full_res, 1);
-    export_equirect_exr_gray(&eq_h, eq_w, eq_ht, &planet_dir.join("height.exr"))?;
 
-    progress.advance("Converting albedo to equirectangular...");
-    let (eq_a, _, _) = cubemap_to_equirect(&all_albedo, full_res, 4);
-    export_equirect_exr_rgba(&eq_a, eq_w, eq_ht, &planet_dir.join("albedo.exr"))?;
+    if layers.height {
+        progress.advance("Exporting height...");
+        export_equirect_exr_gray(&eq_h, eq_w, eq_ht, &planet_dir.join("height.exr"))?;
+    }
 
-    progress.advance("Converting normal to equirectangular...");
-    let (eq_n, _, _) = cubemap_to_equirect(&all_normals, full_res, 4);
-    export_equirect_exr_rgba(&eq_n, eq_w, eq_ht, &planet_dir.join("normal.exr"))?;
+    if layers.albedo {
+        progress.advance("Exporting albedo...");
+        let (eq_a, _, _) = cubemap_to_equirect(&all_albedo, full_res, 4);
+        export_equirect_exr_rgba(&eq_a, eq_w, eq_ht, &planet_dir.join("albedo.exr"))?;
 
-    progress.advance("Converting roughness to equirectangular...");
-    let (eq_r, _, _) = cubemap_to_equirect(&all_roughness, full_res, 1);
-    export_equirect_exr_gray(&eq_r, eq_w, eq_ht, &planet_dir.join("roughness.exr"))?;
+        progress.advance("Exporting AO...");
+        let (eq_ao, _, _) = cubemap_to_equirect(&all_ao, full_res, 1);
+        export_equirect_exr_gray(&eq_ao, eq_w, eq_ht, &planet_dir.join("ao.exr"))?;
+    }
 
-    progress.advance("Converting AO to equirectangular...");
-    let (eq_ao, _, _) = cubemap_to_equirect(&all_ao, full_res, 1);
-    export_equirect_exr_gray(&eq_ao, eq_w, eq_ht, &planet_dir.join("ao.exr"))?;
+    if layers.normals {
+        progress.advance("Exporting normals...");
+        let (eq_n, _, _) = cubemap_to_equirect(&all_normals, full_res, 4);
+        export_equirect_exr_rgba(&eq_n, eq_w, eq_ht, &planet_dir.join("normal.exr"))?;
+    }
 
-    progress.advance("Converting water mask to equirectangular...");
-    let (eq_o, _, _) = cubemap_to_equirect(&all_ocean, full_res, 1);
-    export_equirect_exr_gray(&eq_o, eq_w, eq_ht, &planet_dir.join("water_mask.exr"))?;
+    if layers.roughness {
+        progress.advance("Exporting roughness...");
+        let (eq_r, _, _) = cubemap_to_equirect(&all_roughness, full_res, 1);
+        export_equirect_exr_gray(&eq_r, eq_w, eq_ht, &planet_dir.join("roughness.exr"))?;
+    }
+
+    if layers.water_mask {
+        progress.advance("Exporting water mask...");
+        let (eq_o, _, _) = cubemap_to_equirect(&all_ocean, full_res, 1);
+        export_equirect_exr_gray(&eq_o, eq_w, eq_ht, &planet_dir.join("water_mask.exr"))?;
+    }
 
     let _ = progress_tx.send(ExportProgress::Complete);
     Ok(planet_dir)
@@ -892,10 +925,12 @@ mod tests {
             tectonics_factor: 0.85,
             continental_scale: 1.0,
             num_plates_override: 0,
+            num_continents: 0,
+            continent_size_variety: 0.0,
         });
 
         // Generate directly at 64x64
-        let direct = pipeline.generate(&gpu, &plates, 64, 42, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0, 9.81, 0.85, 0.2);
+        let direct = pipeline.generate(&gpu, &plates, 64, 42, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0, 9.81, 0.85, 0.2, 1.0);
 
         // Generate tiled at 64x64 (2x2 tiles of 32)
         let plates_buffer = pipeline.create_plates_buffer(&gpu, &plates);
@@ -952,6 +987,7 @@ mod tests {
             planet_name: "test_planet".into(),
             erosion_iterations: 2,
             season: 0.5,
+            layers: ExportLayers::default(),
         };
 
         let (tx, rx) = std::sync::mpsc::channel();
@@ -1006,6 +1042,7 @@ mod tests {
             planet_name: "cancel_test".into(),
             erosion_iterations: 2,
             season: 0.5,
+            layers: ExportLayers::default(),
         };
 
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -1047,6 +1084,7 @@ mod tests {
             planet_name: "benchmark".into(),
             erosion_iterations: 10,
             season: 0.5,
+            layers: ExportLayers::default(),
         };
 
         let (tx, _rx) = std::sync::mpsc::channel();

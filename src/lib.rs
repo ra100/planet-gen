@@ -1,14 +1,9 @@
 pub mod app;
-pub mod compute;
 pub mod cube_sphere;
 pub mod export;
 pub mod gpu;
-pub mod healpix;
-pub mod healpix_terrain;
 pub mod noise;
 pub mod planet;
-pub mod plate_sim;
 pub mod plates;
 pub mod preview;
-pub mod terrain;
 pub mod terrain_compute;

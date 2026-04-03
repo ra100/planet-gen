@@ -294,63 +294,34 @@ Reference: planet_heightmap_generation/ (JS/WebGL implementation with BFS distan
 
 ---
 
-## Phase 6.0: HEALPix Orogen Port — Infrastructure
+## Phase 5.13: Wire Continent Controls to Pipeline
 
-HEALPix sphere grid module with index↔position conversion, neighbor lookup, and cubemap resampling.
+Connect the `num_continents` and `continent_size_variety` UI sliders to the plate generation pipeline so they actually influence terrain shape.
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 5.13.1 | Add `num_continents` and `continent_size_variety` fields to `PlateGenParams` | Struct compiles with new fields; all call sites updated | Phase 5.12 | cc:完了 |
+| 5.13.2 | Wire `num_continents` → continental plate count in `generate_plates()`: override `continental_count = num_continents.min(total_plates)` instead of deriving from ocean_fraction | Changing slider 1→10 changes number of continental plates; ocean_fraction still controls water level independently | 5.13.1 | cc:完了 |
+| 5.13.3 | Wire `continent_size_variety` → plate center clustering: when variety > 0, pull a fraction of continental centers toward a seed-derived cluster point, creating one large supercontinent + scattered smaller ones | variety=0 gives roughly equal continents; variety=1 gives one dominant landmass + islands; smooth transition between | 5.13.2 | cc:完了 |
+| 5.13.4 | Pass both values from `app.rs::regenerate_terrain()` into `PlateGenParams` | Both sliders trigger terrain regeneration AND their values reach `generate_plates()` | 5.13.1 | cc:完了 |
+| 5.13.5 | Test: verify continent controls produce visually distinct results | `cargo test --lib` passes; sweeping num_continents 1→10 at fixed seed shows clear continent count change; sweeping variety 0→1 shows size distribution change | 5.13.4 | cc:完了 |
+
+---
+
+## Phase 6.0–6.3: HEALPix Orogen Port (ARCHIVED)
+
+HEALPix-based terrain system was fully implemented (Phases 6.0–6.2) and briefly integrated (6.3.1–6.3.3), then reverted at commit `1aac311` in favor of the multi-pass GPU plate pipeline (Phase 5.12). Code archived to branch `archive/healpix-orogen`.
 
 Requirements: [docs/brainstorms/2026-04-03-orogen-port-requirements.md](docs/brainstorms/2026-04-03-orogen-port-requirements.md)
 
-| Task | 内容 | DoD | Depends | Status |
-|------|------|-----|---------|--------|
-| 6.0.1 | HEALPix module: nested-scheme pixel index ↔ 3D sphere position (vec3) | `healpix::pix2vec(nside, ipix)` and `healpix::vec2pix(nside, vec)` pass unit tests for all 12*nside^2 pixels | - | cc:完了 [c7e75f6] |
-| 6.0.2 | HEALPix neighbor lookup: 8 neighbors per pixel (SW,W,NW,N,NE,E,SE,S) | `healpix::neighbors(nside, ipix) -> [u32; 8]` correct for interior + edge + corner pixels | 6.0.1 | cc:完了 [c7e75f6] |
-| 6.0.3 | HEALPix → cubemap resampling: sample HEALPix buffer onto 6-face cubemap | `healpix::to_cubemap(data, nside, face_res) -> [Vec<f32>; 6]` with bilinear interpolation; output matches existing TectonicTerrain format | 6.0.1 | cc:完了 [c7e75f6] |
-| 6.0.4 | Integration test: generate flat HEALPix buffer, resample to cubemap, render in preview | Preview shows a uniform sphere with no face-boundary seams or distortion artifacts | 6.0.3 | cc:完了 [c7e75f6] |
-
----
-
-## Phase 6.1: HEALPix Orogen Port — Plate Simulation
-
-Voronoi plate assignment, BFS distance fields, and super-plate clustering on HEALPix grid.
-
-| Task | 内容 | DoD | Depends | Status |
-|------|------|-----|---------|--------|
-| 6.1.1 | Plate seed generation on HEALPix: 10-20 seeds from Fibonacci sphere + noise | Seeds well-distributed; continental/oceanic type assigned from ocean_fraction | Phase 6.0 | cc:完了 [0688c5c] |
-| 6.1.2 | BFS flood-fill plate assignment with noise perturbation | Each HEALPix pixel assigned to nearest plate; boundaries are organic (not pure Voronoi) | 6.1.1 | cc:完了 [0688c5c] |
-| 6.1.3 | BFS distance-to-boundary field (global, all boundaries) | Smooth distance field across entire sphere; no face-boundary artifacts; unit test verifies continuity | 6.1.2 | cc:完了 [0688c5c] |
-| 6.1.4 | BFS distance-to-coast field (continental↔oceanic boundaries only) | Separate distance field for shelf/slope profiles; 0 at coast, increasing inland and offshore | 6.1.2 | cc:完了 [0688c5c] |
-| 6.1.5 | Super-plate clustering: group 10-20 small plates into 3-5 super-plates | Super-plate assignment per pixel; blend 5% small-plate + 95% super-plate for continent-scale structure | 6.1.2 | cc:完了 [0688c5c] |
-| 6.1.6 | Stress computation: collision stress at each pixel from plate velocity × boundary normal | Per-pixel stress field [0,1]; high at convergent, low at divergent/interior; decays with distance | 6.1.3 | cc:完了 [0688c5c] |
-
----
-
-## Phase 6.2: HEALPix Orogen Port — Terrain Generation
-
-Orogeny, shelves, stress-driven roughness on HEALPix, then GPU noise detail.
-
-| Task | 内容 | DoD | Depends | Status |
-|------|------|-----|---------|--------|
-| 6.2.1 | Base elevation from plate type + super-plate structure | Continental pixels elevated, oceanic depressed; super-plate blending creates broad continent shapes | Phase 6.1 | cc:完了 [b8af38f] |
-| 6.2.2 | Convergent mountain ridges with asymmetric subduction profiles | Mountains at convergent boundaries; steeper subducting side + trench, gentler back-arc plateau | 6.2.1, 6.1.6 | cc:完了 [b8af38f] |
-| 6.2.3 | Fold ridges parallel to plate motion direction | Linear ridge/valley patterns within mountain zones; aligned with Euler pole velocity | 6.2.2 | cc:完了 [b8af38f] |
-| 6.2.4 | Divergent boundaries: mid-ocean ridges + continental rift valleys | Subtle ocean ridge elevation; land rift depression; stress-modulated | 6.2.1, 6.1.6 | cc:完了 [b8af38f] |
-| 6.2.5 | Continental shelf profile from coast distance field | Shelf (0-5 units), slope (5-12), abyssal plain (12+); active vs passive margin width | 6.2.1, 6.1.4 | cc:完了 [b8af38f] |
-| 6.2.6 | Stress-driven roughness: GPU noise detail amplitude scales with stress | Craggy near orogens, smooth in cratons; ridged multifractal + fBm layered via GPU compute shader | 6.2.2, 6.2.5 | cc:完了 [b8af38f] |
-| 6.2.7 | HEALPix→cubemap pipeline: resample terrain to cubemap, upload as R16Float | Existing fragment shader renders the new terrain; biomes/climate/atmosphere work unchanged | 6.2.6, 6.0.3 | cc:完了 [b8af38f] |
-
----
-
-## Phase 6.3: HEALPix Orogen Port — Integration & Tuning
-
-Wire into app, parameter tuning, export support, cleanup.
-
-| Task | 内容 | DoD | Depends | Status |
-|------|------|-----|---------|--------|
-| 6.3.1 | Wire HEALPix terrain pipeline into app.rs regenerate_terrain() | New pipeline replaces noise terrain for preview; all UI parameters (seed, mountain_scale, etc.) work | Phase 6.2 | cc:完了 [45789c7] |
-| 6.3.2 | Performance profiling: full pipeline < 3s at Nside=256 | Timed end-to-end; BFS + terrain + resample + upload within budget | 6.3.1 | cc:完了 [45789c7] |
-| 6.3.3 | Export support: HEALPix terrain at Nside=512 for high-res export | Export pipeline uses HEALPix terrain → cubemap → equirect EXR; existing maps (albedo, roughness, etc.) work | 6.3.1 | cc:完了 [45789c7] |
-| 6.3.4 | Parameter tuning: mountain height, shelf width, stress decay, noise detail | Earth-like seed produces recognizable tectonic features; visual quality approaches reference | 6.3.1 | cc:TODO |
-| 6.3.5 | Remove old noise terrain code from plates.wgsl (keep as backup branch) | TerrainComputePipeline uses HEALPix exclusively; old single-pass shaders archived | 6.3.4 | cc:TODO |
+| Phase | Summary | Status |
+|-------|---------|--------|
+| 6.0 | HEALPix infrastructure (index/position, neighbors, cubemap resampling) | cc:完了 then archived |
+| 6.1 | Plate simulation (BFS flood fill, distance fields, super-plates, stress) | cc:完了 then archived |
+| 6.2 | Terrain generation (orogeny, shelves, roughness, cubemap pipeline) | cc:完了 then archived |
+| 6.3.1–3 | Integration into app + export | cc:reverted [1aac311] |
+| 6.3.4 | Parameter tuning | cc:cancelled (pipeline reverted) |
+| 6.3.5 | Remove old noise terrain code | cc:cancelled (pipeline reverted) |
 
 ---
 
@@ -360,30 +331,30 @@ Pure-Python Blender addon that imports generated textures and sets up materials.
 
 | Task | 内容 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
-| 6.1 | Addon skeleton: Blender addon with `bl_info`, register/unregister, sidebar panel in 3D Viewport | Addon installs in Blender 4.x, panel appears in N-panel | - | cc:TODO |
-| 6.2 | "Import Planet" operator: file browser to select planet output directory, load all texture files as Image datablocks | Test: all texture files load into Blender's Image Editor | 6.1 | cc:TODO |
-| 6.3 | Material builder: create Principled BSDF node tree, wire albedo→Base Color, normal→Normal Map→Normal, roughness→Roughness, height→Displacement | Test: material node tree is correctly wired; render shows textured planet | 6.2 | cc:TODO |
-| 6.4 | "Create Planet" mode: generate a UV sphere/icosphere with cube-projection UVs, apply material | Test: one-click produces a textured sphere in the scene | 6.3 | cc:TODO |
-| 6.5 | "Apply to Selected" mode: apply material to user's selected mesh object | Test: selecting an existing sphere and clicking "Apply" textures it correctly | 6.3 | cc:TODO |
-| 6.6 | Cycles + EEVEE compatibility: material works in both render engines (Displacement node setup differs) | Test: render in both Cycles and EEVEE produces correct results | 6.3 | cc:TODO |
+| 7.1 | Addon skeleton: Blender addon with `bl_info`, register/unregister, sidebar panel in 3D Viewport | Addon installs in Blender 4.x, panel appears in N-panel | - | cc:TODO |
+| 7.2 | "Import Planet" operator: file browser to select planet output directory, load all texture files as Image datablocks | Test: all texture files load into Blender's Image Editor | 7.1 | cc:TODO |
+| 7.3 | Material builder: create Principled BSDF node tree, wire albedo→Base Color, normal→Normal Map→Normal, roughness→Roughness, height→Displacement | Test: material node tree is correctly wired; render shows textured planet | 7.2 | cc:TODO |
+| 7.4 | "Create Planet" mode: generate a UV sphere/icosphere with cube-projection UVs, apply material | Test: one-click produces a textured sphere in the scene | 7.3 | cc:TODO |
+| 7.5 | "Apply to Selected" mode: apply material to user's selected mesh object | Test: selecting an existing sphere and clicking "Apply" textures it correctly | 7.3 | cc:TODO |
+| 7.6 | Cycles + EEVEE compatibility: material works in both render engines (Displacement node setup differs) | Test: render in both Cycles and EEVEE produces correct results | 7.3 | cc:TODO |
 
 ---
 
-## Phase 7: Advanced Visual Features
+## Phase 8: Advanced Visual Features
 
 Post-Blender visual enhancements for cinematic renders.
 
 | Task | 内容 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
-| 7.1 | Lava glow along plate boundaries: volcanic emission at tectonic faults, tectonic activity slider | Orange-red glow at convergent/divergent boundaries, configurable intensity | Phase 4.8 | cc:TODO |
-| 7.2 | Lens flare near planet limb: procedural flare when sun is near the edge | Cinematic lens flare effect, subtle and adjustable | Phase 5.7 | cc:TODO |
-| 7.3 | Ocean specular / sun glint: bright reflection on water surface toward sun | Visible sun glint on oceans, PBR-correct | Phase 4 | cc:TODO |
-| 7.4 | Ring system: Saturn-like rings with color gradients, transparency, shadow casting on planet | Configurable ring tilt, inner/outer radius, color gradient, planet shadow on rings | Phase 5 | cc:TODO |
-| 7.5 | Ring export: single pixel width gradient texture (at least 4K) for Blender use | Exported 4K+ gradient PNG with transparency for ring shader | 7.4, Phase 6 | cc:TODO |
+| 8.1 | Lava glow along plate boundaries: volcanic emission at tectonic faults, tectonic activity slider | Orange-red glow at convergent/divergent boundaries, configurable intensity | Phase 4.8 | cc:TODO |
+| 8.2 | Lens flare near planet limb: procedural flare when sun is near the edge | Cinematic lens flare effect, subtle and adjustable | Phase 5.7 | cc:TODO |
+| 8.3 | Ocean specular / sun glint: bright reflection on water surface toward sun | Visible sun glint on oceans, PBR-correct | Phase 4 | cc:TODO |
+| 8.4 | Ring system: Saturn-like rings with color gradients, transparency, shadow casting on planet | Configurable ring tilt, inner/outer radius, color gradient, planet shadow on rings | Phase 5 | cc:TODO |
+| 8.5 | Ring export: single pixel width gradient texture (at least 4K) for Blender use | Exported 4K+ gradient PNG with transparency for ring shader | 8.4, Phase 7 | cc:TODO |
 
 ---
 
-## Phase 7.5: Performance
+## Phase 8.5: Performance
 
 Benchmarking and optimization infrastructure.
 
@@ -398,7 +369,7 @@ Benchmarking and optimization infrastructure.
 
 ---
 
-## Phase 8: Advanced Tectonics
+## Phase 9: Advanced Tectonics
 
 Three-tier tectonic simulation with UI toggle between modes. Each tier adds realism at the cost of computation time.
 
@@ -436,7 +407,7 @@ Three-tier tectonic simulation with UI toggle between modes. Each tier adds real
 
 ---
 
-## Phase 9: Polish & Distribution
+## Phase 10: Polish & Distribution
 
 Error handling, cross-platform builds, and documentation.
 

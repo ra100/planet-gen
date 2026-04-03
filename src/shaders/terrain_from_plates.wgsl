@@ -29,7 +29,7 @@ struct GenParams {
     surface_gravity: f32,
     tectonics_factor: f32,
     surface_age: f32,
-    _pad0: u32,
+    continental_scale: f32,
 }
 
 struct JfaSeed {
@@ -163,25 +163,33 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let high_freq_weight = 1.0 - age * 0.7;
     let tect = params.tectonics_factor;
 
-    // === Base terrain from noise (NOT plate type) ===
-    // Continent shapes come from domain-warped noise. Plates only affect
-    // boundary features (mountains, rifts, shelves) via JFA distance fields.
-    let c1 = snoise(wpos * 1.0 + seed_offset(params.seed + 1000u));
-    let c2 = snoise(wpos * 2.0 + seed_offset(params.seed + 1010u)) * 0.20;
-    let c3 = snoise(wpos * 4.0 + seed_offset(params.seed + 1020u)) * 0.06;
-    let c4 = snoise(wpos * 8.0 + seed_offset(params.seed + 1030u)) * 0.02 * high_freq_weight;
+    // === Base terrain: plate type is PRIMARY land/ocean driver ===
+    // Plate assignment determines continent placement. Noise adds coastline shape and detail.
+    let is_continental = plates[my_plate].plate_type > 0.5;
+
+    // Strong elevation from plate type: continental = raised, oceanic = depressed
+    let plate_base = select(-0.35, 0.35, is_continental);
+    // Smooth blend at plate boundaries (over ~25 pixels) for natural coastlines
+    let edge_blend = smooth_step(0.0, 25.0, boundary_dist);
+    let plate_height = plate_base * edge_blend;
+
+    // Noise adds coastline irregularity and surface texture (secondary role)
+    let cs = params.continental_scale;
+    let c1 = snoise(wpos * cs + seed_offset(params.seed + 1000u));
+    let c2 = snoise(wpos * cs * 2.0 + seed_offset(params.seed + 1010u)) * 0.20;
+    let c3 = snoise(wpos * cs * 4.0 + seed_offset(params.seed + 1020u)) * 0.06;
+    let c4 = snoise(wpos * cs * 8.0 + seed_offset(params.seed + 1030u)) * 0.02 * high_freq_weight;
     let continental_raw = (c1 + c2 + c3 + c4) / 1.28;
-    // Bimodal shaping for solid continents
     let continental = sign(continental_raw) * pow(abs(continental_raw), 0.35);
-    var height = continental * params.amplitude * 0.35;
+    let noise_detail = continental * params.amplitude * 0.12;
+
+    var height = plate_height * params.amplitude + noise_detail;
 
     // Highland/lowland variation within continents
     let on_land = smooth_step(-0.05, 0.05, height);
     let highland = snoise(wpos * 4.0 + seed_offset(params.seed + 1100u)) * 0.10
                  + snoise(wpos * 8.0 + seed_offset(params.seed + 1110u)) * 0.04 * high_freq_weight;
     height += highland * on_land;
-
-    let is_continental = plates[my_plate].plate_type > 0.5;
 
     // === Boundary features (only where JFA found a boundary) ===
     if (jfa.plate_b >= 0 && jfa.seed_x >= 0) {

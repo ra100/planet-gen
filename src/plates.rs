@@ -20,18 +20,28 @@ pub struct PlateGenParams {
     pub continental_scale: f32,
     /// Override plate count (0 = auto from physics).
     pub num_plates_override: u32,
+    /// Target number of continental plates (1-10). 0 = derive from ocean_fraction.
+    pub num_continents: u32,
+    /// Continent size distribution. 0 = equal sizes, 1 = one large supercontinent + small islands.
+    pub continent_size_variety: f32,
 }
 
 /// Generate tectonic plates from planet parameters.
 /// Returns a Vec of PlateGpu ready for GPU upload.
 pub fn generate_plates(params: &PlateGenParams) -> Vec<PlateGpu> {
-    let n = if params.num_plates_override > 0 {
+    let base_n = if params.num_plates_override > 0 {
         params.num_plates_override as usize
     } else {
         compute_plate_count(params.mass_earth, params.tectonics_factor, params.continental_scale)
     };
+    let continental_count = if params.num_continents > 0 {
+        params.num_continents as usize
+    } else {
+        ((base_n as f32) * (1.0 - params.ocean_fraction)).round() as usize
+    };
+    // Ensure enough total plates: at least num_continents + 3 oceanic plates for ocean coverage
+    let n = base_n.max(continental_count + 3);
     let centers = fibonacci_sphere(n, params.seed);
-    let continental_count = ((n as f32) * (1.0 - params.ocean_fraction)).round() as usize;
     let velocities = generate_velocities(n, params.seed, params.tectonics_factor, &centers);
 
     // Assign continental/oceanic by seed-based scoring, not index order.
@@ -48,12 +58,42 @@ pub fn generate_plates(params: &PlateGenParams) -> Vec<PlateGpu> {
         is_continental
     };
 
+    // Apply continent size variety: cluster continental centers toward an attractor
+    let mut final_centers = centers.clone();
+    if params.continent_size_variety > 0.0 {
+        // Seed-derived attractor point on sphere
+        let ax = hash_f32(params.seed.wrapping_add(9999), 0, 0);
+        let ay = hash_f32(params.seed.wrapping_add(9999), 0, 1);
+        let az = hash_f32(params.seed.wrapping_add(9999), 0, 2);
+        let alen = (ax * ax + ay * ay + az * az).sqrt().max(1e-6);
+        let attractor = [ax / alen, ay / alen, az / alen];
+
+        let strength = params.continent_size_variety * 0.6; // cap lerp to avoid full collapse
+        for i in 0..n {
+            if continental_indices[i] {
+                // Lerp toward attractor, then re-normalize to sphere
+                let cx = final_centers[i][0] * (1.0 - strength) + attractor[0] * strength;
+                let cy = final_centers[i][1] * (1.0 - strength) + attractor[1] * strength;
+                let cz = final_centers[i][2] * (1.0 - strength) + attractor[2] * strength;
+                let clen = (cx * cx + cy * cy + cz * cz).sqrt().max(1e-6);
+                final_centers[i] = [cx / clen, cy / clen, cz / clen];
+            }
+        }
+    }
+
+    // Recompute velocities with the (possibly shifted) centers
+    let final_velocities = if params.continent_size_variety > 0.0 {
+        generate_velocities(n, params.seed, params.tectonics_factor, &final_centers)
+    } else {
+        velocities
+    };
+
     let mut plates = Vec::with_capacity(n);
     for i in 0..n {
         plates.push(PlateGpu {
-            center: centers[i],
+            center: final_centers[i],
             plate_type: if continental_indices[i] { 1.0 } else { 0.0 },
-            velocity: velocities[i],
+            velocity: final_velocities[i],
             _pad: 0.0,
         });
     }
@@ -167,6 +207,8 @@ mod tests {
             tectonics_factor: 0.85,
             continental_scale: 1.0,
             num_plates_override: 0,
+            num_continents: 0,
+            continent_size_variety: 0.0,
         };
         let plates = generate_plates(&params);
         assert!(
@@ -185,6 +227,8 @@ mod tests {
             tectonics_factor: 0.85,
             continental_scale: 1.0,
             num_plates_override: 0,
+            num_continents: 0,
+            continent_size_variety: 0.0,
         };
         let plates = generate_plates(&params);
         let continental = plates.iter().filter(|p| p.plate_type > 0.5).count();
@@ -204,6 +248,8 @@ mod tests {
             tectonics_factor: 0.85,
             continental_scale: 1.0,
             num_plates_override: 0,
+            num_continents: 0,
+            continent_size_variety: 0.0,
         };
         let plates = generate_plates(&params);
         for (i, p) in plates.iter().enumerate() {
@@ -225,6 +271,8 @@ mod tests {
             tectonics_factor: 0.85,
             continental_scale: 1.0,
             num_plates_override: 0,
+            num_continents: 0,
+            continent_size_variety: 0.0,
         });
         let p2 = generate_plates(&PlateGenParams {
             seed: 999,
@@ -233,6 +281,8 @@ mod tests {
             tectonics_factor: 0.85,
             continental_scale: 1.0,
             num_plates_override: 0,
+            num_continents: 0,
+            continent_size_variety: 0.0,
         });
         let diff: f32 = p1.iter().zip(p2.iter())
             .map(|(a, b)| {
@@ -253,6 +303,8 @@ mod tests {
             tectonics_factor: 0.2,
             continental_scale: 1.0,
             num_plates_override: 0,
+            num_continents: 0,
+            continent_size_variety: 0.0,
         });
         assert!(
             plates.len() <= 8,
@@ -270,6 +322,8 @@ mod tests {
             tectonics_factor: 0.85,
             continental_scale: 1.0,
             num_plates_override: 0,
+            num_continents: 0,
+            continent_size_variety: 0.0,
         };
         let plates = generate_plates(&params);
         for (i, p) in plates.iter().enumerate() {
@@ -291,6 +345,8 @@ mod tests {
             tectonics_factor: 0.1,
             continental_scale: 1.0,
             num_plates_override: 0,
+            num_continents: 0,
+            continent_size_variety: 0.0,
         });
         let plates_high = generate_plates(&PlateGenParams {
             seed: 42,
@@ -299,6 +355,8 @@ mod tests {
             tectonics_factor: 1.0,
             continental_scale: 1.0,
             num_plates_override: 0,
+            num_continents: 0,
+            continent_size_variety: 0.0,
         });
         let avg_low: f32 = plates_low.iter()
             .map(|p| (p.velocity[0].powi(2) + p.velocity[1].powi(2) + p.velocity[2].powi(2)).sqrt())
@@ -322,6 +380,8 @@ mod tests {
             tectonics_factor: 0.85,
             continental_scale: 1.0,
             num_plates_override: 8,
+            num_continents: 0,
+            continent_size_variety: 0.0,
         };
         let plates = generate_plates(&params);
         for (i, p) in plates.iter().enumerate() {
@@ -338,5 +398,69 @@ mod tests {
                 i, normalized_dot
             );
         }
+    }
+
+    #[test]
+    fn num_continents_controls_continental_count() {
+        for nc in 1..=8u32 {
+            let plates = generate_plates(&PlateGenParams {
+                seed: 42,
+                mass_earth: 1.0,
+                ocean_fraction: 0.7,
+                tectonics_factor: 0.85,
+                continental_scale: 1.0,
+                num_plates_override: 0,
+                num_continents: nc,
+                continent_size_variety: 0.0,
+            });
+            let continental = plates.iter().filter(|p| p.plate_type > 0.5).count();
+            assert_eq!(
+                continental, nc as usize,
+                "Expected {} continental plates, got {}",
+                nc, continental
+            );
+        }
+    }
+
+    #[test]
+    fn continent_size_variety_shifts_centers() {
+        let plates_equal = generate_plates(&PlateGenParams {
+            seed: 42,
+            mass_earth: 1.0,
+            ocean_fraction: 0.7,
+            tectonics_factor: 0.85,
+            continental_scale: 1.0,
+            num_plates_override: 0,
+            num_continents: 4,
+            continent_size_variety: 0.0,
+        });
+        let plates_clustered = generate_plates(&PlateGenParams {
+            seed: 42,
+            mass_earth: 1.0,
+            ocean_fraction: 0.7,
+            tectonics_factor: 0.85,
+            continental_scale: 1.0,
+            num_plates_override: 0,
+            num_continents: 4,
+            continent_size_variety: 1.0,
+        });
+
+        // Continental plate centers should differ when variety changes
+        let cont_equal: Vec<_> = plates_equal.iter()
+            .filter(|p| p.plate_type > 0.5)
+            .map(|p| p.center)
+            .collect();
+        let cont_clustered: Vec<_> = plates_clustered.iter()
+            .filter(|p| p.plate_type > 0.5)
+            .map(|p| p.center)
+            .collect();
+
+        assert_eq!(cont_equal.len(), cont_clustered.len());
+        let mut any_different = false;
+        for (a, b) in cont_equal.iter().zip(cont_clustered.iter()) {
+            let dist = ((a[0]-b[0]).powi(2) + (a[1]-b[1]).powi(2) + (a[2]-b[2]).powi(2)).sqrt();
+            if dist > 0.01 { any_different = true; }
+        }
+        assert!(any_different, "Variety=1 should shift continental centers relative to variety=0");
     }
 }

@@ -37,6 +37,8 @@ fn main() {
         tectonics_factor: derived.tectonics_factor,
         continental_scale: 1.0,
         num_plates_override: 0,
+        num_continents: 0,
+        continent_size_variety: 0.0,
     });
 
     // Terrain params
@@ -69,7 +71,7 @@ fn main() {
     for (iterations, erosion_name) in &erosion_levels {
         // Generate fresh terrain for each (erosion modifies in place)
         let mut terrain = compute.generate(
-            &gpu, &plates, 512, seed, amplitude, frequency, octaves, gain, lacunarity, 1.0, 0.10, 1.0, 1.0, 9.81, 0.85, 0.2,
+            &gpu, &plates, 512, seed, amplitude, frequency, octaves, gain, lacunarity, 1.0, 0.10, 1.0, 1.0, 9.81, 0.85, 0.2, 1.0,
         );
 
         // Apply erosion

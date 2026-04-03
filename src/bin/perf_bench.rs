@@ -40,9 +40,11 @@ fn main() {
             tectonics_factor: derived.tectonics_factor,
             continental_scale: 1.0,
             num_plates_override: 0,
+            num_continents: 0,
+            continent_size_variety: 0.0,
         });
         let mut terrain = terrain_compute.generate(
-            &gpu, &plates, warmup_res, seed, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0, 9.81, 0.85, 0.2,
+            &gpu, &plates, warmup_res, seed, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0, 9.81, 0.85, 0.2, 1.0,
         );
         erosion_pipeline.erode(&gpu, &mut terrain, 5, ocean_level);
         let _ = preview_renderer.upload_terrain(&gpu, &terrain);
@@ -65,13 +67,15 @@ fn main() {
             tectonics_factor: derived.tectonics_factor,
             continental_scale: 1.0,
             num_plates_override: 0,
+            num_continents: 0,
+            continent_size_variety: 0.0,
         });
         let plates_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
         // Compute (terrain generation)
         let t1 = Instant::now();
         let mut terrain = terrain_compute.generate(
-            &gpu, &plates, res, seed, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0, 9.81, 0.85, 0.2,
+            &gpu, &plates, res, seed, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0, 9.81, 0.85, 0.2, 1.0,
         );
         let compute_ms = t1.elapsed().as_secs_f64() * 1000.0;
 
@@ -105,6 +109,8 @@ fn main() {
         tectonics_factor: derived.tectonics_factor,
         continental_scale: 1.0,
         num_plates_override: 0,
+        num_continents: 0,
+        continent_size_variety: 0.0,
     });
 
     let t_classified = Instant::now();

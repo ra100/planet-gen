@@ -30,7 +30,7 @@ struct GenParams {
     surface_gravity: f32,  // m/s² (lower gravity → taller mountains)
     tectonics_factor: f32, // [0,1]: boundary force strength
     surface_age: f32,      // [0,1]: 0=young/sharp, 1=old/smooth
-    _pad0: u32,
+    continental_scale: f32, // noise frequency for continent size
 }
 
 @group(0) @binding(0) var<storage, read> plates: array<Plate>;
@@ -214,22 +214,35 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     // Domain warp for complex geological shapes (coastlines, mountain curves)
     let wpos = warp_position(raw_pos);
 
-    // === Layer 1: Continental terrain — defines land/ocean geography ===
-    // Low persistence fBm: first octave dominates → large coherent continents
-    // Higher octaves add coastline complexity without fragmenting land masses
-    let c1 = snoise(wpos * 1.0 + seed_offset(params.seed + 1000u));         // continent-scale
-    let c2 = snoise(wpos * 2.0 + seed_offset(params.seed + 1010u)) * 0.20;  // sub-continent shape
-    let c3 = snoise(wpos * 4.0 + seed_offset(params.seed + 1020u)) * 0.06;  // coastline bays/peninsulas
-    let c4 = snoise(wpos * 8.0 + seed_offset(params.seed + 1030u)) * 0.02 * high_freq_weight; // fine coast
+    // === Layer 1: Plate-driven elevation — PRIMARY land/ocean geography ===
+    let info = find_nearest_plates(wpos);
+    let is_continental = info.nearest_type > 0.5;
+
+    // Each plate's elevation: continental = raised, oceanic = depressed
+    let elev_nearest = select(-0.30, 0.30, info.nearest_type > 0.5);
+    let elev_second = select(-0.30, 0.30, info.second_type > 0.5);
+
+    // Blend between plates at boundaries. At the edge (equidistant), use the average.
+    // Far from boundary, use the nearest plate's value fully.
+    // This ensures ocean-ocean boundaries stay negative, continent-continent stay positive.
+    let boundary_t = smooth_step(0.0, 0.06, info.second_dist - info.nearest_dist);
+    let plate_height = mix((elev_nearest + elev_second) * 0.5, elev_nearest, boundary_t);
+
+    // === Layer 1b: Noise adds coastline shape and surface texture (secondary) ===
+    let cs = params.continental_scale;
+    let c1 = snoise(wpos * cs + seed_offset(params.seed + 1000u));
+    let c2 = snoise(wpos * cs * 2.0 + seed_offset(params.seed + 1010u)) * 0.20;
+    let c3 = snoise(wpos * cs * 4.0 + seed_offset(params.seed + 1020u)) * 0.06;
+    let c4 = snoise(wpos * cs * 8.0 + seed_offset(params.seed + 1030u)) * 0.02 * high_freq_weight;
     let continental_raw = (c1 + c2 + c3 + c4) / 1.28;
-    // Strong bimodal shaping: pow(0.35) creates plateau-like continents
-    // Land is solidly above sea level, ocean solidly below — fewer channels
     let continental = sign(continental_raw) * pow(abs(continental_raw), 0.35);
-    var height = continental * params.amplitude * 0.35;
+    let noise_detail = continental * params.amplitude * 0.20;
+
+    var height = plate_height * params.amplitude + noise_detail;
 
     // === Layer 2: Highland/lowland variation within continents ===
-    let highland = snoise(wpos * 4.0 + seed_offset(params.seed + 1100u)) * 0.10
-                 + snoise(wpos * 8.0 + seed_offset(params.seed + 1110u)) * 0.04 * high_freq_weight;
+    let highland = snoise(wpos * 3.0 + seed_offset(params.seed + 1100u)) * 0.14
+                 + snoise(wpos * 6.0 + seed_offset(params.seed + 1110u)) * 0.06 * high_freq_weight;
     let on_land = smooth_step(-0.05, 0.05, height);
     height += highland * on_land;
 
@@ -253,8 +266,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         5, 2.2, 2.0, 1.0
     );
 
-    // Mountains only on land and near-coast (not deep ocean)
-    let mountain_base = smooth_step(-0.08, 0.02, height);
+    // Mountains only on land (not ocean floor or thin boundary strips)
+    let mountain_base = smooth_step(-0.02, 0.05, height);
     height += ridge * mountain_zone * mountain_base
         * params.mountain_scale * 0.35 * gravity_factor;
 
@@ -262,8 +275,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let ocean_floor = smooth_step(0.0, -0.1, height);
     let of1 = snoise(raw_pos * 3.5 + seed_offset(params.seed + 3000u)) * 0.04;
     let of2 = snoise(raw_pos * 7.0 + seed_offset(params.seed + 3010u)) * 0.015;
-    // Mid-ocean ridge: broad elevated zone from separate noise
-    let mor = smooth_step(0.3, 0.7, snoise(raw_pos * 1.8 + seed_offset(params.seed + 3100u)) * 0.5 + 0.5) * 0.06;
+    // Mid-ocean ridge: subtle elevation in deep ocean only
+    let mor = smooth_step(0.3, 0.7, snoise(raw_pos * 1.8 + seed_offset(params.seed + 3100u)) * 0.5 + 0.5) * 0.03;
     height += (of1 + of2 + mor) * ocean_floor;
 
     // === Layer 5: Seamounts and volcanic hotspots ===
@@ -295,8 +308,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let coast_pos = raw_pos + vec3<f32>(coast_warp_val) * 0.12;
     let coast_n = snoise(coast_pos * 2.5 + seed_offset(params.seed + 700u))
                 + snoise(coast_pos * 5.0 + seed_offset(params.seed + 710u)) * 0.3 * high_freq_weight;
-    let near_coast = smooth_step(0.08, 0.0, abs(height));
-    height += coast_n * 0.03 * near_coast;
+    let near_coast = smooth_step(0.05, 0.0, abs(height));
+    height += coast_n * 0.02 * near_coast;
 
     // === Hypsometric shaping ===
     if (height > 0.0) {
