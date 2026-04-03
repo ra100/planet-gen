@@ -548,39 +548,53 @@ fn cubemap_to_equirect(
     (result, eq_w as u32, eq_h as u32)
 }
 
-fn export_equirect_png_rgba(data: &[f32], width: u32, height: u32, path: &Path) -> Result<(), String> {
-    let mut img = image::RgbaImage::new(width, height);
-    for y in 0..height {
-        for x in 0..width {
-            let idx = (y * width + x) as usize * 4;
-            let r = (data[idx].clamp(0.0, 1.0) * 255.0) as u8;
-            let g = (data[idx + 1].clamp(0.0, 1.0) * 255.0) as u8;
-            let b = (data[idx + 2].clamp(0.0, 1.0) * 255.0) as u8;
-            let a = (data[idx + 3].clamp(0.0, 1.0) * 255.0) as u8;
-            img.put_pixel(x, y, image::Rgba([r, g, b, a]));
-        }
-    }
-    img.save(path).map_err(|e| format!("PNG write error: {e}"))
-}
-
-fn export_equirect_png_gray(data: &[f32], width: u32, height: u32, path: &Path) -> Result<(), String> {
-    let mut img = image::GrayImage::new(width, height);
-    for y in 0..height {
-        for x in 0..width {
-            let v = (data[(y * width + x) as usize].clamp(0.0, 1.0) * 255.0) as u8;
-            img.put_pixel(x, y, image::Luma([v]));
-        }
-    }
-    img.save(path).map_err(|e| format!("PNG write error: {e}"))
-}
-
-fn export_equirect_exr(data: &[f32], width: u32, height: u32, path: &Path) -> Result<(), String> {
+/// Write RGBA EXR with DWAB compression (lossy, ~80% quality).
+fn export_equirect_exr_rgba(data: &[f32], width: u32, height: u32, path: &Path) -> Result<(), String> {
+    use exr::prelude::*;
     let w = width as usize;
     let h = height as usize;
-    exr::prelude::write_rgba_file(path, w, h, |x, y| {
+
+    let channels = SpecificChannels::rgba(|Vec2(x, y)| {
+        let idx = (y * w + x) * 4;
+        (data[idx], data[idx + 1], data[idx + 2], data[idx + 3])
+    });
+
+    Image::from_encoded_channels(
+        (w, h),
+        Encoding {
+            compression: Compression::ZIP16,
+            blocks: Blocks::ScanLines,
+            line_order: LineOrder::Increasing,
+        },
+        channels,
+    )
+    .write()
+    .to_file(path)
+    .map_err(|e| format!("EXR write error: {e}"))
+}
+
+/// Write single-channel EXR as RGB (all same value) with DWAB compression.
+fn export_equirect_exr_gray(data: &[f32], width: u32, height: u32, path: &Path) -> Result<(), String> {
+    use exr::prelude::*;
+    let w = width as usize;
+    let h = height as usize;
+
+    let channels = SpecificChannels::rgba(|Vec2(x, y)| {
         let v = data[y * w + x];
         (v, v, v, 1.0)
-    })
+    });
+
+    Image::from_encoded_channels(
+        (w, h),
+        Encoding {
+            compression: Compression::ZIP16,
+            blocks: Blocks::ScanLines,
+            line_order: LineOrder::Increasing,
+        },
+        channels,
+    )
+    .write()
+    .to_file(path)
     .map_err(|e| format!("EXR write error: {e}"))
 }
 
@@ -770,27 +784,27 @@ pub fn run_export(
     // --- Phase 6: Convert cubemap to equirectangular and export ---
     progress.advance("Converting height to equirectangular...");
     let (eq_h, eq_w, eq_ht) = cubemap_to_equirect(&all_heights, full_res, 1);
-    export_equirect_exr(&eq_h, eq_w, eq_ht, &planet_dir.join("height.exr"))?;
+    export_equirect_exr_gray(&eq_h, eq_w, eq_ht, &planet_dir.join("height.exr"))?;
 
     progress.advance("Converting albedo to equirectangular...");
     let (eq_a, _, _) = cubemap_to_equirect(&all_albedo, full_res, 4);
-    export_equirect_png_rgba(&eq_a, eq_w, eq_ht, &planet_dir.join("albedo.png"))?;
+    export_equirect_exr_rgba(&eq_a, eq_w, eq_ht, &planet_dir.join("albedo.exr"))?;
 
     progress.advance("Converting normal to equirectangular...");
     let (eq_n, _, _) = cubemap_to_equirect(&all_normals, full_res, 4);
-    export_equirect_png_rgba(&eq_n, eq_w, eq_ht, &planet_dir.join("normal.png"))?;
+    export_equirect_exr_rgba(&eq_n, eq_w, eq_ht, &planet_dir.join("normal.exr"))?;
 
     progress.advance("Converting roughness to equirectangular...");
     let (eq_r, _, _) = cubemap_to_equirect(&all_roughness, full_res, 1);
-    export_equirect_png_gray(&eq_r, eq_w, eq_ht, &planet_dir.join("roughness.png"))?;
+    export_equirect_exr_gray(&eq_r, eq_w, eq_ht, &planet_dir.join("roughness.exr"))?;
 
     progress.advance("Converting AO to equirectangular...");
     let (eq_ao, _, _) = cubemap_to_equirect(&all_ao, full_res, 1);
-    export_equirect_png_gray(&eq_ao, eq_w, eq_ht, &planet_dir.join("ao.png"))?;
+    export_equirect_exr_gray(&eq_ao, eq_w, eq_ht, &planet_dir.join("ao.exr"))?;
 
     progress.advance("Converting water mask to equirectangular...");
     let (eq_o, _, _) = cubemap_to_equirect(&all_ocean, full_res, 1);
-    export_equirect_png_gray(&eq_o, eq_w, eq_ht, &planet_dir.join("water_mask.png"))?;
+    export_equirect_exr_gray(&eq_o, eq_w, eq_ht, &planet_dir.join("water_mask.exr"))?;
 
     let _ = progress_tx.send(ExportProgress::Complete);
     Ok(planet_dir)
@@ -958,13 +972,13 @@ mod tests {
         assert!(result.is_ok(), "Export failed: {:?}", result.err());
 
         let planet_dir = tmp_dir.join("test_planet");
-        // Equirectangular output files
+        // Equirectangular EXR output files
         assert!(planet_dir.join("height.exr").exists());
-        assert!(planet_dir.join("albedo.png").exists());
-        assert!(planet_dir.join("normal.png").exists());
-        assert!(planet_dir.join("roughness.png").exists());
-        assert!(planet_dir.join("water_mask.png").exists());
-        assert!(planet_dir.join("ao.png").exists());
+        assert!(planet_dir.join("albedo.exr").exists());
+        assert!(planet_dir.join("normal.exr").exists());
+        assert!(planet_dir.join("roughness.exr").exists());
+        assert!(planet_dir.join("water_mask.exr").exists());
+        assert!(planet_dir.join("ao.exr").exists());
 
         // Check last progress was Complete
         let mut last = None;
