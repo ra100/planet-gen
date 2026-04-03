@@ -302,10 +302,10 @@ Requirements: [docs/brainstorms/2026-04-03-orogen-port-requirements.md](docs/bra
 
 | Task | 内容 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
-| 6.0.1 | HEALPix module: nested-scheme pixel index ↔ 3D sphere position (vec3) | `healpix::pix2vec(nside, ipix)` and `healpix::vec2pix(nside, vec)` pass unit tests for all 12*nside^2 pixels | - | cc:TODO |
-| 6.0.2 | HEALPix neighbor lookup: 8 neighbors per pixel (SW,W,NW,N,NE,E,SE,S) | `healpix::neighbors(nside, ipix) -> [u32; 8]` correct for interior + edge + corner pixels | 6.0.1 | cc:TODO |
-| 6.0.3 | HEALPix → cubemap resampling: sample HEALPix buffer onto 6-face cubemap | `healpix::to_cubemap(data, nside, face_res) -> [Vec<f32>; 6]` with bilinear interpolation; output matches existing TectonicTerrain format | 6.0.1 | cc:TODO |
-| 6.0.4 | Integration test: generate flat HEALPix buffer, resample to cubemap, render in preview | Preview shows a uniform sphere with no face-boundary seams or distortion artifacts | 6.0.3 | cc:TODO |
+| 6.0.1 | HEALPix module: nested-scheme pixel index ↔ 3D sphere position (vec3) | `healpix::pix2vec(nside, ipix)` and `healpix::vec2pix(nside, vec)` pass unit tests for all 12*nside^2 pixels | - | cc:完了 [c7e75f6] |
+| 6.0.2 | HEALPix neighbor lookup: 8 neighbors per pixel (SW,W,NW,N,NE,E,SE,S) | `healpix::neighbors(nside, ipix) -> [u32; 8]` correct for interior + edge + corner pixels | 6.0.1 | cc:完了 [c7e75f6] |
+| 6.0.3 | HEALPix → cubemap resampling: sample HEALPix buffer onto 6-face cubemap | `healpix::to_cubemap(data, nside, face_res) -> [Vec<f32>; 6]` with bilinear interpolation; output matches existing TectonicTerrain format | 6.0.1 | cc:完了 [c7e75f6] |
+| 6.0.4 | Integration test: generate flat HEALPix buffer, resample to cubemap, render in preview | Preview shows a uniform sphere with no face-boundary seams or distortion artifacts | 6.0.3 | cc:完了 [c7e75f6] |
 
 ---
 
@@ -393,7 +393,7 @@ Benchmarking and optimization infrastructure.
 | 7.5.2 | Document performance bottlenecks | Analysis in docs/research/performance-analysis.md | 7.5.1 | cc:完了 [d30ea78] |
 | 7.5.3 | Resolution-adaptive erosion: scale iterations with resolution (256→5, 512→10, 768→15, 1024+→25) | 2K generation under 4s; visual quality similar at each resolution | - | cc:完了 [5d7b697] |
 | 7.5.4 | Progressive terrain: show un-eroded preview immediately, apply erosion in batches (5 iters/batch), re-render after each batch | Planet visible within 100ms of parameter change; erosion refines progressively | 7.5.3 | cc:完了 [b8d86f7] |
-| 7.5.5 | Re-run perf_bench after optimizations, compare before/after | Updated performance-analysis.md with comparison table | 7.5.3, 7.5.4 | cc:完了 |
+| 7.5.5 | Re-run perf_bench after optimizations, compare before/after | Updated performance-analysis.md with comparison table | 7.5.3, 7.5.4 | cc:完了 [c7e75f6] |
 | 7.5.6 | Moisture-weighted erosion: scale erosion strength by latitude-based moisture in erosion.wgsl. Desert mountains stay sharp/craggy, tropical mountains get smooth rounded valleys. Factors: rainfall (primary), slope steepness (secondary) | Visible difference between desert (sharp) and tropical (smooth) mountains at same elevation | Phase 4.8 | cc:完了 [edb3904] |
 
 ---
