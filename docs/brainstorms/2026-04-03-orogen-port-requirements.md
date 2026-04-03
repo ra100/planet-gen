@@ -71,7 +71,7 @@ The current terrain generation uses pure noise — it produces organic shapes bu
 
 ### Resolve Before Planning
 
-- [Affects R1][Architecture] Which sphere grid representation? Options: icosphere (easy subdivision, good neighbor access), HEALPix (equal-area, used in astronomy), Fibonacci sphere (easy to generate, hard neighbor lookup). The choice affects BFS implementation complexity.
+- ~~[Affects R1][Architecture] Which sphere grid representation?~~ **RESOLVED: HEALPix.** Equal-area pixels, 8 neighbors per pixel, analytical index↔position conversion. Nside=256 → 786K pixels (preview), Nside=512 → 3.1M (export). Nested scheme for GPU spatial locality. Requires HEALPix→cubemap resampling for rendering but provides the best foundation for global BFS and equal-area plate simulation.
 
 ### Deferred to Planning
 
