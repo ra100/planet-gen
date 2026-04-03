@@ -21,6 +21,7 @@ pub struct PlanetGenApp {
     // Visual override parameters
     continental_scale: f32,
     water_loss: f32,
+    climate_moisture: f32, // 0=bone dry atmosphere, 1=full moisture from physics
     season: f32, // 0=winter, 0.5=equinox, 1=summer
     erosion_iterations: u32,
     light_azimuth: f32,   // sun horizontal angle in radians
@@ -99,6 +100,7 @@ impl PlanetGenApp {
             rotation_x: 0.0,
             continental_scale: 1.0,
             water_loss: 0.5,
+            climate_moisture: 1.0,
             season: 0.5,
             erosion_iterations: 25,
             light_azimuth: -0.5,
@@ -178,9 +180,9 @@ impl PlanetGenApp {
             ],
             ocean_level,
             base_temp_c: self.derived.base_temperature_c,
-            // Use physics ocean_fraction for climate (moisture, clouds), not effective_ocean.
-            // water_loss only affects sea level (ocean_level), not atmospheric moisture.
-            ocean_fraction: self.derived.ocean_fraction,
+            // Climate moisture: physics ocean_fraction scaled by user's moisture slider.
+            // water_loss controls sea level only; climate_moisture controls atmosphere wetness.
+            ocean_fraction: self.derived.ocean_fraction * self.climate_moisture,
             axial_tilt_rad: self.params.axial_tilt_deg.to_radians(),
             view_mode: self.view_mode,
             season: self.season,
@@ -478,10 +480,17 @@ impl eframe::App for PlanetGenApp {
 
                 if ui.add(egui::Slider::new(&mut self.water_loss, 0.0..=1.0)
                     .text("Water Loss"))
-                    .on_hover_text("Simulate water loss. 0 = physics default, 1 = completely dry")
+                    .on_hover_text("Sea level control. 0 = ocean world, 1 = no surface water")
                     .changed()
                 {
                     self.needs_terrain = true;
+                }
+                if ui.add(egui::Slider::new(&mut self.climate_moisture, 0.0..=1.0)
+                    .text("Atm. Moisture"))
+                    .on_hover_text("Atmospheric moisture. 0 = bone dry (desert world), 1 = full moisture. Independent of water loss.")
+                    .changed()
+                {
+                    self.needs_render = true;
                 }
 
                 let mut erosion_i32 = self.erosion_iterations as i32;
