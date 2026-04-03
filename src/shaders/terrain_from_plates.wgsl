@@ -163,16 +163,25 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let high_freq_weight = 1.0 - age * 0.7;
     let tect = params.tectonics_factor;
 
-    // === Base elevation from plate type ===
+    // === Base terrain from noise (NOT plate type) ===
+    // Continent shapes come from domain-warped noise. Plates only affect
+    // boundary features (mountains, rifts, shelves) via JFA distance fields.
+    let c1 = snoise(wpos * 1.0 + seed_offset(params.seed + 1000u));
+    let c2 = snoise(wpos * 2.0 + seed_offset(params.seed + 1010u)) * 0.20;
+    let c3 = snoise(wpos * 4.0 + seed_offset(params.seed + 1020u)) * 0.06;
+    let c4 = snoise(wpos * 8.0 + seed_offset(params.seed + 1030u)) * 0.02 * high_freq_weight;
+    let continental_raw = (c1 + c2 + c3 + c4) / 1.28;
+    // Bimodal shaping for solid continents
+    let continental = sign(continental_raw) * pow(abs(continental_raw), 0.35);
+    var height = continental * params.amplitude * 0.35;
+
+    // Highland/lowland variation within continents
+    let on_land = smooth_step(-0.05, 0.05, height);
+    let highland = snoise(wpos * 4.0 + seed_offset(params.seed + 1100u)) * 0.10
+                 + snoise(wpos * 8.0 + seed_offset(params.seed + 1110u)) * 0.04 * high_freq_weight;
+    height += highland * on_land;
+
     let is_continental = plates[my_plate].plate_type > 0.5;
-    let base_elev = select(-0.25, 0.15, is_continental); // oceanic floor vs continental shelf
-
-    // Intra-plate noise for terrain variation within plates
-    let plate_off = seed_offset(params.seed + my_plate * 100u);
-    let intra_noise = snoise(wpos * 2.0 + plate_off) * 0.08
-                    + snoise(wpos * 4.0 + plate_off * 1.3) * 0.04 * high_freq_weight;
-
-    var height = base_elev + intra_noise * gravity_factor;
 
     // === Boundary features (only where JFA found a boundary) ===
     if (jfa.plate_b >= 0 && jfa.seed_x >= 0) {
@@ -223,16 +232,11 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         }
     }
 
-    // === R9: Continental shelves from coast distance ===
-    // Use norm_dist + plate type to create shelf profile
-    if (!is_continental) {
-        // Distance-based ocean floor profile
-        let shelf_dist = norm_dist; // distance from nearest boundary (which is the coast)
-        let shelf = smooth_step(0.0, 0.02, shelf_dist);      // shallow shelf zone
-        let slope = smooth_step(0.02, 0.06, shelf_dist);      // continental slope
-        // Shelf: shallow (-0.05), slope transitions to deep (-0.25)
-        let ocean_profile = mix(-0.05, -0.25, slope);
-        height = mix(height, ocean_profile, shelf * 0.7);
+    // === R9: Continental shelves near coastlines ===
+    let is_coast = height > -0.15 && height < 0.05;
+    if (is_coast) {
+        let coast_zone = smooth_step(-0.15, -0.02, height) * smooth_step(0.05, 0.0, height);
+        height = mix(height, -0.02, coast_zone * 0.3);
     }
 
     // === R11/R12: Stress-driven roughness ===
