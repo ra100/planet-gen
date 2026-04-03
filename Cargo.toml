@@ -17,7 +17,7 @@ egui = "0.31"
 
 # Image export
 image = "0.25"
-exr = "1"
+exr = "1.74"
 
 # Utilities
 log = "0.4"
