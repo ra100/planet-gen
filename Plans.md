@@ -315,12 +315,12 @@ Voronoi plate assignment, BFS distance fields, and super-plate clustering on HEA
 
 | Task | 内容 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
-| 6.1.1 | Plate seed generation on HEALPix: 10-20 seeds from Fibonacci sphere + noise | Seeds well-distributed; continental/oceanic type assigned from ocean_fraction | Phase 6.0 | cc:TODO |
-| 6.1.2 | BFS flood-fill plate assignment with noise perturbation | Each HEALPix pixel assigned to nearest plate; boundaries are organic (not pure Voronoi) | 6.1.1 | cc:TODO |
-| 6.1.3 | BFS distance-to-boundary field (global, all boundaries) | Smooth distance field across entire sphere; no face-boundary artifacts; unit test verifies continuity | 6.1.2 | cc:TODO |
-| 6.1.4 | BFS distance-to-coast field (continental↔oceanic boundaries only) | Separate distance field for shelf/slope profiles; 0 at coast, increasing inland and offshore | 6.1.2 | cc:TODO |
-| 6.1.5 | Super-plate clustering: group 10-20 small plates into 3-5 super-plates | Super-plate assignment per pixel; blend 5% small-plate + 95% super-plate for continent-scale structure | 6.1.2 | cc:TODO |
-| 6.1.6 | Stress computation: collision stress at each pixel from plate velocity × boundary normal | Per-pixel stress field [0,1]; high at convergent, low at divergent/interior; decays with distance | 6.1.3 | cc:TODO |
+| 6.1.1 | Plate seed generation on HEALPix: 10-20 seeds from Fibonacci sphere + noise | Seeds well-distributed; continental/oceanic type assigned from ocean_fraction | Phase 6.0 | cc:完了 [0688c5c] |
+| 6.1.2 | BFS flood-fill plate assignment with noise perturbation | Each HEALPix pixel assigned to nearest plate; boundaries are organic (not pure Voronoi) | 6.1.1 | cc:完了 [0688c5c] |
+| 6.1.3 | BFS distance-to-boundary field (global, all boundaries) | Smooth distance field across entire sphere; no face-boundary artifacts; unit test verifies continuity | 6.1.2 | cc:完了 [0688c5c] |
+| 6.1.4 | BFS distance-to-coast field (continental↔oceanic boundaries only) | Separate distance field for shelf/slope profiles; 0 at coast, increasing inland and offshore | 6.1.2 | cc:完了 [0688c5c] |
+| 6.1.5 | Super-plate clustering: group 10-20 small plates into 3-5 super-plates | Super-plate assignment per pixel; blend 5% small-plate + 95% super-plate for continent-scale structure | 6.1.2 | cc:完了 [0688c5c] |
+| 6.1.6 | Stress computation: collision stress at each pixel from plate velocity × boundary normal | Per-pixel stress field [0,1]; high at convergent, low at divergent/interior; decays with distance | 6.1.3 | cc:完了 [0688c5c] |
 
 ---
 

@@ -45,6 +45,8 @@ pub struct PlanetGenApp {
     detail_scale: f32,
     age_override: Option<f32>, // None = derived from physics, Some = manual override
     num_plates_override: u32, // 0 = auto from physics
+    num_continents: u32,      // target number of distinct landmasses (1-10)
+    continent_size_variety: f32, // 0 = equal sizes, 1 = heavily skewed
     cloud_coverage: f32,
     cloud_seed: u32,
     cloud_type: f32,
@@ -122,6 +124,8 @@ impl PlanetGenApp {
             detail_scale: 1.0,
             age_override: None,
             num_plates_override: 0,
+            num_continents: 4,
+            continent_size_variety: 0.35,
             cloud_coverage: 0.5,
             cloud_seed: default_cloud_seed,
             cloud_type: 0.5,
@@ -473,6 +477,24 @@ impl eframe::App for PlanetGenApp {
                 if ui.add(egui::Slider::new(&mut self.continental_scale, 0.5..=4.0)
                     .text("Continent Scale"))
                     .on_hover_text("Lower = fewer, larger continents. Higher = many small islands")
+                    .changed()
+                {
+                    self.needs_terrain = true;
+                }
+
+                let mut nc_i32 = self.num_continents as i32;
+                if ui.add(egui::Slider::new(&mut nc_i32, 1..=10)
+                    .text("Continents"))
+                    .on_hover_text("Target number of distinct landmasses. 1 = supercontinent, 10 = archipelago")
+                    .changed()
+                {
+                    self.num_continents = nc_i32 as u32;
+                    self.needs_terrain = true;
+                }
+
+                if ui.add(egui::Slider::new(&mut self.continent_size_variety, 0.0..=1.0)
+                    .text("Size Variety"))
+                    .on_hover_text("Continent size distribution. 0 = equal sizes, 1 = one large + many small")
                     .changed()
                 {
                     self.needs_terrain = true;

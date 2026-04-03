@@ -6,6 +6,7 @@ pub mod gpu;
 pub mod healpix;
 pub mod noise;
 pub mod planet;
+pub mod plate_sim;
 pub mod plates;
 pub mod preview;
 pub mod terrain;
