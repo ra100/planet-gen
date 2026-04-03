@@ -36,6 +36,7 @@ Plans.md          — Master progress tracker across all phases
 ### Preview Pipeline
 
 User parameters → `PlanetParams` → `DerivedProperties` (physics model) → `PreviewUniforms` (GPU buffer) → fragment shader renders lit sphere with:
+
 - Continental structure (low-freq noise + domain warping)
 - Multi-octave fBm terrain detail (8-12 octaves)
 - Hadley cell atmospheric circulation → moisture
@@ -74,4 +75,4 @@ User parameters → `PlanetParams` → `DerivedProperties` (physics model) → `
 
 ### Commits
 
-Follow existing commit message style with emoji prefixes: ✨ feature, 🔴 fix, 🔄 refactor, ✅ chore, 📋 plan, 📝 docs
+Follow existing commit message style with gitmoji prefixes: ✨ feature, 🐛 fix, ♻️ refactor, 📋 plan, 📝 docs
