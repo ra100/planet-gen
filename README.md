@@ -4,9 +4,12 @@ GPU-accelerated procedural planet generator for VFX. Produces physically plausib
 
 Built with Rust, wgpu (WebGPU), and egui.
 
-<!-- Add screenshots: save to docs/images/ and uncomment -->
-<!-- <p align="center"><img src="docs/images/planet-overview.png" width="600" alt="Planet overview"></p> -->
-<!-- <p align="center"><img src="docs/images/planet-closeup.png" width="600" alt="Planet closeup"></p> -->
+<p align="center">
+  <img src="docs/images/planet_01.png" width="720" alt="Earth-like planet with continents, clouds, and atmosphere">
+</p>
+<p align="center">
+  <img src="docs/images/planet_02.png" width="720" alt="Icy planet with different continent configuration">
+</p>
 
 ## Quick Start
 
