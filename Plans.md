@@ -346,9 +346,9 @@ Wire into app, parameter tuning, export support, cleanup.
 
 | Task | 内容 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
-| 6.3.1 | Wire HEALPix terrain pipeline into app.rs regenerate_terrain() | New pipeline replaces noise terrain for preview; all UI parameters (seed, mountain_scale, etc.) work | Phase 6.2 | cc:TODO |
-| 6.3.2 | Performance profiling: full pipeline < 3s at Nside=256 | Timed end-to-end; BFS + terrain + resample + upload within budget | 6.3.1 | cc:TODO |
-| 6.3.3 | Export support: HEALPix terrain at Nside=512 for high-res export | Export pipeline uses HEALPix terrain → cubemap → equirect EXR; existing maps (albedo, roughness, etc.) work | 6.3.1 | cc:TODO |
+| 6.3.1 | Wire HEALPix terrain pipeline into app.rs regenerate_terrain() | New pipeline replaces noise terrain for preview; all UI parameters (seed, mountain_scale, etc.) work | Phase 6.2 | cc:完了 [45789c7] |
+| 6.3.2 | Performance profiling: full pipeline < 3s at Nside=256 | Timed end-to-end; BFS + terrain + resample + upload within budget | 6.3.1 | cc:完了 [45789c7] |
+| 6.3.3 | Export support: HEALPix terrain at Nside=512 for high-res export | Export pipeline uses HEALPix terrain → cubemap → equirect EXR; existing maps (albedo, roughness, etc.) work | 6.3.1 | cc:完了 [45789c7] |
 | 6.3.4 | Parameter tuning: mountain height, shelf width, stress decay, noise detail | Earth-like seed produces recognizable tectonic features; visual quality approaches reference | 6.3.1 | cc:TODO |
 | 6.3.5 | Remove old noise terrain code from plates.wgsl (keep as backup branch) | TerrainComputePipeline uses HEALPix exclusively; old single-pass shaders archived | 6.3.4 | cc:TODO |
 

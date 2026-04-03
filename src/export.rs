@@ -7,9 +7,10 @@ use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
 use crate::gpu::GpuContext;
+use crate::healpix_terrain::{self, HealpixTerrainParams};
 use crate::planet::{DerivedProperties, PlanetParams};
-use crate::plates::{generate_plates, PlateGenParams};
-use crate::terrain_compute::{ErosionPipeline, TerrainComputePipeline, TerrainGenParams, TectonicTerrain};
+use crate::plate_sim::{self, PlateSimParams};
+use crate::terrain_compute::ErosionPipeline;
 
 // ============ Constants ============
 
@@ -296,87 +297,6 @@ impl MapPipeline {
     }
 }
 
-// ============ Tiled Terrain Generation ============
-
-fn generate_terrain_tiled(
-    gpu: &GpuContext,
-    terrain_pipeline: &TerrainComputePipeline,
-    plates_buffer: &wgpu::Buffer,
-    coordinator: &TileCoordinator,
-    num_plates: u32,
-    seed: u32,
-    amplitude: f32,
-    frequency: f32,
-    octaves: u32,
-    gain: f32,
-    lacunarity: f32,
-    progress: &mut ProgressTracker,
-    cancel: &AtomicBool,
-) -> Result<TectonicTerrain, String> {
-    let res = coordinator.face_resolution;
-    let tile_size = coordinator.tile_size;
-    let tiles_per_axis = coordinator.tiles_per_axis;
-
-    let mut faces: [Vec<f32>; 6] = Default::default();
-
-    for face_idx in 0..6u32 {
-        let mut face_data = vec![0.0f32; (res * res) as usize];
-
-        for ty in 0..tiles_per_axis {
-            for tx in 0..tiles_per_axis {
-                if cancel.load(Ordering::Relaxed) {
-                    return Err("Cancelled".into());
-                }
-
-                let offset_x = tx * tile_size;
-                let offset_y = ty * tile_size;
-
-                let params = TerrainGenParams {
-                    face: face_idx,
-                    resolution: tile_size,
-                    num_plates,
-                    seed,
-                    amplitude,
-                    frequency,
-                    octaves,
-                    gain,
-                    lacunarity,
-                    tile_offset_x: offset_x,
-                    tile_offset_y: offset_y,
-                    full_resolution: res,
-                    mountain_scale: 1.0,
-                    boundary_width: 0.10,
-                    warp_strength: 1.0,
-                    detail_scale: 1.0,
-                    surface_gravity: 9.81,
-                    tectonics_factor: 0.85,
-                    surface_age: 0.2,
-                    _pad0: 0,
-                };
-
-                let tile_data = terrain_pipeline.dispatch_tile(gpu, plates_buffer, &params);
-
-                // Copy tile into face
-                for row in 0..tile_size {
-                    let src_start = (row * tile_size) as usize;
-                    let dst_start = ((offset_y + row) * res + offset_x) as usize;
-                    face_data[dst_start..dst_start + tile_size as usize]
-                        .copy_from_slice(&tile_data[src_start..src_start + tile_size as usize]);
-                }
-
-                progress.advance(&format!("Generating terrain face {face_idx}"));
-            }
-        }
-
-        faces[face_idx as usize] = face_data;
-    }
-
-    Ok(TectonicTerrain {
-        faces,
-        resolution: res,
-    })
-}
-
 // ============ Tiled Map Generation ============
 
 fn generate_map_tiled<P: Pod>(
@@ -605,9 +525,9 @@ pub fn run_export(
     config: &ExportConfig,
     params: &PlanetParams,
     derived: &DerivedProperties,
-    continental_scale: f32,
     water_loss: f32,
-    terrain_params: (f32, f32, u32, f32, f32),
+    plate_params: &PlateSimParams,
+    healpix_params: &HealpixTerrainParams,
     progress_tx: &Sender<ExportProgress>,
     cancel: &AtomicBool,
 ) -> Result<PathBuf, String> {
@@ -618,47 +538,26 @@ pub fn run_export(
     std::fs::create_dir_all(&planet_dir).map_err(|e| format!("Failed to create output dir: {e}"))?;
 
     let effective_ocean = derived.ocean_fraction * (1.0 - water_loss);
-    let ocean_level = -0.5 + 1.7 * effective_ocean; // match app.rs formula
-    let (amplitude, frequency, octaves, gain, lacunarity) = terrain_params;
+    let ocean_level = -0.5 + 1.7 * effective_ocean;
 
-    // Compute total steps for progress:
-    // terrain tiles + erosion(6) + map tiles(3 maps * tiles_per_face * 6) + file exports(6*6)
     let tiles_per_face = coordinator.tiles_per_face();
-    let total_steps = coordinator.total_tiles() // terrain generation
+    let total_steps = 2 // plate sim + terrain gen
         + 6 // erosion
         + 4 * 6 * tiles_per_face // normal + roughness + albedo + ao tiles
         + 6 * 7; // file writes (6 faces * 7 map types)
     let mut progress = ProgressTracker::new(progress_tx, total_steps);
 
-    // --- Phase 1: Generate plates ---
-    let plates = generate_plates(&PlateGenParams {
-        seed: params.seed,
-        mass_earth: params.mass_earth,
-        ocean_fraction: effective_ocean,
-        tectonics_factor: derived.tectonics_factor,
-        continental_scale,
-        num_plates_override: 0,
-    });
+    // --- Phase 1: Plate simulation on HEALPix ---
+    progress.advance("Simulating plate tectonics");
+    let sim = plate_sim::simulate(plate_params);
 
-    // --- Phase 2: Generate terrain (tiled) ---
-    let terrain_pipeline = TerrainComputePipeline::new(gpu);
-    let plates_buffer = terrain_pipeline.create_plates_buffer(gpu, &plates);
+    if cancel.load(Ordering::Relaxed) {
+        return Err("Cancelled".into());
+    }
 
-    let mut terrain = generate_terrain_tiled(
-        gpu,
-        &terrain_pipeline,
-        &plates_buffer,
-        &coordinator,
-        plates.len() as u32,
-        params.seed,
-        amplitude,
-        frequency,
-        octaves,
-        gain,
-        lacunarity,
-        &mut progress,
-        cancel,
-    )?;
+    // --- Phase 2: Generate terrain (HEALPix → cubemap) ---
+    progress.advance("Generating terrain");
+    let mut terrain = healpix_terrain::generate(&sim, healpix_params, config.face_resolution);
 
     // --- Phase 3: Erosion ---
     let erosion_pipeline = ErosionPipeline::new(gpu);
@@ -823,9 +722,9 @@ pub fn spawn_export(
     config: ExportConfig,
     params: PlanetParams,
     derived: DerivedProperties,
-    continental_scale: f32,
     water_loss: f32,
-    terrain_params: (f32, f32, u32, f32, f32),
+    plate_params: PlateSimParams,
+    healpix_params: HealpixTerrainParams,
 ) -> ExportHandle {
     let (tx, rx) = std::sync::mpsc::channel();
     let cancel = Arc::new(AtomicBool::new(false));
@@ -837,9 +736,9 @@ pub fn spawn_export(
             &config,
             &params,
             &derived,
-            continental_scale,
             water_loss,
-            terrain_params,
+            &plate_params,
+            &healpix_params,
             &tx,
             &cancel_clone,
         ) {
@@ -881,59 +780,24 @@ mod tests {
     }
 
     #[test]
-    fn test_tiled_terrain_matches_direct() {
-        let gpu = GpuContext::new().expect("GPU init failed");
-        let pipeline = TerrainComputePipeline::new(&gpu);
+    fn test_healpix_terrain_export() {
+        use crate::healpix_terrain::HealpixTerrainParams;
+        use crate::plate_sim::PlateSimParams;
 
-        let plates = generate_plates(&PlateGenParams {
-            seed: 42,
-            mass_earth: 1.0,
-            ocean_fraction: 0.7,
-            tectonics_factor: 0.85,
-            continental_scale: 1.0,
-            num_plates_override: 0,
+        let sim = crate::plate_sim::simulate(&PlateSimParams {
+            nside: 16,
+            ..PlateSimParams::default()
         });
+        let terrain = crate::healpix_terrain::generate(
+            &sim,
+            &HealpixTerrainParams::default(),
+            64,
+        );
 
-        // Generate directly at 64x64
-        let direct = pipeline.generate(&gpu, &plates, 64, 42, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0, 9.81, 0.85, 0.2);
-
-        // Generate tiled at 64x64 (2x2 tiles of 32)
-        let plates_buffer = pipeline.create_plates_buffer(&gpu, &plates);
-        let coord = TileCoordinator::new(64, 32);
-        let (tx, _rx) = std::sync::mpsc::channel();
-        let cancel = AtomicBool::new(false);
-        let mut progress = ProgressTracker::new(&tx, coord.total_tiles());
-
-        let tiled = generate_terrain_tiled(
-            &gpu,
-            &pipeline,
-            &plates_buffer,
-            &coord,
-            plates.len() as u32,
-            42,
-            1.0,
-            1.2,
-            8,
-            0.5,
-            2.0,
-            &mut progress,
-            &cancel,
-        )
-        .unwrap();
-
-        // Compare all faces
-        for face in 0..6 {
-            assert_eq!(direct.faces[face].len(), tiled.faces[face].len());
-            for (i, (d, t)) in direct.faces[face]
-                .iter()
-                .zip(tiled.faces[face].iter())
-                .enumerate()
-            {
-                assert!(
-                    (d - t).abs() < 1e-5,
-                    "face {face} pixel {i}: direct={d} tiled={t}"
-                );
-            }
+        assert_eq!(terrain.faces.len(), 6);
+        for (i, face) in terrain.faces.iter().enumerate() {
+            assert_eq!(face.len(), 64 * 64, "face {i} wrong size");
+            assert!(face.iter().all(|v| v.is_finite()), "face {i} has non-finite");
         }
     }
 
@@ -957,14 +821,24 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let cancel = AtomicBool::new(false);
 
+        let plate_params = PlateSimParams {
+            nside: 16,
+            seed: params.seed,
+            num_plates: 14,
+            ocean_fraction: derived.ocean_fraction,
+            num_continents: 4,
+            continent_size_variety: 0.35,
+            tectonics_factor: derived.tectonics_factor,
+        };
+
         let result = run_export(
             &gpu,
             &config,
             &params,
             &derived,
-            1.0,  // continental_scale
             0.0,  // water_loss
-            (1.0, 1.2, 8, 0.5, 2.0), // terrain params
+            &plate_params,
+            &HealpixTerrainParams::default(),
             &tx,
             &cancel,
         );
@@ -1011,14 +885,20 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let cancel = AtomicBool::new(true); // Pre-cancelled
 
+        let plate_params = PlateSimParams {
+            nside: 16,
+            seed: params.seed,
+            ..PlateSimParams::default()
+        };
+
         let result = run_export(
             &gpu,
             &config,
             &params,
             &derived,
-            1.0,
             0.0,
-            (1.0, 1.2, 8, 0.5, 2.0),
+            &plate_params,
+            &HealpixTerrainParams::default(),
             &tx,
             &cancel,
         );
@@ -1052,15 +932,21 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let cancel = AtomicBool::new(false);
 
+        let plate_params = PlateSimParams {
+            nside: 256,
+            seed: params.seed,
+            ..PlateSimParams::default()
+        };
+
         let start = Instant::now();
         let result = run_export(
             &gpu,
             &config,
             &params,
             &derived,
-            1.0,
             0.0,
-            (1.0, 1.2, 8, 0.5, 2.0),
+            &plate_params,
+            &HealpixTerrainParams::default(),
             &tx,
             &cancel,
         );

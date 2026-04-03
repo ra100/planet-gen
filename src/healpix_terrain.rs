@@ -763,4 +763,38 @@ mod tests {
             "some boundaries should have nonzero convergence"
         );
     }
+
+    #[test]
+    #[ignore] // Run with: cargo test --release -- --ignored pipeline_nside256
+    fn pipeline_nside256_under_3s() {
+        use std::time::Instant;
+
+        let t0 = Instant::now();
+        let sim = plate_sim::simulate(&PlateSimParams {
+            nside: 256,
+            ..PlateSimParams::default()
+        });
+        let t_sim = t0.elapsed();
+
+        let t1 = Instant::now();
+        let terrain = generate(&sim, &HealpixTerrainParams::default(), 512);
+        let t_terrain = t1.elapsed();
+
+        let total = t0.elapsed();
+
+        eprintln!(
+            "[perf] nside=256 face_res=512: sim={:.0}ms terrain={:.0}ms total={:.0}ms",
+            t_sim.as_secs_f64() * 1000.0,
+            t_terrain.as_secs_f64() * 1000.0,
+            total.as_secs_f64() * 1000.0,
+        );
+
+        assert_eq!(terrain.faces.len(), 6);
+        assert_eq!(terrain.faces[0].len(), 512 * 512);
+        assert!(
+            total.as_secs_f64() < 3.0,
+            "full pipeline should complete in <3s (took {:.1}s)",
+            total.as_secs_f64()
+        );
+    }
 }
