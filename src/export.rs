@@ -459,47 +459,7 @@ impl<'a> ProgressTracker<'a> {
     }
 }
 
-// ============ EXR Export ============
-
-fn export_height_exr(face_data: &[f32], resolution: u32, path: &Path) -> Result<(), String> {
-    let res = resolution as usize;
-    exr::prelude::write_rgba_file(path, res, res, |x, y| {
-        let h = face_data[y * res + x];
-        (h, h, h, 1.0)
-    })
-    .map_err(|e| format!("EXR write error: {e}"))
-}
-
-// ============ PNG Export ============
-
-fn export_png_rgba(data: &[f32], resolution: u32, path: &Path) -> Result<(), String> {
-    let res = resolution;
-    let mut img = image::RgbaImage::new(res, res);
-    for y in 0..res {
-        for x in 0..res {
-            let idx = (y * res + x) as usize * 4;
-            let r = (data[idx].clamp(0.0, 1.0) * 255.0) as u8;
-            let g = (data[idx + 1].clamp(0.0, 1.0) * 255.0) as u8;
-            let b = (data[idx + 2].clamp(0.0, 1.0) * 255.0) as u8;
-            let a = (data[idx + 3].clamp(0.0, 1.0) * 255.0) as u8;
-            img.put_pixel(x, y, image::Rgba([r, g, b, a]));
-        }
-    }
-    img.save(path).map_err(|e| format!("PNG write error: {e}"))
-}
-
-fn export_png_gray(data: &[f32], resolution: u32, path: &Path) -> Result<(), String> {
-    let res = resolution;
-    let mut img = image::GrayImage::new(res, res);
-    for y in 0..res {
-        for x in 0..res {
-            let idx = (y * res + x) as usize;
-            let v = (data[idx].clamp(0.0, 1.0) * 255.0) as u8;
-            img.put_pixel(x, y, image::Luma([v]));
-        }
-    }
-    img.save(path).map_err(|e| format!("PNG write error: {e}"))
-}
+// ============ Equirectangular Export Functions ============
 
 // ============ CPU Mask Generation ============
 
@@ -510,21 +470,6 @@ fn generate_ocean_mask(heightmap: &[f32], ocean_level: f32) -> Vec<f32> {
         .collect()
 }
 
-fn cube_to_sphere(face: u32, u: f32, v: f32) -> [f32; 3] {
-    let s = u * 2.0 - 1.0;
-    let t = v * 2.0 - 1.0;
-    let (x, y, z) = match face {
-        0 => (1.0, -t, -s),
-        1 => (-1.0, -t, s),
-        2 => (s, 1.0, t),
-        3 => (s, -1.0, -t),
-        4 => (s, -t, 1.0),
-        5 => (-s, -t, -1.0),
-        _ => (0.0, 0.0, 1.0),
-    };
-    let len = (x * x + y * y + z * z).sqrt();
-    [x / len, y / len, z / len]
-}
 
 /// Inverse of cube_to_sphere: given a 3D direction, find which cube face and UV.
 fn direction_to_face_uv(dx: f32, dy: f32, dz: f32) -> (usize, f32, f32) {
@@ -637,53 +582,6 @@ fn export_equirect_exr(data: &[f32], width: u32, height: u32, path: &Path) -> Re
         (v, v, v, 1.0)
     })
     .map_err(|e| format!("EXR write error: {e}"))
-}
-
-fn generate_ice_mask(
-    heightmap: &[f32],
-    face: u32,
-    resolution: u32,
-    axial_tilt_rad: f32,
-    base_temp_c: f32,
-    ocean_level: f32,
-    ocean_fraction: f32,
-) -> Vec<f32> {
-    let res = resolution as usize;
-    let mut mask = vec![0.0f32; res * res];
-    let _ice_moisture_threshold = 15.0 + 40.0 * (1.0 - ocean_fraction);
-
-    for y in 0..res {
-        for x in 0..res {
-            let u = x as f32 / (res - 1) as f32;
-            let v = y as f32 / (res - 1) as f32;
-            let pos = cube_to_sphere(face, u, v);
-
-            // Temperature with tilt
-            let ct = axial_tilt_rad.cos();
-            let st = axial_tilt_rad.sin();
-            let tilted_y = pos[1] * ct + pos[2] * st;
-            let effective_lat = tilted_y.clamp(-1.0, 1.0).asin();
-            let lat_deg = effective_lat.abs() * 180.0 / std::f32::consts::PI;
-            let lat_norm = lat_deg / 90.0;
-            let temp_drop = 50.0 * (0.4 * lat_norm + 0.6 * lat_norm * lat_norm);
-            let temp_offset = base_temp_c - 15.0;
-
-            let idx = y * res + x;
-            let height = heightmap[idx];
-            let land_frac =
-                ((height - ocean_level) / (1.0 - ocean_level).max(0.01)).clamp(0.0, 1.0);
-            let elevation_km = land_frac * 5.0;
-            let temp = 30.0 - temp_drop + temp_offset - elevation_km * 6.5;
-
-            let is_ocean = height < ocean_level;
-            if is_ocean {
-                mask[idx] = if temp < -2.0 { 1.0 } else { 0.0 };
-            } else {
-                mask[idx] = if temp < -15.0 { 1.0 } else { 0.0 };
-            }
-        }
-    }
-    mask
 }
 
 // ============ Main Export Orchestrator ============
