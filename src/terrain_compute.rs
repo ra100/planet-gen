@@ -352,6 +352,387 @@ impl TerrainComputePipeline {
     }
 }
 
+// ---- Multi-Pass Plate Terrain Pipeline ----
+// Pass 1: Voronoi plate assignment + boundary seed init
+// Pass 2: JFA distance field (ping-pong, O(log n) passes)
+// Pass 3: Terrain from plate data + distance fields
+
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct AssignParams {
+    pub face: u32,
+    pub resolution: u32,
+    pub num_plates: u32,
+    pub seed: u32,
+    pub warp_strength: f32,
+    pub _pad0: u32,
+    pub _pad1: u32,
+    pub _pad2: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct JfaParams {
+    pub resolution: u32,
+    pub step_size: u32,
+    pub _pad0: u32,
+    pub _pad1: u32,
+}
+
+pub struct MultiPassTerrainPipeline {
+    assign_pipeline: wgpu::ComputePipeline,
+    assign_bgl: wgpu::BindGroupLayout,
+    jfa_pipeline: wgpu::ComputePipeline,
+    jfa_bgl: wgpu::BindGroupLayout,
+    terrain_pipeline: wgpu::ComputePipeline,
+    terrain_bgl: wgpu::BindGroupLayout,
+}
+
+fn create_storage_entry(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
+}
+
+fn create_uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
+}
+
+impl MultiPassTerrainPipeline {
+    pub fn new(gpu: &GpuContext) -> Self {
+        let cube_sphere = include_str!("shaders/cube_sphere.wgsl");
+        let noise = include_str!("shaders/noise.wgsl");
+
+        // Pass 1: plate assignment
+        let assign_src = format!("{cube_sphere}\n{noise}\n{}", include_str!("shaders/plate_assign.wgsl"));
+        let assign_shader = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("plate assign shader"),
+            source: wgpu::ShaderSource::Wgsl(assign_src.into()),
+        });
+        let assign_bgl = gpu.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("assign bgl"),
+            entries: &[
+                create_storage_entry(0, true),   // plates
+                create_uniform_entry(1),          // params
+                create_storage_entry(2, false),  // plate_idx output
+                create_storage_entry(3, false),  // jfa_seeds output
+            ],
+        });
+        let assign_layout = gpu.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("assign layout"),
+            bind_group_layouts: &[&assign_bgl],
+            push_constant_ranges: &[],
+        });
+        let assign_pipeline = gpu.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("assign pipeline"),
+            layout: Some(&assign_layout),
+            module: &assign_shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        // Pass 2: JFA
+        let jfa_shader = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("jfa shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/jfa.wgsl").into()),
+        });
+        let jfa_bgl = gpu.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("jfa bgl"),
+            entries: &[
+                create_storage_entry(0, true),   // jfa_src
+                create_storage_entry(1, false),  // jfa_dst
+                create_uniform_entry(2),          // params
+            ],
+        });
+        let jfa_layout = gpu.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("jfa layout"),
+            bind_group_layouts: &[&jfa_bgl],
+            push_constant_ranges: &[],
+        });
+        let jfa_pipeline = gpu.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("jfa pipeline"),
+            layout: Some(&jfa_layout),
+            module: &jfa_shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        // Pass 3: terrain from plates
+        let terrain_src = format!("{cube_sphere}\n{noise}\n{}", include_str!("shaders/terrain_from_plates.wgsl"));
+        let terrain_shader = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("terrain from plates shader"),
+            source: wgpu::ShaderSource::Wgsl(terrain_src.into()),
+        });
+        let terrain_bgl = gpu.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("terrain from plates bgl"),
+            entries: &[
+                create_storage_entry(0, true),   // plates
+                create_uniform_entry(1),          // params
+                create_storage_entry(2, true),   // plate_idx
+                create_storage_entry(3, true),   // jfa_data
+                create_storage_entry(4, false),  // heightmap output
+            ],
+        });
+        let terrain_layout = gpu.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("terrain from plates layout"),
+            bind_group_layouts: &[&terrain_bgl],
+            push_constant_ranges: &[],
+        });
+        let terrain_pipeline = gpu.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("terrain from plates pipeline"),
+            layout: Some(&terrain_layout),
+            module: &terrain_shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        Self {
+            assign_pipeline, assign_bgl,
+            jfa_pipeline, jfa_bgl,
+            terrain_pipeline, terrain_bgl,
+        }
+    }
+
+    pub fn generate(
+        &self,
+        gpu: &GpuContext,
+        plates: &[PlateGpu],
+        resolution: u32,
+        seed: u32,
+        amplitude: f32,
+        frequency: f32,
+        octaves: u32,
+        gain: f32,
+        lacunarity: f32,
+        mountain_scale: f32,
+        boundary_width: f32,
+        warp_strength: f32,
+        detail_scale: f32,
+        surface_gravity: f32,
+        tectonics_factor: f32,
+        surface_age: f32,
+    ) -> TectonicTerrain {
+        let total_pixels = (resolution * resolution) as usize;
+        let f32_size = std::mem::size_of::<f32>() as u64;
+        let u32_size = std::mem::size_of::<u32>() as u64;
+        // JfaSeed = 4 x i32 = 16 bytes
+        let jfa_seed_size = 16u64;
+
+        let plates_buffer = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("plates buffer"),
+            contents: bytemuck::cast_slice(plates),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
+        // Buffers reused across faces
+        let plate_idx_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("plate_idx"),
+            size: total_pixels as u64 * u32_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let jfa_buf_a = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("jfa_a"),
+            size: total_pixels as u64 * jfa_seed_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let jfa_buf_b = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("jfa_b"),
+            size: total_pixels as u64 * jfa_seed_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let heightmap_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("heightmap"),
+            size: total_pixels as u64 * f32_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let staging_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("staging"),
+            size: total_pixels as u64 * f32_size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let workgroups = (resolution + 15) / 16;
+        let num_jfa_passes = (resolution as f32).log2().ceil() as u32;
+        let mut faces: [Vec<f32>; 6] = Default::default();
+
+        for face_idx in 0..6u32 {
+            // --- Pass 1: Plate assignment ---
+            let assign_params = AssignParams {
+                face: face_idx,
+                resolution,
+                num_plates: plates.len() as u32,
+                seed,
+                warp_strength,
+                _pad0: 0, _pad1: 0, _pad2: 0,
+            };
+            let assign_params_buf = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("assign params"),
+                contents: bytemuck::bytes_of(&assign_params),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+            let assign_bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("assign bg"),
+                layout: &self.assign_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: plates_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: assign_params_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: plate_idx_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: jfa_buf_a.as_entire_binding() },
+                ],
+            });
+
+            let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("multipass encoder"),
+            });
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("pass1: assign"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.assign_pipeline);
+                pass.set_bind_group(0, &assign_bg, &[]);
+                pass.dispatch_workgroups(workgroups, workgroups, 1);
+            }
+            gpu.queue.submit(Some(encoder.finish()));
+
+            // --- Pass 2: JFA iterations ---
+            // Ping-pong between jfa_buf_a and jfa_buf_b
+            let mut src_is_a = true;
+            for i in 0..num_jfa_passes {
+                let step = 1u32 << (num_jfa_passes - 1 - i);
+                let jfa_params = JfaParams {
+                    resolution,
+                    step_size: step,
+                    _pad0: 0, _pad1: 0,
+                };
+                let jfa_params_buf = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("jfa params"),
+                    contents: bytemuck::bytes_of(&jfa_params),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
+
+                let (src_buf, dst_buf) = if src_is_a {
+                    (&jfa_buf_a, &jfa_buf_b)
+                } else {
+                    (&jfa_buf_b, &jfa_buf_a)
+                };
+
+                let jfa_bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("jfa bg"),
+                    layout: &self.jfa_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: src_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 1, resource: dst_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 2, resource: jfa_params_buf.as_entire_binding() },
+                    ],
+                });
+
+                let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("jfa encoder"),
+                });
+                {
+                    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("pass2: jfa"),
+                        timestamp_writes: None,
+                    });
+                    pass.set_pipeline(&self.jfa_pipeline);
+                    pass.set_bind_group(0, &jfa_bg, &[]);
+                    pass.dispatch_workgroups(workgroups, workgroups, 1);
+                }
+                gpu.queue.submit(Some(encoder.finish()));
+                src_is_a = !src_is_a;
+            }
+
+            // The final JFA result is in whichever buffer was last written to
+            let final_jfa_buf = if src_is_a { &jfa_buf_a } else { &jfa_buf_b };
+
+            // --- Pass 3: Terrain generation ---
+            let terrain_params = TerrainGenParams {
+                face: face_idx,
+                resolution,
+                num_plates: plates.len() as u32,
+                seed,
+                amplitude, frequency, octaves, gain, lacunarity,
+                tile_offset_x: 0, tile_offset_y: 0,
+                full_resolution: resolution,
+                mountain_scale, boundary_width, warp_strength, detail_scale,
+                surface_gravity, tectonics_factor, surface_age,
+                _pad0: 0,
+            };
+            let terrain_params_buf = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("terrain params"),
+                contents: bytemuck::bytes_of(&terrain_params),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+            let terrain_bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("terrain bg"),
+                layout: &self.terrain_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: plates_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: terrain_params_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: plate_idx_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: final_jfa_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 4, resource: heightmap_buf.as_entire_binding() },
+                ],
+            });
+
+            let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("terrain encoder"),
+            });
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("pass3: terrain"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.terrain_pipeline);
+                pass.set_bind_group(0, &terrain_bg, &[]);
+                pass.dispatch_workgroups(workgroups, workgroups, 1);
+            }
+
+            // Readback
+            encoder.copy_buffer_to_buffer(
+                &heightmap_buf, 0,
+                &staging_buf, 0,
+                total_pixels as u64 * f32_size,
+            );
+            gpu.queue.submit(Some(encoder.finish()));
+
+            staging_buf.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+            let _ = gpu.device.poll(wgpu::PollType::Wait);
+            let mapped = staging_buf.slice(..).get_mapped_range();
+            faces[face_idx as usize] = bytemuck::cast_slice(&mapped).to_vec();
+            drop(mapped);
+            staging_buf.unmap();
+        }
+
+        TectonicTerrain { faces, resolution }
+    }
+}
+
 // ---- Erosion Pipeline ----
 
 #[repr(C)]

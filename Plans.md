@@ -281,7 +281,7 @@ Reference: planet_heightmap_generation/ (JS/WebGL implementation with BFS distan
 
 | Task | 内容 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
-| 5.12.1 | Pass 1 shader: Voronoi plate assignment per pixel + boundary detection | Each pixel stores plate_idx; boundary pixels marked where neighbors differ | - | cc:TODO |
+| 5.12.1 | Pass 1 shader: Voronoi plate assignment per pixel + boundary detection | Each pixel stores plate_idx; boundary pixels marked where neighbors differ | - | cc:WIP |
 | 5.12.2 | Pass 2 shader: JFA distance field (ping-pong buffers, O(log n) passes) | Smooth distance-to-boundary field per pixel; no sharp Voronoi edges | 5.12.1 | cc:TODO |
 | 5.12.3 | Rust pipeline: multi-pass dispatch orchestration (buffers, bind groups, sequencing) | All passes dispatch in sequence per face, readback produces TectonicTerrain | 5.12.1, 5.12.2 | cc:TODO |
 | 5.12.4 | Pass 3: stress computation + boundary type classification (convergent/divergent/transform) | Per-pixel stress from plate velocities; boundary type from relative motion dot product | 5.12.3 | cc:TODO |

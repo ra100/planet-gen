@@ -6,12 +6,12 @@ use crate::gpu::GpuContext;
 use crate::planet::{DerivedProperties, PlanetParams};
 use crate::plates::{generate_plates, PlateGenParams};
 use crate::preview::{PreviewRenderer, PreviewUniforms};
-use crate::terrain_compute::{ErosionPipeline, TerrainComputePipeline};
+use crate::terrain_compute::{ErosionPipeline, MultiPassTerrainPipeline};
 
 pub struct PlanetGenApp {
     gpu: Arc<GpuContext>,
     preview_renderer: PreviewRenderer,
-    terrain_compute: TerrainComputePipeline,
+    terrain_compute: MultiPassTerrainPipeline,
     erosion_pipeline: ErosionPipeline,
     texture_handle: Option<egui::TextureHandle>,
     params: PlanetParams,
@@ -83,7 +83,7 @@ pub struct PlanetGenApp {
 impl PlanetGenApp {
     pub fn new(gpu: Arc<GpuContext>) -> Self {
         let preview_renderer = PreviewRenderer::new(&gpu);
-        let terrain_compute = TerrainComputePipeline::new(&gpu);
+        let terrain_compute = MultiPassTerrainPipeline::new(&gpu);
         let erosion_pipeline = ErosionPipeline::new(&gpu);
         let params = PlanetParams::default();
         let derived = DerivedProperties::from_params(&params);
