@@ -300,11 +300,11 @@ Connect the `num_continents` and `continent_size_variety` UI sliders to the plat
 
 | Task | 内容 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
-| 5.13.1 | Add `num_continents` and `continent_size_variety` fields to `PlateGenParams` | Struct compiles with new fields; all call sites updated | Phase 5.12 | cc:完了 |
-| 5.13.2 | Wire `num_continents` → continental plate count in `generate_plates()`: override `continental_count = num_continents.min(total_plates)` instead of deriving from ocean_fraction | Changing slider 1→10 changes number of continental plates; ocean_fraction still controls water level independently | 5.13.1 | cc:完了 |
-| 5.13.3 | Wire `continent_size_variety` → plate center clustering: when variety > 0, pull a fraction of continental centers toward a seed-derived cluster point, creating one large supercontinent + scattered smaller ones | variety=0 gives roughly equal continents; variety=1 gives one dominant landmass + islands; smooth transition between | 5.13.2 | cc:完了 |
-| 5.13.4 | Pass both values from `app.rs::regenerate_terrain()` into `PlateGenParams` | Both sliders trigger terrain regeneration AND their values reach `generate_plates()` | 5.13.1 | cc:完了 |
-| 5.13.5 | Test: verify continent controls produce visually distinct results | `cargo test --lib` passes; sweeping num_continents 1→10 at fixed seed shows clear continent count change; sweeping variety 0→1 shows size distribution change | 5.13.4 | cc:完了 |
+| 5.13.1 | Add `num_continents` and `continent_size_variety` fields to `PlateGenParams` | Struct compiles with new fields; all call sites updated | Phase 5.12 | cc:完了 [f0b2a06] |
+| 5.13.2 | Wire `num_continents` → continental plate count in `generate_plates()`: override `continental_count = num_continents.min(total_plates)` instead of deriving from ocean_fraction | Changing slider 1→10 changes number of continental plates; ocean_fraction still controls water level independently | 5.13.1 | cc:完了 [f0b2a06] |
+| 5.13.3 | Wire `continent_size_variety` → plate center clustering: when variety > 0, pull a fraction of continental centers toward a seed-derived cluster point, creating one large supercontinent + scattered smaller ones | variety=0 gives roughly equal continents; variety=1 gives one dominant landmass + islands; smooth transition between | 5.13.2 | cc:完了 [f0b2a06] |
+| 5.13.4 | Pass both values from `app.rs::regenerate_terrain()` into `PlateGenParams` | Both sliders trigger terrain regeneration AND their values reach `generate_plates()` | 5.13.1 | cc:完了 [f0b2a06] |
+| 5.13.5 | Test: verify continent controls produce visually distinct results | `cargo test --lib` passes; sweeping num_continents 1→10 at fixed seed shows clear continent count change; sweeping variety 0→1 shows size distribution change | 5.13.4 | cc:完了 [f0b2a06] |
 
 ---
 

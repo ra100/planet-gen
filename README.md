@@ -4,24 +4,34 @@ GPU-accelerated procedural planet generator for VFX. Produces physically plausib
 
 Built with Rust, wgpu (WebGPU), and egui.
 
+<p align="center">
+  <img src="docs/images/planet-closeup.png" width="600" alt="Planet closeup showing continents, clouds, and polar ice">
+</p>
+
+<p align="center">
+  <img src="docs/images/planet-terrain-colored.png" width="600" alt="Planet terrain with plate-driven continents and biomes">
+</p>
+
 ## Quick Start
 
 ```
-cargo run
+cargo run --bin planet-gen
 ```
 
 Requires a GPU with Vulkan, Metal, or DX12 support (most GPUs from 2018+).
 
 ## Features
 
-- **Plate tectonics simulation** on HEALPix spherical grid — BFS flood-fill plates, Euler pole velocities, convergent/divergent boundary detection, collision stress fields
-- **Geologically-driven terrain** — convergent mountain ridges with asymmetric subduction, fold ridges, mid-ocean ridges, continental rift valleys, continental shelf profiles, stress-modulated noise detail
+- **Plate-driven continents** — Voronoi plate assignment on sphere, plate type controls land/ocean elevation with smooth boundary blending
+- **Continent controls** — sliders for number of continents (1-10), size variety (equal to supercontinent), and continental scale (noise frequency)
 - **Whittaker biome system** — temperature x moisture lookup with altitude zonation (forest, alpine, rock, snow)
 - **Hadley cell climate** — latitude-driven temperature, wind-terrain rain shadows, continentality effects
-- **Cloud layers** — stratus/cumulus blend, orographic lift, cyclone systems
-- **GPU-rendered preview** — real-time cubemap-sampled sphere with diffuse + specular lighting, ambient occlusion, normal mapping
-- **Progressive erosion** — GPU hydraulic erosion on cubemap faces
-- **EXR export** — height, albedo, normal, roughness, emission, water mask, AO maps at up to 8K resolution
+- **Cloud layers** — stratus/cumulus blend, orographic lift, cyclone storm systems with spiral arms
+- **Atmosphere** — Mie scattering haze, star color temperature tinting
+- **Night lights** — procedural city lights with cloud occlusion and scattered glow
+- **GPU-rendered preview** — real-time cubemap-sampled sphere with diffuse + specular lighting, AO, normal mapping
+- **Progressive erosion** — GPU hydraulic erosion with moisture-weighted intensity
+- **Selective EXR export** — height, albedo, normal, roughness, AO, water mask at up to 8K resolution
 
 ## Usage
 
@@ -35,65 +45,91 @@ The app opens with a sidebar of planet parameters and a 3D preview.
 - **Day (hours)** — Rotation period. Affects wind patterns and terrain lacunarity.
 - **Seed** — Random seed for all procedural generation.
 
-**Visual Overrides:**
-- **Continents** — Number and size variety of landmasses
-- **Plates** — Number of tectonic plates
-- **Mountain scale / Detail** — Terrain feature amplitude
-- **Ocean level** — Water coverage control
-- **Cloud coverage / type** — Atmosphere visuals
-- **Season** — Winter/equinox/summer for biome response
+**Continent Controls:**
+- **Continents (1-10)** — Number of distinct landmasses. Directly sets continental plate count.
+- **Size Variety (0-1)** — Continent size distribution. 0 = equal sizes, 1 = supercontinent + islands.
+- **Continental Scale (0.5-4)** — Controls noise frequency for continent shape. Lower = bigger features.
 
-**Preview:** Drag to rotate, scroll to zoom, middle-click to pan. Multiple view modes: Normal, Heightmap, Biome, Climate, Plate structure, Boundary stress.
+**Visual Overrides:**
+- **Mountain scale / Detail** — Terrain feature amplitude
+- **Water Loss** — Sea level control (0 = ocean world, 1 = desert world)
+- **Cloud coverage / type / storms** — Atmosphere visuals
+- **Season** — Winter/equinox/summer for biome and cloud response
+- **Star color** — Blue O-star to red M-dwarf, tints all lighting
+
+**Preview:** Drag to rotate, scroll to zoom, middle-click to pan. View modes: Normal, Heightmap, Biome, Climate, Plates.
+
+**Export:** Select layers via checkboxes (height, albedo, normals, roughness, water mask), choose resolution, and export as equirectangular EXR files.
 
 ## Architecture
 
-- **HEALPix plate simulation** (`plate_sim.rs`) — Fibonacci sphere plate seeding, BFS flood-fill, boundary/coast distance fields, super-plate clustering, collision stress via Euler pole velocities
-- **HEALPix terrain generation** (`healpix_terrain.rs`) — CPU terrain on spherical grid: base elevation, convergent mountains, fold ridges, divergent features, continental shelves, stress-driven noise. Resampled to cubemap via IDW interpolation
-- **GPU preview** (`preview_cubemap.wgsl`) — Fragment shader samples height cubemap, computes temperature/moisture/biomes per pixel, renders with lighting, clouds, atmosphere, and night lights
-- **Cube-sphere** with 6 faces, no pole pinching
-- **Planetary science model** (`planet.rs`) — Derives planet type, tectonic regime, atmosphere, gravity, temperature, ocean coverage from input parameters
+```
+User Parameters
+     |
+     v
+PlanetParams --> DerivedProperties (physics model)
+     |                    |
+     v                    v
+generate_plates()    PreviewUniforms
+     |                    |
+     v                    v
+TerrainComputePipeline   preview_cubemap.wgsl
+  (plates.wgsl)          (fragment shader)
+     |                        |
+     v                        v
+ TectonicTerrain         Lit sphere with
+  (6-face cubemap)       biomes, clouds,
+     |                   atmosphere, cities
+     v
+ ErosionPipeline
+  (erosion.wgsl)
+     |
+     v
+  EXR Export
+```
+
+**Terrain pipeline:** Plate centers (Fibonacci sphere) are uploaded to GPU. The `plates.wgsl` compute shader assigns each pixel to the nearest plate via Voronoi, then generates heightmap from plate type elevation + noise detail + mountain ridges + ocean floor variation.
+
+**Preview pipeline:** Fragment shader samples the height cubemap, computes temperature/moisture/biomes per pixel, applies Whittaker lookup, renders with lighting, clouds, atmosphere, and night lights.
 
 ## Project Structure
 
 ```
 src/
-  main.rs            — App entry point
-  app.rs             — egui UI, parameter sliders, pipeline orchestration
-  gpu.rs             — wgpu device singleton
-  planet.rs          — Planet physics model and derived properties
-  healpix.rs         — HEALPix spherical pixelization (nested scheme)
-  plate_sim.rs       — HEALPix plate tectonics simulation
-  healpix_terrain.rs — Terrain generation on HEALPix grid + cubemap resampling
-  terrain_compute.rs — GPU tectonic terrain compute pipeline
-  preview.rs         — Preview renderer (cubemap upload, render-to-texture)
-  export.rs          — Tiled EXR export pipeline
-  plates.rs          — GPU plate data structures
-  cube_sphere.rs     — Cube-to-sphere coordinate mapping
-  noise.rs           — Noise test harness
+  main.rs             -- App entry point
+  app.rs              -- egui UI, parameter sliders, pipeline orchestration
+  gpu.rs              -- wgpu device singleton
+  planet.rs           -- Planet physics model and derived properties
+  plates.rs           -- CPU plate generation (Fibonacci sphere, Voronoi, clustering)
+  terrain_compute.rs  -- GPU terrain compute pipeline + erosion pipeline
+  preview.rs          -- Preview renderer (cubemap upload, render-to-texture)
+  export.rs           -- Tiled equirectangular EXR export with selective layers
+  cube_sphere.rs      -- Cube-to-sphere coordinate mapping
+  noise.rs            -- GPU noise test harness
   shaders/
-    preview_cubemap.wgsl — Main preview: cubemap terrain + biomes + climate
-    terrain_from_plates.wgsl — GPU plate-based terrain (legacy)
-    normal_map.wgsl    — Normal map generation from heightmap
-    roughness_map.wgsl — Roughness map from terrain features
-    noise.wgsl         — 3D simplex noise
-    cube_sphere.wgsl   — Cube-to-sphere mapping
+    plates.wgsl           -- Terrain compute: plate assignment + terrain generation
+    preview_cubemap.wgsl  -- Preview fragment: biomes, climate, clouds, atmosphere
+    erosion.wgsl          -- Hydraulic erosion simulation
+    normal_map.wgsl       -- Normal map from heightmap (export)
+    albedo_map.wgsl       -- Albedo map with biome colors (export)
+    roughness_map.wgsl    -- Roughness map (export)
+    ao_map.wgsl           -- Ambient occlusion map (export)
+    noise.wgsl            -- 3D simplex noise
+    cube_sphere.wgsl      -- Cube-to-sphere mapping
 ```
 
 ## Roadmap
 
 See [Plans.md](Plans.md) for the full implementation plan.
 
-- [x] Phase 1: Project scaffold & GPU hello world
-- [x] Phase 2: Cube-sphere & noise generation
-- [x] Phase 3: Planet physics & parameter derivation
-- [x] Phase 4: Biome, climate & atmosphere rendering
-- [x] Phase 5: Terrain rebuild, erosion & EXR export
-- [x] Phase 6.0: HEALPix spherical grid
-- [x] Phase 6.1: HEALPix plate simulation
-- [x] Phase 6.2: HEALPix terrain generation (orogen port)
-- [x] Phase 6.3: Integration, performance, export support
-- [ ] Phase 6.3.4-5: Parameter tuning & legacy cleanup
+- [x] Phase 1-3: Scaffold, cube-sphere, planet physics
+- [x] Phase 4: Biomes, climate, atmosphere, craters
+- [x] Phase 5.1-5.12: Export, clouds, cities, visual polish, GPU plate terrain
+- [x] Phase 5.13: Wire continent controls to terrain pipeline
 - [ ] Phase 7: Blender importer addon
+- [ ] Phase 8: Advanced visual features (lava, rings, ocean glint)
+- [ ] Phase 9: Advanced tectonics (plate motion simulation)
+- [ ] Phase 10: Polish & distribution
 
 ## License
 
