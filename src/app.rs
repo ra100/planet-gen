@@ -36,6 +36,7 @@ pub struct PlanetGenApp {
     show_ice: bool,
     show_biomes: bool,
     show_clouds: bool,
+    show_cloud_advection: bool, // GPU wind advection modulates cloud coverage
     show_cities: bool,
     show_erosion: bool,
     zoom: f32,            // viewport zoom level
@@ -120,6 +121,7 @@ impl PlanetGenApp {
             show_ice: true,
             show_biomes: true,
             show_clouds: true,
+            show_cloud_advection: false,
             show_cities: true,
             show_erosion: false,
             zoom: 1.0,
@@ -220,6 +222,8 @@ impl PlanetGenApp {
             show_atmosphere_layer: if self.show_atmosphere { 1.0 } else { 0.0 },
             show_cities: if self.show_cities { 1.0 } else { 0.0 },
             cloud_opacity: self.cloud_opacity,
+            cloud_advection: if self.show_cloud_advection { 1.0 } else { 0.0 },
+            _pad0: 0.0, _pad1: 0.0, _pad2: 0.0,
         }
     }
 
@@ -287,8 +291,8 @@ impl PlanetGenApp {
         // Show un-eroded terrain immediately
         self.cached_cubemap_view = Some(self.preview_renderer.upload_terrain(&self.gpu, &terrain));
 
-        // Generate advected cloud density
-        if self.show_clouds {
+        // Generate advected cloud density (only when advection toggle is on)
+        if self.show_clouds && self.show_cloud_advection {
             let cloud_res = (self.preview_resolution / 3).max(128);
             let t_cloud = std::time::Instant::now();
             let cloud_density = self.cloud_pipeline.generate(
@@ -607,7 +611,27 @@ impl eframe::App for PlanetGenApp {
                         (&mut self.show_ice, "Ice Caps", "Polar and altitude ice rendering"),
                         (&mut self.show_biomes, "Biome Colors", "Temperature/moisture-driven biome coloring"),
                         (&mut self.show_ao, "Ambient Occlusion", "Valley darkening for depth perception"),
-                        (&mut self.show_clouds, "Clouds", "Cloud layer rendering"),
+                    ] {
+                        if ui.checkbox(flag, label).on_hover_text(tip).changed() {
+                            self.needs_render = true;
+                        }
+                    }
+                    if ui.checkbox(&mut self.show_clouds, "Clouds")
+                        .on_hover_text("Cloud layer rendering").changed()
+                    {
+                        self.needs_render = true;
+                    }
+                    if self.show_clouds {
+                        ui.indent("cloud_sub", |ui| {
+                            if ui.checkbox(&mut self.show_cloud_advection, "Wind Advection")
+                                .on_hover_text("GPU wind advection modulates cloud coverage (toggle to compare)")
+                                .changed()
+                            {
+                                self.needs_render = true;
+                            }
+                        });
+                    }
+                    for (flag, label, tip) in [
                         (&mut self.show_atmosphere, "Atmosphere", "Atmospheric scattering (blue limb glow, red sunsets)"),
                         (&mut self.show_cities, "City Lights", "Night-side city lights and day-side urban patches"),
                     ] {

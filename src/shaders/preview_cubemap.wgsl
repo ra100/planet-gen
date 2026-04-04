@@ -35,6 +35,7 @@ struct Uniforms {
     show_atmosphere_layer: f32,
     show_cities: f32,
     cloud_opacity: f32,    // 0.0 = transparent, 1.0 = full opacity
+    cloud_advection: f32,  // 1.0 = advected cubemap modulates clouds, 0.0 = per-pixel only
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -285,9 +286,8 @@ fn wind_direction_vec(latitude_rad: f32) -> vec3<f32> {
     let ferrel_meridional = smooth_step(38.0, 48.0, lat_deg) * (1.0 - smooth_step(55.0, 65.0, lat_deg)) * 0.25;
     var wind_y = (hadley_meridional + ferrel_meridional) * hemisphere;
 
-    // Prevent zero-wind singularity at cell boundaries: ensure minimum zonal component
-    if (abs(wind_x) < 0.15) { wind_x = sign(wind_x + 0.001) * 0.15; }
-
+    // The 0.1 z-component ensures normalize() never gets a zero vector,
+    // so wind_x can smoothly pass through zero at cell boundaries.
     return normalize(vec3<f32>(wind_x, wind_y, 0.1));
 }
 
@@ -1397,15 +1397,36 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 debug_color = n * 0.5 + vec3<f32>(0.5);
             }
             case 14u: {
-                // Wind direction: terrain-deflected, color-coded
-                let wind_lat = asin(clamp(rotated.y, -1.0, 1.0));
+                // Wind direction: terrain-deflected, projected to local east/north frame
+                let tilted_y_w = rotated.y * cos(uniforms.axial_tilt_rad)
+                               + rotated.z * sin(uniforms.axial_tilt_rad);
+                let wind_lat = asin(clamp(tilted_y_w, -1.0, 1.0));
                 let tangent_w = wind_direction_at(rotated, wind_lat);
-                // R = eastward, B = westward, G = poleward/equatorward
+
+                // Local east/north aligned with TILTED axis (avoids circle artifact)
+                let ct_w = cos(uniforms.axial_tilt_rad);
+                let st_w = sin(uniforms.axial_tilt_rad);
+                let tilted_pole = vec3<f32>(0.0, ct_w, st_w);
+                var up_ref = tilted_pole;
+                if (abs(dot(rotated, tilted_pole)) > 0.99) {
+                    up_ref = vec3<f32>(1.0, 0.0, 0.0);
+                }
+                let local_east = normalize(cross(up_ref, rotated));
+                let local_north = normalize(cross(rotated, local_east));
+
+                let wind_east = dot(tangent_w, local_east);
+                let wind_north = dot(tangent_w, local_north);
+                let speed = length(vec2<f32>(wind_east, wind_north));
+
+                // Continuous color: east=red, west=blue, blend through white at zero
+                // Avoids hard black lines at cell boundaries
+                let east_frac = (wind_east / max(speed, 0.01) + 1.0) * 0.5; // 0=west, 1=east
+                let merid_frac = abs(wind_north) / max(speed, 0.01);
                 debug_color = vec3<f32>(
-                    max(tangent_w.x, 0.0),
-                    abs(tangent_w.y) * 0.8,
-                    max(-tangent_w.x, 0.0)
-                ) + vec3<f32>(0.08);
+                    smooth_step(0.4, 0.8, east_frac),           // R: east
+                    merid_frac * 0.5 + speed * 0.3,             // G: meridional + speed
+                    smooth_step(0.6, 0.2, east_frac)            // B: west
+                ) * (0.4 + speed * 0.6);
             }
             case 15u: {
                 // Ocean currents: warm (red) vs cold (blue) current zones
@@ -1531,12 +1552,26 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let low_world = (uniforms.rotation * vec4<f32>(low_dir, 0.0)).xyz;
 
         let low_sfc_h = textureSample(height_tex, height_sampler, low_world).r;
-        // Blend advected cloud texture with per-pixel noise detail
-        let advected = sample_cloud_advected(low_world);
         let per_pixel = compute_cloud_density(low_world, low_sfc_h);
-        // If advected data exists (non-zero somewhere), use it as base + noise detail
-        // Otherwise fall back to pure per-pixel computation
-        let low_density = select(per_pixel, advected * 0.7 + per_pixel * 0.3, advected > 0.001 || advected == 0.0);
+        var low_density = per_pixel;
+        if (uniforms.cloud_advection > 0.5) {
+            // Tangent-plane 5-tap diagonal blur: every offset crosses BOTH
+            // cubemap texel axes, eliminating latitude-aligned banding.
+            var up_b = vec3<f32>(0.0, 1.0, 0.0);
+            if (abs(low_world.y) > 0.95) { up_b = vec3<f32>(1.0, 0.0, 0.0); }
+            let be = normalize(cross(up_b, low_world));
+            let bn = normalize(cross(low_world, be));
+            let blur = 0.10;
+            let a0 = sample_cloud_advected(low_world);
+            let a1 = sample_cloud_advected(normalize(low_world + (be + bn) * blur));
+            let a2 = sample_cloud_advected(normalize(low_world + (be - bn) * blur));
+            let a3 = sample_cloud_advected(normalize(low_world - (be - bn) * blur));
+            let a4 = sample_cloud_advected(normalize(low_world - (be + bn) * blur));
+            let advected = (a0 + a1 + a2 + a3 + a4) * 0.2;
+
+            let advect_coverage = smooth_step(0.05, 0.45, advected);
+            low_density = per_pixel * mix(0.3, 1.3, advect_coverage);
+        }
 
         if (low_density > 0.005) {
             // Beer-Lambert with density-dependent thickness:

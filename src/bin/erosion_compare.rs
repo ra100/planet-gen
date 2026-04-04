@@ -117,6 +117,8 @@ fn main() {
                 show_atmosphere_layer: 0.0,
                 show_cities: 0.0,
                 cloud_opacity: 1.0,
+                cloud_advection: 0.0,
+                _pad0: 0.0, _pad1: 0.0, _pad2: 0.0,
             };
 
             let pixels = renderer.render(&gpu, &uniforms, &cubemap_view, None, render_size);

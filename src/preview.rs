@@ -41,6 +41,10 @@ pub struct PreviewUniforms {
     pub show_atmosphere_layer: f32,
     pub show_cities: f32,
     pub cloud_opacity: f32,
+    pub cloud_advection: f32,  // 1.0 = advected cubemap modulates clouds, 0.0 = per-pixel only
+    pub _pad0: f32,
+    pub _pad1: f32,
+    pub _pad2: f32,
 }
 
 pub struct PreviewRenderer {
@@ -440,6 +444,8 @@ mod tests {
             show_atmosphere_layer: 0.0,
             show_cities: 0.0,
             cloud_opacity: 1.0,
+            cloud_advection: 0.0,
+            _pad0: 0.0, _pad1: 0.0, _pad2: 0.0,
         };
 
         let size = 256;
