@@ -208,24 +208,30 @@ fn compute_temperature(sphere_pos: vec3<f32>, height: f32, season: f32) -> f32 {
         let wind = wind_direction_vec(effective_lat);
         let tangent_wind = normalize(wind - sphere_pos * dot(wind, sphere_pos));
 
-        // Check if there's land nearby (coastal ocean current zone)
+        // Check for nearby land to determine ocean basin margins
+        // Use poleward-perpendicular sampling (not wind direction) for E/W coast detection
+        // On a sphere, "east" is cross(north, position) and "west" is the opposite
+        let north_pole = vec3<f32>(0.0, 1.0, 0.0);
+        let east_dir = normalize(cross(north_pole, sphere_pos));
         let coast_step = 0.08;
-        let h_cw = textureSample(height_tex, height_sampler, normalize(sphere_pos - tangent_wind * coast_step)).r;
-        let h_ce = textureSample(height_tex, height_sampler, normalize(sphere_pos + tangent_wind * coast_step)).r;
-        let near_west_coast = h_cw > uniforms.ocean_level; // land is upwind (western coast of continent)
-        let near_east_coast = h_ce > uniforms.ocean_level; // land is downwind (eastern coast)
+        let h_east = textureSample(height_tex, height_sampler, normalize(sphere_pos + east_dir * coast_step)).r;
+        let h_west = textureSample(height_tex, height_sampler, normalize(sphere_pos - east_dir * coast_step)).r;
+        let land_to_east = h_east > uniforms.ocean_level; // continent to the east
+        let land_to_west = h_west > uniforms.ocean_level; // continent to the west
 
-        // Seasonal modulation: currents stronger in winter hemisphere
-        let season_angle = (uniforms.season - 0.5) * 2.0; // [-1, 1]
-        let winter_boost = 1.0 + clamp(-effective_lat * season_angle * 2.0, 0.0, 0.5); // winter = +50%
+        let season_angle = (uniforms.season - 0.5) * 2.0;
+        let winter_boost = 1.0 + clamp(-effective_lat * season_angle * 2.0, 0.0, 0.5);
+        let lat_strength = 1.0 - abs(lat_normalized);
 
-        // Warm current on western ocean margin (downwind side of continent)
-        if (near_west_coast) {
-            current_temp = 4.5 * (1.0 - abs(lat_normalized)) * winter_boost;
+        // Western boundary current (Gulf Stream): warm, EAST coast of continent
+        // = western side of ocean basin, land is to the WEST
+        if (land_to_west) {
+            current_temp = 4.0 * lat_strength * winter_boost;
         }
-        // Cold upwelling on eastern ocean margin (upwind side of continent)
-        if (near_east_coast) {
-            current_temp = -3.5 * (1.0 - abs(lat_normalized)) * winter_boost;
+        // Eastern boundary current (California): cold upwelling, WEST coast of continent
+        // = eastern side of ocean basin, land is to the EAST
+        if (land_to_east) {
+            current_temp = max(current_temp, 0.0) - 3.0 * lat_strength * winter_boost;
         }
     }
 
@@ -421,10 +427,10 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
             let storm_sigma = (18.0 + per_storm_size * 10.0) * lat_tightness / max(uniforms.storm_size * uniforms.storm_size, 0.1);
             let influence = exp(-d * d * storm_sigma);
 
-            // Tangent rotation: vortex strength scales with per-storm size
-            let rotation_amount = influence * sign_y * (2.0 + per_storm_size) / max(d * 5.0, 0.2);
+            // Tangent rotation: reduced strength to avoid over-stretching noise
+            let rotation_amount = influence * sign_y * (1.5 + per_storm_size * 0.5) / max(d * 6.0, 0.3);
             let tangent = cross(center, sphere_pos);
-            vortex_sphere = normalize(vortex_sphere + tangent * rotation_amount * 0.03);
+            vortex_sphere = normalize(vortex_sphere + tangent * rotation_amount * 0.02);
         }
     }
 
@@ -483,12 +489,11 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     let t_p = p_base * 0.8 + vec3<f32>(51.0, 23.0, 87.0) + wind_bias * 2.0; // strong wind stretch
     let thin_val = (snoise(t_p) * 0.7 + snoise(t_p * 3.0) * 0.3) * 0.3 + 0.3; // low amplitude
 
-    // === Step 2: Region SELECTS cloud type — overlapping weights, no gap ===
-    let w_stratus = smooth_step(0.60, 0.30, region_type); // dominant below 0.40
-    let w_cumulus = smooth_step(0.40, 0.70, region_type); // dominant above 0.60
-    // Overlap zone (0.30-0.70): both contribute, creating mixed frontal character
-    // Thin is a subtle additive everywhere, stronger in thin regions
-    let thin_mix = smooth_step(0.3, 0.0, region_type) * 0.6 + 0.15; // always at least 15% thin
+    // === Step 2: Region SELECTS cloud type (climate-adjusted) ===
+    let rt = region_type; // climate adjusts below after moisture/temp are available
+    let w_stratus = smooth_step(0.60, 0.30, rt);
+    let w_cumulus = smooth_step(0.40, 0.70, rt);
+    let thin_mix = smooth_step(0.3, 0.0, rt) * 0.6 + 0.15;
     let w_total = max(w_stratus + w_cumulus + thin_mix, 0.01);
     let noise_val = (w_stratus * stratus_val + w_cumulus * cumulus_val + thin_mix * thin_val) / w_total;
 
@@ -512,6 +517,9 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     let moisture = compute_moisture(warped_climate_pos, cloud_h, uniforms.season);
     let moisture_norm = clamp(moisture / 300.0, 0.0, 1.0);
     let temp = compute_temperature(warped_climate_pos, cloud_h, uniforms.season);
+
+    // Climate-driven cloud coverage boost: warm+moist areas get more clouds
+    let warm_moist_boost = smooth_step(15.0, 28.0, temp) * smooth_step(0.3, 0.6, moisture_norm) * 0.10;
 
     // === Latitude-banded cloud distribution ===
     let subtropical = smooth_step(15.0, 25.0, cloud_lat_deg) * smooth_step(40.0, 30.0, cloud_lat_deg);
@@ -552,9 +560,9 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
         local_coverage -= foehn_raw * land_factor;
     }
 
-    // Warm convection: warmer areas produce more convective cloud potential
+    // Warm convection + climate boost
     let convection_boost = smooth_step(15.0, 30.0, temp) * 0.06;
-    local_coverage += convection_boost;
+    local_coverage += convection_boost + warm_moist_boost;
 
     // === Step 3b: Cyclone storm coverage boost ===
     // Phase 1: storms boost local_coverage to make the area cloudier.
@@ -613,17 +621,19 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
             storm_cumulus_boost = max(storm_cumulus_boost, inf * 0.3);
         }
     }
-    // Add cumulus peaks inside storm zones
-    let storm_peaks = max(snoise(vortex_sphere * 12.0 + seed_off), 0.0) * storm_cumulus_boost;
+    // Add cumulus peaks inside storm zones — use ORIGINAL position (not vortex-warped)
+    // to maintain texture detail instead of smooth vortex-stretched streaks
+    let storm_detail = snoise(sphere_pos * 18.0 + seed_off) * 0.5
+                     + snoise(sphere_pos * 35.0 + seed_off * 1.3) * 0.3;
+    let storm_peaks = max(storm_detail, 0.0) * storm_cumulus_boost;
     let varied_noise = clamp(noise_val_w + weather_scale + storm_peaks, 0.0, 1.0);
 
     // === Step 5: Schneider remap + thin veil for graduated edges ===
     let remapped = cloud_remap(varied_noise, 1.0 - local_coverage, 1.0, 0.0, 1.0) * local_coverage;
 
-    // Thin veil: unthresholded noise creates semi-transparent clouds in gaps
-    // This is what gives real clouds their graduated opacity — thin wisps exist
-    // outside the main cloud masses, fading gradually rather than cutting to zero
-    let thin_veil = max(varied_noise - 0.55, 0.0) * 0.5 * local_coverage;
+    // Thin veil: graduated opacity around cloud edges + scattered wisps in gaps
+    // Lower threshold (0.40) creates wide soft transition instead of hard cutoff
+    let thin_veil = max(varied_noise - 0.40, 0.0) * 0.4 * local_coverage;
 
     // Combine: thick clouds from remap + thin clouds from veil
     var density = max(remapped, thin_veil);
