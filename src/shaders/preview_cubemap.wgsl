@@ -215,13 +215,17 @@ fn compute_temperature(sphere_pos: vec3<f32>, height: f32, season: f32) -> f32 {
         let near_west_coast = h_cw > uniforms.ocean_level; // land is upwind (western coast of continent)
         let near_east_coast = h_ce > uniforms.ocean_level; // land is downwind (eastern coast)
 
+        // Seasonal modulation: currents stronger in winter hemisphere
+        let season_angle = (uniforms.season - 0.5) * 2.0; // [-1, 1]
+        let winter_boost = 1.0 + clamp(-effective_lat * season_angle * 2.0, 0.0, 0.5); // winter = +50%
+
         // Warm current on western ocean margin (downwind side of continent)
         if (near_west_coast) {
-            current_temp = 4.0 * (1.0 - abs(lat_normalized)); // stronger at low latitudes
+            current_temp = 4.5 * (1.0 - abs(lat_normalized)) * winter_boost;
         }
         // Cold upwelling on eastern ocean margin (upwind side of continent)
         if (near_east_coast) {
-            current_temp = -3.0 * (1.0 - abs(lat_normalized));
+            current_temp = -3.5 * (1.0 - abs(lat_normalized)) * winter_boost;
         }
     }
 
@@ -244,27 +248,27 @@ fn hadley_cell_moisture(latitude_rad: f32) -> f32 {
 }
 
 // Wind direction from Hadley/Ferrel/Polar cells — smooth transitions, Coriolis curvature
+// Cell boundaries shift with thermal equator (seasonal migration)
 fn wind_direction_vec(latitude_rad: f32) -> vec3<f32> {
-    let lat_deg = abs(latitude_rad) * 180.0 / 3.14159;
-    let hemisphere = sign(latitude_rad + 0.0001); // +1 north, -1 south
+    let hemisphere = sign(latitude_rad + 0.0001);
 
-    // Three-cell zonal wind with smooth_step blending (no hard if/else)
-    // Trade winds (0-30°): easterly with equatorward component
+    // Seasonal shift: thermal equator moves with sub-solar point
+    // Summer hemisphere trades expand 5-10°, winter contracts
+    let season_shift = uniforms.axial_tilt_rad * ((uniforms.season - 0.5) * 2.0) * 0.4;
+    let shifted_lat = latitude_rad - season_shift; // shift cells toward summer hemisphere
+    let lat_deg = abs(shifted_lat) * 180.0 / 3.14159;
+
+    // Three-cell zonal wind with smooth_step blending
     let trade = (1.0 - smooth_step(20.0, 35.0, lat_deg)) * -0.8;
-    // Ferrel cell / westerlies (30-60°): westerly with poleward component
     let westerly = smooth_step(25.0, 40.0, lat_deg) * (1.0 - smooth_step(55.0, 70.0, lat_deg)) * 0.9;
-    // Polar easterlies (60-90°): weak easterly
     let polar_east = smooth_step(60.0, 75.0, lat_deg) * -0.5;
-
     let wind_x = trade + westerly + polar_east;
 
-    // Coriolis-deflected meridional component: Hadley cell has strong equatorward at surface
-    // near subtropics, weak poleward at ITCZ. Ferrel cell has poleward surface flow.
+    // Coriolis-deflected meridional flow
     let hadley_meridional = -smooth_step(5.0, 25.0, lat_deg) * (1.0 - smooth_step(25.0, 35.0, lat_deg)) * 0.4;
     let ferrel_meridional = smooth_step(35.0, 45.0, lat_deg) * (1.0 - smooth_step(55.0, 65.0, lat_deg)) * 0.3;
     let wind_y = (hadley_meridional + ferrel_meridional) * hemisphere;
 
-    // Small Z component for 3D sphere projection (prevents degenerate normalize)
     return normalize(vec3<f32>(wind_x, wind_y, 0.15));
 }
 
@@ -431,10 +435,9 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     let cloud_lat_deg = abs(cloud_lat) * 180.0 / 3.14159;
 
     // === Step 1: Single unified cloud density via alpha-over compositing ===
-    // All cloud types contribute to ONE density value. No weight normalization artifacts.
-    let p_base = vortex_sphere * 5.0 + seed_off;
+    let p_base = vortex_sphere * 7.0 + seed_off; // freq 7.0 (was 5.0) for more cloud systems
 
-    // Domain warp for organic shapes (gentle, NOT wind-streaked)
+    // Domain warp for organic shapes
     let warp = vec3<f32>(
         snoise(p_base * 0.7 + vec3<f32>(31.7, 0.0, 0.0)),
         snoise(p_base * 0.7 + vec3<f32>(0.0, 47.3, 0.0)),
@@ -442,18 +445,22 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     ) * 0.4;
     let warped_p = p_base + warp;
 
-    // --- Base: domain-warped fBm (smooth stratus-like) ---
+    // --- Base: domain-warped 6-octave fBm (was 5) for wispy detail ---
     var fbm_val = 0.0;
     var freq = 1.0;
     var amp = 1.0;
     var amp_sum = 0.0;
-    for (var i = 0; i < 5; i++) {
+    for (var i = 0; i < 6; i++) {
         fbm_val += snoise(warped_p * freq) * amp;
         amp_sum += amp;
         freq *= 2.1;
         amp *= 0.52;
     }
     fbm_val = fbm_val / amp_sum * 0.5 + 0.5; // [0, 1]
+
+    // Weather-scale noise: large clear/cloudy REGIONS (breaks uniform spread)
+    let weather_region = snoise(vortex_sphere * 1.5 + seed_off * 0.3 + vec3<f32>(77.0, 0.0, 0.0));
+    fbm_val *= 0.7 + 0.3 * (weather_region * 0.5 + 0.5); // modulate by region
 
     // --- Cumulus overlay: clamped-positive peaks alpha-composited on top ---
     let cp = p_base + vec3<f32>(13.7, 7.3, 21.1);
@@ -501,31 +508,44 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     // === Latitude-banded cloud distribution ===
     let subtropical = smooth_step(15.0, 25.0, cloud_lat_deg) * smooth_step(40.0, 30.0, cloud_lat_deg);
     let midlat = smooth_step(30.0, 45.0, cloud_lat_deg) * smooth_step(65.0, 55.0, cloud_lat_deg);
-    let lat_coverage_base = itcz_factor * 0.25           // ITCZ: heavy clouds
-        - subtropical * 0.15                               // Subtropical: clear zone
-        + midlat * 0.10                                    // Mid-latitude: frontal
-        + polar_c * 0.05;                                  // Polar: thin overcast
+    let lat_climate = itcz_factor * 0.30               // ITCZ: heavy clouds
+        - subtropical * 0.12                             // Subtropical: clear zone (reduced suppression)
+        + midlat * 0.12                                  // Mid-latitude: frontal
+        + polar_c * 0.08;                                // Polar: thin overcast
 
-    // Coverage slider as multiplier on climate baseline + moisture contribution
-    var local_coverage = (0.25 + lat_coverage_base) * coverage + moisture_norm * 0.20;
+    // Coverage formula: slider=1.0 overrides climate suppression for ~95% cover
+    // At low coverage, climate zones modulate; at high coverage, everything fills in
+    let climate_coverage = (0.35 + lat_climate) * coverage + moisture_norm * 0.25;
+    var local_coverage = max(climate_coverage, coverage * 0.85); // floor ensures slider=1 → ~85%+
 
-    // Orographic lift: mountains force air up → condensation on windward side
+    // === Mountain clouds (orographic lift + föhn gap) ===
     let tilt = uniforms.axial_tilt_rad;
     let tilted_y = sphere_pos.y * cos(tilt) + sphere_pos.z * sin(tilt);
     let lat_rad = asin(clamp(tilted_y, -1.0, 1.0));
-    // Orographic lift: only well inland (not at coast edge) to prevent coastline-tracing clouds
     let current_h = textureSample(height_tex, height_sampler, sphere_pos).r;
-    if (current_h > uniforms.ocean_level + 0.03) {
+    if (current_h > uniforms.ocean_level + 0.02) {
         let wind = wind_direction_vec(lat_rad);
         let tangent_wind = normalize(wind - sphere_pos * dot(wind, sphere_pos));
-        let upwind_pos = normalize(sphere_pos + tangent_wind * 0.06);
+
+        // Windward side: strong orographic lift (clouds build up)
+        let upwind_pos = normalize(sphere_pos + tangent_wind * 0.05);
         let upwind_h = textureSample(height_tex, height_sampler, upwind_pos).r;
-        let mountain_lift = smooth_step(0.08, 0.30, max(upwind_h - uniforms.ocean_level, 0.0));
-        local_coverage += mountain_lift * 0.10;
+        let mountain_lift = smooth_step(0.06, 0.25, max(upwind_h - uniforms.ocean_level, 0.0));
+        local_coverage += mountain_lift * 0.25; // stronger mountain clouds (was 0.10)
+
+        // Leeward side: föhn gap (dry descending air suppresses clouds)
+        let downwind_pos = normalize(sphere_pos - tangent_wind * 0.05);
+        let downwind_h = textureSample(height_tex, height_sampler, downwind_pos).r;
+        let my_elev = max(current_h - uniforms.ocean_level, 0.0);
+        if (downwind_h > my_elev + 0.05) {
+            // We're in the lee of a mountain — suppress clouds
+            let foehn_strength = clamp((downwind_h - my_elev) * 4.0, 0.0, 0.3);
+            local_coverage -= foehn_strength;
+        }
     }
 
     // Warm convection: warmer areas produce more convective cloud potential
-    let convection_boost = smooth_step(15.0, 30.0, temp) * 0.05;
+    let convection_boost = smooth_step(15.0, 30.0, temp) * 0.06;
     local_coverage += convection_boost;
 
     // === Step 3b: Cyclone storm coverage boost ===
@@ -634,22 +654,25 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
             let eye_wall_boost = exp(-wall_dist * wall_dist / (eye_r * eye_r * 0.5)) * near_storm * 0.4;
             density += eye_wall_boost;
 
-            // Spiral arms: ADD dense bands + CARVE gaps (both needed for visibility)
-            let spiral_phase = angle * sign_y - log(max(d, 0.003)) * 3.5;
+            // Spiral arms with TURBULENT edges (noise-perturbed angle)
+            let arm_noise = snoise(sphere_pos * 20.0 + seed_off + vec3<f32>(fi * 17.0, 0.0, 0.0));
+            let perturbed_angle = angle + arm_noise * 0.35; // turbulent arm edges
+            let spiral_phase = perturbed_angle * sign_y - log(max(d, 0.005)) * 3.0;
             let spiral_raw = cos(spiral_phase * 2.0);
-            let spiral_fade = smooth_step(eye_r * 1.5, eye_r * 4.0, d);
-            let storm_fade2 = near_storm * near_storm; // squared = faster outer cutoff
+            let spiral_fade = smooth_step(eye_r * 1.5, eye_r * 3.5, d);
+            // Cap vortex influence at minimum distance to prevent tails
+            let storm_fade2 = near_storm * smooth_step(0.0, 0.03, d); // no influence at d=0
 
-            // Add dense TEXTURED cloud along spiral arms (not smooth arcs)
+            // Dense textured cloud along spiral arms
             let arm_tex = snoise(sphere_pos * 15.0 + seed_off + vec3<f32>(fi * 13.0, 0.0, 0.0)) * 0.3 + 0.7;
-            let arm_strength = pow(max(spiral_raw, 0.0), 1.2) * arm_tex;
-            let arm_boost = arm_strength * storm_fade2 * spiral_fade * 0.55;
+            let arm_strength = pow(max(spiral_raw, 0.0), 1.5) * arm_tex; // sharper arm peaks
+            let arm_boost = arm_strength * storm_fade2 * spiral_fade * 0.45;
             density += arm_boost;
 
-            // Carve gaps between arms (only where near_storm is strong)
-            let gap_depth = storm_fade2 * spiral_fade * 0.85;
+            // Softer gaps between arms (reduced contrast)
+            let gap_depth = storm_fade2 * spiral_fade * 0.60; // was 0.85, less aggressive
             let arm_shape = spiral_raw * 0.5 + 0.5;
-            let spiral_mask = 1.0 - gap_depth * (1.0 - max(arm_shape, arm_tex * 0.3));
+            let spiral_mask = 1.0 - gap_depth * (1.0 - max(arm_shape, arm_tex * 0.4));
 
             density *= mix(1.0, spiral_mask * eye_mask, near_storm);
         }
