@@ -435,73 +435,60 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     let cloud_lat_deg = abs(cloud_lat) * 180.0 / 3.14159;
 
     // === Cloud type REGION selector — low-freq noise creates distinct zones ===
-    // Each region has a dominant cloud character: stratus, cumulus, thin/wispy
     // region_type: 0 = thin/wispy, 0.5 = stratus sheets, 1.0 = puffy cumulus
     let region_raw = snoise(vortex_sphere * 0.8 + seed_off * 0.2 + vec3<f32>(131.0, 71.0, 0.0));
     let itcz_factor = exp(-cloud_lat_deg * cloud_lat_deg / 150.0);
     let polar_c = smooth_step(55.0, 70.0, cloud_lat_deg);
-    // Latitude biases: ITCZ → cumulus, subtropics → thin, mid-lat → stratus, polar → thin
     let lat_type_bias = itcz_factor * 0.4 - polar_c * 0.3
         - smooth_step(15.0, 28.0, cloud_lat_deg) * smooth_step(38.0, 28.0, cloud_lat_deg) * 0.3;
     let region_type = clamp(region_raw * 0.4 + 0.5 + lat_type_bias + uniforms.cloud_type * 0.2, 0.0, 1.0);
 
-    // === Step 1: Cloud density with region-varied character ===
+    // === Step 1: Three fundamentally different noise patterns ===
     let p_base = vortex_sphere * 7.0 + seed_off;
 
-    // Domain warp strength varies by region: stratus = more warp, cumulus = less
-    let warp_strength = mix(0.5, 0.25, region_type);
-    let warp = vec3<f32>(
-        snoise(p_base * 0.7 + vec3<f32>(31.7, 0.0, 0.0)),
-        snoise(p_base * 0.7 + vec3<f32>(0.0, 47.3, 0.0)),
-        snoise(p_base * 0.7 + vec3<f32>(0.0, 0.0, 73.1))
-    ) * warp_strength;
-    let warped_p = p_base + warp;
+    // Subtle wind-aligned bias in domain warp (clouds elongate along flow)
+    let wind_cv = wind_direction_vec(cloud_lat);
+    let tangent_cv = normalize(wind_cv - vortex_sphere * dot(wind_cv, vortex_sphere));
+    let wind_bias = tangent_cv * 0.06; // gentle directional component
 
-    // --- Stratus base: domain-warped fBm, gain varies by region ---
-    // Thin regions: lower gain (fewer octaves matter) → smoother
-    // Cumulus regions: higher gain → more detail peaks
-    let region_gain = mix(0.42, 0.58, region_type);
-    var fbm_val = 0.0;
-    var freq = 1.0;
-    var amp = 1.0;
-    var amp_sum = 0.0;
-    for (var i = 0; i < 6; i++) {
-        fbm_val += snoise(warped_p * freq) * amp;
-        amp_sum += amp;
-        freq *= 2.1;
-        amp *= region_gain;
-    }
-    fbm_val = fbm_val / amp_sum * 0.5 + 0.5;
+    // --- STRATUS: smooth flowing sheets (3 octaves, heavy warp) ---
+    let s_warp = vec3<f32>(
+        snoise(p_base * 0.5 + vec3<f32>(31.7, 0.0, 0.0)),
+        snoise(p_base * 0.5 + vec3<f32>(0.0, 47.3, 0.0)),
+        snoise(p_base * 0.5 + vec3<f32>(0.0, 0.0, 73.1))
+    ) * 0.5 + wind_bias;
+    let s_p = p_base + s_warp;
+    let stratus_val = (snoise(s_p) * 0.6 + snoise(s_p * 2.1) * 0.3 + snoise(s_p * 4.2) * 0.1) * 0.5 + 0.5;
 
-    // Weather-scale modulation: large clear/cloudy regions
-    let weather_region = snoise(vortex_sphere * 1.5 + seed_off * 0.3 + vec3<f32>(77.0, 0.0, 0.0));
-    fbm_val *= 0.7 + 0.3 * (weather_region * 0.5 + 0.5);
-
-    // Thin/wispy regions: suppress density, make clouds fragile
-    let thin_suppression = smooth_step(0.3, 0.0, region_type); // strong in thin zones
-    fbm_val *= 1.0 - thin_suppression * 0.4; // thin zones produce less
-
-    // --- Cumulus overlay: only strong in cumulus-dominant regions ---
-    let cp = p_base + vec3<f32>(13.7, 7.3, 21.1);
+    // --- CUMULUS: isolated puffy blobs (max(noise,0) peaks, NO stratus fill) ---
+    let c_p = p_base + vec3<f32>(13.7, 7.3, 21.1) + wind_bias * 0.5;
     var cumulus_val = 0.0;
     var c_freq = 1.0;
     var c_amp = 1.0;
     var c_amp_sum = 0.0;
-    for (var i = 0; i < 4; i++) {
-        cumulus_val += max(snoise(cp * c_freq), 0.0) * c_amp;
+    for (var i = 0; i < 5; i++) {
+        cumulus_val += max(snoise(c_p * c_freq), 0.0) * c_amp;
         c_amp_sum += c_amp;
-        c_freq *= 2.3;
-        c_amp *= 0.5;
+        c_freq *= 2.2;
+        c_amp *= 0.45;
     }
     cumulus_val = cumulus_val / c_amp_sum;
-    cumulus_val = pow(cumulus_val, 1.3);
+    cumulus_val = pow(cumulus_val, 1.1) * 1.4; // boost and soften peaks
 
-    // === Step 2: Region-driven alpha-over compositing ===
-    // region_type directly drives how much cumulus shows through
-    let cumulus_alpha = clamp(region_type * 1.2 - 0.1, 0.0, 1.0); // 0 in thin/stratus, 1 in cumulus
+    // --- THIN/WISPY: sparse, low-density streaks ---
+    let t_p = p_base * 0.8 + vec3<f32>(51.0, 23.0, 87.0) + wind_bias * 2.0; // strong wind stretch
+    let thin_val = (snoise(t_p) * 0.7 + snoise(t_p * 3.0) * 0.3) * 0.3 + 0.3; // low amplitude
 
-    // Alpha-over: cumulus peaks show through where they're strong
-    let noise_val = mix(fbm_val, max(fbm_val, cumulus_val), cumulus_alpha);
+    // === Step 2: Region SELECTS cloud type (not blends same noise) ===
+    // Smooth transitions at region boundaries, but each type is fundamentally different
+    let w_stratus = smooth_step(0.55, 0.35, region_type); // dominant in 0.0-0.45
+    let w_cumulus = smooth_step(0.55, 0.75, region_type); // dominant in 0.65-1.0
+    let w_thin = max(1.0 - w_stratus - w_cumulus, 0.0);  // fills the gap
+    let noise_val = w_stratus * stratus_val + w_cumulus * cumulus_val + w_thin * thin_val;
+
+    // Weather-scale clear/cloudy regions
+    let weather_region = snoise(vortex_sphere * 1.5 + seed_off * 0.3 + vec3<f32>(77.0, 0.0, 0.0));
+    let noise_val_w = noise_val * (0.75 + 0.25 * (weather_region * 0.5 + 0.5));
 
     // === Step 3: Climate + terrain modulated local coverage ===
     // All influences adjust the Schneider THRESHOLD, not density amplitude.
@@ -537,9 +524,10 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     let tilt = uniforms.axial_tilt_rad;
     let tilted_y = sphere_pos.y * cos(tilt) + sphere_pos.z * sin(tilt);
     let lat_rad = asin(clamp(tilted_y, -1.0, 1.0));
-    let current_h = textureSample(height_tex, height_sampler, sphere_pos).r;
-    // Smooth land factor — NO hard threshold at coastline
-    let land_factor = smooth_step(uniforms.ocean_level - 0.02, uniforms.ocean_level + 0.08, current_h);
+    // Sample height at CLIMATE-warped position (smooths out terrain pixelation in clouds)
+    let current_h = textureSample(height_tex, height_sampler, warped_climate_pos).r;
+    // Very wide smooth transition at coastline — no sharp edges
+    let land_factor = smooth_step(uniforms.ocean_level - 0.03, uniforms.ocean_level + 0.12, current_h);
     if (land_factor > 0.01) {
         let wind = wind_direction_vec(lat_rad);
         let tangent_wind = normalize(wind - sphere_pos * dot(wind, sphere_pos));
@@ -621,7 +609,7 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     }
     // Add cumulus peaks inside storm zones
     let storm_peaks = max(snoise(vortex_sphere * 12.0 + seed_off), 0.0) * storm_cumulus_boost;
-    let varied_noise = clamp(noise_val + weather_scale + storm_peaks, 0.0, 1.0);
+    let varied_noise = clamp(noise_val_w + weather_scale + storm_peaks, 0.0, 1.0);
 
     // === Step 5: Schneider remap ===
     var density = cloud_remap(varied_noise, 1.0 - local_coverage, 1.0, 0.0, 1.0) * local_coverage;
