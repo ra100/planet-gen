@@ -81,6 +81,8 @@ Research: [docs/research/cloud-rendering.md], [docs/brainstorms/2026-03-31-cloud
 | 5.16.4 | Stronger mountain clouds 0.25 (was 0.10) + föhn gap lee-side suppression | Visible buildup on windward, clear gap on leeward | 5.16.2 | cc:完了 |
 | 5.16.5 | Storm spirals: noise-perturbed angle (±0.35), capped vortex at min distance, softer gaps | No smooth tails, turbulent edges | 5.16.4 | cc:完了 |
 | 5.16.6 | Seasonal ocean currents: winter hemisphere +50% current strength | Currents stronger in winter | 5.16.3 | cc:完了 |
+| 5.16.7 | Cloud type regions: low-freq noise (0.8) + latitude bias selects stratus/cumulus/thin per region; varies fBm gain and warp per zone | Debug shows different texture patterns across planet | 5.16.2 | cc:完了 |
+| 5.16.8 | Fix coast edges: smooth_step land_factor replaces hard threshold; föhn gap smooth | No hard edges at continent borders in debug | 5.16.7 | cc:完了 |
 
 ---
 

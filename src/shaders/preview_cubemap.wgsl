@@ -434,18 +434,33 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     let cloud_lat = asin(clamp(tilted_y_c, -1.0, 1.0));
     let cloud_lat_deg = abs(cloud_lat) * 180.0 / 3.14159;
 
-    // === Step 1: Single unified cloud density via alpha-over compositing ===
-    let p_base = vortex_sphere * 7.0 + seed_off; // freq 7.0 (was 5.0) for more cloud systems
+    // === Cloud type REGION selector — low-freq noise creates distinct zones ===
+    // Each region has a dominant cloud character: stratus, cumulus, thin/wispy
+    // region_type: 0 = thin/wispy, 0.5 = stratus sheets, 1.0 = puffy cumulus
+    let region_raw = snoise(vortex_sphere * 0.8 + seed_off * 0.2 + vec3<f32>(131.0, 71.0, 0.0));
+    let itcz_factor = exp(-cloud_lat_deg * cloud_lat_deg / 150.0);
+    let polar_c = smooth_step(55.0, 70.0, cloud_lat_deg);
+    // Latitude biases: ITCZ → cumulus, subtropics → thin, mid-lat → stratus, polar → thin
+    let lat_type_bias = itcz_factor * 0.4 - polar_c * 0.3
+        - smooth_step(15.0, 28.0, cloud_lat_deg) * smooth_step(38.0, 28.0, cloud_lat_deg) * 0.3;
+    let region_type = clamp(region_raw * 0.4 + 0.5 + lat_type_bias + uniforms.cloud_type * 0.2, 0.0, 1.0);
 
-    // Domain warp for organic shapes
+    // === Step 1: Cloud density with region-varied character ===
+    let p_base = vortex_sphere * 7.0 + seed_off;
+
+    // Domain warp strength varies by region: stratus = more warp, cumulus = less
+    let warp_strength = mix(0.5, 0.25, region_type);
     let warp = vec3<f32>(
         snoise(p_base * 0.7 + vec3<f32>(31.7, 0.0, 0.0)),
         snoise(p_base * 0.7 + vec3<f32>(0.0, 47.3, 0.0)),
         snoise(p_base * 0.7 + vec3<f32>(0.0, 0.0, 73.1))
-    ) * 0.4;
+    ) * warp_strength;
     let warped_p = p_base + warp;
 
-    // --- Base: domain-warped 6-octave fBm (was 5) for wispy detail ---
+    // --- Stratus base: domain-warped fBm, gain varies by region ---
+    // Thin regions: lower gain (fewer octaves matter) → smoother
+    // Cumulus regions: higher gain → more detail peaks
+    let region_gain = mix(0.42, 0.58, region_type);
     var fbm_val = 0.0;
     var freq = 1.0;
     var amp = 1.0;
@@ -454,15 +469,19 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
         fbm_val += snoise(warped_p * freq) * amp;
         amp_sum += amp;
         freq *= 2.1;
-        amp *= 0.52;
+        amp *= region_gain;
     }
-    fbm_val = fbm_val / amp_sum * 0.5 + 0.5; // [0, 1]
+    fbm_val = fbm_val / amp_sum * 0.5 + 0.5;
 
-    // Weather-scale noise: large clear/cloudy REGIONS (breaks uniform spread)
+    // Weather-scale modulation: large clear/cloudy regions
     let weather_region = snoise(vortex_sphere * 1.5 + seed_off * 0.3 + vec3<f32>(77.0, 0.0, 0.0));
-    fbm_val *= 0.7 + 0.3 * (weather_region * 0.5 + 0.5); // modulate by region
+    fbm_val *= 0.7 + 0.3 * (weather_region * 0.5 + 0.5);
 
-    // --- Cumulus overlay: clamped-positive peaks alpha-composited on top ---
+    // Thin/wispy regions: suppress density, make clouds fragile
+    let thin_suppression = smooth_step(0.3, 0.0, region_type); // strong in thin zones
+    fbm_val *= 1.0 - thin_suppression * 0.4; // thin zones produce less
+
+    // --- Cumulus overlay: only strong in cumulus-dominant regions ---
     let cp = p_base + vec3<f32>(13.7, 7.3, 21.1);
     var cumulus_val = 0.0;
     var c_freq = 1.0;
@@ -477,13 +496,9 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     cumulus_val = cumulus_val / c_amp_sum;
     cumulus_val = pow(cumulus_val, 1.3);
 
-    // === Step 2: Alpha-over compositing — cumulus on top of stratus base ===
-    // cloud_type slider controls the blend: 0 = all stratus, 1 = cumulus dominates
-    // Latitude gently biases: more cumulus at ITCZ, more stratus at poles
-    let itcz_factor = exp(-cloud_lat_deg * cloud_lat_deg / 150.0);
-    let polar_c = smooth_step(55.0, 70.0, cloud_lat_deg);
-    let type_noise = snoise(vortex_sphere * 1.8 + seed_off * 0.15 + vec3<f32>(97.0, 41.0, 63.0));
-    let cumulus_alpha = clamp(uniforms.cloud_type + itcz_factor * 0.2 - polar_c * 0.3 + type_noise * 0.2, 0.0, 1.0);
+    // === Step 2: Region-driven alpha-over compositing ===
+    // region_type directly drives how much cumulus shows through
+    let cumulus_alpha = clamp(region_type * 1.2 - 0.1, 0.0, 1.0); // 0 in thin/stratus, 1 in cumulus
 
     // Alpha-over: cumulus peaks show through where they're strong
     let noise_val = mix(fbm_val, max(fbm_val, cumulus_val), cumulus_alpha);
@@ -518,30 +533,29 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     let climate_coverage = (0.35 + lat_climate) * coverage + moisture_norm * 0.25;
     var local_coverage = max(climate_coverage, coverage * 0.85); // floor ensures slider=1 → ~85%+
 
-    // === Mountain clouds (orographic lift + föhn gap) ===
+    // === Mountain clouds (orographic lift + föhn gap) — smooth transitions ===
     let tilt = uniforms.axial_tilt_rad;
     let tilted_y = sphere_pos.y * cos(tilt) + sphere_pos.z * sin(tilt);
     let lat_rad = asin(clamp(tilted_y, -1.0, 1.0));
     let current_h = textureSample(height_tex, height_sampler, sphere_pos).r;
-    if (current_h > uniforms.ocean_level + 0.02) {
+    // Smooth land factor — NO hard threshold at coastline
+    let land_factor = smooth_step(uniforms.ocean_level - 0.02, uniforms.ocean_level + 0.08, current_h);
+    if (land_factor > 0.01) {
         let wind = wind_direction_vec(lat_rad);
         let tangent_wind = normalize(wind - sphere_pos * dot(wind, sphere_pos));
 
-        // Windward side: strong orographic lift (clouds build up)
+        // Windward: orographic lift (fades smoothly from coast inland)
         let upwind_pos = normalize(sphere_pos + tangent_wind * 0.05);
         let upwind_h = textureSample(height_tex, height_sampler, upwind_pos).r;
         let mountain_lift = smooth_step(0.06, 0.25, max(upwind_h - uniforms.ocean_level, 0.0));
-        local_coverage += mountain_lift * 0.25; // stronger mountain clouds (was 0.10)
+        local_coverage += mountain_lift * 0.25 * land_factor;
 
-        // Leeward side: föhn gap (dry descending air suppresses clouds)
+        // Leeward: föhn gap (smooth suppression)
         let downwind_pos = normalize(sphere_pos - tangent_wind * 0.05);
         let downwind_h = textureSample(height_tex, height_sampler, downwind_pos).r;
         let my_elev = max(current_h - uniforms.ocean_level, 0.0);
-        if (downwind_h > my_elev + 0.05) {
-            // We're in the lee of a mountain — suppress clouds
-            let foehn_strength = clamp((downwind_h - my_elev) * 4.0, 0.0, 0.3);
-            local_coverage -= foehn_strength;
-        }
+        let foehn_raw = clamp((downwind_h - my_elev - 0.03) * 3.0, 0.0, 0.25);
+        local_coverage -= foehn_raw * land_factor;
     }
 
     // Warm convection: warmer areas produce more convective cloud potential
