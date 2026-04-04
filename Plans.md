@@ -68,6 +68,22 @@ Target: 3-4 distinct layers, wind-streaked shapes, latitude-coherent cloud bands
 
 ---
 
+## Phase 5.16: Cloud & Wind Quality Pass
+
+Fix coverage scaling, storm artifacts, cloud detail, seasonal wind, and mountain interaction.
+Research: [docs/research/cloud-rendering.md], [docs/brainstorms/2026-03-31-cloud-layer-requirements.md]
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 5.16.1 | Fix coverage scaling: at slider=1.0 the planet should be ~95% cloudy. Problem: latitude suppression formula `(0.25 + lat_base) * coverage` caps subtropical zones at 10%. Fix: use `max(coverage * 0.9, (0.25 + lat_base) * coverage)` so slider=1.0 overrides climate suppression. Also increase base from 0.25 to 0.35 and boost moisture blend | slider=1.0 shows ~90%+ cloud cover; slider=0.5 shows recognizable climate zones; no flat-capped zones | Phase 5.15 | cc:TODO |
+| 5.16.2 | Cloud detail resolution: increase fBm octaves from 5→6, add 6th wispy-edge octave at high frequency. Increase base frequency from 5.0→7.0 for more distinct cloud systems. Add weather-scale noise (frequency 1.5-2.0) for region-sized clear patches vs cloudy regions — breaks the uniform spread | Individual clouds have visible wispy edges; planet shows 8-12 distinct cloud systems; large clear/cloudy regions visible | 5.16.1 | cc:TODO |
+| 5.16.3 | Seasonal wind: shift Hadley/Ferrel/Polar cell boundaries with thermal equator. `wind_direction_vec` takes season parameter, shifts smooth_step thresholds by `sub_solar_lat * 0.5`. Summer hemisphere trades expand, winter contracts. Also affects cloud ITCZ band position | Wind debug view shows asymmetric bands between hemispheres during non-equinox seasons | 5.16.1 | cc:TODO |
+| 5.16.4 | Stronger mountain clouds: increase orographic lift boost from 0.10→0.25. Sample at 2 upwind distances for broader effect. Add lee-side cloud suppression (föhn gap). Mountain clouds should be cumulus-like (boost cumulus_alpha near mountains) | Visible cloud buildup on windward mountain slopes; clear föhn gap on leeward side | 5.16.2 | cc:TODO |
+| 5.16.5 | Fix storm spiral artifacts: add noise perturbation to spiral arm angle (`arm_angle + noise * 0.3`) so edges are turbulent not smooth. Reduce spiral arm contrast. Make storm cloud wall thicker (broader Gaussian around eye). Fix tail artifact by capping vortex influence falloff at a minimum distance | No smooth sine-wave tails; storm spirals have turbulent irregular edges; storm wall is thick not thin | 5.16.4 | cc:TODO |
+| 5.16.6 | Seasonal ocean currents: modulate current temperature anomaly by season — Gulf Stream equivalent stronger in winter, weaker in summer. Shift ITCZ-driven tropical current patterns with thermal equator. Add to Currents debug view | Currents debug view shows seasonal shift; western boundary currents visibly stronger in winter hemisphere | 5.16.3 | cc:TODO |
+
+---
+
 ## Phase 7: Blender Importer Addon
 
 Pure-Python Blender addon that imports generated textures and sets up materials.
