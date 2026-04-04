@@ -86,6 +86,21 @@ Research: [docs/research/cloud-rendering.md], [docs/brainstorms/2026-03-31-cloud
 
 ---
 
+## Phase 5.17: GPU Cloud Advection
+
+Replace per-pixel noise clouds with GPU compute-generated cloud density texture advected by wind over N iterations. Clouds flow along atmospheric circulation, accumulate over convergence zones, and dissipate over divergence zones. Produces physically motivated cloud patterns that respect wind direction and terrain.
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 5.17.1 | Cloud density cubemap texture: allocate R16Float cubemap (6 faces × 256²) for cloud density. Initialize with noise-based seed density from current `compute_cloud_density` logic. Upload as GPU texture alongside height cubemap | Cloud density texture created, initialized with noise, visible in preview via textureSample | Phase 5.16 | cc:TODO |
+| 5.17.2 | Wind field compute shader: compute per-pixel wind vectors on the cubemap using `wind_direction_vec` + terrain deflection. Store as RG16Float cubemap (2-channel: wind_x, wind_y in tangent space). Dispatch once per regeneration | Wind texture created; Wind debug view samples it directly instead of recomputing | 5.17.1 | cc:TODO |
+| 5.17.3 | Advection compute shader: semi-Lagrangian advection — for each pixel, trace back along wind vector by dt, sample source density with bilinear interpolation. Ping-pong between two density textures. Single dispatch = one advection step | Running 1 step visibly shifts cloud density along wind direction | 5.17.2 | cc:TODO |
+| 5.17.4 | Source/sink terms: add moisture-driven condensation (source where moisture > threshold) and dissipation (sink everywhere, proportional to dryness). Rain shadow: sink behind mountains. ITCZ convergence: source boost at ITCZ. This makes clouds accumulate where physics says they should | Clouds accumulate at ITCZ, dissipate over deserts, build windward of mountains | 5.17.3 | cc:TODO |
+| 5.17.5 | Iterative pipeline: run 20-50 advection steps on app startup and after parameter change. Progressive display: show intermediate results after every 5 steps. UI shows advection progress | Planet shows advected clouds within 1-2s; visible wind-aligned streaks and convergence bands | 5.17.4 | cc:TODO |
+| 5.17.6 | Preview integration: replace `compute_cloud_density()` fragment shader call with cubemap texture sample of advected density. Keep noise-based detail overlay at render time for fine texture. Cirrus layer remains noise-based (high altitude, different dynamics) | Clouds render from texture, same visual quality + wind-aligned patterns, no perf regression | 5.17.5 | cc:TODO |
+
+---
+
 ## Phase 7: Blender Importer Addon
 
 Pure-Python Blender addon that imports generated textures and sets up materials.
