@@ -617,8 +617,19 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     let storm_peaks = max(snoise(vortex_sphere * 12.0 + seed_off), 0.0) * storm_cumulus_boost;
     let varied_noise = clamp(noise_val_w + weather_scale + storm_peaks, 0.0, 1.0);
 
-    // === Step 5: Schneider remap ===
-    var density = cloud_remap(varied_noise, 1.0 - local_coverage, 1.0, 0.0, 1.0) * local_coverage;
+    // === Step 5: Schneider remap + thin veil for graduated edges ===
+    let remapped = cloud_remap(varied_noise, 1.0 - local_coverage, 1.0, 0.0, 1.0) * local_coverage;
+
+    // Thin veil: unthresholded noise creates semi-transparent clouds in gaps
+    // This is what gives real clouds their graduated opacity — thin wisps exist
+    // outside the main cloud masses, fading gradually rather than cutting to zero
+    let thin_veil = max(varied_noise - 0.55, 0.0) * 0.5 * local_coverage;
+
+    // Combine: thick clouds from remap + thin clouds from veil
+    var density = max(remapped, thin_veil);
+
+    // Soft power curve: pulls density toward more mid-range values (less binary)
+    density = pow(density, 0.8);
 
     // === Step 6: Carve spiral arms + eye into density (post-remap) ===
     // This directly sculpts the visible cloud density, making spiral structure visible.
@@ -1492,35 +1503,30 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let low_world = (uniforms.rotation * vec4<f32>(low_dir, 0.0)).xyz;
 
         let low_sfc_h = textureSample(height_tex, height_sampler, low_world).r;
-        var low_density = compute_cloud_density(low_world, low_sfc_h);
+        let low_density = compute_cloud_density(low_world, low_sfc_h);
 
-        // Edge erosion: high-freq detail noise eats away at cloud borders
-        // This creates wispy, detailed edges instead of smooth blobs
-        if (low_density > 0.01 && low_density < 0.8) {
-            let erosion_noise = snoise(low_world * 40.0 + vec3<f32>(uniforms.cloud_seed * 3.7)) * 0.5
-                              + snoise(low_world * 80.0 + vec3<f32>(uniforms.cloud_seed * 7.1)) * 0.25;
-            let erosion_strength = smooth_step(0.6, 0.05, low_density); // stronger at thin edges
-            low_density = max(low_density - erosion_strength * max(erosion_noise, 0.0) * 0.5, 0.0);
-        }
+        if (low_density > 0.005) {
+            // Beer-Lambert with density-dependent thickness:
+            // Thin clouds (density<0.3): low optical depth → translucent
+            // Thick clouds (density>0.7): high optical depth → opaque white
+            let thickness = mix(2.0, 6.0, low_density); // thin=2, thick=6
+            let low_alpha = (1.0 - exp(-low_density * thickness)) * uniforms.cloud_opacity;
 
-        if (low_density > 0.01) {
-            // Beer-Lambert opacity — reduced thickness for more translucency
-            let low_alpha = (1.0 - exp(-low_density * 3.2)) * uniforms.cloud_opacity;
-
-            // Self-shadowing
-            let shadow_pos = normalize(low_world + sun_dir * 0.03);
+            // Self-shadowing — STRONGER contrast for 3D appearance
+            let shadow_pos = normalize(low_world + sun_dir * 0.035);
             let shadow_h = textureSample(height_tex, height_sampler, shadow_pos).r;
             let shadow_density = compute_cloud_density(shadow_pos, shadow_h);
-            let shadow = exp(-shadow_density * 2.5);
+            let shadow = exp(-shadow_density * 3.5); // stronger shadow (was 2.5)
 
-            // Warm white (lit) → blue-grey (shadow), tinted by star color
-            let lit_cloud = vec3<f32>(0.95, 0.95, 0.93) * s_color;
-            let shadow_cloud = vec3<f32>(0.55, 0.58, 0.65);
+            // Cloud color: bright white → deep blue-grey shadow
+            let lit_cloud = vec3<f32>(0.97, 0.97, 0.95) * s_color;
+            let shadow_cloud = vec3<f32>(0.45, 0.50, 0.60); // darker shadow (was 0.55,0.58,0.65)
             var low_color = mix(shadow_cloud, lit_cloud, shadow);
 
-            // Internal cloud texture: subtle brightness variation within cloud masses
-            let cloud_tex = snoise(low_world * 25.0 + vec3<f32>(uniforms.cloud_seed * 5.3)) * 0.08;
-            low_color *= 1.0 + cloud_tex;
+            // Internal texture: density-proportional variation
+            let cloud_tex = snoise(low_world * 25.0 + vec3<f32>(uniforms.cloud_seed * 5.3)) * 0.06
+                          + snoise(low_world * 50.0 + vec3<f32>(uniforms.cloud_seed * 9.1)) * 0.03;
+            low_color *= 1.0 + cloud_tex * low_density;
 
             // Day/night terminator
             let sun_facing = max(dot(low_dir, sun_dir), 0.0);
