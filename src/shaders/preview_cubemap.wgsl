@@ -208,31 +208,35 @@ fn compute_temperature(sphere_pos: vec3<f32>, height: f32, season: f32) -> f32 {
         let wind = wind_direction_vec(effective_lat);
         let tangent_wind = normalize(wind - sphere_pos * dot(wind, sphere_pos));
 
-        // Check for nearby land to determine ocean basin margins
-        // Use poleward-perpendicular sampling (not wind direction) for E/W coast detection
-        // On a sphere, "east" is cross(north, position) and "west" is the opposite
-        let north_pole = vec3<f32>(0.0, 1.0, 0.0);
-        let east_dir = normalize(cross(north_pole, sphere_pos));
-        let coast_step = 0.08;
-        let h_east = textureSample(height_tex, height_sampler, normalize(sphere_pos + east_dir * coast_step)).r;
-        let h_west = textureSample(height_tex, height_sampler, normalize(sphere_pos - east_dir * coast_step)).r;
-        let land_to_east = h_east > uniforms.ocean_level; // continent to the east
-        let land_to_west = h_west > uniforms.ocean_level; // continent to the west
+        // Ocean basin margin detection: sample at MULTIPLE distances for broad effect
+        // "East" on sphere = cross(up, pos), with pole guard
+        var up_ref = vec3<f32>(0.0, 1.0, 0.0);
+        if (abs(sphere_pos.y) > 0.95) { up_ref = vec3<f32>(1.0, 0.0, 0.0); }
+        let east_dir = normalize(cross(up_ref, sphere_pos));
+
+        // Sample land at 3 distances: near (0.06), mid (0.12), far (0.20)
+        var land_east_score = 0.0;
+        var land_west_score = 0.0;
+        for (var cs = 0u; cs < 3u; cs++) {
+            let step_d = 0.06 + f32(cs) * 0.07; // 0.06, 0.13, 0.20
+            let weight = 1.0 - f32(cs) * 0.3; // 1.0, 0.7, 0.4
+            let he = textureSample(height_tex, height_sampler, normalize(sphere_pos + east_dir * step_d)).r;
+            let hw = textureSample(height_tex, height_sampler, normalize(sphere_pos - east_dir * step_d)).r;
+            if (he > uniforms.ocean_level) { land_east_score += weight; }
+            if (hw > uniforms.ocean_level) { land_west_score += weight; }
+        }
+        // Normalize to [0, 1] range
+        land_east_score = clamp(land_east_score / 2.1, 0.0, 1.0);
+        land_west_score = clamp(land_west_score / 2.1, 0.0, 1.0);
 
         let season_angle = (uniforms.season - 0.5) * 2.0;
         let winter_boost = 1.0 + clamp(-effective_lat * season_angle * 2.0, 0.0, 0.5);
         let lat_strength = 1.0 - abs(lat_normalized);
 
-        // Western boundary current (Gulf Stream): warm, EAST coast of continent
-        // = western side of ocean basin, land is to the WEST
-        if (land_to_west) {
-            current_temp = 4.0 * lat_strength * winter_boost;
-        }
-        // Eastern boundary current (California): cold upwelling, WEST coast of continent
-        // = eastern side of ocean basin, land is to the EAST
-        if (land_to_east) {
-            current_temp = max(current_temp, 0.0) - 3.0 * lat_strength * winter_boost;
-        }
+        // Western boundary current (Gulf Stream): warm where land is to the WEST
+        current_temp += land_west_score * 4.0 * lat_strength * winter_boost;
+        // Eastern boundary current (California): cold upwelling where land is to the EAST
+        current_temp -= land_east_score * 3.0 * lat_strength * winter_boost;
     }
 
     return base_temp + lapse + temp_noise + region_temp_bias + current_temp;
