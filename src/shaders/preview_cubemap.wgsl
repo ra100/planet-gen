@@ -269,17 +269,20 @@ fn wind_direction_vec(latitude_rad: f32) -> vec3<f32> {
     let lat_deg = abs(shifted_lat) * 180.0 / 3.14159;
 
     // Three-cell zonal wind with smooth_step blending
-    let trade = (1.0 - smooth_step(20.0, 35.0, lat_deg)) * -0.8;
-    let westerly = smooth_step(25.0, 40.0, lat_deg) * (1.0 - smooth_step(55.0, 70.0, lat_deg)) * 0.9;
-    let polar_east = smooth_step(60.0, 75.0, lat_deg) * -0.5;
-    let wind_x = trade + westerly + polar_east;
+    let trade = (1.0 - smooth_step(22.0, 33.0, lat_deg)) * -0.8;
+    let westerly = smooth_step(28.0, 42.0, lat_deg) * (1.0 - smooth_step(55.0, 68.0, lat_deg)) * 0.85;
+    let polar_east = smooth_step(62.0, 75.0, lat_deg) * -0.45;
+    var wind_x = trade + westerly + polar_east;
 
     // Coriolis-deflected meridional flow
-    let hadley_meridional = -smooth_step(5.0, 25.0, lat_deg) * (1.0 - smooth_step(25.0, 35.0, lat_deg)) * 0.4;
-    let ferrel_meridional = smooth_step(35.0, 45.0, lat_deg) * (1.0 - smooth_step(55.0, 65.0, lat_deg)) * 0.3;
-    let wind_y = (hadley_meridional + ferrel_meridional) * hemisphere;
+    let hadley_meridional = -smooth_step(8.0, 25.0, lat_deg) * (1.0 - smooth_step(28.0, 38.0, lat_deg)) * 0.35;
+    let ferrel_meridional = smooth_step(38.0, 48.0, lat_deg) * (1.0 - smooth_step(55.0, 65.0, lat_deg)) * 0.25;
+    var wind_y = (hadley_meridional + ferrel_meridional) * hemisphere;
 
-    return normalize(vec3<f32>(wind_x, wind_y, 0.15));
+    // Prevent zero-wind singularity at cell boundaries: ensure minimum zonal component
+    if (abs(wind_x) < 0.15) { wind_x = sign(wind_x + 0.001) * 0.15; }
+
+    return normalize(vec3<f32>(wind_x, wind_y, 0.1));
 }
 
 // Enhanced wind with terrain deflection — samples heightmap to bend flow around mountains
@@ -456,24 +459,25 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     // === Step 1: Three fundamentally different noise patterns ===
     let p_base = vortex_sphere * 7.0 + seed_off;
 
-    // Subtle wind-aligned bias in domain warp (clouds elongate along flow)
+    // Wind-aligned cloud stretching: clouds elongate along flow direction
     let wind_cv = wind_direction_vec(cloud_lat);
+    let wind_speed = length(vec2<f32>(wind_cv.x, wind_cv.y)); // 0-1 magnitude
     let tangent_cv = normalize(wind_cv - vortex_sphere * dot(wind_cv, vortex_sphere));
-    let wind_bias = tangent_cv * 0.06; // gentle directional component
+    let wind_stretch = tangent_cv * wind_speed * 0.08; // stronger wind = more stretch
 
     // --- STRATUS: flowing sheets with texture (5 octaves, heavy warp) ---
     let s_warp = vec3<f32>(
         snoise(p_base * 0.5 + vec3<f32>(31.7, 0.0, 0.0)),
         snoise(p_base * 0.5 + vec3<f32>(0.0, 47.3, 0.0)),
         snoise(p_base * 0.5 + vec3<f32>(0.0, 0.0, 73.1))
-    ) * 0.5 + wind_bias;
+    ) * 0.5 + wind_stretch;
     let s_p = p_base + s_warp;
     let stratus_val = (snoise(s_p) * 0.50 + snoise(s_p * 2.1) * 0.25
         + snoise(s_p * 4.2) * 0.13 + snoise(s_p * 8.4) * 0.07
         + snoise(s_p * 16.8) * 0.05) * 0.5 + 0.5;
 
     // --- CUMULUS: isolated puffy blobs — soft ramp instead of hard max(noise,0) ---
-    let c_p = p_base + vec3<f32>(13.7, 7.3, 21.1) + wind_bias * 0.5;
+    let c_p = p_base + vec3<f32>(13.7, 7.3, 21.1) + wind_stretch * 0.5;
     var cumulus_val = 0.0;
     var c_freq = 1.0;
     var c_amp = 1.0;
@@ -487,10 +491,12 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
         c_amp *= 0.45;
     }
     cumulus_val = cumulus_val / c_amp_sum;
-    cumulus_val = pow(max(cumulus_val, 0.0), 0.9) * 1.5;
+    // Break up large blobs with high-freq detail erosion
+    let cu_detail = snoise(c_p * 12.0) * 0.15 + snoise(c_p * 24.0) * 0.08;
+    cumulus_val = pow(max(cumulus_val - max(cu_detail, 0.0), 0.0), 0.85) * 1.4;
 
     // --- THIN/WISPY: sparse, low-density streaks ---
-    let t_p = p_base * 0.8 + vec3<f32>(51.0, 23.0, 87.0) + wind_bias * 2.0; // strong wind stretch
+    let t_p = p_base * 0.8 + vec3<f32>(51.0, 23.0, 87.0) + wind_stretch * 2.0; // strong wind stretch
     let thin_val = (snoise(t_p) * 0.7 + snoise(t_p * 3.0) * 0.3) * 0.3 + 0.3; // low amplitude
 
     // === Step 2: Region SELECTS cloud type (climate-adjusted) ===
