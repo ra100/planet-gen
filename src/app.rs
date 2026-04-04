@@ -50,6 +50,7 @@ pub struct PlanetGenApp {
     cloud_coverage: f32,
     cloud_seed: u32,
     cloud_type: f32,
+    cloud_opacity: f32,
     storm_count: u32,
     storm_size: f32,
     night_lights: f32,
@@ -129,6 +130,7 @@ impl PlanetGenApp {
             cloud_coverage: 0.5,
             cloud_seed: default_cloud_seed,
             cloud_type: 0.5,
+            cloud_opacity: 1.0,
             storm_count: 0,
             storm_size: 1.0,
             night_lights: 0.0,
@@ -212,7 +214,7 @@ impl PlanetGenApp {
             show_clouds: if self.show_clouds { 1.0 } else { 0.0 },
             show_atmosphere_layer: if self.show_atmosphere { 1.0 } else { 0.0 },
             show_cities: if self.show_cities { 1.0 } else { 0.0 },
-            _pad5: 0.0,
+            cloud_opacity: self.cloud_opacity,
         }
     }
 
@@ -675,6 +677,13 @@ impl eframe::App for PlanetGenApp {
                 if ui.add(egui::Slider::new(&mut self.cloud_type, 0.0..=1.0)
                     .text("Type"))
                     .on_hover_text("Cloud style: 0 = smooth flowing stratus, 1 = puffy cumulus blobs")
+                    .changed()
+                {
+                    self.needs_render = true;
+                }
+                if ui.add(egui::Slider::new(&mut self.cloud_opacity, 0.0..=1.0)
+                    .text("Opacity"))
+                    .on_hover_text("Cloud layer transparency: 0 = invisible, 1 = fully opaque")
                     .changed()
                 {
                     self.needs_render = true;

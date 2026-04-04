@@ -40,7 +40,7 @@ pub struct PreviewUniforms {
     pub show_clouds: f32,
     pub show_atmosphere_layer: f32,
     pub show_cities: f32,
-    pub _pad5: f32,
+    pub cloud_opacity: f32,
 }
 
 pub struct PreviewRenderer {
@@ -396,7 +396,7 @@ mod tests {
             show_clouds: 0.0,
             show_atmosphere_layer: 0.0,
             show_cities: 0.0,
-            _pad5: 0.0,
+            cloud_opacity: 1.0,
         };
 
         let size = 256;

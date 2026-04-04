@@ -34,7 +34,7 @@ struct Uniforms {
     show_clouds: f32,
     show_atmosphere_layer: f32,
     show_cities: f32,
-    _pad5: f32,
+    cloud_opacity: f32,    // 0.0 = transparent, 1.0 = full opacity
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -243,17 +243,47 @@ fn hadley_cell_moisture(latitude_rad: f32) -> f32 {
     return max(itcz_wet + subtropical_dry + polar_front_wet + polar_dry + 90.0, 10.0);
 }
 
-// Wind direction from Hadley cells for rain shadow
+// Wind direction from Hadley/Ferrel/Polar cells — smooth transitions, Coriolis curvature
 fn wind_direction_vec(latitude_rad: f32) -> vec3<f32> {
     let lat_deg = abs(latitude_rad) * 180.0 / 3.14159;
-    // Trade winds (0-30°): from east. Westerlies (30-60°): from west. Polar (60-90°): from east.
-    var wind_x: f32;
-    if (lat_deg < 30.0) { wind_x = -0.8; }  // Easterly
-    else if (lat_deg < 60.0) { wind_x = 0.8; } // Westerly
-    else { wind_x = -0.6; } // Polar easterly
-    // Smooth poleward component — no discontinuity at equator
-    let wind_y = -0.2 * sin(latitude_rad);
-    return normalize(vec3<f32>(wind_x, wind_y, 0.3));
+    let hemisphere = sign(latitude_rad + 0.0001); // +1 north, -1 south
+
+    // Three-cell zonal wind with smooth_step blending (no hard if/else)
+    // Trade winds (0-30°): easterly with equatorward component
+    let trade = (1.0 - smooth_step(20.0, 35.0, lat_deg)) * -0.8;
+    // Ferrel cell / westerlies (30-60°): westerly with poleward component
+    let westerly = smooth_step(25.0, 40.0, lat_deg) * (1.0 - smooth_step(55.0, 70.0, lat_deg)) * 0.9;
+    // Polar easterlies (60-90°): weak easterly
+    let polar_east = smooth_step(60.0, 75.0, lat_deg) * -0.5;
+
+    let wind_x = trade + westerly + polar_east;
+
+    // Coriolis-deflected meridional component: Hadley cell has strong equatorward at surface
+    // near subtropics, weak poleward at ITCZ. Ferrel cell has poleward surface flow.
+    let hadley_meridional = -smooth_step(5.0, 25.0, lat_deg) * (1.0 - smooth_step(25.0, 35.0, lat_deg)) * 0.4;
+    let ferrel_meridional = smooth_step(35.0, 45.0, lat_deg) * (1.0 - smooth_step(55.0, 65.0, lat_deg)) * 0.3;
+    let wind_y = (hadley_meridional + ferrel_meridional) * hemisphere;
+
+    // Small Z component for 3D sphere projection (prevents degenerate normalize)
+    return normalize(vec3<f32>(wind_x, wind_y, 0.15));
+}
+
+// Enhanced wind with terrain deflection — samples heightmap to bend flow around mountains
+fn wind_direction_at(sphere_pos: vec3<f32>, latitude_rad: f32) -> vec3<f32> {
+    var wind = wind_direction_vec(latitude_rad);
+    // Project to sphere tangent plane
+    let tangent_wind = normalize(wind - sphere_pos * dot(wind, sphere_pos));
+
+    // Terrain deflection: sample height gradient perpendicular to wind
+    let perp = normalize(cross(sphere_pos, tangent_wind));
+    let step_d = 0.04;
+    let h_left = textureSample(height_tex, height_sampler, normalize(sphere_pos + perp * step_d)).r;
+    let h_right = textureSample(height_tex, height_sampler, normalize(sphere_pos - perp * step_d)).r;
+    let terrain_gradient = (h_left - h_right) * 3.0; // how much terrain slopes across wind path
+
+    // Wind deflects away from high terrain (flows around mountains, not through them)
+    let deflected = normalize(tangent_wind + perp * clamp(terrain_gradient, -0.4, 0.4));
+    return deflected;
 }
 
 fn compute_moisture(sphere_pos: vec3<f32>, height: f32, season: f32) -> f32 {
@@ -381,12 +411,14 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
                 raw_center.y * st + raw_center.z * ct
             ));
             let d = acos(clamp(dot(sphere_pos, center), -1.0, 1.0));
-            let base_sigma = 22.0 + fract(sin(fi * 73.1 + s * 0.7) * 19283.3) * 12.0;
-            let storm_sigma = base_sigma / max(uniforms.storm_size * uniforms.storm_size, 0.1);
+            // Per-storm unique size: 0.5x-2.0x of base, tropical storms tighter
+            let per_storm_size = 0.5 + fract(sin(fi * 73.1 + s * 0.7) * 19283.3) * 1.5;
+            let lat_tightness = mix(1.0, 1.5, smooth_step(15.0, 35.0, slat * 180.0 / 3.14159));
+            let storm_sigma = (18.0 + per_storm_size * 10.0) * lat_tightness / max(uniforms.storm_size * uniforms.storm_size, 0.1);
             let influence = exp(-d * d * storm_sigma);
 
-            // Tangent rotation: strong vortex near center, Coriolis-correct
-            let rotation_amount = influence * sign_y * 3.0 / max(d * 5.0, 0.2);
+            // Tangent rotation: vortex strength scales with per-storm size
+            let rotation_amount = influence * sign_y * (2.0 + per_storm_size) / max(d * 5.0, 0.2);
             let tangent = cross(center, sphere_pos);
             vortex_sphere = normalize(vortex_sphere + tangent * rotation_amount * 0.03);
         }
@@ -518,19 +550,44 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
                 raw_center.y * st + raw_center.z * ct
             ));
             let d = acos(clamp(dot(sphere_pos, center), -1.0, 1.0));
-            let base_sigma = 22.0 + fract(sin(fi * 73.1 + s * 0.7) * 19283.3) * 12.0;
-            let storm_sigma = base_sigma / max(uniforms.storm_size * uniforms.storm_size, 0.1);
-            let falloff = exp(-d * d * storm_sigma);
-            // Strong coverage boost — storms should be dramatically cloudier
-            local_coverage += falloff * 0.7;
+            // Per-storm unique size (matching vortex warp section)
+            let per_storm_size = 0.5 + fract(sin(fi * 73.1 + s * 0.7) * 19283.3) * 1.5;
+            let storm_sigma_cov = (18.0 + per_storm_size * 10.0) / max(uniforms.storm_size * uniforms.storm_size, 0.1);
+            let falloff = exp(-d * d * storm_sigma_cov);
+
+            // Strong coverage boost with clear eye
+            let eye_radius = 0.02 / max(per_storm_size, 0.3); // smaller storms = relatively larger eye
+            let eye_clear = smooth_step(eye_radius, eye_radius * 2.5, d);
+            local_coverage += falloff * 0.7 * eye_clear;
         }
     }
 
     local_coverage = clamp(local_coverage, 0.0, 1.0);
 
-    // === Step 4: Multi-scale pattern variety ===
+    // === Step 4: Multi-scale pattern variety + storm puffiness ===
     let weather_scale = snoise(sphere_pos * 2.0 + seed_off * 0.2) * 0.15;
-    let varied_noise = clamp(noise_val + weather_scale, 0.0, 1.0);
+    // Inside storm zones, boost cumulus peaks for puffier towering clouds
+    var storm_cumulus_boost = 0.0;
+    if (n_storms > 0) {
+        for (var i = 0; i < 8; i++) {
+            if (i >= n_storms) { break; }
+            let fi = f32(i);
+            let slat = (30.0 + fract(sin(fi * 127.1 + s) * 43758.5) * 25.0) * 3.14159 / 180.0;
+            let slon = fract(sin(fi * 311.7 + s * 1.3) * 23421.6) * 6.28318;
+            let sign_y = select(-1.0, 1.0, i % 2 == 0);
+            let raw_c = vec3<f32>(cos(slat) * cos(slon), sin(slat) * sign_y, cos(slat) * sin(slon));
+            let ct2 = cos(uniforms.axial_tilt_rad);
+            let st2 = sin(uniforms.axial_tilt_rad);
+            let cntr = normalize(vec3<f32>(raw_c.x, raw_c.y * ct2 - raw_c.z * st2, raw_c.y * st2 + raw_c.z * ct2));
+            let sd = acos(clamp(dot(sphere_pos, cntr), -1.0, 1.0));
+            let ps = 0.5 + fract(sin(fi * 73.1 + s * 0.7) * 19283.3) * 1.5;
+            let inf = exp(-sd * sd * (18.0 + ps * 10.0) / max(uniforms.storm_size * uniforms.storm_size, 0.1));
+            storm_cumulus_boost = max(storm_cumulus_boost, inf * 0.3);
+        }
+    }
+    // Add cumulus peaks inside storm zones
+    let storm_peaks = max(snoise(vortex_sphere * 12.0 + seed_off), 0.0) * storm_cumulus_boost;
+    let varied_noise = clamp(noise_val + weather_scale + storm_peaks, 0.0, 1.0);
 
     // === Step 5: Schneider remap ===
     var density = cloud_remap(varied_noise, 1.0 - local_coverage, 1.0, 0.0, 1.0) * local_coverage;
@@ -1267,16 +1324,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 debug_color = n * 0.5 + vec3<f32>(0.5);
             }
             case 14u: {
-                // Wind direction: color-coded by wind vector on sphere
+                // Wind direction: terrain-deflected, color-coded
                 let wind_lat = asin(clamp(rotated.y, -1.0, 1.0));
-                let wind_v = wind_direction_vec(wind_lat);
-                let tangent_w = normalize(wind_v - rotated * dot(wind_v, rotated));
-                // R = eastward component, B = westward, G = poleward
+                let tangent_w = wind_direction_at(rotated, wind_lat);
+                // R = eastward, B = westward, G = poleward/equatorward
                 debug_color = vec3<f32>(
                     max(tangent_w.x, 0.0),
-                    abs(tangent_w.y) * 0.5,
+                    abs(tangent_w.y) * 0.8,
                     max(-tangent_w.x, 0.0)
-                ) + vec3<f32>(0.1);
+                ) + vec3<f32>(0.08);
             }
             case 15u: {
                 // Ocean currents: warm (red) vs cold (blue) current zones
@@ -1405,8 +1461,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let low_density = compute_cloud_density(low_world, low_sfc_h);
 
         if (low_density > 0.01) {
-            // Beer-Lambert opacity
-            let low_alpha = 1.0 - exp(-low_density * 4.5);
+            // Beer-Lambert opacity, modulated by cloud_opacity slider
+            let low_alpha = (1.0 - exp(-low_density * 4.5)) * uniforms.cloud_opacity;
 
             // Self-shadowing
             let shadow_pos = normalize(low_world + sun_dir * 0.03);
@@ -1443,7 +1499,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
         if (cirrus_density > 0.01) {
             // Cirrus: much thinner optical depth, more translucent
-            let ci_alpha = 1.0 - exp(-cirrus_density * 2.0);
+            let ci_alpha = (1.0 - exp(-cirrus_density * 2.0)) * uniforms.cloud_opacity;
 
             // Cirrus color: ice-white, less self-shadowing (thin layer)
             let ci_sun = max(dot(high_dir, sun_dir), 0.0);

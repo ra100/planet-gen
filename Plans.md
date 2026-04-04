@@ -61,6 +61,10 @@ Target: 3-4 distinct layers, wind-streaked shapes, latitude-coherent cloud bands
 | 5.15.3 | Latitude-banded cloud distribution: ITCZ thick convective band, subtropical clear zone, mid-latitude frontal bands, polar thin overcast. Replace uniform coverage slider with climate-driven baseline + slider as multiplier | Clear subtropical gaps visible; thick ITCZ band; frontal cloud bands at mid-latitudes | 5.15.2 | cc:完了 |
 | 5.15.4 | Per-layer rendering: render low (cumulus/stratus), mid (stratocumulus), and high (cirrus) as separate passes with distinct altitude offsets, opacity, and self-shadow. Each layer casts shadow on layers below | Visible depth parallax between layers; low clouds shadow surface, cirrus shadows low clouds | 5.15.3 | cc:完了 |
 | 5.15.5 | Cloud type from climate: ITCZ → tall cumulonimbus (bright white), subtropics → thin stratocumulus, mid-lat → mixed frontal, polar → thin stratus. Cloud type auto-selected from latitude + moisture, cloud_type slider becomes a bias | Cloud appearance changes with latitude without user intervention; slider fine-tunes | 5.15.4 | cc:完了 |
+| 5.15.6 | Cloud opacity slider (0-1) multiplying Beer-Lambert alpha for both layers | Slider fades clouds smoothly | 5.15.0 | cc:完了 |
+| 5.15.7 | Storm variety: per-storm unique size (0.5x-2.0x), tropical tighter, mid-lat broader | Visible size variation between storms | 5.15.0 | cc:完了 |
+| 5.15.8 | Puffier storm clouds: cumulus peaks inside vortex, clear eye with towering wall | Puffy storm clouds, visible eye | 5.15.7 | cc:完了 |
+| 5.15.9 | Wind model: smooth Hadley/Ferrel/Polar cells, Coriolis meridional, terrain deflection | Smooth curved flow in debug view | 5.15.0b | cc:完了 |
 
 ---
 
