@@ -451,14 +451,16 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     let tangent_cv = normalize(wind_cv - vortex_sphere * dot(wind_cv, vortex_sphere));
     let wind_bias = tangent_cv * 0.06; // gentle directional component
 
-    // --- STRATUS: smooth flowing sheets (3 octaves, heavy warp) ---
+    // --- STRATUS: flowing sheets with texture (5 octaves, heavy warp) ---
     let s_warp = vec3<f32>(
         snoise(p_base * 0.5 + vec3<f32>(31.7, 0.0, 0.0)),
         snoise(p_base * 0.5 + vec3<f32>(0.0, 47.3, 0.0)),
         snoise(p_base * 0.5 + vec3<f32>(0.0, 0.0, 73.1))
     ) * 0.5 + wind_bias;
     let s_p = p_base + s_warp;
-    let stratus_val = (snoise(s_p) * 0.6 + snoise(s_p * 2.1) * 0.3 + snoise(s_p * 4.2) * 0.1) * 0.5 + 0.5;
+    let stratus_val = (snoise(s_p) * 0.50 + snoise(s_p * 2.1) * 0.25
+        + snoise(s_p * 4.2) * 0.13 + snoise(s_p * 8.4) * 0.07
+        + snoise(s_p * 16.8) * 0.05) * 0.5 + 0.5;
 
     // --- CUMULUS: isolated puffy blobs (max(noise,0) peaks, NO stratus fill) ---
     let c_p = p_base + vec3<f32>(13.7, 7.3, 21.1) + wind_bias * 0.5;
@@ -479,12 +481,14 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     let t_p = p_base * 0.8 + vec3<f32>(51.0, 23.0, 87.0) + wind_bias * 2.0; // strong wind stretch
     let thin_val = (snoise(t_p) * 0.7 + snoise(t_p * 3.0) * 0.3) * 0.3 + 0.3; // low amplitude
 
-    // === Step 2: Region SELECTS cloud type (not blends same noise) ===
-    // Smooth transitions at region boundaries, but each type is fundamentally different
-    let w_stratus = smooth_step(0.55, 0.35, region_type); // dominant in 0.0-0.45
-    let w_cumulus = smooth_step(0.55, 0.75, region_type); // dominant in 0.65-1.0
-    let w_thin = max(1.0 - w_stratus - w_cumulus, 0.0);  // fills the gap
-    let noise_val = w_stratus * stratus_val + w_cumulus * cumulus_val + w_thin * thin_val;
+    // === Step 2: Region SELECTS cloud type — overlapping weights, no gap ===
+    let w_stratus = smooth_step(0.60, 0.30, region_type); // dominant below 0.40
+    let w_cumulus = smooth_step(0.40, 0.70, region_type); // dominant above 0.60
+    // Overlap zone (0.30-0.70): both contribute, creating mixed frontal character
+    // Thin is a subtle additive everywhere, stronger in thin regions
+    let thin_mix = smooth_step(0.3, 0.0, region_type) * 0.6 + 0.15; // always at least 15% thin
+    let w_total = max(w_stratus + w_cumulus + thin_mix, 0.01);
+    let noise_val = (w_stratus * stratus_val + w_cumulus * cumulus_val + thin_mix * thin_val) / w_total;
 
     // Weather-scale clear/cloudy regions
     let weather_region = snoise(vortex_sphere * 1.5 + seed_off * 0.3 + vec3<f32>(77.0, 0.0, 0.0));
