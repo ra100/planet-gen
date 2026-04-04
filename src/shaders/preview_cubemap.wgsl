@@ -462,20 +462,22 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
         + snoise(s_p * 4.2) * 0.13 + snoise(s_p * 8.4) * 0.07
         + snoise(s_p * 16.8) * 0.05) * 0.5 + 0.5;
 
-    // --- CUMULUS: isolated puffy blobs (max(noise,0) peaks, NO stratus fill) ---
+    // --- CUMULUS: isolated puffy blobs — soft ramp instead of hard max(noise,0) ---
     let c_p = p_base + vec3<f32>(13.7, 7.3, 21.1) + wind_bias * 0.5;
     var cumulus_val = 0.0;
     var c_freq = 1.0;
     var c_amp = 1.0;
     var c_amp_sum = 0.0;
     for (var i = 0; i < 5; i++) {
-        cumulus_val += max(snoise(c_p * c_freq), 0.0) * c_amp;
+        // smooth_step ramp instead of hard max — eliminates pixelated zero-crossing edges
+        let n = snoise(c_p * c_freq);
+        cumulus_val += smooth_step(-0.1, 0.15, n) * n * c_amp;
         c_amp_sum += c_amp;
         c_freq *= 2.2;
         c_amp *= 0.45;
     }
     cumulus_val = cumulus_val / c_amp_sum;
-    cumulus_val = pow(cumulus_val, 1.1) * 1.4; // boost and soften peaks
+    cumulus_val = pow(max(cumulus_val, 0.0), 0.9) * 1.5;
 
     // --- THIN/WISPY: sparse, low-density streaks ---
     let t_p = p_base * 0.8 + vec3<f32>(51.0, 23.0, 87.0) + wind_bias * 2.0; // strong wind stretch
@@ -536,14 +538,14 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
         let wind = wind_direction_vec(lat_rad);
         let tangent_wind = normalize(wind - sphere_pos * dot(wind, sphere_pos));
 
-        // Windward: orographic lift (fades smoothly from coast inland)
-        let upwind_pos = normalize(sphere_pos + tangent_wind * 0.05);
+        // Windward: orographic lift — sample at wider offset to smooth terrain pixels
+        let upwind_pos = normalize(warped_climate_pos + tangent_wind * 0.07);
         let upwind_h = textureSample(height_tex, height_sampler, upwind_pos).r;
         let mountain_lift = smooth_step(0.06, 0.25, max(upwind_h - uniforms.ocean_level, 0.0));
         local_coverage += mountain_lift * 0.25 * land_factor;
 
-        // Leeward: föhn gap (smooth suppression)
-        let downwind_pos = normalize(sphere_pos - tangent_wind * 0.05);
+        // Leeward: föhn gap — also at warped position
+        let downwind_pos = normalize(warped_climate_pos - tangent_wind * 0.07);
         let downwind_h = textureSample(height_tex, height_sampler, downwind_pos).r;
         let my_elev = max(current_h - uniforms.ocean_level, 0.0);
         let foehn_raw = clamp((downwind_h - my_elev - 0.03) * 3.0, 0.0, 0.25);
@@ -650,14 +652,17 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
             let to_pt = sphere_pos - center * dot(sphere_pos, center);
             let angle = atan2(dot(to_pt, ty), dot(to_pt, tx));
 
-            // Eye: clear center with noisy edge
+            // Eye: clear center with high-detail noisy edge
             let eye_r = (0.03 + fract(sin(fi * 53.7 + s * 0.3) * 31415.9) * 0.02) * uniforms.storm_size;
-            let eye_noise = snoise(sphere_pos * 30.0 + seed_off + vec3<f32>(fi * 11.0, 0.0, 0.0)) * eye_r * 0.4;
-            let eye_mask = smooth_step((eye_r + eye_noise) * 0.3, (eye_r + eye_noise) * 1.2, d);
+            let eye_n1 = snoise(sphere_pos * 60.0 + seed_off + vec3<f32>(fi * 11.0, 0.0, 0.0));
+            let eye_n2 = snoise(sphere_pos * 120.0 + seed_off + vec3<f32>(fi * 23.0, 0.0, 0.0));
+            let eye_noise = (eye_n1 * 0.6 + eye_n2 * 0.4) * eye_r * 0.35;
+            let eye_mask = smooth_step((eye_r + eye_noise) * 0.25, (eye_r + eye_noise) * 1.3, d);
 
-            // Dense eye wall ring
-            let wall_dist = abs(d - eye_r * 1.3);
-            let eye_wall_boost = exp(-wall_dist * wall_dist / (eye_r * eye_r * 0.5)) * near_storm * 0.4;
+            // Dense eye wall ring — thicker, more detailed
+            let wall_dist = abs(d - eye_r * 1.4);
+            let wall_noise = snoise(sphere_pos * 50.0 + vec3<f32>(fi * 31.0)) * eye_r * 0.15;
+            let eye_wall_boost = exp(-(wall_dist + wall_noise) * (wall_dist + wall_noise) / (eye_r * eye_r * 0.6)) * near_storm * 0.45;
             density += eye_wall_boost;
 
             // Spiral arms with TURBULENT edges (noise-perturbed angle)
@@ -1487,11 +1492,20 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let low_world = (uniforms.rotation * vec4<f32>(low_dir, 0.0)).xyz;
 
         let low_sfc_h = textureSample(height_tex, height_sampler, low_world).r;
-        let low_density = compute_cloud_density(low_world, low_sfc_h);
+        var low_density = compute_cloud_density(low_world, low_sfc_h);
+
+        // Edge erosion: high-freq detail noise eats away at cloud borders
+        // This creates wispy, detailed edges instead of smooth blobs
+        if (low_density > 0.01 && low_density < 0.8) {
+            let erosion_noise = snoise(low_world * 40.0 + vec3<f32>(uniforms.cloud_seed * 3.7)) * 0.5
+                              + snoise(low_world * 80.0 + vec3<f32>(uniforms.cloud_seed * 7.1)) * 0.25;
+            let erosion_strength = smooth_step(0.6, 0.05, low_density); // stronger at thin edges
+            low_density = max(low_density - erosion_strength * max(erosion_noise, 0.0) * 0.5, 0.0);
+        }
 
         if (low_density > 0.01) {
-            // Beer-Lambert opacity, modulated by cloud_opacity slider
-            let low_alpha = (1.0 - exp(-low_density * 4.5)) * uniforms.cloud_opacity;
+            // Beer-Lambert opacity — reduced thickness for more translucency
+            let low_alpha = (1.0 - exp(-low_density * 3.2)) * uniforms.cloud_opacity;
 
             // Self-shadowing
             let shadow_pos = normalize(low_world + sun_dir * 0.03);
@@ -1503,6 +1517,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let lit_cloud = vec3<f32>(0.95, 0.95, 0.93) * s_color;
             let shadow_cloud = vec3<f32>(0.55, 0.58, 0.65);
             var low_color = mix(shadow_cloud, lit_cloud, shadow);
+
+            // Internal cloud texture: subtle brightness variation within cloud masses
+            let cloud_tex = snoise(low_world * 25.0 + vec3<f32>(uniforms.cloud_seed * 5.3)) * 0.08;
+            low_color *= 1.0 + cloud_tex;
 
             // Day/night terminator
             let sun_facing = max(dot(low_dir, sun_dir), 0.0);
