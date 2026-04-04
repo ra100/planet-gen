@@ -617,6 +617,7 @@ impl eframe::App for PlanetGenApp {
                     let debug_views: &[(u32, &str)] = &[
                         (8, "AO"), (6, "Plates"), (2, "Temp"), (3, "Moisture"),
                         (4, "Biome"), (5, "Ocean/Ice"), (11, "Boundary"), (12, "Snow"),
+                        (14, "Wind"), (15, "Currents"),
                     ];
                     ui.label("Debug Views");
                     ui.horizontal_wrapped(|ui| {

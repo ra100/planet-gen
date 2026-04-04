@@ -54,6 +54,8 @@ Target: 3-4 distinct layers, wind-streaked shapes, latitude-coherent cloud bands
 
 | Task | 内容 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
+| 5.15.0 | Fix cloud artifacts: reduce wind warp strength, merge all cloud types into single density with alpha compositing instead of separate layers, fix cubemap face boundary banding | Clouds look natural — no vertical streaks, no banding lines, smooth coverage | Phase 5.14 | cc:完了 |
+| 5.15.0b | Add debug views: Cloud density, Wind direction, Ocean currents, Moisture map — as new view_mode options in the shader + UI dropdown | Each debug view selectable from View Mode dropdown; shows the raw data driving the layer | 5.15.0 | cc:完了 |
 | 5.15.1 | Wind-driven cloud warp: replace random domain warp with wind_direction_vec-based stretching. Low clouds warp along trade winds/westerlies, cirrus along jet stream. Warp strength scales with wind speed at altitude | Cloud shapes visibly elongated along wind direction; trade wind zone clouds streak E-W, westerlies zone W-E | Phase 5.14 | cc:完了 |
 | 5.15.2 | Stratocumulus layer: new mid-level layer between low cumulus and high cirrus. Cellular/honeycomb pattern from abs(noise) with open-cell (marine) and closed-cell (land) variants. Covers subtropical ocean regions | Visible cellular cloud pattern over subtropical oceans; distinct from puffy cumulus and smooth stratus | 5.15.1 | cc:完了 |
 | 5.15.3 | Latitude-banded cloud distribution: ITCZ thick convective band, subtropical clear zone, mid-latitude frontal bands, polar thin overcast. Replace uniform coverage slider with climate-driven baseline + slider as multiplier | Clear subtropical gaps visible; thick ITCZ band; frontal cloud bands at mid-latitudes | 5.15.2 | cc:完了 |
