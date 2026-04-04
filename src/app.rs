@@ -6,13 +6,15 @@ use crate::gpu::GpuContext;
 use crate::planet::{DerivedProperties, PlanetParams};
 use crate::plates::{generate_plates, PlateGenParams};
 use crate::preview::{PreviewRenderer, PreviewUniforms};
-use crate::terrain_compute::{ErosionPipeline, TerrainComputePipeline};
+use crate::terrain_compute::{CloudAdvectionPipeline, ErosionPipeline, TerrainComputePipeline};
 
 pub struct PlanetGenApp {
     gpu: Arc<GpuContext>,
     preview_renderer: PreviewRenderer,
     terrain_compute: TerrainComputePipeline,
     erosion_pipeline: ErosionPipeline,
+    cloud_pipeline: CloudAdvectionPipeline,
+    cloud_cubemap_view: Option<wgpu::TextureView>,
     texture_handle: Option<egui::TextureHandle>,
     params: PlanetParams,
     derived: DerivedProperties,
@@ -88,6 +90,7 @@ impl PlanetGenApp {
         let preview_renderer = PreviewRenderer::new(&gpu);
         let terrain_compute = TerrainComputePipeline::new(&gpu);
         let erosion_pipeline = ErosionPipeline::new(&gpu);
+        let cloud_pipeline = CloudAdvectionPipeline::new(&gpu);
         let params = PlanetParams::default();
         let derived = DerivedProperties::from_params(&params);
         let default_cloud_seed = params.seed.wrapping_add(1000);
@@ -96,6 +99,8 @@ impl PlanetGenApp {
             preview_renderer,
             terrain_compute,
             erosion_pipeline,
+            cloud_pipeline,
+            cloud_cubemap_view: None,
             texture_handle: None,
             params,
             derived,
@@ -282,6 +287,22 @@ impl PlanetGenApp {
         // Show un-eroded terrain immediately
         self.cached_cubemap_view = Some(self.preview_renderer.upload_terrain(&self.gpu, &terrain));
 
+        // Generate advected cloud density
+        if self.show_clouds {
+            let cloud_res = (self.preview_resolution / 3).max(128);
+            let t_cloud = std::time::Instant::now();
+            let cloud_density = self.cloud_pipeline.generate(
+                &self.gpu, &terrain, cloud_res, self.cloud_seed,
+                ocean_level, effective_ocean,
+                self.params.axial_tilt_deg.to_radians(), self.season, 30,
+            );
+            self.cloud_cubemap_view = Some(
+                self.preview_renderer.upload_cubemap_r16(&self.gpu, &cloud_density.faces, cloud_res)
+            );
+            eprintln!("[clouds {}px] advection 30 steps: {:.0}ms",
+                cloud_res, t_cloud.elapsed().as_secs_f64() * 1000.0);
+        }
+
         // Schedule progressive erosion (skipped when erosion layer is disabled)
         if self.show_erosion {
             let adaptive_iters = match self.preview_resolution {
@@ -340,7 +361,8 @@ impl PlanetGenApp {
         if let Some(ref cubemap_view) = self.cached_cubemap_view {
             let uniforms = self.build_uniforms();
             let size = self.preview_resolution;
-            let pixels = self.preview_renderer.render(&self.gpu, &uniforms, cubemap_view, size);
+            let cloud_ref = self.cloud_cubemap_view.as_ref();
+            let pixels = self.preview_renderer.render(&self.gpu, &uniforms, cubemap_view, cloud_ref, size);
 
             let image =
                 egui::ColorImage::from_rgba_unmultiplied([size as usize, size as usize], &pixels);

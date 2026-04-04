@@ -116,10 +116,10 @@ fn main() {
                 show_clouds: 0.0,
                 show_atmosphere_layer: 0.0,
                 show_cities: 0.0,
-                _pad5: 0.0,
+                cloud_opacity: 1.0,
             };
 
-            let pixels = renderer.render(&gpu, &uniforms, &cubemap_view, render_size);
+            let pixels = renderer.render(&gpu, &uniforms, &cubemap_view, None, render_size);
             let filename = format!("{}/{}_{}.png", output_dir, erosion_name, view_name);
             let img = image::RgbaImage::from_raw(render_size, render_size, pixels)
                 .expect("Failed to create image");

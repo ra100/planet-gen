@@ -1068,6 +1068,167 @@ impl ErosionPipeline {
     }
 }
 
+// ============ Cloud Advection Pipeline ============
+
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct CloudAdvectParams {
+    pub face: u32,
+    pub resolution: u32,
+    pub seed: u32,
+    pub mode: u32,
+    pub dt: f32,
+    pub decay: f32,
+    pub ocean_level: f32,
+    pub ocean_fraction: f32,
+    pub axial_tilt_rad: f32,
+    pub season: f32,
+    pub condensation_rate: f32,
+    pub _pad0: u32,
+}
+
+pub struct CloudDensity {
+    pub faces: [Vec<f32>; 6],
+    pub resolution: u32,
+}
+
+pub struct CloudAdvectionPipeline {
+    pipeline: wgpu::ComputePipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+}
+
+impl CloudAdvectionPipeline {
+    pub fn new(gpu: &GpuContext) -> Self {
+        let src = format!("{}\n{}\n{}",
+            include_str!("shaders/cube_sphere.wgsl"),
+            include_str!("shaders/noise.wgsl"),
+            include_str!("shaders/cloud_advect.wgsl"),
+        );
+        let shader = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("cloud advect shader"),
+            source: wgpu::ShaderSource::Wgsl(src.into()),
+        });
+
+        let bgl = gpu.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("cloud advect bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 3, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+            ],
+        });
+        let layout = gpu.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("cloud advect layout"), bind_group_layouts: &[&bgl], push_constant_ranges: &[],
+        });
+        let pipeline = gpu.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("cloud advect pipeline"), layout: Some(&layout), module: &shader,
+            entry_point: Some("main"), compilation_options: Default::default(), cache: None,
+        });
+        Self { pipeline, bind_group_layout: bgl }
+    }
+
+    pub fn generate(&self, gpu: &GpuContext, terrain: &TectonicTerrain, resolution: u32,
+        seed: u32, ocean_level: f32, ocean_fraction: f32, axial_tilt_rad: f32, season: f32, steps: u32,
+    ) -> CloudDensity {
+        let ppf = (resolution * resolution) as usize;
+        let total = 6 * ppf;
+        let buf_size = (total * 4) as u64;
+        let wg = (resolution + 15) / 16;
+
+        let buf_a = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cloud A"), size: buf_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let buf_b = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cloud B"), size: buf_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Init: write noise seed into buf_a
+        for face in 0..6u32 {
+            let h_buf = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("cloud h"), contents: bytemuck::cast_slice(&terrain.faces[face as usize]),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+            let p = CloudAdvectParams { face, resolution, seed, mode: 0, dt: 0.0, decay: 1.0,
+                ocean_level, ocean_fraction, axial_tilt_rad, season, condensation_rate: 1.0, _pad0: 0 };
+            let p_buf = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("cloud p"), contents: bytemuck::bytes_of(&p), usage: wgpu::BufferUsages::UNIFORM,
+            });
+            let bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None, layout: &self.bind_group_layout, entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: p_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: buf_b.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: buf_a.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: h_buf.as_entire_binding() },
+                ],
+            });
+            let mut enc = gpu.device.create_command_encoder(&Default::default());
+            { let mut pass = enc.begin_compute_pass(&Default::default());
+              pass.set_pipeline(&self.pipeline); pass.set_bind_group(0, &bg, &[]);
+              pass.dispatch_workgroups(wg, wg, 1); }
+            gpu.queue.submit(std::iter::once(enc.finish()));
+        }
+
+        // Advect N steps
+        let mut src_a = true;
+        for _ in 0..steps {
+            for face in 0..6u32 {
+                let h_buf = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("cloud h"), contents: bytemuck::cast_slice(&terrain.faces[face as usize]),
+                    usage: wgpu::BufferUsages::STORAGE,
+                });
+                let p = CloudAdvectParams { face, resolution, seed, mode: 1, dt: 0.015, decay: 0.985,
+                    ocean_level, ocean_fraction, axial_tilt_rad, season, condensation_rate: 0.8, _pad0: 0 };
+                let p_buf = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("cloud p"), contents: bytemuck::bytes_of(&p), usage: wgpu::BufferUsages::UNIFORM,
+                });
+                let (s, d) = if src_a { (&buf_a, &buf_b) } else { (&buf_b, &buf_a) };
+                let bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: None, layout: &self.bind_group_layout, entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: p_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 1, resource: s.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 2, resource: d.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 3, resource: h_buf.as_entire_binding() },
+                    ],
+                });
+                let mut enc = gpu.device.create_command_encoder(&Default::default());
+                { let mut pass = enc.begin_compute_pass(&Default::default());
+                  pass.set_pipeline(&self.pipeline); pass.set_bind_group(0, &bg, &[]);
+                  pass.dispatch_workgroups(wg, wg, 1); }
+                gpu.queue.submit(std::iter::once(enc.finish()));
+            }
+            src_a = !src_a;
+        }
+
+        // Readback
+        let result = if src_a { &buf_a } else { &buf_b };
+        let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cloud staging"), size: buf_size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
+        });
+        let mut enc = gpu.device.create_command_encoder(&Default::default());
+        enc.copy_buffer_to_buffer(result, 0, &staging, 0, buf_size);
+        gpu.queue.submit(std::iter::once(enc.finish()));
+        staging.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        let _ = gpu.device.poll(wgpu::PollType::Wait);
+        let mapped = staging.slice(..).get_mapped_range();
+        let all: Vec<f32> = bytemuck::cast_slice(&mapped).to_vec();
+        drop(mapped); staging.unmap();
+
+        let mut faces: [Vec<f32>; 6] = Default::default();
+        for i in 0..6 { faces[i] = all[i * ppf..(i + 1) * ppf].to_vec(); }
+        CloudDensity { faces, resolution }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

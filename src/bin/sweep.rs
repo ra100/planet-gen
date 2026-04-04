@@ -184,10 +184,10 @@ fn generate_planet_png(
         show_clouds: 0.0,
         show_atmosphere_layer: 0.0,
         show_cities: 0.0,
-        _pad5: 0.0,
+        cloud_opacity: 1.0,
     };
 
-    renderer.render(gpu, &uniforms, &cubemap_view, render_size)
+    renderer.render(gpu, &uniforms, &cubemap_view, None, render_size)
 }
 
 fn main() {

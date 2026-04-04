@@ -40,6 +40,12 @@ struct Uniforms {
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 @group(0) @binding(1) var height_tex: texture_cube<f32>;
 @group(0) @binding(2) var height_sampler: sampler;
+@group(0) @binding(3) var cloud_tex: texture_cube<f32>;
+
+// Sample advected cloud density from cubemap (0 if no cloud data uploaded)
+fn sample_cloud_advected(dir: vec3<f32>) -> f32 {
+    return textureSample(cloud_tex, height_sampler, dir).r;
+}
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -1525,7 +1531,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let low_world = (uniforms.rotation * vec4<f32>(low_dir, 0.0)).xyz;
 
         let low_sfc_h = textureSample(height_tex, height_sampler, low_world).r;
-        let low_density = compute_cloud_density(low_world, low_sfc_h);
+        // Blend advected cloud texture with per-pixel noise detail
+        let advected = sample_cloud_advected(low_world);
+        let per_pixel = compute_cloud_density(low_world, low_sfc_h);
+        // If advected data exists (non-zero somewhere), use it as base + noise detail
+        // Otherwise fall back to pure per-pixel computation
+        let low_density = select(per_pixel, advected * 0.7 + per_pixel * 0.3, advected > 0.001 || advected == 0.0);
 
         if (low_density > 0.005) {
             // Beer-Lambert with density-dependent thickness:

@@ -99,6 +99,17 @@ impl PreviewRenderer {
                             ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                             count: None,
                         },
+                        // Cloud density cubemap
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 3,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                                view_dimension: wgpu::TextureViewDimension::Cube,
+                                multisampled: false,
+                            },
+                            count: None,
+                        },
                     ],
                 });
 
@@ -204,11 +215,32 @@ impl PreviewRenderer {
     }
 
     /// Render the planet preview to an RGBA pixel buffer using a pre-computed cubemap.
+    /// Upload arbitrary 6-face f32 data as R16Float cubemap.
+    pub fn upload_cubemap_r16(&self, gpu: &GpuContext, faces: &[Vec<f32>; 6], res: u32) -> wgpu::TextureView {
+        let cubemap = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("data cubemap"), size: wgpu::Extent3d { width: res, height: res, depth_or_array_layers: 6 },
+            mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[],
+        });
+        for (i, face_data) in faces.iter().enumerate() {
+            let f16_data: Vec<u16> = face_data.iter().map(|&v| half::f16::from_f32(v).to_bits()).collect();
+            gpu.queue.write_texture(
+                wgpu::TexelCopyTextureInfo { texture: &cubemap, mip_level: 0, origin: wgpu::Origin3d { x: 0, y: 0, z: i as u32 }, aspect: wgpu::TextureAspect::All },
+                bytemuck::cast_slice(&f16_data),
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(res * 2), rows_per_image: Some(res) },
+                wgpu::Extent3d { width: res, height: res, depth_or_array_layers: 1 },
+            );
+        }
+        cubemap.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::Cube), ..Default::default() })
+    }
+
     pub fn render(
         &self,
         gpu: &GpuContext,
         uniforms: &PreviewUniforms,
         cubemap_view: &wgpu::TextureView,
+        cloud_view: Option<&wgpu::TextureView>,
         render_size: u32,
     ) -> Vec<u8> {
         let size = render_size;
@@ -221,22 +253,33 @@ impl PreviewRenderer {
                     usage: wgpu::BufferUsages::UNIFORM,
                 });
 
+        // Cloud cubemap: use provided or create 1x1 zero dummy
+        let dummy_cloud_tex;
+        let dummy_cloud_view;
+        let effective_cloud_view = match cloud_view {
+            Some(v) => v,
+            None => {
+                dummy_cloud_tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("dummy cloud"), size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 6 },
+                    mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::R16Float,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING, view_formats: &[],
+                });
+                dummy_cloud_view = dummy_cloud_tex.create_view(&wgpu::TextureViewDescriptor {
+                    dimension: Some(wgpu::TextureViewDimension::Cube), ..Default::default()
+                });
+                &dummy_cloud_view
+            }
+        };
+
         let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("preview bind group"),
             layout: &self.bind_group_layout,
             entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: uniform_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(cubemap_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
+                wgpu::BindGroupEntry { binding: 0, resource: uniform_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(cubemap_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(effective_cloud_view) },
             ],
         });
 
@@ -400,7 +443,7 @@ mod tests {
         };
 
         let size = 256;
-        let pixels = renderer.render(&gpu, &uniforms, &cubemap_view, size);
+        let pixels = renderer.render(&gpu, &uniforms, &cubemap_view, None, size);
         assert_eq!(pixels.len(), (size * size * 4) as usize);
 
         let non_background: usize = pixels
