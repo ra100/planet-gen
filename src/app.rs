@@ -58,8 +58,7 @@ pub struct PlanetGenApp {
     cloud_seed: u32,
     cloud_type: f32,
     cloud_opacity: f32,
-    cloud_advect_steps: u32,   // number of advection iterations (10-100)
-    cloud_advect_blend: f32,   // fresh noise vs advected blend (0.0-0.5)
+    cloud_wind_trail: f32,     // wind streamline trail strength (0.0-1.0)
     storm_count: u32,
     storm_size: f32,
     night_lights: f32,
@@ -148,8 +147,7 @@ impl PlanetGenApp {
             cloud_seed: default_cloud_seed,
             cloud_type: 0.5,
             cloud_opacity: 1.0,
-            cloud_advect_steps: 200,
-            cloud_advect_blend: 0.18,
+            cloud_wind_trail: 0.5,
             storm_count: 0,
             storm_size: 1.0,
             night_lights: 0.0,
@@ -237,7 +235,7 @@ impl PlanetGenApp {
             cloud_advection: if self.show_cloud_advection { 1.0 } else { 0.0 },
             rotation_rate: 24.0 / self.params.rotation_period_h,
             atm_pressure: self.derived.atmosphere_strength,
-            _pad2: 0.0,
+            cloud_wind_trail: if self.show_cloud_advection { self.cloud_wind_trail } else { 0.0 },
         }
     }
 
@@ -305,32 +303,22 @@ impl PlanetGenApp {
         // Show un-eroded terrain immediately
         self.cached_cubemap_view = Some(self.preview_renderer.upload_terrain(&self.gpu, &terrain));
 
-        // Generate pressure-based wind field + advected cloud density
-        if self.show_clouds && self.show_cloud_advection {
+        // Generate pressure-based wind field (for debug views + continentality cubemap)
+        {
             let cloud_res = (self.preview_resolution / 2).max(192);
             let t_wind = std::time::Instant::now();
 
-            // Phase 1: Pressure-based wind field
             let rotation_rate = 24.0 / self.params.rotation_period_h;
             let wind_field = self.wind_pipeline.generate(
                 &self.gpu, &terrain, cloud_res, self.params.seed,
                 ocean_level, self.params.axial_tilt_deg.to_radians(), self.season,
                 rotation_rate, self.derived.base_temperature_c, self.derived.atmosphere_strength,
             );
-            let wind_ms = t_wind.elapsed().as_secs_f64() * 1000.0;
 
-            // Phase 2: Cloud advection using pressure-derived wind
-            let t_cloud = std::time::Instant::now();
-            let cloud_density = self.cloud_pipeline.generate(
-                &self.gpu, &terrain, cloud_res, self.cloud_seed,
-                ocean_level, effective_ocean,
-                self.params.axial_tilt_deg.to_radians(), self.season, self.cloud_advect_steps,
-                Some(&wind_field.wind), self.cloud_advect_blend,
-            );
+            // Upload continentality as cloud_tex (used for cloud coverage modulation + debug)
             self.cloud_cubemap_view = Some(
-                self.preview_renderer.upload_cubemap_r16(&self.gpu, &cloud_density.faces, cloud_res)
+                self.preview_renderer.upload_cubemap_r16(&self.gpu, &wind_field.continentality, cloud_res)
             );
-            // Upload debug cubemaps for pressure/continentality views
             self.continentality_view = Some(
                 self.preview_renderer.upload_cubemap_r16(&self.gpu, &wind_field.continentality, cloud_res)
             );
@@ -338,8 +326,7 @@ impl PlanetGenApp {
                 self.preview_renderer.upload_cubemap_r16(&self.gpu, &wind_field.pressure, cloud_res)
             );
 
-            eprintln!("[wind {}px] {:.0}ms | [clouds] advection {} steps: {:.0}ms",
-                cloud_res, wind_ms, self.cloud_advect_steps, t_cloud.elapsed().as_secs_f64() * 1000.0);
+            eprintln!("[wind {}px] {:.0}ms", cloud_res, t_wind.elapsed().as_secs_f64() * 1000.0);
         }
 
         // Schedule progressive erosion (skipped when erosion layer is disabled)
@@ -709,7 +696,7 @@ impl eframe::App for PlanetGenApp {
                     let debug_views: &[(u32, &str)] = &[
                         (8, "AO"), (6, "Plates"), (2, "Temp"), (3, "Moisture"),
                         (4, "Biome"), (5, "Ocean/Ice"), (11, "Boundary"), (12, "Snow"),
-                        (9, "Clouds"), (18, "Advect Wt"), (14, "Wind"), (15, "Currents"), (16, "Continentality"), (17, "Pressure"),
+                        (9, "Clouds"), (14, "Wind"), (15, "Currents"), (16, "Continentality"), (17, "Pressure"),
                     ];
                     ui.label("Debug Views");
                     ui.horizontal_wrapped(|ui| {
@@ -797,25 +784,14 @@ impl eframe::App for PlanetGenApp {
                     }
                 }
 
-                // Cloud advection debug controls
+                // Wind trail control (when wind shaping is ON)
                 if self.show_cloud_advection {
-                    ui.separator();
-                    ui.label("Advection Debug");
-                    let mut steps_i32 = self.cloud_advect_steps as i32;
-                    if ui.add(egui::Slider::new(&mut steps_i32, 10..=500)
-                        .text("Steps").logarithmic(true))
-                        .on_hover_text("Transport iterations: more = longer equilibrium. 200 default, try 500 for strong patterns")
+                    if ui.add(egui::Slider::new(&mut self.cloud_wind_trail, 0.0..=1.0)
+                        .text("Wind Trail"))
+                        .on_hover_text("Cloud elongation along wind: 0 = round blobs, 0.5 = moderate trails, 1.0 = long streaks")
                         .changed()
                     {
-                        self.cloud_advect_steps = steps_i32 as u32;
-                        self.needs_terrain = true;
-                    }
-                    if ui.add(egui::Slider::new(&mut self.cloud_advect_blend, 0.0..=0.50)
-                        .text("Blend"))
-                        .on_hover_text("Anti-streak: 0 = pure wind redistribution, 0.5 = noise-dominated. Controls spatial noise mixed into advection.")
-                        .changed()
-                    {
-                        self.needs_terrain = true;
+                        self.needs_render = true;
                     }
                 }
 

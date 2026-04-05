@@ -38,7 +38,7 @@ struct Uniforms {
     cloud_advection: f32,  // 1.0 = advected cubemap modulates clouds, 0.0 = per-pixel only
     rotation_rate: f32,    // relative to Earth (1.0 = 24h day)
     atm_pressure: f32,     // atmospheric pressure in bar (1.0 = Earth)
-    _pad2: f32,
+    cloud_wind_trail: f32, // wind streamline trail strength (0.0-1.0)
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -51,22 +51,6 @@ fn sample_cloud_advected(dir: vec3<f32>) -> f32 {
     return textureSample(cloud_tex, height_sampler, dir).r;
 }
 
-// Blurred advection weight: average 5 tangent-plane samples to smooth
-// the low-res cubemap into gentle gradients for cloud modulation
-fn sample_advect_weight_smooth(dir: vec3<f32>) -> f32 {
-    var up_ref = vec3<f32>(0.0, 1.0, 0.0);
-    if (abs(dir.y) > 0.95) { up_ref = vec3<f32>(1.0, 0.0, 0.0); }
-    let te = normalize(cross(up_ref, dir));
-    let tn = normalize(cross(dir, te));
-    // Diagonal offsets (per cubemap blur feedback: tangent-plane, not axis-aligned)
-    let r = 0.035; // blur radius in sphere coords (~2° on Earth)
-    let w0 = sample_cloud_advected(dir);
-    let w1 = sample_cloud_advected(normalize(dir + (te + tn) * r));
-    let w2 = sample_cloud_advected(normalize(dir + (te - tn) * r));
-    let w3 = sample_cloud_advected(normalize(dir + (-te + tn) * r));
-    let w4 = sample_cloud_advected(normalize(dir + (-te - tn) * r));
-    return (w0 * 2.0 + w1 + w2 + w3 + w4) / 6.0; // center-weighted
-}
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -502,6 +486,31 @@ fn cloud_remap(value: f32, old_min: f32, old_max: f32, new_min: f32, new_max: f3
            / max(old_max - old_min, 0.001) * (new_max - new_min);
 }
 
+// Trace backward along wind streamline to create wind-elongated cloud shapes.
+// Returns a warped sphere position: adjacent pixels trace to similar upstream
+// positions → noise correlates along wind direction → clouds form trails.
+// trail_strength: 0 = no warp, 1 = full streamline trace
+fn wind_streamline_warp(sphere_pos: vec3<f32>, trail_strength: f32) -> vec3<f32> {
+    if (trail_strength < 0.01) { return sphere_pos; }
+
+    var pos = sphere_pos;
+    let steps = 6; // enough for visible trails without being expensive
+    let step_size = trail_strength * 0.025; // total displacement = 6 * 0.025 * trail = ~0.15 at max
+
+    for (var i = 0; i < steps; i++) {
+        // Get wind at current trace position (terrain-deflected)
+        let tilt = uniforms.axial_tilt_rad;
+        let tilted_y = pos.y * cos(tilt) + pos.z * sin(tilt);
+        let lat = asin(clamp(tilted_y, -1.0, 1.0));
+        let wind = wind_direction_at(pos, lat);
+
+        // Step backward along wind (trace to upstream position)
+        pos = normalize(pos - wind * step_size);
+    }
+
+    return pos;
+}
+
 fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     let cov_slider = uniforms.cloud_coverage;
     if (cov_slider <= 0.0) { return 0.0; }
@@ -567,27 +576,23 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     let region_type = clamp(region_raw * 0.4 + 0.5 + lat_type_bias + uniforms.cloud_type * 0.2, 0.0, 1.0);
 
     // === Step 1: Three fundamentally different noise patterns ===
-    let p_base = vortex_sphere * 7.0 + seed_off;
-
-    // Wind-aligned cloud stretching: clouds elongate along flow direction
-    let wind_cv = wind_direction_vec(cloud_lat);
-    let wind_speed = length(vec2<f32>(wind_cv.x, wind_cv.y)); // 0-1 magnitude
-    let tangent_cv = normalize(wind_cv - vortex_sphere * dot(wind_cv, vortex_sphere));
-    let wind_stretch = tangent_cv * wind_speed * 0.08; // stronger wind = more stretch
+    // Wind streamline warp: trace backward along wind to create elongated trails
+    let wind_warped = wind_streamline_warp(vortex_sphere, uniforms.cloud_wind_trail);
+    let p_base = wind_warped * 7.0 + seed_off;
 
     // --- STRATUS: flowing sheets with texture (5 octaves, heavy warp) ---
     let s_warp = vec3<f32>(
         snoise(p_base * 0.5 + vec3<f32>(31.7, 0.0, 0.0)),
         snoise(p_base * 0.5 + vec3<f32>(0.0, 47.3, 0.0)),
         snoise(p_base * 0.5 + vec3<f32>(0.0, 0.0, 73.1))
-    ) * 0.5 + wind_stretch;
+    ) * 0.5;
     let s_p = p_base + s_warp;
     let stratus_val = (snoise(s_p) * 0.50 + snoise(s_p * 2.1) * 0.25
         + snoise(s_p * 4.2) * 0.13 + snoise(s_p * 8.4) * 0.07
         + snoise(s_p * 16.8) * 0.05) * 0.5 + 0.5;
 
     // --- CUMULUS: isolated puffy blobs — soft ramp instead of hard max(noise,0) ---
-    let c_p = p_base + vec3<f32>(13.7, 7.3, 21.1) + wind_stretch * 0.5;
+    let c_p = p_base + vec3<f32>(13.7, 7.3, 21.1);
     var cumulus_val = 0.0;
     var c_freq = 1.0;
     var c_amp = 1.0;
@@ -606,7 +611,7 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     cumulus_val = pow(max(cumulus_val, 0.0), 0.9) * 1.3 + cu_detail * cumulus_val;
 
     // --- THIN/WISPY: sparse, low-density streaks ---
-    let t_p = p_base * 0.8 + vec3<f32>(51.0, 23.0, 87.0) + wind_stretch * 2.0; // strong wind stretch
+    let t_p = p_base * 0.8 + vec3<f32>(51.0, 23.0, 87.0);
     let thin_val = (snoise(t_p) * 0.7 + snoise(t_p * 3.0) * 0.3) * 0.3 + 0.3; // low amplitude
 
     // === Step 2: Region blends cloud types — very wide overlap for no visible seams ===
@@ -658,6 +663,15 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     // At low coverage, climate zones modulate; at high coverage, everything fills in
     let climate_coverage = (0.35 + lat_climate) * coverage + moisture_norm * 0.25;
     var local_coverage = max(climate_coverage, coverage * 0.85); // floor ensures slider=1 → ~85%+
+
+    // === Continentality modulation: ocean=more clouds, deep interior=fewer ===
+    // cloud_tex contains continentality data (0=coast, 1=deep interior)
+    if (uniforms.cloud_advection > 0.5) {
+        let cont = sample_cloud_advected(sphere_pos); // 0-1: coast to interior
+        // Ocean: boost +15%, coast: neutral, deep interior (>0.6): suppress up to -25%
+        let cont_mod = mix(1.15, 0.75, smooth_step(0.1, 0.7, cont));
+        local_coverage *= cont_mod;
+    }
 
     // === Mountain clouds (orographic lift + föhn gap) — smooth transitions ===
     let tilt = uniforms.axial_tilt_rad;
@@ -847,18 +861,16 @@ fn compute_cirrus_density(sphere_pos: vec3<f32>) -> f32 {
     let s = uniforms.cloud_seed;
     let seed_off = vec3<f32>(s, fract(s * 1.618) * 89.0, fract(s * 2.618) * 83.0);
 
-    // Wind-aligned stretching: cirrus follows jet stream (strong at mid-latitudes)
+    // Cirrus: 2.5x stronger wind trail (ice crystals are light, blow far in jet stream)
+    let ci_trail = min(uniforms.cloud_wind_trail * 2.5, 1.0);
+    let ci_warped = wind_streamline_warp(sphere_pos, ci_trail);
+
     let tilt = uniforms.axial_tilt_rad;
     let tilted_y = sphere_pos.y * cos(tilt) + sphere_pos.z * sin(tilt);
     let ci_lat = asin(clamp(tilted_y, -1.0, 1.0));
     let lat_deg = abs(ci_lat) * 180.0 / 3.14159;
-    let jet_wind = wind_direction_vec(ci_lat);
-    let jet_tangent = normalize(jet_wind - sphere_pos * dot(jet_wind, sphere_pos));
-    // Gentle jet stream stretch at mid-latitudes
-    let jet_stretch = smooth_step(20.0, 45.0, lat_deg) * 0.08;
-    let ci_sphere = normalize(sphere_pos + jet_tangent * jet_stretch);
 
-    let p = ci_sphere * 6.0 + seed_off + vec3<f32>(50.0, 30.0, 70.0);
+    let p = ci_warped * 6.0 + seed_off + vec3<f32>(50.0, 30.0, 70.0);
 
     // 3-octave high-frequency wispy noise
     let ci = snoise(p) * 0.5
@@ -1640,11 +1652,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let shadow_sample_pos = normalize(rotated + sun_dir * 0.015);
         let shadow_sfc_h = textureSample(height_tex, height_sampler, shadow_sample_pos).r;
         var cloud_above = compute_cloud_density(shadow_sample_pos, shadow_sfc_h);
-        if (uniforms.cloud_advection > 0.5) {
-            let cw = sample_advect_weight_smooth(shadow_sample_pos);
-            let cp = clamp(1.0 / max(cw, 0.25), 0.5, 2.5);
-            cloud_above = pow(max(cloud_above, 0.0), cp);
-        }
         let surface_shadow = exp(-cloud_above * 3.0);
         lit_color *= mix(1.0, surface_shadow, 0.65);
     }
@@ -1703,15 +1710,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // WEIGHT that modulates where clouds appear — convergence zones get denser,
         // divergence/rain shadow gets cleared.
         var low_density = compute_cloud_density(low_world, low_sfc_h);
-        if (uniforms.cloud_advection > 0.5) {
-            // Advection weight modifies cloud coverage as a power remap.
-            // weight > 1 (wet zone): exponent < 1 → thin clouds become thick, new groups appear
-            // weight < 1 (dry zone): exponent > 1 → clouds thin out and disappear
-            // This adds/removes cloud GROUPS, not just adjusts opacity.
-            let w = sample_advect_weight_smooth(low_world);
-            let power = clamp(1.0 / max(w, 0.25), 0.5, 2.5);
-            low_density = pow(max(low_density, 0.0), power);
-        }
 
         if (low_density > 0.005) {
             // Beer-Lambert with density-dependent thickness:
@@ -1724,11 +1722,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let shadow_pos = normalize(low_world + sun_dir * 0.035);
             let shadow_h = textureSample(height_tex, height_sampler, shadow_pos).r;
             var shadow_density = compute_cloud_density(shadow_pos, shadow_h);
-            if (uniforms.cloud_advection > 0.5) {
-                let sw = sample_advect_weight_smooth(shadow_pos);
-                let sp = clamp(1.0 / max(sw, 0.25), 0.5, 2.5);
-                shadow_density = pow(max(shadow_density, 0.0), sp);
-            }
             let shadow = exp(-shadow_density * 3.0);
 
             // Cloud color: bright white → blue-grey shadow
