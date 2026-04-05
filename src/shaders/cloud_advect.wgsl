@@ -80,15 +80,25 @@ fn sphere_to_face_uv(dir: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(face_idx, u * 0.5 + 0.5, v * 0.5 + 0.5);
 }
 
-// Sample density from the full 6-face buffer using a 3D direction
+// Sample density from the full 6-face buffer using a 3D direction (bilinear interpolation)
 fn sample_density(dir: vec3<f32>) -> f32 {
     let fuv = sphere_to_face_uv(dir);
     let face = u32(fuv.x);
     let res = params.resolution;
-    let px = clamp(u32(fuv.y * f32(res - 1u)), 0u, res - 1u);
-    let py = clamp(u32(fuv.z * f32(res - 1u)), 0u, res - 1u);
-    let idx = face * res * res + py * res + px;
-    return src_density[idx];
+    let fx = fuv.y * f32(res - 1u);
+    let fy = fuv.z * f32(res - 1u);
+    let x0 = clamp(u32(fx), 0u, res - 2u);
+    let y0 = clamp(u32(fy), 0u, res - 2u);
+    let x1 = x0 + 1u;
+    let y1 = y0 + 1u;
+    let tx = fx - f32(x0);
+    let ty = fy - f32(y0);
+    let base = face * res * res;
+    let v00 = src_density[base + y0 * res + x0];
+    let v10 = src_density[base + y0 * res + x1];
+    let v01 = src_density[base + y1 * res + x0];
+    let v11 = src_density[base + y1 * res + x1];
+    return mix(mix(v00, v10, tx), mix(v01, v11, tx), ty);
 }
 
 // Sample pressure-derived wind from precomputed wind field buffer.
@@ -228,6 +238,16 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
                 }
             }
         }
+
+        // Diffusion: blend with 4 neighbors to smooth pixelation
+        // This spreads moisture laterally, simulating atmospheric mixing
+        let diff_step = 1.2 / f32(res);
+        let n0 = sample_density(normalize(pos + te * diff_step));
+        let n1 = sample_density(normalize(pos - te * diff_step));
+        let n2 = sample_density(normalize(pos + tn * diff_step));
+        let n3 = sample_density(normalize(pos - tn * diff_step));
+        let neighbor_avg = (n0 + n1 + n2 + n3) * 0.25;
+        moisture = mix(moisture, neighbor_avg, 0.15); // 15% diffusion per step
 
         // Anti-streak noise blend (optional)
         if (params.blend_factor > 0.001) {
