@@ -6,7 +6,7 @@ use crate::gpu::GpuContext;
 use crate::planet::{DerivedProperties, PlanetParams};
 use crate::plates::{generate_plates, PlateGenParams};
 use crate::preview::{PreviewRenderer, PreviewUniforms};
-use crate::terrain_compute::{CloudAdvectionPipeline, ErosionPipeline, TerrainComputePipeline};
+use crate::terrain_compute::{CloudAdvectionPipeline, ErosionPipeline, TerrainComputePipeline, WindFieldPipeline};
 
 pub struct PlanetGenApp {
     gpu: Arc<GpuContext>,
@@ -14,7 +14,11 @@ pub struct PlanetGenApp {
     terrain_compute: TerrainComputePipeline,
     erosion_pipeline: ErosionPipeline,
     cloud_pipeline: CloudAdvectionPipeline,
+    wind_pipeline: WindFieldPipeline,
     cloud_cubemap_view: Option<wgpu::TextureView>,
+    // Debug data cubemap views (continentality, pressure — uploaded on demand)
+    continentality_view: Option<wgpu::TextureView>,
+    pressure_view: Option<wgpu::TextureView>,
     texture_handle: Option<egui::TextureHandle>,
     params: PlanetParams,
     derived: DerivedProperties,
@@ -92,6 +96,7 @@ impl PlanetGenApp {
         let terrain_compute = TerrainComputePipeline::new(&gpu);
         let erosion_pipeline = ErosionPipeline::new(&gpu);
         let cloud_pipeline = CloudAdvectionPipeline::new(&gpu);
+        let wind_pipeline = WindFieldPipeline::new(&gpu);
         let params = PlanetParams::default();
         let derived = DerivedProperties::from_params(&params);
         let default_cloud_seed = params.seed.wrapping_add(1000);
@@ -101,7 +106,10 @@ impl PlanetGenApp {
             terrain_compute,
             erosion_pipeline,
             cloud_pipeline,
+            wind_pipeline,
             cloud_cubemap_view: None,
+            continentality_view: None,
+            pressure_view: None,
             texture_handle: None,
             params,
             derived,
@@ -291,20 +299,39 @@ impl PlanetGenApp {
         // Show un-eroded terrain immediately
         self.cached_cubemap_view = Some(self.preview_renderer.upload_terrain(&self.gpu, &terrain));
 
-        // Generate advected cloud density (only when advection toggle is on)
+        // Generate pressure-based wind field + advected cloud density
         if self.show_clouds && self.show_cloud_advection {
             let cloud_res = (self.preview_resolution / 2).max(192);
+            let t_wind = std::time::Instant::now();
+
+            // Phase 1: Pressure-based wind field
+            let wind_field = self.wind_pipeline.generate(
+                &self.gpu, &terrain, cloud_res, self.params.seed,
+                ocean_level, self.params.axial_tilt_deg.to_radians(), self.season,
+            );
+            let wind_ms = t_wind.elapsed().as_secs_f64() * 1000.0;
+
+            // Phase 2: Cloud advection using pressure-derived wind
             let t_cloud = std::time::Instant::now();
             let cloud_density = self.cloud_pipeline.generate(
                 &self.gpu, &terrain, cloud_res, self.cloud_seed,
                 ocean_level, effective_ocean,
                 self.params.axial_tilt_deg.to_radians(), self.season, 30,
+                Some(&wind_field.wind),
             );
             self.cloud_cubemap_view = Some(
                 self.preview_renderer.upload_cubemap_r16(&self.gpu, &cloud_density.faces, cloud_res)
             );
-            eprintln!("[clouds {}px] advection 30 steps: {:.0}ms",
-                cloud_res, t_cloud.elapsed().as_secs_f64() * 1000.0);
+            // Upload debug cubemaps for pressure/continentality views
+            self.continentality_view = Some(
+                self.preview_renderer.upload_cubemap_r16(&self.gpu, &wind_field.continentality, cloud_res)
+            );
+            self.pressure_view = Some(
+                self.preview_renderer.upload_cubemap_r16(&self.gpu, &wind_field.pressure, cloud_res)
+            );
+
+            eprintln!("[wind {}px] {:.0}ms | [clouds] advection 30 steps: {:.0}ms",
+                cloud_res, wind_ms, t_cloud.elapsed().as_secs_f64() * 1000.0);
         }
 
         // Schedule progressive erosion (skipped when erosion layer is disabled)
@@ -365,7 +392,12 @@ impl PlanetGenApp {
         if let Some(ref cubemap_view) = self.cached_cubemap_view {
             let uniforms = self.build_uniforms();
             let size = self.preview_resolution;
-            let cloud_ref = self.cloud_cubemap_view.as_ref();
+            // Debug views 16/17 use continentality/pressure cubemap in the cloud_tex slot
+            let cloud_ref = match self.view_mode {
+                16 => self.continentality_view.as_ref(),
+                17 => self.pressure_view.as_ref(),
+                _ => self.cloud_cubemap_view.as_ref(),
+            };
             let pixels = self.preview_renderer.render(&self.gpu, &uniforms, cubemap_view, cloud_ref, size);
 
             let image =
@@ -669,7 +701,7 @@ impl eframe::App for PlanetGenApp {
                     let debug_views: &[(u32, &str)] = &[
                         (8, "AO"), (6, "Plates"), (2, "Temp"), (3, "Moisture"),
                         (4, "Biome"), (5, "Ocean/Ice"), (11, "Boundary"), (12, "Snow"),
-                        (14, "Wind"), (15, "Currents"),
+                        (14, "Wind"), (15, "Currents"), (16, "Continentality"), (17, "Pressure"),
                     ];
                     ui.label("Debug Views");
                     ui.horizontal_wrapped(|ui| {

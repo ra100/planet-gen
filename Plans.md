@@ -101,6 +101,24 @@ Replace per-pixel noise clouds with GPU compute-generated cloud density texture 
 
 ---
 
+## Phase 5.18: Pressure-Based Wind Model
+
+Replace latitude-only wind with pressure-gradient-derived wind that varies by longitude, terrain, and land/ocean distribution. Inspired by [planet_heightmap_generation](https://github.com/raguilar011095/planet_heightmap_generation) wind.js. Makes cloud advection produce visible, physically motivated cloud movement.
+
+Plan: [docs/plans/2026-04-05-pressure-wind-model.md](docs/plans/2026-04-05-pressure-wind-model.md)
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 5.18.1 | GPU continentality: compute shader BFS from ocean cells on cubemap | Continentality cubemap 0=coast, 1=interior; debug view shows smooth gradient | Phase 5.17 | cc:TODO |
+| 5.18.2 | Pressure field shader: ITCZ low, subtropical highs, continental thermal, elevation, noise | Pressure cubemap; debug view blue=low red=high; ITCZ varies by longitude | 5.18.1 | cc:TODO |
+| 5.18.3 | Pressure gradient → wind: finite differences + Coriolis deflection + surface friction | Wind cubemap shows trades, westerlies, monsoon deflection | 5.18.2 | cc:TODO |
+| 5.18.4 | Wire wind cubemap into cloud advection shader (replaces inline wind_at) | Advection uses precomputed pressure-derived wind | 5.18.3 | cc:TODO |
+| 5.18.5 | Make advected clouds the PRIMARY density source (per-pixel noise adds detail only) | Toggle ON/OFF shows clear cloud movement difference | 5.18.4 | cc:TODO |
+| 5.18.6 | Add Pressure + Continentality debug views to view mode dropdown | Selectable from UI; shows raw pressure/continentality data | 5.18.2 | cc:TODO |
+| 5.18.7 | Tune and validate: compare with Earth-like wind/cloud patterns | Monsoon shift over continents, maritime westerlies, subtropical clear zones | 5.18.5 | cc:TODO |
+
+---
+
 ## Phase 7: Blender Importer Addon
 
 Pure-Python Blender addon that imports generated textures and sets up materials.

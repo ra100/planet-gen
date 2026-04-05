@@ -21,6 +21,7 @@ struct CloudParams {
 @group(0) @binding(1) var<storage, read> src_density: array<f32>;    // source (read)
 @group(0) @binding(2) var<storage, read_write> dst_density: array<f32>; // destination (write)
 @group(0) @binding(3) var<storage, read> height_data: array<f32>;    // terrain heightmap (same face)
+@group(0) @binding(4) var<storage, read> wind_field: array<f32>;     // 3D wind vectors (3 * 6 * res²)
 // For cross-face sampling, we pack all 6 faces into src_density:
 // face i starts at offset i * resolution * resolution
 
@@ -88,40 +89,33 @@ fn sample_density(dir: vec3<f32>) -> f32 {
     return src_density[idx];
 }
 
-// Wind direction from Hadley/Ferrel/Polar cells with noise perturbation.
-// Position-dependent noise breaks perfect latitude alignment, preventing
-// the horizontal banding that occurs after many advection steps.
+// Sample pressure-derived wind from precomputed wind field buffer.
+// Wind field contains 3D tangent vectors: 3 floats per texel, all 6 faces packed.
+// Falls back to basic latitude-based wind if wind field is empty (size < 6).
 fn wind_at(pos: vec3<f32>) -> vec3<f32> {
-    let tilted_y = pos.y * cos(params.axial_tilt_rad) + pos.z * sin(params.axial_tilt_rad);
-    let lat = asin(clamp(tilted_y, -1.0, 1.0));
-    let hemisphere = sign(lat + 0.0001);
-    let season_shift = params.axial_tilt_rad * ((params.season - 0.5) * 2.0) * 0.4;
-    let shifted_lat = lat - season_shift;
+    // Sample wind from precomputed buffer via cross-face lookup
+    let fuv = sphere_to_face_uv(pos);
+    let face = u32(fuv.x);
+    let res = params.resolution;
+    let px = clamp(u32(fuv.y * f32(res - 1u)), 0u, res - 1u);
+    let py = clamp(u32(fuv.z * f32(res - 1u)), 0u, res - 1u);
+    let base = (face * res * res + py * res + px) * 3u;
 
-    // Noise perturbation: ±6° latitude wobble breaks perfect latitude bands.
-    // Low-frequency noise creates weather-scale wind variation.
-    let so = seed_offset(params.seed + 9000u);
-    let lat_noise = snoise(pos * 2.5 + so) * 6.0;
-    let lat_deg = abs(shifted_lat) * 180.0 / 3.14159 + lat_noise;
+    let wx = wind_field[base];
+    let wy = wind_field[base + 1u];
+    let wz = wind_field[base + 2u];
+    let wind = vec3<f32>(wx, wy, wz);
 
-    let trade = (1.0 - smooth_step(22.0, 33.0, lat_deg)) * -0.8;
-    let westerly = smooth_step(28.0, 42.0, lat_deg) * (1.0 - smooth_step(55.0, 68.0, lat_deg)) * 0.85;
-    let polar_east = smooth_step(62.0, 75.0, lat_deg) * -0.45;
-    var wind_x = trade + westerly + polar_east;
+    let speed = length(wind);
+    if (speed < 0.001) {
+        // Fallback: tiny tangent nudge to prevent zero advection
+        var up = vec3<f32>(0.0, 1.0, 0.0);
+        if (abs(pos.y) > 0.95) { up = vec3<f32>(1.0, 0.0, 0.0); }
+        return normalize(cross(up, pos)) * 0.01;
+    }
 
-    let hadley_m = -smooth_step(8.0, 25.0, lat_deg) * (1.0 - smooth_step(28.0, 38.0, lat_deg)) * 0.35;
-    let ferrel_m = smooth_step(38.0, 48.0, lat_deg) * (1.0 - smooth_step(55.0, 65.0, lat_deg)) * 0.25;
-    var wind_y = (hadley_m + ferrel_m) * hemisphere;
-
-    // Small directional noise: ±15% variation in both components
-    let dir_noise = snoise(pos * 4.0 + so + vec3<f32>(50.0, 0.0, 0.0)) * 0.15;
-    wind_x += dir_noise;
-    wind_y += snoise(pos * 4.0 + so + vec3<f32>(0.0, 50.0, 0.0)) * 0.1;
-
-    // 0.1 z-component prevents zero-length vectors at cell boundaries
-    let raw_wind = normalize(vec3<f32>(wind_x, wind_y, 0.1));
-    // Project to tangent plane
-    return normalize(raw_wind - pos * dot(raw_wind, pos));
+    // Normalize to reasonable advection speed (scale from pressure gradient units)
+    return normalize(wind) * min(speed * 0.5, 1.0);
 }
 
 // Moisture-based condensation rate
@@ -131,19 +125,22 @@ fn condensation_at(pos: vec3<f32>, height: f32) -> f32 {
     let lat_deg = abs(lat) * 180.0 / 3.14159;
 
     // ITCZ convergence: strong condensation at equator
-    let itcz = exp(-lat_deg * lat_deg / 150.0) * 0.3;
+    let itcz = exp(-lat_deg * lat_deg / 150.0) * 0.5;
 
     // Moisture from ocean proximity (simple: below ocean_level = ocean)
     let is_ocean = height < params.ocean_level;
-    let ocean_boost = select(0.0, 0.15, is_ocean);
+    let ocean_boost = select(0.0, 0.25, is_ocean);
 
     // Subtropical suppression
     let subtropical = smooth_step(15.0, 25.0, lat_deg) * smooth_step(40.0, 30.0, lat_deg) * 0.2;
 
     // Mid-latitude frontal
-    let midlat = smooth_step(35.0, 50.0, lat_deg) * smooth_step(65.0, 55.0, lat_deg) * 0.12;
+    let midlat = smooth_step(35.0, 50.0, lat_deg) * smooth_step(65.0, 55.0, lat_deg) * 0.15;
 
-    return (itcz + ocean_boost + midlat - subtropical) * params.condensation_rate;
+    // Baseline condensation everywhere (clouds form globally, just denser at ITCZ)
+    let baseline = 0.08;
+
+    return (baseline + itcz + ocean_boost + midlat - subtropical) * params.condensation_rate;
 }
 
 @compute @workgroup_size(16, 16)

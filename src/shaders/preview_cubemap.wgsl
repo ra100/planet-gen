@@ -1447,6 +1447,21 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                     debug_color = vec3<f32>(lh * 0.3 + 0.1);
                 }
             }
+            case 16u: {
+                // Continentality: sampled from cloud_tex (uploaded with continentality data)
+                let cont = sample_cloud_advected(rotated);
+                debug_color = mix(vec3<f32>(0.1, 0.2, 0.5), vec3<f32>(0.8, 0.5, 0.2), cont);
+            }
+            case 17u: {
+                // Pressure: sampled from cloud_tex (uploaded with pressure data)
+                // Pressure stored as raw hPa; map deviation from 1013 to color
+                let p = sample_cloud_advected(rotated);
+                let dev = (p - 1013.0) / 20.0; // ±20 hPa range
+                let low = clamp(-dev, 0.0, 1.0);
+                let high = clamp(dev, 0.0, 1.0);
+                debug_color = mix(vec3<f32>(0.3, 0.3, 0.3), vec3<f32>(0.2, 0.4, 0.9), low);
+                debug_color = mix(debug_color, vec3<f32>(0.9, 0.3, 0.1), high);
+            }
             default: { debug_color = surface_color; }
         }
         return vec4<f32>(debug_color, 1.0);
@@ -1552,25 +1567,23 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let low_world = (uniforms.rotation * vec4<f32>(low_dir, 0.0)).xyz;
 
         let low_sfc_h = textureSample(height_tex, height_sampler, low_world).r;
-        let per_pixel = compute_cloud_density(low_world, low_sfc_h);
-        var low_density = per_pixel;
+        var low_density: f32;
         if (uniforms.cloud_advection > 0.5) {
-            // Tangent-plane 5-tap diagonal blur: every offset crosses BOTH
-            // cubemap texel axes, eliminating latitude-aligned banding.
-            var up_b = vec3<f32>(0.0, 1.0, 0.0);
-            if (abs(low_world.y) > 0.95) { up_b = vec3<f32>(1.0, 0.0, 0.0); }
-            let be = normalize(cross(up_b, low_world));
-            let bn = normalize(cross(low_world, be));
-            let blur = 0.10;
-            let a0 = sample_cloud_advected(low_world);
-            let a1 = sample_cloud_advected(normalize(low_world + (be + bn) * blur));
-            let a2 = sample_cloud_advected(normalize(low_world + (be - bn) * blur));
-            let a3 = sample_cloud_advected(normalize(low_world - (be - bn) * blur));
-            let a4 = sample_cloud_advected(normalize(low_world - (be + bn) * blur));
-            let advected = (a0 + a1 + a2 + a3 + a4) * 0.2;
+            // Advection is PRIMARY: advected cubemap drives cloud shape.
+            // Per-pixel noise adds only fine detail texture.
+            // Boost: advection equilibrium density is lower than per-pixel,
+            // scale to match Beer-Lambert opacity expectations.
+            let raw_advected = sample_cloud_advected(low_world);
+            let advected = clamp(raw_advected * 2.0, 0.0, 1.0);
 
-            let advect_coverage = smooth_step(0.05, 0.45, advected);
-            low_density = per_pixel * mix(0.3, 1.3, advect_coverage);
+            // Per-pixel detail: high-frequency noise variation within cloud areas
+            let detail_p = low_world * 18.0 + vec3<f32>(uniforms.cloud_seed * 5.3, 0.0, 0.0);
+            let detail = snoise(detail_p) * 0.15 + snoise(detail_p * 2.3) * 0.08;
+
+            // Advected density + detail texture (clamped, never negative)
+            low_density = max(advected + detail * advected, 0.0);
+        } else {
+            low_density = compute_cloud_density(low_world, low_sfc_h);
         }
 
         if (low_density > 0.005) {

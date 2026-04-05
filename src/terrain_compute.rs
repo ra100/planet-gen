@@ -1068,6 +1068,226 @@ impl ErosionPipeline {
     }
 }
 
+// ============ Wind Field Pipeline ============
+// Pressure-based wind from terrain + continentality.
+// 4-mode compute shader: init_cont → smooth_cont → pressure → wind.
+
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct WindFieldParams {
+    pub face: u32,
+    pub resolution: u32,
+    pub mode: u32,
+    pub seed: u32,
+    pub ocean_level: f32,
+    pub axial_tilt_rad: f32,
+    pub season: f32,
+    pub smooth_weight: f32,
+}
+
+pub struct WindField {
+    pub wind: Vec<f32>,       // 3 * 6 * res² floats (3D tangent vectors, all faces packed)
+    pub continentality: [Vec<f32>; 6], // per-face continentality [0,1]
+    pub pressure: [Vec<f32>; 6],       // per-face pressure (hPa deviation)
+    pub resolution: u32,
+}
+
+pub struct WindFieldPipeline {
+    pipeline: wgpu::ComputePipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+}
+
+impl WindFieldPipeline {
+    pub fn new(gpu: &GpuContext) -> Self {
+        let src = format!("{}\n{}\n{}",
+            include_str!("shaders/cube_sphere.wgsl"),
+            include_str!("shaders/noise.wgsl"),
+            include_str!("shaders/wind_field.wgsl"),
+        );
+        let shader = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("wind field shader"),
+            source: wgpu::ShaderSource::Wgsl(src.into()),
+        });
+
+        let bgl = gpu.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("wind field bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 3, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+            ],
+        });
+        let layout = gpu.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("wind field layout"), bind_group_layouts: &[&bgl], push_constant_ranges: &[],
+        });
+        let pipeline = gpu.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("wind field pipeline"), layout: Some(&layout), module: &shader,
+            entry_point: Some("main"), compilation_options: Default::default(), cache: None,
+        });
+        Self { pipeline, bind_group_layout: bgl }
+    }
+
+    fn dispatch_mode(&self, gpu: &GpuContext, mode: u32, face: u32, resolution: u32,
+        seed: u32, ocean_level: f32, axial_tilt_rad: f32, season: f32, smooth_weight: f32,
+        src_buf: &wgpu::Buffer, dst_buf: &wgpu::Buffer, height_buf: &wgpu::Buffer,
+    ) {
+        let p = WindFieldParams { face, resolution, mode, seed, ocean_level, axial_tilt_rad, season, smooth_weight };
+        let p_buf = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("wind p"), contents: bytemuck::bytes_of(&p), usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None, layout: &self.bind_group_layout, entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: p_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: src_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: dst_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: height_buf.as_entire_binding() },
+            ],
+        });
+        let wg = (resolution + 15) / 16;
+        let mut enc = gpu.device.create_command_encoder(&Default::default());
+        { let mut pass = enc.begin_compute_pass(&Default::default());
+          pass.set_pipeline(&self.pipeline); pass.set_bind_group(0, &bg, &[]);
+          pass.dispatch_workgroups(wg, wg, 1); }
+        gpu.queue.submit(std::iter::once(enc.finish()));
+    }
+
+    pub fn generate(&self, gpu: &GpuContext, terrain: &TectonicTerrain, resolution: u32,
+        seed: u32, ocean_level: f32, axial_tilt_rad: f32, season: f32,
+    ) -> WindField {
+        let ppf = (resolution * resolution) as usize;
+        let total_1c = 6 * ppf; // 1-component buffer (continentality, pressure)
+        let total_3c = 3 * total_1c; // 3-component buffer (wind vectors)
+
+        // Pack all 6 faces of height into one buffer
+        let mut all_height = vec![0.0f32; total_1c];
+        for (i, face) in terrain.faces.iter().enumerate() {
+            // Resample terrain to wind field resolution if needed
+            let src_res = (face.len() as f32).sqrt() as usize;
+            for y in 0..resolution as usize {
+                for x in 0..resolution as usize {
+                    let sx = x * src_res / resolution as usize;
+                    let sy = y * src_res / resolution as usize;
+                    all_height[i * ppf + y * resolution as usize + x] = face[sy * src_res + sx];
+                }
+            }
+        }
+        let height_buf = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("wind height"), contents: bytemuck::cast_slice(&all_height),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
+        let buf_a = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("wind A"), size: (total_1c * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let buf_b = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("wind B"), size: (total_1c * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        // Wind output needs 3× space (3D vectors)
+        let wind_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("wind out"), size: (total_3c * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        // === Phase 1: Continentality ===
+        // Mode 0: Init (ocean=0, land=1) → buf_a
+        for face in 0..6u32 {
+            self.dispatch_mode(gpu, 0, face, resolution, seed, ocean_level, axial_tilt_rad, season, 0.0,
+                &buf_b, &buf_a, &height_buf);
+        }
+
+        // Mode 1: Smooth (40 iterations, ping-pong buf_a ↔ buf_b)
+        let mut src_is_a = true;
+        for _ in 0..40 {
+            for face in 0..6u32 {
+                let (s, d) = if src_is_a { (&buf_a, &buf_b) } else { (&buf_b, &buf_a) };
+                self.dispatch_mode(gpu, 1, face, resolution, seed, ocean_level, axial_tilt_rad, season, 0.15,
+                    s, d, &height_buf);
+            }
+            src_is_a = !src_is_a;
+        }
+
+        // Read back continentality
+        let cont_result = if src_is_a { &buf_a } else { &buf_b };
+        let cont_data = self.readback_1c(gpu, cont_result, total_1c);
+
+        // === Phase 2: Pressure ===
+        // Continentality is in cont_result, pressure goes to the other buffer
+        let pressure_dst = if src_is_a { &buf_b } else { &buf_a };
+        for face in 0..6u32 {
+            self.dispatch_mode(gpu, 2, face, resolution, seed, ocean_level, axial_tilt_rad, season, 0.0,
+                cont_result, pressure_dst, &height_buf);
+        }
+
+        // Smooth pressure (2 passes)
+        // Need to copy pressure_dst → cont_result for smoothing source, but they're different buffers
+        // Use mode 1 smoothing on the pressure data (reuse smooth_continentality logic)
+        // Actually, mode 1 clamps ocean to 0 which isn't right for pressure.
+        // Skip pressure smoothing for now — the noise + wide Gaussian terms are smooth enough.
+
+        // Read back pressure
+        let pressure_data = self.readback_1c(gpu, pressure_dst, total_1c);
+
+        // === Phase 3: Wind from pressure gradient ===
+        for face in 0..6u32 {
+            self.dispatch_mode(gpu, 3, face, resolution, seed, ocean_level, axial_tilt_rad, season, 0.0,
+                pressure_dst, &wind_buf, &height_buf);
+        }
+
+        // Read back wind (3-component)
+        let wind_data = self.readback_3c(gpu, &wind_buf, total_3c);
+
+        // Split into per-face arrays
+        let mut cont_faces: [Vec<f32>; 6] = Default::default();
+        let mut press_faces: [Vec<f32>; 6] = Default::default();
+        for i in 0..6 {
+            cont_faces[i] = cont_data[i * ppf..(i + 1) * ppf].to_vec();
+            press_faces[i] = pressure_data[i * ppf..(i + 1) * ppf].to_vec();
+        }
+
+        WindField {
+            wind: wind_data,
+            continentality: cont_faces,
+            pressure: press_faces,
+            resolution,
+        }
+    }
+
+    fn readback_1c(&self, gpu: &GpuContext, buf: &wgpu::Buffer, total: usize) -> Vec<f32> {
+        let size = (total * 4) as u64;
+        let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("wind staging"), size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut enc = gpu.device.create_command_encoder(&Default::default());
+        enc.copy_buffer_to_buffer(buf, 0, &staging, 0, size);
+        gpu.queue.submit(std::iter::once(enc.finish()));
+
+        let slice = staging.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
+        let _ = gpu.device.poll(wgpu::PollType::Wait);
+        rx.recv().unwrap().unwrap();
+
+        let data = slice.get_mapped_range();
+        bytemuck::cast_slice::<u8, f32>(&data).to_vec()
+    }
+
+    fn readback_3c(&self, gpu: &GpuContext, buf: &wgpu::Buffer, total: usize) -> Vec<f32> {
+        self.readback_1c(gpu, buf, total) // same logic, different size
+    }
+}
+
 // ============ Cloud Advection Pipeline ============
 
 #[repr(C)]
@@ -1120,6 +1340,8 @@ impl CloudAdvectionPipeline {
                     ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
                 wgpu::BindGroupLayoutEntry { binding: 3, visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 4, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
             ],
         });
         let layout = gpu.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -1134,11 +1356,27 @@ impl CloudAdvectionPipeline {
 
     pub fn generate(&self, gpu: &GpuContext, terrain: &TectonicTerrain, resolution: u32,
         seed: u32, ocean_level: f32, ocean_fraction: f32, axial_tilt_rad: f32, season: f32, steps: u32,
+        wind_data: Option<&[f32]>,
     ) -> CloudDensity {
         let ppf = (resolution * resolution) as usize;
         let total = 6 * ppf;
         let buf_size = (total * 4) as u64;
         let wg = (resolution + 15) / 16;
+
+        // Create wind field buffer (binding 4)
+        let wind_buf = if let Some(wd) = wind_data {
+            gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("cloud wind"), contents: bytemuck::cast_slice(wd),
+                usage: wgpu::BufferUsages::STORAGE,
+            })
+        } else {
+            // Dummy zero wind buffer (minimum 48 bytes = 12 floats for 1 texel × 4 faces min)
+            gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("cloud wind dummy"),
+                contents: bytemuck::cast_slice(&[0.0f32; 48]),
+                usage: wgpu::BufferUsages::STORAGE,
+            })
+        };
 
         let buf_a = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("cloud A"), size: buf_size,
@@ -1168,6 +1406,7 @@ impl CloudAdvectionPipeline {
                     wgpu::BindGroupEntry { binding: 1, resource: buf_b.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 2, resource: buf_a.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 3, resource: h_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 4, resource: wind_buf.as_entire_binding() },
                 ],
             });
             let mut enc = gpu.device.create_command_encoder(&Default::default());
@@ -1185,7 +1424,7 @@ impl CloudAdvectionPipeline {
                     label: Some("cloud h"), contents: bytemuck::cast_slice(&terrain.faces[face as usize]),
                     usage: wgpu::BufferUsages::STORAGE,
                 });
-                let p = CloudAdvectParams { face, resolution, seed, mode: 1, dt: 0.015, decay: 0.985,
+                let p = CloudAdvectParams { face, resolution, seed, mode: 1, dt: 0.015, decay: 0.992,
                     ocean_level, ocean_fraction, axial_tilt_rad, season, condensation_rate: 0.8, _pad0: 0 };
                 let p_buf = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("cloud p"), contents: bytemuck::bytes_of(&p), usage: wgpu::BufferUsages::UNIFORM,
@@ -1197,6 +1436,7 @@ impl CloudAdvectionPipeline {
                         wgpu::BindGroupEntry { binding: 1, resource: s.as_entire_binding() },
                         wgpu::BindGroupEntry { binding: 2, resource: d.as_entire_binding() },
                         wgpu::BindGroupEntry { binding: 3, resource: h_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 4, resource: wind_buf.as_entire_binding() },
                     ],
                 });
                 let mut enc = gpu.device.create_command_encoder(&Default::default());

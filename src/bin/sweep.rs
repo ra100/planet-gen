@@ -5,7 +5,7 @@ use planet_gen::gpu::GpuContext;
 use planet_gen::planet::{DerivedProperties, PlanetParams};
 use planet_gen::plates::{generate_plates, PlateGenParams};
 use planet_gen::preview::{PreviewRenderer, PreviewUniforms};
-use planet_gen::terrain_compute::{CloudAdvectionPipeline, TerrainComputePipeline};
+use planet_gen::terrain_compute::{CloudAdvectionPipeline, TerrainComputePipeline, WindFieldPipeline};
 use std::path::Path;
 
 struct PlanetPreset {
@@ -278,12 +278,18 @@ fn main() {
     );
     let cubemap_view = renderer.upload_terrain(&gpu, &terrain);
 
-    // Generate advected cloud cubemap
+    // Generate pressure-based wind field + advected clouds
     let cloud_res = (render_size / 2).max(192);
+    let wind_pipeline = WindFieldPipeline::new(&gpu);
+    let wind_field = wind_pipeline.generate(
+        &gpu, &terrain, cloud_res, seed,
+        ocean_level, params.axial_tilt_deg.to_radians(), 0.5,
+    );
     let cloud_density = cloud_pipeline.generate(
         &gpu, &terrain, cloud_res, seed,
         ocean_level, effective_ocean,
         params.axial_tilt_deg.to_radians(), 0.5, 30,
+        Some(&wind_field.wind),
     );
     let cloud_view = renderer.upload_cubemap_r16(&gpu, &cloud_density.faces, cloud_res);
 
