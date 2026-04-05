@@ -127,13 +127,13 @@ Research: [docs/research/worldbuildingpasta-climate-research.md](docs/research/w
 
 | Task | 内容 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
-| 5.19.1 | Parameterize Hadley cell boundaries by rotation rate using Kaspi & Showman 2015 table | Cell boundaries shift with rotation_period_h; 16-day planet has single wide cell, 12h planet has 5+ cells | Phase 5.18 | cc:TODO |
-| 5.19.2 | Pressure-dependent wind/precipitation scaling from ExoPlaSim data | Wind speed scales as `22*(1/P)^0.15`, precipitation as `P^-0.5`; thinner atmospheres = stronger winds, more rain | 5.19.1 | cc:TODO |
-| 5.19.3 | Improve ITCZ longitude variation: monsoon rules, thermal equator follows land | ITCZ shifts 15-20° poleward over large continents in summer; trade wind reversal visible in wind debug | 5.19.1 | cc:TODO |
-| 5.19.4 | Fix straight-line cloud stretching: add small-scale turbulence to wind field | Cloud patterns show turbulent eddies, not straight lines; visible in zoomed cloud view | 5.19.3 | cc:TODO |
-| 5.19.5 | Apply moisture penetration distance rules: onshore 2000-3000km, offshore 1000km | Continental interiors >3000km from coast are dry; rain shadow at >2km mountain relief | 5.19.2 | cc:TODO |
-| 5.19.6 | Hadley cell width vs temperature: widen 1° per 4°C warming up to 21°C global mean | Hot planets have wider tropics; cold planets have narrower Hadley cells | 5.19.1 | cc:TODO |
-| 5.19.7 | Altitude-latitude equivalence: 1km altitude ~ 8° poleward for snow/vegetation lines | Mountain biome zonation follows 6.5°C/km lapse rate correctly | - | cc:TODO |
+| 5.19.1 | Parameterize Hadley cell boundaries by rotation rate using Kaspi & Showman 2015 table | Cell boundaries shift with rotation_period_h; 16-day planet has single wide cell, 12h planet has 5+ cells | Phase 5.18 | cc:完了 [4e2d088] |
+| 5.19.2 | Pressure-dependent wind/precipitation scaling from ExoPlaSim data | Wind speed scales as `22*(1/P)^0.15`, precipitation as `P^-0.5`; thinner atmospheres = stronger winds, more rain | 5.19.1 | cc:完了 [4e2d088] |
+| 5.19.3 | Improve ITCZ longitude variation: monsoon rules, thermal equator follows land | ITCZ shifts 15-20° poleward over large continents in summer; trade wind reversal visible in wind debug | 5.19.1 | cc:完了 [4e2d088] |
+| 5.19.4 | Fix straight-line cloud stretching: add small-scale turbulence to wind field | Cloud patterns show turbulent eddies, not straight lines; visible in zoomed cloud view | 5.19.3 | cc:完了 [4e2d088] |
+| 5.19.5 | Apply moisture penetration distance rules: onshore 2000-3000km, offshore 1000km | Continental interiors >3000km from coast are dry; rain shadow at >2km mountain relief | 5.19.2 | cc:完了 [4e2d088] |
+| 5.19.6 | Hadley cell width vs temperature: widen 1° per 4°C warming up to 21°C global mean | Hot planets have wider tropics; cold planets have narrower Hadley cells | 5.19.1 | cc:完了 [4e2d088] |
+| 5.19.7 | Altitude-latitude equivalence: 1km altitude ~ 8° poleward for snow/vegetation lines | Mountain biome zonation follows 6.5°C/km lapse rate correctly | - | cc:完了 [4e2d088] |
 
 ---
 
