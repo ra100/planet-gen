@@ -188,7 +188,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         // Turbulent diffusion: break coherent stretching
         let turb_hash = pcg_hash(idx + params.seed * 7u + params.mode * 31u);
         let turb_angle = f32(turb_hash & 0xFFFFu) / 10430.0;
-        let turb_mag = f32((turb_hash >> 16u) & 0xFFu) / 255.0 * 0.02;
+        let turb_mag = f32((turb_hash >> 16u) & 0xFFu) / 255.0 * 0.04;
         var up_t = vec3<f32>(0.0, 1.0, 0.0);
         if (abs(pos.y) > 0.95) { up_t = vec3<f32>(1.0, 0.0, 0.0); }
         let te = normalize(cross(up_t, pos));
@@ -238,16 +238,6 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
                 }
             }
         }
-
-        // Diffusion: blend with 4 neighbors to smooth pixelation
-        // This spreads moisture laterally, simulating atmospheric mixing
-        let diff_step = 1.2 / f32(res);
-        let n0 = sample_density(normalize(pos + te * diff_step));
-        let n1 = sample_density(normalize(pos - te * diff_step));
-        let n2 = sample_density(normalize(pos + tn * diff_step));
-        let n3 = sample_density(normalize(pos - tn * diff_step));
-        let neighbor_avg = (n0 + n1 + n2 + n3) * 0.25;
-        moisture = mix(moisture, neighbor_avg, 0.15); // 15% diffusion per step
 
         // Anti-streak noise blend (optional)
         if (params.blend_factor > 0.001) {
