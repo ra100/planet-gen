@@ -231,7 +231,9 @@ impl PlanetGenApp {
             show_cities: if self.show_cities { 1.0 } else { 0.0 },
             cloud_opacity: self.cloud_opacity,
             cloud_advection: if self.show_cloud_advection { 1.0 } else { 0.0 },
-            _pad0: 0.0, _pad1: 0.0, _pad2: 0.0,
+            rotation_rate: 24.0 / self.params.rotation_period_h,
+            atm_pressure: self.derived.atmosphere_strength,
+            _pad2: 0.0,
         }
     }
 
@@ -305,9 +307,11 @@ impl PlanetGenApp {
             let t_wind = std::time::Instant::now();
 
             // Phase 1: Pressure-based wind field
+            let rotation_rate = 24.0 / self.params.rotation_period_h;
             let wind_field = self.wind_pipeline.generate(
                 &self.gpu, &terrain, cloud_res, self.params.seed,
                 ocean_level, self.params.axial_tilt_deg.to_radians(), self.season,
+                rotation_rate, self.derived.base_temperature_c, self.derived.atmosphere_strength,
             );
             let wind_ms = t_wind.elapsed().as_secs_f64() * 1000.0;
 

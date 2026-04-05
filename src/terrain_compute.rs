@@ -1083,6 +1083,10 @@ pub struct WindFieldParams {
     pub axial_tilt_rad: f32,
     pub season: f32,
     pub smooth_weight: f32,
+    pub rotation_rate: f32,  // relative to Earth (1.0 = 24h)
+    pub base_temp_c: f32,    // planet mean temperature °C
+    pub atm_pressure: f32,   // atmospheric pressure in bar (1.0 = Earth)
+    pub _pad0: u32,
 }
 
 pub struct WindField {
@@ -1134,9 +1138,11 @@ impl WindFieldPipeline {
 
     fn dispatch_mode(&self, gpu: &GpuContext, mode: u32, face: u32, resolution: u32,
         seed: u32, ocean_level: f32, axial_tilt_rad: f32, season: f32, smooth_weight: f32,
+        rotation_rate: f32, base_temp_c: f32, atm_pressure: f32,
         src_buf: &wgpu::Buffer, dst_buf: &wgpu::Buffer, height_buf: &wgpu::Buffer,
     ) {
-        let p = WindFieldParams { face, resolution, mode, seed, ocean_level, axial_tilt_rad, season, smooth_weight };
+        let p = WindFieldParams { face, resolution, mode, seed, ocean_level, axial_tilt_rad, season, smooth_weight,
+            rotation_rate, base_temp_c, atm_pressure, _pad0: 0 };
         let p_buf = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("wind p"), contents: bytemuck::bytes_of(&p), usage: wgpu::BufferUsages::UNIFORM,
         });
@@ -1158,6 +1164,7 @@ impl WindFieldPipeline {
 
     pub fn generate(&self, gpu: &GpuContext, terrain: &TectonicTerrain, resolution: u32,
         seed: u32, ocean_level: f32, axial_tilt_rad: f32, season: f32,
+        rotation_rate: f32, base_temp_c: f32, atm_pressure: f32,
     ) -> WindField {
         let ppf = (resolution * resolution) as usize;
         let total_1c = 6 * ppf; // 1-component buffer (continentality, pressure)
@@ -1202,6 +1209,7 @@ impl WindFieldPipeline {
         // Mode 0: Init (ocean=0, land=1) → buf_a
         for face in 0..6u32 {
             self.dispatch_mode(gpu, 0, face, resolution, seed, ocean_level, axial_tilt_rad, season, 0.0,
+                rotation_rate, base_temp_c, atm_pressure,
                 &buf_b, &buf_a, &height_buf);
         }
 
@@ -1211,6 +1219,7 @@ impl WindFieldPipeline {
             for face in 0..6u32 {
                 let (s, d) = if src_is_a { (&buf_a, &buf_b) } else { (&buf_b, &buf_a) };
                 self.dispatch_mode(gpu, 1, face, resolution, seed, ocean_level, axial_tilt_rad, season, 0.15,
+                    rotation_rate, base_temp_c, atm_pressure,
                     s, d, &height_buf);
             }
             src_is_a = !src_is_a;
@@ -1225,14 +1234,9 @@ impl WindFieldPipeline {
         let pressure_dst = if src_is_a { &buf_b } else { &buf_a };
         for face in 0..6u32 {
             self.dispatch_mode(gpu, 2, face, resolution, seed, ocean_level, axial_tilt_rad, season, 0.0,
+                rotation_rate, base_temp_c, atm_pressure,
                 cont_result, pressure_dst, &height_buf);
         }
-
-        // Smooth pressure (2 passes)
-        // Need to copy pressure_dst → cont_result for smoothing source, but they're different buffers
-        // Use mode 1 smoothing on the pressure data (reuse smooth_continentality logic)
-        // Actually, mode 1 clamps ocean to 0 which isn't right for pressure.
-        // Skip pressure smoothing for now — the noise + wide Gaussian terms are smooth enough.
 
         // Read back pressure
         let pressure_data = self.readback_1c(gpu, pressure_dst, total_1c);
@@ -1240,6 +1244,7 @@ impl WindFieldPipeline {
         // === Phase 3: Wind from pressure gradient ===
         for face in 0..6u32 {
             self.dispatch_mode(gpu, 3, face, resolution, seed, ocean_level, axial_tilt_rad, season, 0.0,
+                rotation_rate, base_temp_c, atm_pressure,
                 pressure_dst, &wind_buf, &height_buf);
         }
 

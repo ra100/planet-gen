@@ -186,7 +186,7 @@ fn generate_planet_png(
         show_cities: 0.0,
         cloud_opacity: 1.0,
         cloud_advection: 0.0,
-        _pad0: 0.0, _pad1: 0.0, _pad2: 0.0,
+        rotation_rate: 1.0, atm_pressure: 0.7, _pad2: 0.0,
     };
 
     renderer.render(gpu, &uniforms, &cubemap_view, None, render_size)
@@ -281,9 +281,11 @@ fn main() {
     // Generate pressure-based wind field + advected clouds
     let cloud_res = (render_size / 2).max(192);
     let wind_pipeline = WindFieldPipeline::new(&gpu);
+    let rotation_rate = 24.0 / params.rotation_period_h;
     let wind_field = wind_pipeline.generate(
         &gpu, &terrain, cloud_res, seed,
         ocean_level, params.axial_tilt_deg.to_radians(), 0.5,
+        rotation_rate, derived.base_temperature_c, derived.atmosphere_strength,
     );
     let cloud_density = cloud_pipeline.generate(
         &gpu, &terrain, cloud_res, seed,
@@ -307,7 +309,7 @@ fn main() {
         storm_count: 2.0, storm_size: 1.0, night_lights: 0.0, star_color_temp: 0.5,
         city_light_hue: 0.0, show_ao: 1.0, show_water: 1.0, show_ice: 1.0, show_biomes: 1.0,
         show_clouds: 1.0, show_atmosphere_layer: 0.0, show_cities: 0.0, cloud_opacity: 1.0,
-        cloud_advection: 0.0, _pad0: 0.0, _pad1: 0.0, _pad2: 0.0,
+        cloud_advection: 0.0, rotation_rate: 1.0, atm_pressure: 0.7, _pad2: 0.0,
     };
 
     // Render without advection

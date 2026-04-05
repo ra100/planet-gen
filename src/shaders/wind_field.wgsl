@@ -14,8 +14,12 @@ struct WindFieldParams {
     seed: u32,
     ocean_level: f32,
     axial_tilt_rad: f32,
-    season: f32,         // 0=winter, 0.5=equinox, 1=summer
-    smooth_weight: f32,  // smoothing strength per iteration (0.15 typical)
+    season: f32,           // 0=winter, 0.5=equinox, 1=summer
+    smooth_weight: f32,    // smoothing strength per iteration (0.15 typical)
+    rotation_rate: f32,    // relative to Earth (1.0 = 24h, 0.5 = 48h, 2.0 = 12h)
+    base_temp_c: f32,      // planet mean temperature °C (15 = Earth)
+    atm_pressure: f32,     // atmospheric pressure in bar (1.0 = Earth)
+    _pad0: u32,
 }
 
 @group(0) @binding(0) var<uniform> params: WindFieldParams;
@@ -120,12 +124,39 @@ fn smooth_continentality(pos: vec3<f32>, idx: u32) {
 }
 
 // === Mode 2: Pressure field ===
-// 7-term pressure model inspired by planet_heightmap_generation.
+// Rotation-rate-dependent cell boundaries (Kaspi & Showman 2015).
+// Temperature-dependent Hadley width (+1° per 4°C, reverses at 21°C).
+// Pressure-dependent wind scaling from ExoPlaSim data.
+
+// Compute Hadley cell top latitude from rotation rate and temperature.
+// Kaspi & Showman: Earth (Omega=1) → 30°; slow rotation → wider cells.
+// Temperature: widens 1° per 4°C warming up to 21°C global mean.
+fn hadley_top_lat() -> f32 {
+    let omega = max(params.rotation_rate, 0.1);
+    // Base from rotation: 30°/Omega^0.3, capped at 70°
+    var base = min(30.0 / pow(omega, 0.3), 70.0);
+    // Temperature adjustment: +1° per 4°C above 15°C, reverses above 21°C
+    // (melting ice caps reduce pole-equator ΔT → Hadley cell shrinks back)
+    let temp_c = params.base_temp_c;
+    if (temp_c <= 21.0) {
+        let temp_excess = clamp(temp_c - 15.0, -20.0, 6.0);
+        base += temp_excess * 0.25;
+    } else {
+        let overshoot = clamp(temp_c - 21.0, 0.0, 14.0);
+        base += 1.5 - overshoot * 0.25; // peaks at 21°C (+1.5°), shrinks above
+    }
+    return clamp(base, 15.0, 70.0);
+}
+
+// Subpolar low latitude from rotation rate
+fn subpolar_lat() -> f32 {
+    let omega = max(params.rotation_rate, 0.1);
+    return min(60.0 / pow(omega, 0.2), 80.0);
+}
 
 fn compute_pressure(pos: vec3<f32>, idx: u32) {
     let continentality = src[idx]; // from smoothed continentality
     let height = height_data[idx];
-    let is_ocean = height <= params.ocean_level;
 
     let tilt = params.axial_tilt_rad;
     let tilted_y = pos.y * cos(tilt) + pos.z * sin(tilt);
@@ -133,44 +164,44 @@ fn compute_pressure(pos: vec3<f32>, idx: u32) {
     let lat_deg = lat / DEG;
     let abs_lat_deg = abs(lat_deg);
 
-    // Longitude for ITCZ variation
-    let lon = atan2(pos.x, pos.z);
+    let season_sign = select(-1.0, 1.0, params.season > 0.5);
 
-    let season_sign = select(-1.0, 1.0, params.season > 0.5); // NH summer = +1
+    // Rotation-dependent cell boundaries
+    let hadley_lat = hadley_top_lat();
+    let polar_lat = subpolar_lat();
 
-    var pressure = 1013.0; // baseline hPa
+    var pressure = 1013.0;
 
-    // (a) ITCZ low — thermal equator shifts with season + longitude variation
-    // ITCZ bows poleward over continents (monsoon effect via noise + continentality)
+    // (a) ITCZ low — longitude-varying, follows thermal equator
+    // Monsoon: ITCZ shifts 15-20° poleward over large continents in summer
     let so = vec3<f32>(f32(params.seed), fract(f32(params.seed) * 0.001618) * 89.0, 0.0);
-    let itcz_lon_noise = snoise(pos * 1.5 + so) * 4.0; // ±4° longitude variation
-    let itcz_continent_pull = continentality * 8.0 * season_sign; // land pulls ITCZ poleward in summer
-    let itcz_base = 5.0 * season_sign; // base 5° toward summer pole
-    let itcz_lat = itcz_base + itcz_lon_noise + itcz_continent_pull;
+    let itcz_lon_noise = snoise(pos * 1.5 + so) * 5.0;
+    // Stronger continent pull: up to 15° poleward (monsoon)
+    let monsoon_pull = continentality * 15.0 * season_sign;
+    let itcz_base = 5.0 * season_sign * (tilt / (23.4 * DEG)); // scale with tilt
+    let itcz_lat = itcz_base + itcz_lon_noise + monsoon_pull;
     let d_itcz = lat_deg - itcz_lat;
-    pressure -= 15.0 * exp(-0.5 * (d_itcz / 8.0) * (d_itcz / 8.0));
+    pressure -= 15.0 * exp(-0.5 * pow(d_itcz / 8.0, 2.0));
 
-    // (b) Subtropical highs at ±30° — weakened over hot land
+    // (b) Subtropical highs at ±hadley_lat — weakened over hot land
     let season_shift = season_sign * 5.0;
-    let nh_sub = 30.0 + season_shift;
-    let sh_sub = -(30.0 - season_shift);
-    let high_intensity = 12.0 * (1.0 - 0.3 * continentality);
+    let nh_sub = hadley_lat + season_shift;
+    let sh_sub = -(hadley_lat - season_shift);
+    let high_intensity = 12.0 * (1.0 - 0.35 * continentality);
     pressure += high_intensity * exp(-0.5 * pow((lat_deg - nh_sub) / 10.0, 2.0));
     pressure += high_intensity * exp(-0.5 * pow((lat_deg - sh_sub) / 10.0, 2.0));
 
-    // (c) Subpolar lows at ±60°
-    pressure -= 10.0 * exp(-0.5 * pow((lat_deg - 60.0) / 10.0, 2.0));
-    pressure -= 10.0 * exp(-0.5 * pow((lat_deg + 60.0) / 10.0, 2.0));
+    // (c) Subpolar lows at ±polar_lat
+    pressure -= 10.0 * exp(-0.5 * pow((lat_deg - polar_lat) / 10.0, 2.0));
+    pressure -= 10.0 * exp(-0.5 * pow((lat_deg + polar_lat) / 10.0, 2.0));
 
     // (d) Polar highs at ±85°
     pressure += 8.0 * exp(-0.5 * pow((lat_deg - 85.0) / 8.0, 2.0));
     pressure += 8.0 * exp(-0.5 * pow((lat_deg + 85.0) / 8.0, 2.0));
 
-    // (e) Continental thermal modifier
-    // Summer: thermal low over hot continent, Winter: thermal high
+    // (e) Continental thermal modifier (monsoon driver)
     let continental_scale = smooth_step(0.2, 0.5, continentality);
     if (continental_scale > 0.001) {
-        // Latitude-dependent thermal effect (strongest at 30-60°)
         let lat_factor = smooth_step(15.0, 30.0, abs_lat_deg)
                        * smooth_step(90.0, 60.0, abs_lat_deg);
         let is_summer = (season_sign > 0.0 && lat > 0.0) || (season_sign < 0.0 && lat < 0.0);
@@ -232,12 +263,27 @@ fn compute_wind(pos: vec3<f32>, idx: u32) {
     let cos_a = cos(total_angle);
     let sin_a = sin(total_angle);
 
-    // Rotate PGF and apply friction speed reduction (0.6×)
-    let wind_e = (pgf_e * cos_a - pgf_n * sin_a) * 0.6;
-    let wind_n = (pgf_e * sin_a + pgf_n * cos_a) * 0.6;
+    // Pressure-dependent wind speed scaling (ExoPlaSim: v ~ (1/P)^0.15)
+    // Thinner atmospheres have faster winds; thicker have slower
+    let p = max(params.atm_pressure, 0.05);
+    let pressure_wind_scale = pow(1.0 / p, 0.15);
+
+    // Rotate PGF and apply friction speed reduction (0.6×) + pressure scaling
+    let wind_e = (pgf_e * cos_a - pgf_n * sin_a) * 0.6 * pressure_wind_scale;
+    let wind_n = (pgf_e * sin_a + pgf_n * cos_a) * 0.6 * pressure_wind_scale;
 
     // Convert to 3D tangent vector for advection shader
-    let wind_3d = east * wind_e + north * wind_n;
+    var wind_3d = east * wind_e + north * wind_n;
+
+    // Small-scale turbulence: perturb wind direction with noise
+    // Breaks straight-line cloud stretching; creates eddies and swirls
+    let so = vec3<f32>(f32(params.seed), fract(f32(params.seed) * 0.001618) * 89.0, 0.0);
+    let turb_e = snoise(pos * 8.0 + so + vec3<f32>(200.0, 0.0, 0.0)) * 0.12
+               + snoise(pos * 16.0 + so + vec3<f32>(300.0, 0.0, 0.0)) * 0.06;
+    let turb_n = snoise(pos * 8.0 + so + vec3<f32>(0.0, 200.0, 0.0)) * 0.12
+               + snoise(pos * 16.0 + so + vec3<f32>(0.0, 300.0, 0.0)) * 0.06;
+    let wind_speed = length(wind_3d);
+    wind_3d += (east * turb_e + north * turb_n) * wind_speed;
 
     // Store as 3 components: [x, y, z] at offset 3*idx
     let base = idx * 3u;

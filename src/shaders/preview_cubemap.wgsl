@@ -36,6 +36,9 @@ struct Uniforms {
     show_cities: f32,
     cloud_opacity: f32,    // 0.0 = transparent, 1.0 = full opacity
     cloud_advection: f32,  // 1.0 = advected cubemap modulates clouds, 0.0 = per-pixel only
+    rotation_rate: f32,    // relative to Earth (1.0 = 24h day)
+    atm_pressure: f32,     // atmospheric pressure in bar (1.0 = Earth)
+    _pad2: f32,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -249,45 +252,85 @@ fn compute_temperature(sphere_pos: vec3<f32>, height: f32, season: f32) -> f32 {
     return base_temp + lapse + temp_noise + region_temp_bias + current_temp;
 }
 
+// ---- Rotation-dependent cell boundaries (Kaspi & Showman 2015) ----
+// Returns Hadley cell top latitude in degrees from rotation rate Omega (Earth=1.0)
+// and planet mean temperature. Temperature widens 1° per 4°C up to 21°C, then reverses.
+fn preview_hadley_top() -> f32 {
+    let omega = max(uniforms.rotation_rate, 0.1);
+    // Base from rotation: 30°/Omega^0.3, capped at 70°
+    var base = min(30.0 / pow(omega, 0.3), 70.0);
+    // Temperature adjustment: +1° per 4°C above 15°C, reverses above 21°C
+    let temp_c = uniforms.base_temp_c;
+    if (temp_c <= 21.0) {
+        let temp_excess = clamp(temp_c - 15.0, -20.0, 6.0);
+        base += temp_excess * 0.25;
+    } else {
+        // Above 21°C: shrinks back (melting ice caps reduce pole-equator ΔT)
+        let overshoot = clamp(temp_c - 21.0, 0.0, 14.0);
+        base += 1.5 - overshoot * 0.25; // peaks at 21°C (+1.5°), shrinks above
+    }
+    return clamp(base, 15.0, 70.0);
+}
+
+fn preview_subpolar_lat() -> f32 {
+    let omega = max(uniforms.rotation_rate, 0.1);
+    return min(60.0 / pow(omega, 0.2), 80.0);
+}
+
 // ---- Hadley cell moisture ----
 fn hadley_cell_moisture(latitude_rad: f32) -> f32 {
     let lat_deg = abs(latitude_rad) * 180.0 / 3.14159;
-    // ITCZ: tropical wet belt
+    let hadley_lat = preview_hadley_top();
+    let polar_lat = preview_subpolar_lat();
+
+    // ITCZ: tropical wet belt (always centered near equator)
     let itcz_wet = exp(-lat_deg * lat_deg / 200.0) * 200.0;
-    // Subtropical dry: reduced intensity, narrower — deserts are regional, not planet-wide
-    let subtropical_dry = -80.0 * exp(-((lat_deg - 28.0) * (lat_deg - 28.0)) / 60.0);
-    // Mid-latitude wet belt (westerlies)
-    let polar_front_wet = 90.0 * exp(-((lat_deg - 50.0) * (lat_deg - 50.0)) / 200.0);
+    // Subtropical dry: centered at Hadley cell top (rotation-dependent)
+    let subtropical_dry = -80.0 * exp(-((lat_deg - hadley_lat) * (lat_deg - hadley_lat)) / 60.0);
+    // Mid-latitude wet belt: between Hadley top and subpolar low
+    let midlat_center = (hadley_lat + polar_lat) * 0.5;
+    let polar_front_wet = 90.0 * exp(-((lat_deg - midlat_center) * (lat_deg - midlat_center)) / 200.0);
     // Polar drying
-    let polar_dry = -60.0 * smooth_step(65.0, 85.0, lat_deg);
+    let polar_dry = -60.0 * smooth_step(polar_lat + 5.0, polar_lat + 25.0, lat_deg);
     // Higher base ensures most temperate land has enough moisture for vegetation
     return max(itcz_wet + subtropical_dry + polar_front_wet + polar_dry + 90.0, 10.0);
 }
 
 // Wind direction from Hadley/Ferrel/Polar cells — smooth transitions, Coriolis curvature
-// Cell boundaries shift with thermal equator (seasonal migration)
+// Cell boundaries shift with rotation rate (Kaspi & Showman 2015) and thermal equator
 fn wind_direction_vec(latitude_rad: f32) -> vec3<f32> {
     let hemisphere = sign(latitude_rad + 0.0001);
 
+    // Rotation-dependent cell boundaries
+    let hadley_lat = preview_hadley_top();
+    let polar_lat = preview_subpolar_lat();
+    // Transition zone widths scale with cell size
+    let trade_top = hadley_lat * 0.75;       // trades fade near top of Hadley cell
+    let trade_full = hadley_lat * 1.05;      // fully into westerlies
+    let west_start = hadley_lat * 0.9;
+    let west_end = polar_lat * 0.92;
+    let polar_start = polar_lat * 0.95;
+
     // Seasonal shift: thermal equator moves with sub-solar point
-    // Summer hemisphere trades expand 5-10°, winter contracts
     let season_shift = uniforms.axial_tilt_rad * ((uniforms.season - 0.5) * 2.0) * 0.4;
-    let shifted_lat = latitude_rad - season_shift; // shift cells toward summer hemisphere
+    let shifted_lat = latitude_rad - season_shift;
     let lat_deg = abs(shifted_lat) * 180.0 / 3.14159;
 
-    // Three-cell zonal wind with smooth_step blending
-    let trade = (1.0 - smooth_step(22.0, 33.0, lat_deg)) * -0.8;
-    let westerly = smooth_step(28.0, 42.0, lat_deg) * (1.0 - smooth_step(55.0, 68.0, lat_deg)) * 0.85;
-    let polar_east = smooth_step(62.0, 75.0, lat_deg) * -0.45;
+    // Three-cell zonal wind with rotation-dependent boundaries
+    let trade = (1.0 - smooth_step(trade_top, trade_full, lat_deg)) * -0.8;
+    let westerly = smooth_step(west_start, west_start + 10.0, lat_deg)
+                 * (1.0 - smooth_step(west_end - 5.0, west_end + 8.0, lat_deg)) * 0.85;
+    let polar_east = smooth_step(polar_start, polar_start + 10.0, lat_deg) * -0.45;
     var wind_x = trade + westerly + polar_east;
 
-    // Coriolis-deflected meridional flow
-    let hadley_meridional = -smooth_step(8.0, 25.0, lat_deg) * (1.0 - smooth_step(28.0, 38.0, lat_deg)) * 0.35;
-    let ferrel_meridional = smooth_step(38.0, 48.0, lat_deg) * (1.0 - smooth_step(55.0, 65.0, lat_deg)) * 0.25;
+    // Coriolis-deflected meridional flow (boundaries track cells)
+    let hadley_meridional = -smooth_step(8.0, hadley_lat * 0.7, lat_deg)
+                          * (1.0 - smooth_step(hadley_lat * 0.9, hadley_lat * 1.2, lat_deg)) * 0.35;
+    let ferrel_center = (hadley_lat + polar_lat) * 0.5;
+    let ferrel_meridional = smooth_step(ferrel_center - 10.0, ferrel_center, lat_deg)
+                          * (1.0 - smooth_step(ferrel_center, ferrel_center + 10.0, lat_deg)) * 0.25;
     var wind_y = (hadley_meridional + ferrel_meridional) * hemisphere;
 
-    // The 0.1 z-component ensures normalize() never gets a zero vector,
-    // so wind_x can smoothly pass through zero at cell boundaries.
     return normalize(vec3<f32>(wind_x, wind_y, 0.1));
 }
 
@@ -317,10 +360,27 @@ fn compute_moisture(sphere_pos: vec3<f32>, height: f32, season: f32) -> f32 {
     // Shift Hadley cells with thermal equator (same sub-solar shift as temperature)
     let season_angle = (season - 0.5) * 2.0;
     let sub_solar_lat = tilt * season_angle;
-    let thermal_lat = effective_lat - sub_solar_lat;
+
+    // Monsoon: ITCZ shifts 15-20° poleward over large continents in summer
+    // Sample local land to determine monsoon pull
+    let local_h = textureSample(height_tex, height_sampler, sphere_pos).r;
+    let is_local_land = local_h > uniforms.ocean_level;
+    // Wider samples for continent size detection
+    let monsoon_step = 0.15;
+    let h_far1 = textureSample(height_tex, height_sampler, normalize(sphere_pos + vec3<f32>(monsoon_step, 0.0, 0.0))).r;
+    let h_far2 = textureSample(height_tex, height_sampler, normalize(sphere_pos - vec3<f32>(monsoon_step, 0.0, 0.0))).r;
+    let h_far3 = textureSample(height_tex, height_sampler, normalize(sphere_pos + vec3<f32>(0.0, 0.0, monsoon_step))).r;
+    var land_score = 0.0;
+    if (is_local_land) { land_score += 0.25; }
+    if (h_far1 > uniforms.ocean_level) { land_score += 0.25; }
+    if (h_far2 > uniforms.ocean_level) { land_score += 0.25; }
+    if (h_far3 > uniforms.ocean_level) { land_score += 0.25; }
+    // Monsoon pull: ITCZ shifts poleward over large land masses in summer
+    let monsoon_pull = land_score * 15.0 * 3.14159 / 180.0 * season_angle;
+    let thermal_lat = effective_lat - sub_solar_lat - monsoon_pull;
 
     // Hadley cell base moisture — scaled by ocean fraction FIRST.
-    // Softened ocean scaling: low-water worlds still get some moisture (was 0.05 + 0.95*)
+    // Softened ocean scaling: low-water worlds still get some moisture
     let ocean_scale = 0.25 + 0.75 * uniforms.ocean_fraction;
     let hadley_base = hadley_cell_moisture(thermal_lat) * ocean_scale;
 
@@ -346,37 +406,55 @@ fn compute_moisture(sphere_pos: vec3<f32>, height: f32, season: f32) -> f32 {
 
     let is_land = height > uniforms.ocean_level;
     if (is_land) {
-        // Continentality: more land neighbors = drier interior
-        let coastal_factor = ocean_count / 4.0; // 0 = deep interior, 1 = surrounded by ocean
-        moisture *= 0.7 + 0.4 * coastal_factor; // Interior: ×0.7, coast: ×1.1
-    } else {
-        moisture *= 1.3; // Over ocean
-    }
-
-    // === CUBEMAP-BASED RAIN SHADOW (Unit 1) ===
-    // Rain shadow + interior drying (2 extra texture reads, reuses neighbor data from above)
-    if (is_land) {
+        // === Wind-aware moisture penetration (worldbuildingpasta rules) ===
+        // Onshore winds carry moisture 2000-3000km; offshore only ~1000km
+        // On an Earth-radius sphere: 1° ≈ 111km, step 0.06 ≈ 380km, 0.30 ≈ 1900km
         let wind = wind_direction_vec(effective_lat);
         let tangent_wind = normalize(wind - sphere_pos * dot(wind, sphere_pos));
 
-        // Single upwind sample at moderate distance (replaces 3-step loop)
+        // Multi-distance upwind sampling to detect distance from coast
+        // Check if wind is onshore (blowing from ocean toward land)
+        var ocean_upwind = 0.0;
+        var land_depth = 0.0;
+        let upwind_steps = array<f32, 3>(0.08, 0.18, 0.30); // ~500km, 1100km, 1900km
+        for (var us = 0u; us < 3u; us++) {
+            let up_pos = normalize(sphere_pos + tangent_wind * upwind_steps[us]);
+            let up_h = textureSample(height_tex, height_sampler, up_pos).r;
+            if (up_h < uniforms.ocean_level) {
+                ocean_upwind += 1.0; // ocean upwind = onshore flow
+            } else {
+                land_depth += 1.0; // more land upwind = deeper interior
+            }
+        }
+
+        // Onshore: ocean upwind → moisture penetrates further (2000-3000km)
+        // Offshore: land upwind → moisture depletes quickly (1000km)
+        let onshore_frac = ocean_upwind / 3.0; // 0=offshore, 1=onshore
+        // Onshore coasts stay moist; offshore and deep interiors dry out
+        let near_coast = ocean_count / 4.0; // from 4-neighbor sample
+        let penetration = mix(0.55, 1.0, max(onshore_frac, near_coast * 0.8));
+        moisture *= penetration;
+
+        // Deep interior drying: >3000km from coast → very dry
+        let interior_factor = (1.0 - near_coast) * (land_depth / 3.0);
+        moisture *= 1.0 - interior_factor * 0.45; // up to 45% reduction for deep interiors
+
+        // === Rain shadow from mountains (>2km relief) ===
+        // Check upwind terrain for mountains blocking moisture
         let upwind_pos = normalize(sphere_pos + tangent_wind * 0.08);
         let upwind_h = textureSample(height_tex, height_sampler, upwind_pos).r;
         let upwind_elev = max(upwind_h - uniforms.ocean_level, 0.0);
         let my_elevation = max(height - uniforms.ocean_level, 0.0);
 
-        if (upwind_elev > my_elevation + 0.03) {
-            let shadow_strength = clamp((upwind_elev - my_elevation) * 5.0, 0.0, 0.7);
+        // Rain shadow significant when upwind relief > ~1km (0.03 in height units ≈ 1.5km)
+        if (upwind_elev > my_elevation + 0.02) {
+            let relief = upwind_elev - my_elevation;
+            // Strong shadow above 2km relief (0.04 height units), moderate at 1km
+            let shadow_strength = smooth_step(0.02, 0.06, relief) * 0.7;
             moisture *= (1.0 - shadow_strength);
         }
-
-        // Interior drying: reuse the 4 neighbor samples already fetched for continentality
-        // ocean_count is from the near step (0.06), add one far sample for depth
-        let far_pos = normalize(sphere_pos + tangent_wind * 0.15);
-        let h_far = textureSample(height_tex, height_sampler, far_pos).r;
-        let far_is_land = select(0.0, 1.0, h_far > uniforms.ocean_level);
-        let deep_interior = (1.0 - ocean_count / 4.0) * far_is_land;
-        moisture *= 1.0 - deep_interior * 0.3;
+    } else {
+        moisture *= 1.3; // Over ocean
     }
 
     // === Regional moisture character ===
@@ -386,6 +464,13 @@ fn compute_moisture(sphere_pos: vec3<f32>, height: f32, season: f32) -> f32 {
     moisture *= 1.0 + region_moisture_bias * 0.25; // ±25% regional variation
 
     moisture *= 0.5 + uniforms.ocean_fraction;
+
+    // Pressure-dependent precipitation scaling (ExoPlaSim: precip ~ P^(-0.5))
+    // Thinner atmospheres cycle water faster → more precipitation per unit moisture
+    // Thicker atmospheres suppress evaporation → less precipitation
+    let atm_p = max(uniforms.atm_pressure, 0.05);
+    moisture *= pow(atm_p, -0.5);
+
     return clamp(moisture, 0.0, 400.0);
 }
 
@@ -539,9 +624,14 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     // Climate-driven cloud coverage boost: warm+moist areas get more clouds
     let warm_moist_boost = smooth_step(15.0, 28.0, temp) * smooth_step(0.3, 0.6, moisture_norm) * 0.10;
 
-    // === Latitude-banded cloud distribution ===
-    let subtropical = smooth_step(15.0, 25.0, cloud_lat_deg) * smooth_step(40.0, 30.0, cloud_lat_deg);
-    let midlat = smooth_step(30.0, 45.0, cloud_lat_deg) * smooth_step(65.0, 55.0, cloud_lat_deg);
+    // === Latitude-banded cloud distribution (rotation-dependent) ===
+    let cl_hadley = preview_hadley_top();
+    let cl_polar = preview_subpolar_lat();
+    let cl_midlat_center = (cl_hadley + cl_polar) * 0.5;
+    let subtropical = smooth_step(cl_hadley - 15.0, cl_hadley - 5.0, cloud_lat_deg)
+                    * smooth_step(cl_hadley + 10.0, cl_hadley, cloud_lat_deg);
+    let midlat = smooth_step(cl_hadley, cl_midlat_center, cloud_lat_deg)
+               * smooth_step(cl_polar + 5.0, cl_polar - 5.0, cloud_lat_deg);
     let lat_climate = itcz_factor * 0.30               // ITCZ: heavy clouds
         - subtropical * 0.12                             // Subtropical: clear zone (reduced suppression)
         + midlat * 0.12                                  // Mid-latitude: frontal
@@ -1198,13 +1288,20 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             surface_color = mix(surface_color, land_ice_color, ice_blend);
         }
 
-        // Altitude zonation — biome-aware: tropical and arid mountains differ from polar
-        let abs_lat = abs(effective_lat);
-        let lat_factor = abs_lat / 1.5708; // 0 at equator, 1 at pole
-        let snow_line = 0.50 + 0.20 * (1.0 - lat_factor); // higher at equator
-        let rock_line = snow_line - 0.10;
-        let alpine_line = rock_line - 0.12;
-        let highland_line = 0.12;
+        // Altitude zonation — derived from 6.5°C/km lapse rate
+        // 1km altitude ~ 8° poleward for vegetation/snow lines
+        // Compute sea-level temperature to derive where each biome zone starts
+        let sea_level_temp = compute_temperature(rotated, uniforms.ocean_level, 0.5);
+        // Convert threshold temperatures to altitude via lapse rate: alt_km = (T_sealevel - T_threshold) / 6.5
+        // Then to land_height units: land_height = alt_km / 5.0
+        let snow_elev_km = max(sea_level_temp / 6.5, 0.0);         // 0°C line
+        let rock_elev_km = max((sea_level_temp - 5.0) / 6.5, 0.0); // 5°C line
+        let alpine_elev_km = max((sea_level_temp - 10.0) / 6.5, 0.0); // 10°C treeline
+        let highland_elev_km = max((sea_level_temp - 18.0) / 6.5, 0.0); // 18°C highland start
+        let snow_line = clamp(snow_elev_km / 5.0, 0.05, 0.95);
+        let rock_line = clamp(rock_elev_km / 5.0, 0.04, snow_line - 0.03);
+        let alpine_line = clamp(alpine_elev_km / 5.0, 0.03, rock_line - 0.03);
+        let highland_line = clamp(highland_elev_km / 5.0, 0.02, alpine_line - 0.02);
 
         let seasonal_temp_local = compute_temperature(rotated, height, uniforms.season);
         let mean_moisture_local = compute_moisture(rotated, height, 0.5);

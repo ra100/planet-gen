@@ -42,8 +42,8 @@ pub struct PreviewUniforms {
     pub show_cities: f32,
     pub cloud_opacity: f32,
     pub cloud_advection: f32,  // 1.0 = advected cubemap modulates clouds, 0.0 = per-pixel only
-    pub _pad0: f32,
-    pub _pad1: f32,
+    pub rotation_rate: f32,    // relative to Earth (1.0 = 24h day)
+    pub atm_pressure: f32,     // atmospheric pressure in bar (1.0 = Earth)
     pub _pad2: f32,
 }
 
@@ -445,7 +445,7 @@ mod tests {
             show_cities: 0.0,
             cloud_opacity: 1.0,
             cloud_advection: 0.0,
-            _pad0: 0.0, _pad1: 0.0, _pad2: 0.0,
+            rotation_rate: 1.0, atm_pressure: 0.7, _pad2: 0.0,
         };
 
         let size = 256;
