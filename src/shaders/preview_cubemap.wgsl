@@ -1624,7 +1624,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let shadow_sfc_h = textureSample(height_tex, height_sampler, shadow_sample_pos).r;
         var cloud_above = compute_cloud_density(shadow_sample_pos, shadow_sfc_h);
         if (uniforms.cloud_advection > 0.5) {
-            cloud_above *= sample_cloud_advected(shadow_sample_pos);
+            let cw = sample_cloud_advected(shadow_sample_pos);
+            let cp = clamp(1.0 / max(cw, 0.15), 0.3, 4.0);
+            cloud_above = pow(max(cloud_above, 0.0), cp);
         }
         let surface_shadow = exp(-cloud_above * 3.0);
         lit_color *= mix(1.0, surface_shadow, 0.65);
@@ -1685,8 +1687,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // divergence/rain shadow gets cleared.
         var low_density = compute_cloud_density(low_world, low_sfc_h);
         if (uniforms.cloud_advection > 0.5) {
-            let advect_weight = sample_cloud_advected(low_world);
-            low_density *= advect_weight;
+            // Advection weight modifies cloud coverage as a power remap.
+            // weight > 1 (wet zone): exponent < 1 → thin clouds become thick, new groups appear
+            // weight < 1 (dry zone): exponent > 1 → clouds thin out and disappear
+            // This adds/removes cloud GROUPS, not just adjusts opacity.
+            let w = sample_cloud_advected(low_world);
+            let power = clamp(1.0 / max(w, 0.15), 0.3, 4.0);
+            low_density = pow(max(low_density, 0.0), power);
         }
 
         if (low_density > 0.005) {
@@ -1701,7 +1708,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let shadow_h = textureSample(height_tex, height_sampler, shadow_pos).r;
             var shadow_density = compute_cloud_density(shadow_pos, shadow_h);
             if (uniforms.cloud_advection > 0.5) {
-                shadow_density *= sample_cloud_advected(shadow_pos);
+                let sw = sample_cloud_advected(shadow_pos);
+                let sp = clamp(1.0 / max(sw, 0.15), 0.3, 4.0);
+                shadow_density = pow(max(shadow_density, 0.0), sp);
             }
             let shadow = exp(-shadow_density * 3.0);
 

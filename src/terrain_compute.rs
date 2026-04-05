@@ -1429,7 +1429,7 @@ impl CloudAdvectionPipeline {
                     label: Some("cloud h"), contents: bytemuck::cast_slice(&terrain.faces[face as usize]),
                     usage: wgpu::BufferUsages::STORAGE,
                 });
-                let p = CloudAdvectParams { face, resolution, seed, mode: 1, dt: 0.012, precip_rate: 0.025,
+                let p = CloudAdvectParams { face, resolution, seed, mode: 1, dt: 0.015, precip_rate: 0.025,
                     ocean_level, ocean_fraction, axial_tilt_rad, season, evaporation: 0.035, blend_factor };
                 let p_buf = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("cloud p"), contents: bytemuck::bytes_of(&p), usage: wgpu::BufferUsages::UNIFORM,
