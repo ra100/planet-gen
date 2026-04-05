@@ -1,5 +1,8 @@
 // Cloud advection compute shader.
-// Semi-Lagrangian advection on cubemap: trace back along wind, sample source density.
+// Produces a REDISTRIBUTION WEIGHT cubemap (not raw cloud density).
+// Weight ~1.0 = neutral, >1.0 = wind convergence accumulates clouds,
+// <1.0 = divergence/rain shadow clears clouds.
+// The preview shader multiplies per-pixel cloud density by this weight.
 // Includes noise.wgsl and cube_sphere.wgsl (concatenated at load time).
 
 struct CloudParams {
@@ -158,68 +161,45 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let local_idx = id.y * res + id.x;
 
     if (params.mode == 0u) {
-        // === INIT MODE: generate noise-based seed density ===
+        // === INIT MODE: random redistribution weight with spatial variation ===
+        // Start near 1.0 (neutral) with noise variation so wind has something to move
         let so = seed_offset(params.seed + 8000u);
-        let p = pos * 7.0 + so;
-        let warp = vec3<f32>(
-            snoise(p * 0.5 + vec3<f32>(31.7, 0.0, 0.0)),
-            snoise(p * 0.5 + vec3<f32>(0.0, 47.3, 0.0)),
-            snoise(p * 0.5 + vec3<f32>(0.0, 0.0, 73.1))
-        ) * 0.4;
-        var noise = snoise(p + warp) * 0.5 + snoise((p + warp) * 2.1) * 0.25
-                  + snoise((p + warp) * 4.2) * 0.13;
-        noise = noise * 0.5 + 0.4; // bias toward some density
-
-        // Weather-scale regions
-        let weather = snoise(pos * 1.5 + so * 0.3 + vec3<f32>(77.0, 0.0, 0.0));
-        noise *= 0.7 + 0.3 * (weather * 0.5 + 0.5);
-
-        dst_density[idx] = clamp(noise, 0.0, 1.0);
+        let weather = snoise(pos * 2.0 + so) * 0.3
+                    + snoise(pos * 4.5 + so * 1.3) * 0.15;
+        dst_density[idx] = 1.0 + weather; // range ~0.55 to ~1.45
     } else {
-        // === ADVECT MODE: source-driven advection ===
-        // Each step blends advected (wind-transported) density with fresh
-        // noise-based cloud sources. This prevents wind from stretching
-        // clouds into streaks — sources continuously regenerate, wind spreads them.
+        // === ADVECT MODE: redistribute cloud weight via wind transport ===
+        // Weight > 1 = convergence accumulates clouds
+        // Weight < 1 = divergence / rain shadow clears clouds
 
         let wind = wind_at(pos);
 
-        // Turbulent diffusion: random displacement to break coherent stretching
+        // Turbulent diffusion
         let turb_hash = pcg_hash(idx + params.seed * 7u + params.mode * 31u);
-        let turb_angle = f32(turb_hash & 0xFFFFu) / 10430.0; // [0, 2π)
-        let turb_mag = f32((turb_hash >> 16u) & 0xFFu) / 255.0 * 0.025; // 3x stronger
+        let turb_angle = f32(turb_hash & 0xFFFFu) / 10430.0;
+        let turb_mag = f32((turb_hash >> 16u) & 0xFFu) / 255.0 * 0.025;
         var up_t = vec3<f32>(0.0, 1.0, 0.0);
         if (abs(pos.y) > 0.95) { up_t = vec3<f32>(1.0, 0.0, 0.0); }
         let te = normalize(cross(up_t, pos));
         let tn = normalize(cross(pos, te));
         let turb = (te * cos(turb_angle) + tn * sin(turb_angle)) * turb_mag;
 
-        // Trace back along wind to get advected density
+        // Trace back along wind to get advected weight
         let source_pos = normalize(pos - wind * params.dt + turb);
-        let advected = sample_density(source_pos) * params.decay;
+        var weight = sample_density(source_pos);
 
-        // === Fresh cloud source: noise-based "random clouds" ===
-        // Driven by climate zones but always present as noise
-        let so = seed_offset(params.seed + 8000u);
-        let p = pos * 7.0 + so;
-        let warp = vec3<f32>(
-            snoise(p * 0.5 + vec3<f32>(31.7, 0.0, 0.0)),
-            snoise(p * 0.5 + vec3<f32>(0.0, 47.3, 0.0)),
-            snoise(p * 0.5 + vec3<f32>(0.0, 0.0, 73.1))
-        ) * 0.3;
-        var fresh = snoise(p + warp) * 0.45 + snoise((p + warp) * 2.1) * 0.22
-                  + snoise((p + warp) * 4.2) * 0.11;
-        fresh = clamp(fresh * 0.5 + 0.35, 0.0, 1.0);
+        // Relax toward 1.0 (prevents runaway accumulation or depletion)
+        weight = mix(weight, 1.0, 1.0 - params.decay);
 
-        // Weather-scale regions: some areas cloudy, some clear
-        let weather = snoise(pos * 1.5 + so * 0.3 + vec3<f32>(77.0, 0.0, 0.0));
-        fresh *= 0.65 + 0.35 * (weather * 0.5 + 0.5);
-
-        // Climate modulation: ITCZ gets more clouds, subtropics fewer
+        // === Climate source/sink: push weight above/below 1.0 ===
         let h = height_data[local_idx];
         let cond = condensation_at(pos, h);
-        fresh *= 0.4 + cond * 2.5; // climate shapes the distribution
+        // Convergence zones add weight, divergence subtracts
+        // cond ranges ~0.0-0.6; remap to a push centered on 0
+        let climate_push = (cond - 0.2) * 0.15; // ITCZ: +0.06, subtropics: -0.03
+        weight += climate_push;
 
-        // Rain shadow sink: suppress downwind of mountains
+        // Rain shadow: decrease weight downwind of mountains
         let upwind = normalize(pos + wind * 0.05);
         let upwind_fuv = sphere_to_face_uv(upwind);
         let uf = u32(upwind_fuv.x);
@@ -227,15 +207,22 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         let upy = clamp(u32(upwind_fuv.z * f32(res - 1u)), 0u, res - 1u);
         if (uf == params.face) {
             let upwind_h = height_data[upy * res + upx];
-            if (upwind_h > h + 0.06) {
-                fresh *= 0.5; // suppress clouds in rain shadow
+            if (upwind_h > h + 0.05) {
+                weight -= 0.04; // rain shadow reduces cloud weight
             }
         }
 
-        // Blend: wind spreads existing clouds, but sources continuously create new ones
-        // Higher blend_factor = more influence from fresh sources (less streaking)
-        let density = mix(advected, fresh, params.blend_factor);
+        // Blend with fresh noise variation to prevent streaks
+        // blend_factor = 0 → pure wind redistribution (can streak)
+        // blend_factor > 0 → mix in spatial noise (anti-streak)
+        if (params.blend_factor > 0.001) {
+            let so = seed_offset(params.seed + 8000u);
+            let weather = snoise(pos * 2.0 + so) * 0.3
+                        + snoise(pos * 4.5 + so * 1.3) * 0.15;
+            let fresh_weight = 1.0 + weather + climate_push * 3.0;
+            weight = mix(weight, fresh_weight, params.blend_factor);
+        }
 
-        dst_density[idx] = clamp(density, 0.0, 1.0);
+        dst_density[idx] = clamp(weight, 0.2, 2.5);
     }
 }

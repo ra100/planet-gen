@@ -810,9 +810,9 @@ impl eframe::App for PlanetGenApp {
                         self.cloud_advect_steps = steps_i32 as u32;
                         self.needs_terrain = true;
                     }
-                    if ui.add(egui::Slider::new(&mut self.cloud_advect_blend, 0.02..=0.50)
+                    if ui.add(egui::Slider::new(&mut self.cloud_advect_blend, 0.0..=0.50)
                         .text("Blend"))
-                        .on_hover_text("Fresh noise vs advected: 0.02 = wind-dominated (more streaks), 0.5 = noise-dominated (less wind effect)")
+                        .on_hover_text("Anti-streak: 0 = pure wind redistribution, 0.5 = noise-dominated. Controls spatial noise mixed into advection.")
                         .changed()
                     {
                         self.needs_terrain = true;

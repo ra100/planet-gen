@@ -1609,12 +1609,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Cloud shadow on surface (gated by show_clouds)
     if (uniforms.show_clouds > 0.5 && uniforms.cloud_coverage > 0.001) {
         let shadow_sample_pos = normalize(rotated + sun_dir * 0.015);
-        var cloud_above: f32;
+        let shadow_sfc_h = textureSample(height_tex, height_sampler, shadow_sample_pos).r;
+        var cloud_above = compute_cloud_density(shadow_sample_pos, shadow_sfc_h);
         if (uniforms.cloud_advection > 0.5) {
-            cloud_above = clamp(sample_cloud_advected(shadow_sample_pos) * 2.0, 0.0, 1.0);
-        } else {
-            let shadow_sfc_h = textureSample(height_tex, height_sampler, shadow_sample_pos).r;
-            cloud_above = compute_cloud_density(shadow_sample_pos, shadow_sfc_h);
+            cloud_above *= sample_cloud_advected(shadow_sample_pos);
         }
         let surface_shadow = exp(-cloud_above * 3.0);
         lit_color *= mix(1.0, surface_shadow, 0.65);
@@ -1668,23 +1666,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let low_world = (uniforms.rotation * vec4<f32>(low_dir, 0.0)).xyz;
 
         let low_sfc_h = textureSample(height_tex, height_sampler, low_world).r;
-        var low_density: f32;
+        // Always use per-pixel cloud noise (full visual quality: Schneider remap,
+        // cloud types, storms, coverage threshold).
+        // When advection is ON, the advected cubemap provides a redistribution
+        // WEIGHT that modulates where clouds appear — convergence zones get denser,
+        // divergence/rain shadow gets cleared.
+        var low_density = compute_cloud_density(low_world, low_sfc_h);
         if (uniforms.cloud_advection > 0.5) {
-            // Advection is PRIMARY: advected cubemap drives cloud shape.
-            // Per-pixel noise adds only fine detail texture.
-            // Boost: advection equilibrium density is lower than per-pixel,
-            // scale to match Beer-Lambert opacity expectations.
-            let raw_advected = sample_cloud_advected(low_world);
-            let advected = clamp(raw_advected * 2.0 * uniforms.cloud_coverage, 0.0, 1.0);
-
-            // Per-pixel detail: high-frequency noise variation within cloud areas
-            let detail_p = low_world * 18.0 + vec3<f32>(uniforms.cloud_seed * 5.3, 0.0, 0.0);
-            let detail = snoise(detail_p) * 0.15 + snoise(detail_p * 2.3) * 0.08;
-
-            // Advected density + detail texture (clamped, never negative)
-            low_density = max(advected + detail * advected, 0.0);
-        } else {
-            low_density = compute_cloud_density(low_world, low_sfc_h);
+            let advect_weight = sample_cloud_advected(low_world);
+            low_density *= advect_weight;
         }
 
         if (low_density > 0.005) {
@@ -1696,12 +1686,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
             // Self-shadowing: use same source as density (advected or per-pixel)
             let shadow_pos = normalize(low_world + sun_dir * 0.035);
-            var shadow_density: f32;
+            let shadow_h = textureSample(height_tex, height_sampler, shadow_pos).r;
+            var shadow_density = compute_cloud_density(shadow_pos, shadow_h);
             if (uniforms.cloud_advection > 0.5) {
-                shadow_density = clamp(sample_cloud_advected(shadow_pos) * 2.0, 0.0, 1.0);
-            } else {
-                let shadow_h = textureSample(height_tex, height_sampler, shadow_pos).r;
-                shadow_density = compute_cloud_density(shadow_pos, shadow_h);
+                shadow_density *= sample_cloud_advected(shadow_pos);
             }
             let shadow = exp(-shadow_density * 3.0);
 
