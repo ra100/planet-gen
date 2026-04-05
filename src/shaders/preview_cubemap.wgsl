@@ -51,6 +51,23 @@ fn sample_cloud_advected(dir: vec3<f32>) -> f32 {
     return textureSample(cloud_tex, height_sampler, dir).r;
 }
 
+// Blurred advection weight: average 5 tangent-plane samples to smooth
+// the low-res cubemap into gentle gradients for cloud modulation
+fn sample_advect_weight_smooth(dir: vec3<f32>) -> f32 {
+    var up_ref = vec3<f32>(0.0, 1.0, 0.0);
+    if (abs(dir.y) > 0.95) { up_ref = vec3<f32>(1.0, 0.0, 0.0); }
+    let te = normalize(cross(up_ref, dir));
+    let tn = normalize(cross(dir, te));
+    // Diagonal offsets (per cubemap blur feedback: tangent-plane, not axis-aligned)
+    let r = 0.035; // blur radius in sphere coords (~2° on Earth)
+    let w0 = sample_cloud_advected(dir);
+    let w1 = sample_cloud_advected(normalize(dir + (te + tn) * r));
+    let w2 = sample_cloud_advected(normalize(dir + (te - tn) * r));
+    let w3 = sample_cloud_advected(normalize(dir + (-te + tn) * r));
+    let w4 = sample_cloud_advected(normalize(dir + (-te - tn) * r));
+    return (w0 * 2.0 + w1 + w2 + w3 + w4) / 6.0; // center-weighted
+}
+
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -1624,8 +1641,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let shadow_sfc_h = textureSample(height_tex, height_sampler, shadow_sample_pos).r;
         var cloud_above = compute_cloud_density(shadow_sample_pos, shadow_sfc_h);
         if (uniforms.cloud_advection > 0.5) {
-            let cw = sample_cloud_advected(shadow_sample_pos);
-            let cp = clamp(1.0 / max(cw, 0.15), 0.3, 4.0);
+            let cw = sample_advect_weight_smooth(shadow_sample_pos);
+            let cp = clamp(1.0 / max(cw, 0.25), 0.5, 2.5);
             cloud_above = pow(max(cloud_above, 0.0), cp);
         }
         let surface_shadow = exp(-cloud_above * 3.0);
@@ -1691,8 +1708,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             // weight > 1 (wet zone): exponent < 1 → thin clouds become thick, new groups appear
             // weight < 1 (dry zone): exponent > 1 → clouds thin out and disappear
             // This adds/removes cloud GROUPS, not just adjusts opacity.
-            let w = sample_cloud_advected(low_world);
-            let power = clamp(1.0 / max(w, 0.15), 0.3, 4.0);
+            let w = sample_advect_weight_smooth(low_world);
+            let power = clamp(1.0 / max(w, 0.25), 0.5, 2.5);
             low_density = pow(max(low_density, 0.0), power);
         }
 
@@ -1708,8 +1725,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let shadow_h = textureSample(height_tex, height_sampler, shadow_pos).r;
             var shadow_density = compute_cloud_density(shadow_pos, shadow_h);
             if (uniforms.cloud_advection > 0.5) {
-                let sw = sample_cloud_advected(shadow_pos);
-                let sp = clamp(1.0 / max(sw, 0.15), 0.3, 4.0);
+                let sw = sample_advect_weight_smooth(shadow_pos);
+                let sp = clamp(1.0 / max(sw, 0.25), 0.5, 2.5);
                 shadow_density = pow(max(shadow_density, 0.0), sp);
             }
             let shadow = exp(-shadow_density * 3.0);
