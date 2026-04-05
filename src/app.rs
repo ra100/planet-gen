@@ -121,7 +121,7 @@ impl PlanetGenApp {
             show_ice: true,
             show_biomes: true,
             show_clouds: true,
-            show_cloud_advection: false,
+            show_cloud_advection: true,
             show_cities: true,
             show_erosion: false,
             zoom: 1.0,
@@ -293,7 +293,7 @@ impl PlanetGenApp {
 
         // Generate advected cloud density (only when advection toggle is on)
         if self.show_clouds && self.show_cloud_advection {
-            let cloud_res = (self.preview_resolution / 3).max(128);
+            let cloud_res = (self.preview_resolution / 2).max(192);
             let t_cloud = std::time::Instant::now();
             let cloud_density = self.cloud_pipeline.generate(
                 &self.gpu, &terrain, cloud_res, self.cloud_seed,
@@ -398,7 +398,11 @@ impl PlanetGenApp {
                 normals: self.export_normals,
                 roughness: self.export_roughness,
                 water_mask: self.export_water_mask,
+                clouds: self.export_clouds,
             },
+            cloud_coverage: self.cloud_coverage,
+            cloud_type: self.cloud_type,
+            cloud_seed: self.cloud_seed,
         };
 
         let terrain_params = self.terrain_params();

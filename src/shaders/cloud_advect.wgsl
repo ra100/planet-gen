@@ -88,25 +88,37 @@ fn sample_density(dir: vec3<f32>) -> f32 {
     return src_density[idx];
 }
 
-// Wind direction from Hadley/Ferrel/Polar cells (simplified version of preview shader)
+// Wind direction from Hadley/Ferrel/Polar cells with noise perturbation.
+// Position-dependent noise breaks perfect latitude alignment, preventing
+// the horizontal banding that occurs after many advection steps.
 fn wind_at(pos: vec3<f32>) -> vec3<f32> {
     let tilted_y = pos.y * cos(params.axial_tilt_rad) + pos.z * sin(params.axial_tilt_rad);
     let lat = asin(clamp(tilted_y, -1.0, 1.0));
     let hemisphere = sign(lat + 0.0001);
     let season_shift = params.axial_tilt_rad * ((params.season - 0.5) * 2.0) * 0.4;
     let shifted_lat = lat - season_shift;
-    let lat_deg = abs(shifted_lat) * 180.0 / 3.14159;
+
+    // Noise perturbation: ±6° latitude wobble breaks perfect latitude bands.
+    // Low-frequency noise creates weather-scale wind variation.
+    let so = seed_offset(params.seed + 9000u);
+    let lat_noise = snoise(pos * 2.5 + so) * 6.0;
+    let lat_deg = abs(shifted_lat) * 180.0 / 3.14159 + lat_noise;
 
     let trade = (1.0 - smooth_step(22.0, 33.0, lat_deg)) * -0.8;
     let westerly = smooth_step(28.0, 42.0, lat_deg) * (1.0 - smooth_step(55.0, 68.0, lat_deg)) * 0.85;
     let polar_east = smooth_step(62.0, 75.0, lat_deg) * -0.45;
     var wind_x = trade + westerly + polar_east;
-    if (abs(wind_x) < 0.15) { wind_x = sign(wind_x + 0.001) * 0.15; }
 
     let hadley_m = -smooth_step(8.0, 25.0, lat_deg) * (1.0 - smooth_step(28.0, 38.0, lat_deg)) * 0.35;
     let ferrel_m = smooth_step(38.0, 48.0, lat_deg) * (1.0 - smooth_step(55.0, 65.0, lat_deg)) * 0.25;
-    let wind_y = (hadley_m + ferrel_m) * hemisphere;
+    var wind_y = (hadley_m + ferrel_m) * hemisphere;
 
+    // Small directional noise: ±15% variation in both components
+    let dir_noise = snoise(pos * 4.0 + so + vec3<f32>(50.0, 0.0, 0.0)) * 0.15;
+    wind_x += dir_noise;
+    wind_y += snoise(pos * 4.0 + so + vec3<f32>(0.0, 50.0, 0.0)) * 0.1;
+
+    // 0.1 z-component prevents zero-length vectors at cell boundaries
     let raw_wind = normalize(vec3<f32>(wind_x, wind_y, 0.1));
     // Project to tangent plane
     return normalize(raw_wind - pos * dot(raw_wind, pos));
@@ -169,8 +181,21 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     } else {
         // === ADVECT MODE: semi-Lagrangian advection ===
         let wind = wind_at(pos);
-        // Trace back along wind to find source position
-        let source_pos = normalize(pos - wind * params.dt);
+
+        // Turbulent diffusion: small random displacement per-texel per-step
+        // prevents density from organizing into perfect latitude bands.
+        let turb_hash = pcg_hash(idx + params.seed * 7u + params.mode * 31u);
+        let turb_angle = f32(turb_hash & 0xFFFFu) / 10430.0; // [0, 2π)
+        let turb_mag = f32((turb_hash >> 16u) & 0xFFu) / 255.0 * 0.008;
+        // Build tangent-plane displacement
+        var up_t = vec3<f32>(0.0, 1.0, 0.0);
+        if (abs(pos.y) > 0.95) { up_t = vec3<f32>(1.0, 0.0, 0.0); }
+        let te = normalize(cross(up_t, pos));
+        let tn = normalize(cross(pos, te));
+        let turb = (te * cos(turb_angle) + tn * sin(turb_angle)) * turb_mag;
+
+        // Trace back along wind + turbulence to find source position
+        let source_pos = normalize(pos - wind * params.dt + turb);
         var density = sample_density(source_pos);
 
         // Dissipation

@@ -279,7 +279,7 @@ fn main() {
     let cubemap_view = renderer.upload_terrain(&gpu, &terrain);
 
     // Generate advected cloud cubemap
-    let cloud_res = 170u32;
+    let cloud_res = (render_size / 2).max(192);
     let cloud_density = cloud_pipeline.generate(
         &gpu, &terrain, cloud_res, seed,
         ocean_level, effective_ocean,

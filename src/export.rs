@@ -24,11 +24,12 @@ pub struct ExportLayers {
     pub normals: bool,
     pub roughness: bool,
     pub water_mask: bool,
+    pub clouds: bool,
 }
 
 impl Default for ExportLayers {
     fn default() -> Self {
-        Self { height: true, albedo: true, normals: true, roughness: true, water_mask: true }
+        Self { height: true, albedo: true, normals: true, roughness: true, water_mask: true, clouds: true }
     }
 }
 
@@ -40,6 +41,9 @@ pub struct ExportConfig {
     pub erosion_iterations: u32,
     pub season: f32,
     pub layers: ExportLayers,
+    pub cloud_coverage: f32,
+    pub cloud_type: f32,
+    pub cloud_seed: u32,
 }
 
 // ============ Progress ============
@@ -142,6 +146,27 @@ pub struct AlbedoMapParams {
     pub tile_offset_y: u32,
     pub full_resolution: u32,
     pub _pad0: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct CloudMapParams {
+    pub face: u32,
+    pub resolution: u32,
+    pub seed: u32,
+    pub base_temp_c: f32,
+    pub ocean_level: f32,
+    pub ocean_fraction: f32,
+    pub axial_tilt_rad: f32,
+    pub season: f32,
+    pub cloud_coverage: f32,
+    pub cloud_type: f32,
+    pub tile_offset_x: u32,
+    pub tile_offset_y: u32,
+    pub full_resolution: u32,
+    pub _pad0: u32,
+    pub _pad1: u32,
+    pub _pad2: u32,
 }
 
 // ============ Generic Map Compute Pipeline ============
@@ -639,9 +664,9 @@ pub fn run_export(
     // Compute total steps for progress based on selected layers
     let layers = &config.layers;
     let tiles_per_face = coordinator.tiles_per_face();
-    let map_count = [layers.normals, layers.roughness, layers.albedo, layers.albedo /*ao bundled with albedo*/]
+    let map_count = [layers.normals, layers.roughness, layers.albedo, layers.albedo /*ao bundled with albedo*/, layers.clouds]
         .iter().filter(|&&b| b).count() as u32;
-    let export_count = [layers.height, layers.albedo, layers.normals, layers.roughness, layers.albedo /*ao*/, layers.water_mask]
+    let export_count = [layers.height, layers.albedo, layers.normals, layers.roughness, layers.albedo /*ao*/, layers.water_mask, layers.clouds]
         .iter().filter(|&&b| b).count() as u32;
     let total_steps = coordinator.total_tiles() // terrain generation
         + 6 // erosion
@@ -717,6 +742,13 @@ pub fn run_export(
     let ao_pipeline = if layers.albedo {
         Some(MapPipeline::new(gpu, include_str!("shaders/ao_map.wgsl"), "ao map"))
     } else { None };
+    let cloud_pipeline = if layers.clouds {
+        Some(MapPipeline::new(gpu, &format!("{}\n{}\n{}",
+            include_str!("shaders/cube_sphere.wgsl"),
+            include_str!("shaders/noise.wgsl"),
+            include_str!("shaders/cloud_map.wgsl"),
+        ), "cloud map"))
+    } else { None };
 
     // --- Phase 5: Generate all maps per face, store in memory ---
     let tile_size = coordinator.tile_size;
@@ -728,6 +760,7 @@ pub fn run_export(
     let mut all_albedo: [Vec<f32>; 6] = Default::default();
     let mut all_ao: [Vec<f32>; 6] = Default::default();
     let mut all_ocean: [Vec<f32>; 6] = Default::default();
+    let mut all_clouds: [Vec<f32>; 6] = Default::default();
 
     for face in 0..6u32 {
         if cancel.load(Ordering::Relaxed) { return Err("Cancelled".into()); }
@@ -799,6 +832,25 @@ pub fn run_export(
             all_ocean[face as usize] = generate_ocean_mask(face_data, ocean_level);
         }
 
+        if let Some(ref pipeline) = cloud_pipeline {
+            let cloud_bytes = generate_map_tiled(
+                gpu, pipeline, &heightmap_buffer, &coordinator,
+                |ox, oy| CloudMapParams {
+                    face, resolution: tile_size, seed: config.cloud_seed,
+                    base_temp_c: derived.base_temperature_c, ocean_level,
+                    ocean_fraction: effective_ocean,
+                    axial_tilt_rad: params.axial_tilt_deg.to_radians(),
+                    season: config.season,
+                    cloud_coverage: config.cloud_coverage,
+                    cloud_type: config.cloud_type,
+                    tile_offset_x: ox, tile_offset_y: oy,
+                    full_resolution: full_res,
+                    _pad0: 0, _pad1: 0, _pad2: 0,
+                }, 4, &mut progress, "Clouds", face, cancel,
+            )?;
+            all_clouds[face as usize] = bytemuck::cast_slice::<u8, f32>(&cloud_bytes).to_vec();
+        }
+
         progress.advance(&format!("Face {face} maps generated"));
     }
 
@@ -837,6 +889,12 @@ pub fn run_export(
         progress.advance("Exporting water mask...");
         let (eq_o, _, _) = cubemap_to_equirect(&all_ocean, full_res, 1);
         export_equirect_exr_gray(&eq_o, eq_w, eq_ht, &planet_dir.join("water_mask.exr"))?;
+    }
+
+    if layers.clouds {
+        progress.advance("Exporting clouds...");
+        let (eq_c, _, _) = cubemap_to_equirect(&all_clouds, full_res, 1);
+        export_equirect_exr_gray(&eq_c, eq_w, eq_ht, &planet_dir.join("clouds.exr"))?;
     }
 
     let _ = progress_tx.send(ExportProgress::Complete);
@@ -988,6 +1046,7 @@ mod tests {
             erosion_iterations: 2,
             season: 0.5,
             layers: ExportLayers::default(),
+            cloud_coverage: 0.5, cloud_type: 0.5, cloud_seed: 42,
         };
 
         let (tx, rx) = std::sync::mpsc::channel();
@@ -1043,6 +1102,7 @@ mod tests {
             erosion_iterations: 2,
             season: 0.5,
             layers: ExportLayers::default(),
+            cloud_coverage: 0.5, cloud_type: 0.5, cloud_seed: 42,
         };
 
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -1085,6 +1145,7 @@ mod tests {
             erosion_iterations: 10,
             season: 0.5,
             layers: ExportLayers::default(),
+            cloud_coverage: 0.5, cloud_type: 0.5, cloud_seed: 42,
         };
 
         let (tx, _rx) = std::sync::mpsc::channel();
