@@ -137,6 +137,23 @@ Research: [docs/research/worldbuildingpasta-climate-research.md](docs/research/w
 
 ---
 
+## Phase 5.20: Wind-Shaped Cloud System
+
+Replace the broken compute-based cloud advection pipeline with per-pixel wind streamline tracing. Clouds are visibly stretched along wind direction — trade wind trails, westerly frontal bands, monsoon cloud trains — all at full preview resolution with zero cubemap seam artifacts.
+
+**Approach:** For each cloud pixel, trace backward along the wind field for N steps. Use the integrated streamline position as the noise coordinate. Adjacent pixels trace to similar upstream positions → clouds naturally elongate into wind-aligned trails. The existing `wind_direction_at()` (terrain-deflected) provides the wind, `compute_moisture()` provides the climate awareness, and the continentality cubemap (from Phase 5.18, already smooth) provides coast/interior contrast.
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 5.20.1 | Remove cloud advection compute from rendering path. Keep wind field compute for debug views. Remove advection-related UI (Steps, Blend). Keep Wind Advection checkbox as toggle for new system | Clouds render identically with toggle OFF. No compute advection dispatched. Debug views (Wind, Pressure, Continentality) still work | Phase 5.19 | cc:TODO |
+| 5.20.2 | Implement `wind_streamline_warp()`: multi-step backward trace along wind field in per-pixel shader. Replace the current `wind_stretch = tangent * 0.08` with N-step Euler integration along `wind_direction_at()`. Return the traced-back sphere position as noise coordinate | Cloud shapes visibly elongated along wind: trade wind zone shows E-W trails, westerlies show W-E streaks. Visible difference from OFF (round blobs) vs ON (elongated trails) | 5.20.1 | cc:TODO |
+| 5.20.3 | Add "Wind Trail" strength slider (0.0-1.0) controlling streamline trace length. 0 = no wind influence (current round blobs), 0.5 = moderate elongation, 1.0 = long wind trails | Slider continuously interpolates between round and elongated clouds | 5.20.2 | cc:TODO |
+| 5.20.4 | Sample continentality cubemap in cloud coverage: ocean cells get +20% coverage, deep interior (continentality > 0.7) gets -30% coverage. Smooth sampling to avoid face seams | Continental interiors visibly drier than coasts. No cubemap face seam artifacts in clouds | 5.20.2 | cc:TODO |
+| 5.20.5 | Apply wind trail to cirrus layer: high-altitude cirrus should be heavily wind-streaked (jet stream). Separate trail strength for cirrus (2-3x the low cloud trail) | Cirrus shows strong directional streaking, visibly different from low clouds | 5.20.2 | cc:TODO |
+| 5.20.6 | Tune and validate: compare with satellite imagery for trade wind cumulus trails, mid-latitude frontal cloud bands, ITCZ thick band, subtropical clear zones | Zoomed view shows recognizable wind-shaped cloud patterns at multiple latitudes | 5.20.5 | cc:TODO |
+
+---
+
 ## Phase 7: Blender Importer Addon
 
 Pure-Python Blender addon that imports generated textures and sets up materials.
