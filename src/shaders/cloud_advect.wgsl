@@ -142,7 +142,7 @@ fn condensation_at(pos: vec3<f32>, height: f32) -> f32 {
     // Baseline condensation everywhere (clouds form globally, just denser at ITCZ)
     let baseline = 0.08;
 
-    return (baseline + itcz + ocean_boost + midlat - subtropical) * params.condensation_rate;
+    return baseline + itcz + ocean_boost + midlat - subtropical;
 }
 
 @compute @workgroup_size(16, 16)
