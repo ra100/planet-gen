@@ -191,16 +191,25 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         // Relax toward 1.0 (prevents runaway accumulation or depletion)
         weight = mix(weight, 1.0, 1.0 - params.decay);
 
-        // === Climate source/sink: push weight above/below 1.0 ===
-        let h = height_data[local_idx];
-        let cond = condensation_at(pos, h);
-        // Convergence zones add weight, divergence subtracts
-        // cond ranges ~0.0-0.6; remap to a push centered on 0
-        let climate_push = (cond - 0.2) * 0.15; // ITCZ: +0.06, subtropics: -0.03
-        weight += climate_push;
+        // === Wind divergence: where winds converge, mass accumulates ===
+        // Compute ∇·v from finite differences on the wind field
+        // This is the PHYSICAL driver: convergence at ITCZ, fronts, terrain-blocked
+        // flow — divergence at horse latitudes, lee side of mountains
+        let d_step = 1.5 / f32(res);
+        let wind_e = wind_at(normalize(pos + te * d_step));
+        let wind_w = wind_at(normalize(pos - te * d_step));
+        let wind_n = wind_at(normalize(pos + tn * d_step));
+        let wind_s = wind_at(normalize(pos - tn * d_step));
+        // Project onto local frame to get 2D divergence
+        let dvx = dot(wind_e, te) - dot(wind_w, te);
+        let dvy = dot(wind_n, tn) - dot(wind_s, tn);
+        let divergence = (dvx + dvy) / (2.0 * d_step);
+        // Convergence (negative div) → weight increases; divergence → decreases
+        weight -= divergence * 0.08;
 
-        // Rain shadow: decrease weight downwind of mountains
-        let upwind = normalize(pos + wind * 0.05);
+        // Rain shadow: mountains block moisture transport
+        let h = height_data[local_idx];
+        let upwind = normalize(pos + normalize(wind) * 0.05);
         let upwind_fuv = sphere_to_face_uv(upwind);
         let uf = u32(upwind_fuv.x);
         let upx = clamp(u32(upwind_fuv.y * f32(res - 1u)), 0u, res - 1u);
@@ -208,18 +217,29 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         if (uf == params.face) {
             let upwind_h = height_data[upy * res + upx];
             if (upwind_h > h + 0.05) {
-                weight -= 0.04; // rain shadow reduces cloud weight
+                weight -= 0.03;
+            }
+        }
+
+        // Orographic lift: windward side of mountains gets more clouds
+        let downwind = normalize(pos - normalize(wind) * 0.05);
+        let dw_fuv = sphere_to_face_uv(downwind);
+        let df = u32(dw_fuv.x);
+        if (df == params.face) {
+            let dwx = clamp(u32(dw_fuv.y * f32(res - 1u)), 0u, res - 1u);
+            let dwy = clamp(u32(dw_fuv.z * f32(res - 1u)), 0u, res - 1u);
+            let downwind_h = height_data[dwy * res + dwx];
+            if (h > downwind_h + 0.04 && h > params.ocean_level) {
+                weight += 0.02; // windward uplift
             }
         }
 
         // Blend with fresh noise variation to prevent streaks
-        // blend_factor = 0 → pure wind redistribution (can streak)
-        // blend_factor > 0 → mix in spatial noise (anti-streak)
         if (params.blend_factor > 0.001) {
             let so = seed_offset(params.seed + 8000u);
             let weather = snoise(pos * 2.0 + so) * 0.3
                         + snoise(pos * 4.5 + so * 1.3) * 0.15;
-            let fresh_weight = 1.0 + weather + climate_push * 3.0;
+            let fresh_weight = 1.0 + weather;
             weight = mix(weight, fresh_weight, params.blend_factor);
         }
 

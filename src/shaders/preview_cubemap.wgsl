@@ -1559,6 +1559,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 debug_color = mix(vec3<f32>(0.3, 0.3, 0.3), vec3<f32>(0.2, 0.4, 0.9), low);
                 debug_color = mix(debug_color, vec3<f32>(0.9, 0.3, 0.1), high);
             }
+            case 18u: {
+                // Advection weight: redistribution factor from cloud advection cubemap
+                // 1.0 = neutral (grey), >1 = accumulation (green/white), <1 = depletion (red/dark)
+                let w = sample_cloud_advected(rotated);
+                let above = clamp((w - 1.0) / 1.0, 0.0, 1.0); // >1 → green
+                let below = clamp((1.0 - w) / 0.8, 0.0, 1.0); // <1 → red
+                debug_color = vec3<f32>(0.4, 0.4, 0.4); // neutral grey at 1.0
+                debug_color = mix(debug_color, vec3<f32>(0.2, 0.9, 0.3), above); // green = more clouds
+                debug_color = mix(debug_color, vec3<f32>(0.9, 0.2, 0.1), below); // red = less clouds
+            }
             default: { debug_color = surface_color; }
         }
         return vec4<f32>(debug_color, 1.0);

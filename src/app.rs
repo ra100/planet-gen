@@ -709,7 +709,7 @@ impl eframe::App for PlanetGenApp {
                     let debug_views: &[(u32, &str)] = &[
                         (8, "AO"), (6, "Plates"), (2, "Temp"), (3, "Moisture"),
                         (4, "Biome"), (5, "Ocean/Ice"), (11, "Boundary"), (12, "Snow"),
-                        (9, "Clouds"), (14, "Wind"), (15, "Currents"), (16, "Continentality"), (17, "Pressure"),
+                        (9, "Clouds"), (18, "Advect Wt"), (14, "Wind"), (15, "Currents"), (16, "Continentality"), (17, "Pressure"),
                     ];
                     ui.label("Debug Views");
                     ui.horizontal_wrapped(|ui| {
