@@ -58,6 +58,8 @@ pub struct PlanetGenApp {
     cloud_seed: u32,
     cloud_type: f32,
     cloud_opacity: f32,
+    cloud_advect_steps: u32,   // number of advection iterations (10-100)
+    cloud_advect_blend: f32,   // fresh noise vs advected blend (0.0-0.5)
     storm_count: u32,
     storm_size: f32,
     night_lights: f32,
@@ -146,6 +148,8 @@ impl PlanetGenApp {
             cloud_seed: default_cloud_seed,
             cloud_type: 0.5,
             cloud_opacity: 1.0,
+            cloud_advect_steps: 30,
+            cloud_advect_blend: 0.18,
             storm_count: 0,
             storm_size: 1.0,
             night_lights: 0.0,
@@ -320,8 +324,8 @@ impl PlanetGenApp {
             let cloud_density = self.cloud_pipeline.generate(
                 &self.gpu, &terrain, cloud_res, self.cloud_seed,
                 ocean_level, effective_ocean,
-                self.params.axial_tilt_deg.to_radians(), self.season, 30,
-                Some(&wind_field.wind),
+                self.params.axial_tilt_deg.to_radians(), self.season, self.cloud_advect_steps,
+                Some(&wind_field.wind), self.cloud_advect_blend,
             );
             self.cloud_cubemap_view = Some(
                 self.preview_renderer.upload_cubemap_r16(&self.gpu, &cloud_density.faces, cloud_res)
@@ -705,7 +709,7 @@ impl eframe::App for PlanetGenApp {
                     let debug_views: &[(u32, &str)] = &[
                         (8, "AO"), (6, "Plates"), (2, "Temp"), (3, "Moisture"),
                         (4, "Biome"), (5, "Ocean/Ice"), (11, "Boundary"), (12, "Snow"),
-                        (14, "Wind"), (15, "Currents"), (16, "Continentality"), (17, "Pressure"),
+                        (9, "Clouds"), (14, "Wind"), (15, "Currents"), (16, "Continentality"), (17, "Pressure"),
                     ];
                     ui.label("Debug Views");
                     ui.horizontal_wrapped(|ui| {
@@ -790,6 +794,28 @@ impl eframe::App for PlanetGenApp {
                         .changed()
                     {
                         self.needs_render = true;
+                    }
+                }
+
+                // Cloud advection debug controls
+                if self.show_cloud_advection {
+                    ui.separator();
+                    ui.label("Advection Debug");
+                    let mut steps_i32 = self.cloud_advect_steps as i32;
+                    if ui.add(egui::Slider::new(&mut steps_i32, 5..=100)
+                        .text("Steps"))
+                        .on_hover_text("Advection iterations: more steps = stronger wind transport. 30 = default")
+                        .changed()
+                    {
+                        self.cloud_advect_steps = steps_i32 as u32;
+                        self.needs_terrain = true;
+                    }
+                    if ui.add(egui::Slider::new(&mut self.cloud_advect_blend, 0.02..=0.50)
+                        .text("Blend"))
+                        .on_hover_text("Fresh noise vs advected: 0.02 = wind-dominated (more streaks), 0.5 = noise-dominated (less wind effect)")
+                        .changed()
+                    {
+                        self.needs_terrain = true;
                     }
                 }
 

@@ -14,7 +14,7 @@ struct CloudParams {
     axial_tilt_rad: f32,
     season: f32,
     condensation_rate: f32,
-    _pad0: u32,
+    blend_factor: f32,     // fresh noise vs advected blend (0.0-0.5)
 }
 
 @group(0) @binding(0) var<uniform> params: CloudParams;
@@ -176,47 +176,65 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 
         dst_density[idx] = clamp(noise, 0.0, 1.0);
     } else {
-        // === ADVECT MODE: semi-Lagrangian advection ===
+        // === ADVECT MODE: source-driven advection ===
+        // Each step blends advected (wind-transported) density with fresh
+        // noise-based cloud sources. This prevents wind from stretching
+        // clouds into streaks — sources continuously regenerate, wind spreads them.
+
         let wind = wind_at(pos);
 
-        // Turbulent diffusion: small random displacement per-texel per-step
-        // prevents density from organizing into perfect latitude bands.
+        // Turbulent diffusion: random displacement to break coherent stretching
         let turb_hash = pcg_hash(idx + params.seed * 7u + params.mode * 31u);
         let turb_angle = f32(turb_hash & 0xFFFFu) / 10430.0; // [0, 2π)
-        let turb_mag = f32((turb_hash >> 16u) & 0xFFu) / 255.0 * 0.008;
-        // Build tangent-plane displacement
+        let turb_mag = f32((turb_hash >> 16u) & 0xFFu) / 255.0 * 0.025; // 3x stronger
         var up_t = vec3<f32>(0.0, 1.0, 0.0);
         if (abs(pos.y) > 0.95) { up_t = vec3<f32>(1.0, 0.0, 0.0); }
         let te = normalize(cross(up_t, pos));
         let tn = normalize(cross(pos, te));
         let turb = (te * cos(turb_angle) + tn * sin(turb_angle)) * turb_mag;
 
-        // Trace back along wind + turbulence to find source position
+        // Trace back along wind to get advected density
         let source_pos = normalize(pos - wind * params.dt + turb);
-        var density = sample_density(source_pos);
+        let advected = sample_density(source_pos) * params.decay;
 
-        // Dissipation
-        density *= params.decay;
+        // === Fresh cloud source: noise-based "random clouds" ===
+        // Driven by climate zones but always present as noise
+        let so = seed_offset(params.seed + 8000u);
+        let p = pos * 7.0 + so;
+        let warp = vec3<f32>(
+            snoise(p * 0.5 + vec3<f32>(31.7, 0.0, 0.0)),
+            snoise(p * 0.5 + vec3<f32>(0.0, 47.3, 0.0)),
+            snoise(p * 0.5 + vec3<f32>(0.0, 0.0, 73.1))
+        ) * 0.3;
+        var fresh = snoise(p + warp) * 0.45 + snoise((p + warp) * 2.1) * 0.22
+                  + snoise((p + warp) * 4.2) * 0.11;
+        fresh = clamp(fresh * 0.5 + 0.35, 0.0, 1.0);
 
-        // Condensation source (where moisture is high)
+        // Weather-scale regions: some areas cloudy, some clear
+        let weather = snoise(pos * 1.5 + so * 0.3 + vec3<f32>(77.0, 0.0, 0.0));
+        fresh *= 0.65 + 0.35 * (weather * 0.5 + 0.5);
+
+        // Climate modulation: ITCZ gets more clouds, subtropics fewer
         let h = height_data[local_idx];
         let cond = condensation_at(pos, h);
-        density += cond * params.dt;
+        fresh *= 0.4 + cond * 2.5; // climate shapes the distribution
 
-        // Rain shadow sink: check if terrain is upwind and tall
+        // Rain shadow sink: suppress downwind of mountains
         let upwind = normalize(pos + wind * 0.05);
         let upwind_fuv = sphere_to_face_uv(upwind);
         let uf = u32(upwind_fuv.x);
         let upx = clamp(u32(upwind_fuv.y * f32(res - 1u)), 0u, res - 1u);
         let upy = clamp(u32(upwind_fuv.z * f32(res - 1u)), 0u, res - 1u);
-        // Only sample if on same face (cross-face would need height for all faces)
         if (uf == params.face) {
             let upwind_h = height_data[upy * res + upx];
-            if (upwind_h > h + 0.08) {
-                // Leeward dissipation
-                density *= 0.92;
+            if (upwind_h > h + 0.06) {
+                fresh *= 0.5; // suppress clouds in rain shadow
             }
         }
+
+        // Blend: wind spreads existing clouds, but sources continuously create new ones
+        // Higher blend_factor = more influence from fresh sources (less streaking)
+        let density = mix(advected, fresh, params.blend_factor);
 
         dst_density[idx] = clamp(density, 0.0, 1.0);
     }

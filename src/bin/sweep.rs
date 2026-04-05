@@ -291,7 +291,7 @@ fn main() {
         &gpu, &terrain, cloud_res, seed,
         ocean_level, effective_ocean,
         params.axial_tilt_deg.to_radians(), 0.5, 30,
-        Some(&wind_field.wind),
+        Some(&wind_field.wind), 0.18,
     );
     let cloud_view = renderer.upload_cubemap_r16(&gpu, &cloud_density.faces, cloud_res);
 
