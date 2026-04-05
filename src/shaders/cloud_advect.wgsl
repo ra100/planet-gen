@@ -1,23 +1,22 @@
-// Cloud advection compute shader.
-// Produces a REDISTRIBUTION WEIGHT cubemap (not raw cloud density).
-// Weight ~1.0 = neutral, >1.0 = wind convergence accumulates clouds,
-// <1.0 = divergence/rain shadow clears clouds.
-// The preview shader multiplies per-pixel cloud density by this weight.
+// Cloud advection compute shader: moisture transport simulation.
+// Oceans evaporate (source), wind transports, precipitation removes (sink).
+// Output: redistribution WEIGHT cubemap (~0.3-2.0) that modulates per-pixel clouds.
+// Start uniform → run N steps → equilibrium emerges from source/transport/sink balance.
 // Includes noise.wgsl and cube_sphere.wgsl (concatenated at load time).
 
 struct CloudParams {
     face: u32,
     resolution: u32,
     seed: u32,
-    mode: u32,         // 0 = init (noise), 1 = advect step
+    mode: u32,         // 0 = init, 1 = advect step
     dt: f32,           // advection time step
-    decay: f32,        // per-step dissipation (0.99 = slow, 0.95 = fast)
+    precip_rate: f32,  // precipitation sink per step (fraction of density removed)
     ocean_level: f32,
     ocean_fraction: f32,
     axial_tilt_rad: f32,
     season: f32,
-    condensation_rate: f32,
-    blend_factor: f32,     // fresh noise vs advected blend (0.0-0.5)
+    evaporation: f32,  // ocean evaporation rate per step
+    blend_factor: f32, // noise blend for anti-streak (0 = pure transport)
 }
 
 @group(0) @binding(0) var<uniform> params: CloudParams;
@@ -161,71 +160,82 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let local_idx = id.y * res + id.x;
 
     if (params.mode == 0u) {
-        // === INIT MODE: random redistribution weight with spatial variation ===
-        // Start near 1.0 (neutral) with noise variation so wind has something to move
+        // === INIT: uniform moisture field with slight noise variation ===
         let so = seed_offset(params.seed + 8000u);
-        let weather = snoise(pos * 2.0 + so) * 0.3
-                    + snoise(pos * 4.5 + so * 1.3) * 0.15;
-        dst_density[idx] = 1.0 + weather; // range ~0.55 to ~1.45
+        let noise = snoise(pos * 3.0 + so) * 0.1;
+        dst_density[idx] = 1.0 + noise; // near-uniform start
     } else {
-        // === ADVECT MODE: redistribute cloud weight via wind transport ===
-        // Weight > 1 = convergence accumulates clouds
-        // Weight < 1 = divergence / rain shadow clears clouds
+        // === ADVECT: moisture transport simulation ===
+        // 1. Wind transports moisture (semi-Lagrangian)
+        // 2. Oceans evaporate (source)
+        // 3. Precipitation removes moisture (sink ∝ density)
+        // 4. Mountains cause orographic rain (extra sink on windward side)
+        // Equilibrium: ocean-sourced moisture carried by wind, depleted over land
 
         let wind = wind_at(pos);
 
-        // Turbulent diffusion
+        // Turbulent diffusion: break coherent stretching
         let turb_hash = pcg_hash(idx + params.seed * 7u + params.mode * 31u);
         let turb_angle = f32(turb_hash & 0xFFFFu) / 10430.0;
-        let turb_mag = f32((turb_hash >> 16u) & 0xFFu) / 255.0 * 0.025;
+        let turb_mag = f32((turb_hash >> 16u) & 0xFFu) / 255.0 * 0.02;
         var up_t = vec3<f32>(0.0, 1.0, 0.0);
         if (abs(pos.y) > 0.95) { up_t = vec3<f32>(1.0, 0.0, 0.0); }
         let te = normalize(cross(up_t, pos));
         let tn = normalize(cross(pos, te));
         let turb = (te * cos(turb_angle) + tn * sin(turb_angle)) * turb_mag;
 
-        // Trace back along wind to get advected weight
+        // 1. Wind transport: trace back to find upstream moisture
         let source_pos = normalize(pos - wind * params.dt + turb);
-        var weight = sample_density(source_pos);
+        var moisture = sample_density(source_pos);
 
-        // Relax toward 1.0 (prevents runaway accumulation or depletion)
-        weight = mix(weight, 1.0, 1.0 - params.decay);
-
-        // === Gentle climate nudge (very small per-step, wind transport dominates) ===
+        // 2. Ocean evaporation: oceans continuously add moisture
         let h = height_data[local_idx];
-        let cond = condensation_at(pos, h);
-        // Tiny push: convergence zones gently accumulate over many steps
-        // cond ~0.0-0.6, center on 0.15 so most areas are near neutral
-        weight += (cond - 0.15) * 0.012;
+        let is_ocean = h < params.ocean_level;
+        if (is_ocean) {
+            moisture += params.evaporation;
+        }
 
-        // Orographic effects (local, same-face only to avoid seam artifacts)
-        let wind_dir = normalize(wind);
-        let upwind = normalize(pos + wind_dir * 0.06);
-        let upwind_fuv = sphere_to_face_uv(upwind);
-        let uf = u32(upwind_fuv.x);
-        if (uf == params.face) {
-            let upx = clamp(u32(upwind_fuv.y * f32(res - 1u)), 0u, res - 1u);
-            let upy = clamp(u32(upwind_fuv.z * f32(res - 1u)), 0u, res - 1u);
-            let upwind_h = height_data[upy * res + upx];
-            // Rain shadow: mountains upwind reduce cloud weight
-            if (upwind_h > h + 0.04) {
-                weight -= 0.02;
-            }
-            // Windward lift: we're on a mountain with lower terrain upwind
-            if (h > upwind_h + 0.04 && h > params.ocean_level) {
-                weight += 0.015;
+        // ITCZ convergence boost: extra moisture from deep convection at equator
+        let tilted_y = pos.y * cos(params.axial_tilt_rad) + pos.z * sin(params.axial_tilt_rad);
+        let lat_deg = abs(asin(clamp(tilted_y, -1.0, 1.0))) * 180.0 / 3.14159;
+        let itcz_boost = exp(-lat_deg * lat_deg / 200.0) * params.evaporation * 0.5;
+        moisture += itcz_boost;
+
+        // 3. Precipitation sink: remove moisture proportional to current density
+        // Higher density = more likely to rain out. This naturally limits accumulation.
+        moisture *= (1.0 - params.precip_rate);
+
+        // 4. Orographic precipitation: mountains force extra rain on windward side
+        if (!is_ocean && length(wind) > 0.01) {
+            let wind_dir = normalize(wind);
+            let upwind = normalize(pos + wind_dir * 0.06);
+            let upwind_fuv = sphere_to_face_uv(upwind);
+            let uf = u32(upwind_fuv.x);
+            if (uf == params.face) {
+                let upx = clamp(u32(upwind_fuv.y * f32(res - 1u)), 0u, res - 1u);
+                let upy = clamp(u32(upwind_fuv.z * f32(res - 1u)), 0u, res - 1u);
+                let upwind_h = height_data[upy * res + upx];
+                // Rain shadow: terrain rises upwind → forced precipitation
+                let relief = max(upwind_h - h, 0.0);
+                if (relief > 0.03) {
+                    moisture *= 1.0 - clamp(relief * 3.0, 0.0, 0.15);
+                }
+                // Windward lift: we're on rising terrain
+                let my_relief = max(h - upwind_h, 0.0);
+                if (my_relief > 0.03 && h > params.ocean_level) {
+                    moisture += my_relief * 0.5; // orographic clouds
+                }
             }
         }
 
-        // Blend with fresh noise variation to prevent streaks
+        // Anti-streak noise blend (optional)
         if (params.blend_factor > 0.001) {
             let so = seed_offset(params.seed + 8000u);
-            let weather = snoise(pos * 2.0 + so) * 0.3
-                        + snoise(pos * 4.5 + so * 1.3) * 0.15;
-            let fresh_weight = 1.0 + weather;
-            weight = mix(weight, fresh_weight, params.blend_factor);
+            let weather = snoise(pos * 2.0 + so) * 0.15
+                        + snoise(pos * 4.5 + so * 1.3) * 0.08;
+            moisture = mix(moisture, moisture * (1.0 + weather), params.blend_factor);
         }
 
-        dst_density[idx] = clamp(weight, 0.3, 2.0);
+        dst_density[idx] = clamp(moisture, 0.05, 3.0);
     }
 }

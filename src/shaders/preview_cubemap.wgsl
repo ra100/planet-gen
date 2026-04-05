@@ -1560,17 +1560,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 debug_color = mix(debug_color, vec3<f32>(0.9, 0.3, 0.1), high);
             }
             case 18u: {
-                // Advection weight: redistribution factor from cloud advection cubemap
-                // 1.0 = neutral (grey), >1 = accumulation (blue→white), <1 = depletion (brown→dark)
+                // Moisture transport weight: ocean-sourced moisture redistributed by wind
+                // Range ~0.1 (dry continental interior) to ~2.0 (wet convergence zone)
                 let w = sample_cloud_advected(rotated);
-                // Amplify deviation from 1.0 for visibility (±0.3 fills the color range)
-                let dev = (w - 1.0) * 3.0;
-                let above = clamp(dev, 0.0, 1.0);
-                let below = clamp(-dev, 0.0, 1.0);
-                // Neutral=grey, accumulation=white/blue, depletion=brown/dark
-                debug_color = vec3<f32>(0.45, 0.45, 0.45);
-                debug_color = mix(debug_color, vec3<f32>(0.85, 0.90, 1.0), above);
-                debug_color = mix(debug_color, vec3<f32>(0.25, 0.15, 0.08), below);
+                // Map 0-2 range to color: dark brown=dry, green=moderate, white/blue=wet
+                let dry = clamp(1.0 - w * 1.5, 0.0, 1.0);
+                let wet = clamp((w - 0.8) / 1.2, 0.0, 1.0);
+                let mid = 1.0 - dry - wet * 0.5;
+                debug_color = dry * vec3<f32>(0.35, 0.20, 0.08)  // dry = brown
+                            + mid * vec3<f32>(0.3, 0.5, 0.25)    // moderate = green
+                            + wet * vec3<f32>(0.8, 0.85, 1.0);   // wet = blue-white
             }
             default: { debug_color = surface_color; }
         }

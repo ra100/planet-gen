@@ -148,7 +148,7 @@ impl PlanetGenApp {
             cloud_seed: default_cloud_seed,
             cloud_type: 0.5,
             cloud_opacity: 1.0,
-            cloud_advect_steps: 30,
+            cloud_advect_steps: 200,
             cloud_advect_blend: 0.18,
             storm_count: 0,
             storm_size: 1.0,
@@ -338,8 +338,8 @@ impl PlanetGenApp {
                 self.preview_renderer.upload_cubemap_r16(&self.gpu, &wind_field.pressure, cloud_res)
             );
 
-            eprintln!("[wind {}px] {:.0}ms | [clouds] advection 30 steps: {:.0}ms",
-                cloud_res, wind_ms, t_cloud.elapsed().as_secs_f64() * 1000.0);
+            eprintln!("[wind {}px] {:.0}ms | [clouds] advection {} steps: {:.0}ms",
+                cloud_res, wind_ms, self.cloud_advect_steps, t_cloud.elapsed().as_secs_f64() * 1000.0);
         }
 
         // Schedule progressive erosion (skipped when erosion layer is disabled)
@@ -802,9 +802,9 @@ impl eframe::App for PlanetGenApp {
                     ui.separator();
                     ui.label("Advection Debug");
                     let mut steps_i32 = self.cloud_advect_steps as i32;
-                    if ui.add(egui::Slider::new(&mut steps_i32, 5..=100)
-                        .text("Steps"))
-                        .on_hover_text("Advection iterations: more steps = stronger wind transport. 30 = default")
+                    if ui.add(egui::Slider::new(&mut steps_i32, 10..=500)
+                        .text("Steps").logarithmic(true))
+                        .on_hover_text("Transport iterations: more = longer equilibrium. 200 default, try 500 for strong patterns")
                         .changed()
                     {
                         self.cloud_advect_steps = steps_i32 as u32;

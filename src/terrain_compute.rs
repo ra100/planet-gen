@@ -1303,13 +1303,13 @@ pub struct CloudAdvectParams {
     pub seed: u32,
     pub mode: u32,
     pub dt: f32,
-    pub decay: f32,
+    pub precip_rate: f32,   // fraction of moisture removed per step
     pub ocean_level: f32,
     pub ocean_fraction: f32,
     pub axial_tilt_rad: f32,
     pub season: f32,
-    pub condensation_rate: f32,
-    pub blend_factor: f32,     // fresh noise vs advected blend (0.0-0.5)
+    pub evaporation: f32,   // ocean evaporation per step
+    pub blend_factor: f32,
 }
 
 pub struct CloudDensity {
@@ -1400,8 +1400,8 @@ impl CloudAdvectionPipeline {
                 label: Some("cloud h"), contents: bytemuck::cast_slice(&terrain.faces[face as usize]),
                 usage: wgpu::BufferUsages::STORAGE,
             });
-            let p = CloudAdvectParams { face, resolution, seed, mode: 0, dt: 0.0, decay: 1.0,
-                ocean_level, ocean_fraction, axial_tilt_rad, season, condensation_rate: 1.0, blend_factor };
+            let p = CloudAdvectParams { face, resolution, seed, mode: 0, dt: 0.0, precip_rate: 0.0,
+                ocean_level, ocean_fraction, axial_tilt_rad, season, evaporation: 0.0, blend_factor };
             let p_buf = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("cloud p"), contents: bytemuck::bytes_of(&p), usage: wgpu::BufferUsages::UNIFORM,
             });
@@ -1429,8 +1429,8 @@ impl CloudAdvectionPipeline {
                     label: Some("cloud h"), contents: bytemuck::cast_slice(&terrain.faces[face as usize]),
                     usage: wgpu::BufferUsages::STORAGE,
                 });
-                let p = CloudAdvectParams { face, resolution, seed, mode: 1, dt: 0.012, decay: 0.965,
-                    ocean_level, ocean_fraction, axial_tilt_rad, season, condensation_rate: 1.0, blend_factor };
+                let p = CloudAdvectParams { face, resolution, seed, mode: 1, dt: 0.010, precip_rate: 0.004,
+                    ocean_level, ocean_fraction, axial_tilt_rad, season, evaporation: 0.006, blend_factor };
                 let p_buf = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("cloud p"), contents: bytemuck::bytes_of(&p), usage: wgpu::BufferUsages::UNIFORM,
                 });
