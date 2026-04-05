@@ -160,10 +160,11 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let local_idx = id.y * res + id.x;
 
     if (params.mode == 0u) {
-        // === INIT: uniform moisture field with slight noise variation ===
-        let so = seed_offset(params.seed + 8000u);
-        let noise = snoise(pos * 3.0 + so) * 0.1;
-        dst_density[idx] = 1.0 + noise; // near-uniform start
+        // === INIT: start EMPTY — moisture builds from ocean evaporation ===
+        // Ocean cells start with some moisture, land starts dry
+        let h = height_data[local_idx];
+        let is_ocean = h < params.ocean_level;
+        dst_density[idx] = select(0.0, 0.3, is_ocean);
     } else {
         // === ADVECT: moisture transport simulation ===
         // 1. Wind transports moisture (semi-Lagrangian)
