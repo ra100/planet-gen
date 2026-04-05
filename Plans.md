@@ -109,13 +109,31 @@ Plan: [docs/plans/2026-04-05-pressure-wind-model.md](docs/plans/2026-04-05-press
 
 | Task | 内容 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
-| 5.18.1 | GPU continentality: compute shader BFS from ocean cells on cubemap | Continentality cubemap 0=coast, 1=interior; debug view shows smooth gradient | Phase 5.17 | cc:TODO |
-| 5.18.2 | Pressure field shader: ITCZ low, subtropical highs, continental thermal, elevation, noise | Pressure cubemap; debug view blue=low red=high; ITCZ varies by longitude | 5.18.1 | cc:TODO |
-| 5.18.3 | Pressure gradient → wind: finite differences + Coriolis deflection + surface friction | Wind cubemap shows trades, westerlies, monsoon deflection | 5.18.2 | cc:TODO |
-| 5.18.4 | Wire wind cubemap into cloud advection shader (replaces inline wind_at) | Advection uses precomputed pressure-derived wind | 5.18.3 | cc:TODO |
-| 5.18.5 | Make advected clouds the PRIMARY density source (per-pixel noise adds detail only) | Toggle ON/OFF shows clear cloud movement difference | 5.18.4 | cc:TODO |
-| 5.18.6 | Add Pressure + Continentality debug views to view mode dropdown | Selectable from UI; shows raw pressure/continentality data | 5.18.2 | cc:TODO |
-| 5.18.7 | Tune and validate: compare with Earth-like wind/cloud patterns | Monsoon shift over continents, maritime westerlies, subtropical clear zones | 5.18.5 | cc:TODO |
+| 5.18.1 | GPU continentality: compute shader BFS from ocean cells on cubemap | Continentality cubemap 0=coast, 1=interior; debug view shows smooth gradient | Phase 5.17 | cc:完了 [cb33c99] |
+| 5.18.2 | Pressure field shader: ITCZ low, subtropical highs, continental thermal, elevation, noise | Pressure cubemap; debug view blue=low red=high; ITCZ varies by longitude | 5.18.1 | cc:完了 [cb33c99] |
+| 5.18.3 | Pressure gradient → wind: finite differences + Coriolis deflection + surface friction | Wind cubemap shows trades, westerlies, monsoon deflection | 5.18.2 | cc:完了 [cb33c99] |
+| 5.18.4 | Wire wind cubemap into cloud advection shader (replaces inline wind_at) | Advection uses precomputed pressure-derived wind | 5.18.3 | cc:完了 [cb33c99] |
+| 5.18.5 | Make advected clouds the PRIMARY density source (per-pixel noise adds detail only) | Toggle ON/OFF shows clear cloud movement difference | 5.18.4 | cc:完了 [cb33c99] |
+| 5.18.6 | Add Pressure + Continentality debug views to view mode dropdown | Selectable from UI; shows raw pressure/continentality data | 5.18.2 | cc:完了 [cb33c99] |
+| 5.18.7 | Tune and validate: compare with Earth-like wind/cloud patterns | Monsoon shift over continents, maritime westerlies, subtropical clear zones | 5.18.5 | cc:完了 [09637ba] |
+
+---
+
+## Phase 5.19: Climate Model Refinement
+
+Apply quantitative data from worldbuildingpasta research to improve physical accuracy of wind, clouds, and precipitation.
+
+Research: [docs/research/worldbuildingpasta-climate-research.md](docs/research/worldbuildingpasta-climate-research.md)
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 5.19.1 | Parameterize Hadley cell boundaries by rotation rate using Kaspi & Showman 2015 table | Cell boundaries shift with rotation_period_h; 16-day planet has single wide cell, 12h planet has 5+ cells | Phase 5.18 | cc:TODO |
+| 5.19.2 | Pressure-dependent wind/precipitation scaling from ExoPlaSim data | Wind speed scales as `22*(1/P)^0.15`, precipitation as `P^-0.5`; thinner atmospheres = stronger winds, more rain | 5.19.1 | cc:TODO |
+| 5.19.3 | Improve ITCZ longitude variation: monsoon rules, thermal equator follows land | ITCZ shifts 15-20° poleward over large continents in summer; trade wind reversal visible in wind debug | 5.19.1 | cc:TODO |
+| 5.19.4 | Fix straight-line cloud stretching: add small-scale turbulence to wind field | Cloud patterns show turbulent eddies, not straight lines; visible in zoomed cloud view | 5.19.3 | cc:TODO |
+| 5.19.5 | Apply moisture penetration distance rules: onshore 2000-3000km, offshore 1000km | Continental interiors >3000km from coast are dry; rain shadow at >2km mountain relief | 5.19.2 | cc:TODO |
+| 5.19.6 | Hadley cell width vs temperature: widen 1° per 4°C warming up to 21°C global mean | Hot planets have wider tropics; cold planets have narrower Hadley cells | 5.19.1 | cc:TODO |
+| 5.19.7 | Altitude-latitude equivalence: 1km altitude ~ 8° poleward for snow/vegetation lines | Mountain biome zonation follows 6.5°C/km lapse rate correctly | - | cc:TODO |
 
 ---
 
