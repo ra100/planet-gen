@@ -191,46 +191,29 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         // Relax toward 1.0 (prevents runaway accumulation or depletion)
         weight = mix(weight, 1.0, 1.0 - params.decay);
 
-        // === Wind divergence: where winds converge, mass accumulates ===
-        // Compute ∇·v from finite differences on the wind field
-        // This is the PHYSICAL driver: convergence at ITCZ, fronts, terrain-blocked
-        // flow — divergence at horse latitudes, lee side of mountains
-        let d_step = 1.5 / f32(res);
-        let wind_e = wind_at(normalize(pos + te * d_step));
-        let wind_w = wind_at(normalize(pos - te * d_step));
-        let wind_n = wind_at(normalize(pos + tn * d_step));
-        let wind_s = wind_at(normalize(pos - tn * d_step));
-        // Project onto local frame to get 2D divergence
-        let dvx = dot(wind_e, te) - dot(wind_w, te);
-        let dvy = dot(wind_n, tn) - dot(wind_s, tn);
-        let divergence = (dvx + dvy) / (2.0 * d_step);
-        // Convergence (negative div) → weight increases; divergence → decreases
-        weight -= divergence * 0.08;
-
-        // Rain shadow: mountains block moisture transport
+        // === Gentle climate nudge (very small per-step, wind transport dominates) ===
         let h = height_data[local_idx];
-        let upwind = normalize(pos + normalize(wind) * 0.05);
+        let cond = condensation_at(pos, h);
+        // Tiny push: convergence zones gently accumulate over many steps
+        // cond ~0.0-0.6, center on 0.15 so most areas are near neutral
+        weight += (cond - 0.15) * 0.012;
+
+        // Orographic effects (local, same-face only to avoid seam artifacts)
+        let wind_dir = normalize(wind);
+        let upwind = normalize(pos + wind_dir * 0.06);
         let upwind_fuv = sphere_to_face_uv(upwind);
         let uf = u32(upwind_fuv.x);
-        let upx = clamp(u32(upwind_fuv.y * f32(res - 1u)), 0u, res - 1u);
-        let upy = clamp(u32(upwind_fuv.z * f32(res - 1u)), 0u, res - 1u);
         if (uf == params.face) {
+            let upx = clamp(u32(upwind_fuv.y * f32(res - 1u)), 0u, res - 1u);
+            let upy = clamp(u32(upwind_fuv.z * f32(res - 1u)), 0u, res - 1u);
             let upwind_h = height_data[upy * res + upx];
-            if (upwind_h > h + 0.05) {
-                weight -= 0.03;
+            // Rain shadow: mountains upwind reduce cloud weight
+            if (upwind_h > h + 0.04) {
+                weight -= 0.02;
             }
-        }
-
-        // Orographic lift: windward side of mountains gets more clouds
-        let downwind = normalize(pos - normalize(wind) * 0.05);
-        let dw_fuv = sphere_to_face_uv(downwind);
-        let df = u32(dw_fuv.x);
-        if (df == params.face) {
-            let dwx = clamp(u32(dw_fuv.y * f32(res - 1u)), 0u, res - 1u);
-            let dwy = clamp(u32(dw_fuv.z * f32(res - 1u)), 0u, res - 1u);
-            let downwind_h = height_data[dwy * res + dwx];
-            if (h > downwind_h + 0.04 && h > params.ocean_level) {
-                weight += 0.02; // windward uplift
+            // Windward lift: we're on a mountain with lower terrain upwind
+            if (h > upwind_h + 0.04 && h > params.ocean_level) {
+                weight += 0.015;
             }
         }
 
@@ -243,6 +226,6 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             weight = mix(weight, fresh_weight, params.blend_factor);
         }
 
-        dst_density[idx] = clamp(weight, 0.2, 2.5);
+        dst_density[idx] = clamp(weight, 0.3, 2.0);
     }
 }
