@@ -423,10 +423,12 @@ impl PlanetGenApp {
                 roughness: self.export_roughness,
                 water_mask: self.export_water_mask,
                 clouds: self.export_clouds,
+                emission: self.export_emission,
             },
             cloud_coverage: self.cloud_coverage,
             cloud_type: self.cloud_type,
             cloud_seed: self.cloud_seed,
+            night_lights: self.night_lights,
         };
 
         let terrain_params = self.terrain_params();

@@ -25,11 +25,12 @@ pub struct ExportLayers {
     pub roughness: bool,
     pub water_mask: bool,
     pub clouds: bool,
+    pub emission: bool,
 }
 
 impl Default for ExportLayers {
     fn default() -> Self {
-        Self { height: true, albedo: true, normals: true, roughness: true, water_mask: true, clouds: true }
+        Self { height: true, albedo: true, normals: true, roughness: true, water_mask: true, clouds: true, emission: true }
     }
 }
 
@@ -44,6 +45,7 @@ pub struct ExportConfig {
     pub cloud_coverage: f32,
     pub cloud_type: f32,
     pub cloud_seed: u32,
+    pub night_lights: f32,
 }
 
 // ============ Progress ============
@@ -167,6 +169,23 @@ pub struct CloudMapParams {
     pub _pad0: u32,
     pub _pad1: u32,
     pub _pad2: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct EmissionMapParams {
+    pub face: u32,
+    pub resolution: u32,
+    pub seed: u32,
+    pub base_temp_c: f32,
+    pub ocean_level: f32,
+    pub night_lights: f32,
+    pub axial_tilt_rad: f32,
+    pub tile_offset_x: u32,
+    pub tile_offset_y: u32,
+    pub full_resolution: u32,
+    pub _pad0: u32,
+    pub _pad1: u32,
 }
 
 // ============ Generic Map Compute Pipeline ============
@@ -749,6 +768,13 @@ pub fn run_export(
             include_str!("shaders/cloud_map.wgsl"),
         ), "cloud map"))
     } else { None };
+    let emission_pipeline = if layers.emission {
+        Some(MapPipeline::new(gpu, &format!("{}\n{}\n{}",
+            include_str!("shaders/cube_sphere.wgsl"),
+            include_str!("shaders/noise.wgsl"),
+            include_str!("shaders/emission_map.wgsl"),
+        ), "emission map"))
+    } else { None };
 
     // --- Phase 5: Generate all maps per face, store in memory ---
     let tile_size = coordinator.tile_size;
@@ -761,6 +787,7 @@ pub fn run_export(
     let mut all_ao: [Vec<f32>; 6] = Default::default();
     let mut all_ocean: [Vec<f32>; 6] = Default::default();
     let mut all_clouds: [Vec<f32>; 6] = Default::default();
+    let mut all_emission: [Vec<f32>; 6] = Default::default();
 
     for face in 0..6u32 {
         if cancel.load(Ordering::Relaxed) { return Err("Cancelled".into()); }
@@ -851,6 +878,21 @@ pub fn run_export(
             all_clouds[face as usize] = bytemuck::cast_slice::<u8, f32>(&cloud_bytes).to_vec();
         }
 
+        if let Some(ref pipeline) = emission_pipeline {
+            let emission_bytes = generate_map_tiled(
+                gpu, pipeline, &heightmap_buffer, &coordinator,
+                |ox, oy| EmissionMapParams {
+                    face, resolution: tile_size, seed: params.seed,
+                    base_temp_c: derived.base_temperature_c, ocean_level,
+                    night_lights: config.night_lights,
+                    axial_tilt_rad: params.axial_tilt_deg.to_radians(),
+                    tile_offset_x: ox, tile_offset_y: oy,
+                    full_resolution: full_res, _pad0: 0, _pad1: 0,
+                }, 4, &mut progress, "Emission", face, cancel,
+            )?;
+            all_emission[face as usize] = bytemuck::cast_slice::<u8, f32>(&emission_bytes).to_vec();
+        }
+
         progress.advance(&format!("Face {face} maps generated"));
     }
 
@@ -895,6 +937,12 @@ pub fn run_export(
         progress.advance("Exporting clouds...");
         let (eq_c, _, _) = cubemap_to_equirect(&all_clouds, full_res, 1);
         export_equirect_exr_gray(&eq_c, eq_w, eq_ht, &planet_dir.join("clouds.exr"))?;
+    }
+
+    if layers.emission {
+        progress.advance("Exporting emission...");
+        let (eq_e, _, _) = cubemap_to_equirect(&all_emission, full_res, 1);
+        export_equirect_exr_gray(&eq_e, eq_w, eq_ht, &planet_dir.join("emission.exr"))?;
     }
 
     let _ = progress_tx.send(ExportProgress::Complete);
@@ -1046,7 +1094,7 @@ mod tests {
             erosion_iterations: 2,
             season: 0.5,
             layers: ExportLayers::default(),
-            cloud_coverage: 0.5, cloud_type: 0.5, cloud_seed: 42,
+            cloud_coverage: 0.5, cloud_type: 0.5, cloud_seed: 42, night_lights: 0.5,
         };
 
         let (tx, rx) = std::sync::mpsc::channel();
@@ -1102,7 +1150,7 @@ mod tests {
             erosion_iterations: 2,
             season: 0.5,
             layers: ExportLayers::default(),
-            cloud_coverage: 0.5, cloud_type: 0.5, cloud_seed: 42,
+            cloud_coverage: 0.5, cloud_type: 0.5, cloud_seed: 42, night_lights: 0.5,
         };
 
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -1145,7 +1193,7 @@ mod tests {
             erosion_iterations: 10,
             season: 0.5,
             layers: ExportLayers::default(),
-            cloud_coverage: 0.5, cloud_type: 0.5, cloud_seed: 42,
+            cloud_coverage: 0.5, cloud_type: 0.5, cloud_seed: 42, night_lights: 0.5,
         };
 
         let (tx, _rx) = std::sync::mpsc::channel();
