@@ -93,6 +93,7 @@ pub struct PlanetGenApp {
     export_handle: Option<ExportHandle>,
     export_status: String,
     export_progress: f32,
+    gpu_error: Option<String>,
 }
 
 impl PlanetGenApp {
@@ -182,6 +183,7 @@ impl PlanetGenApp {
             export_handle: None,
             export_status: String::new(),
             export_progress: 0.0,
+            gpu_error: None,
         }
     }
 
@@ -275,6 +277,10 @@ impl PlanetGenApp {
     }
 
     fn regenerate_terrain(&mut self) {
+        // Install custom wgpu error handler that stores errors instead of panicking
+        self.gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        self.gpu.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+
         use std::time::Instant;
         let t0 = Instant::now();
 
@@ -394,6 +400,14 @@ impl PlanetGenApp {
             self.terrain_start = None;
         }
         self.needs_render = true;
+
+        // Check for GPU errors (OOM, validation)
+        if let Some(err) = pollster::block_on(self.gpu.device.pop_error_scope()) {
+            self.gpu_error = Some(format!("GPU OOM: {err}"));
+        }
+        if let Some(err) = pollster::block_on(self.gpu.device.pop_error_scope()) {
+            self.gpu_error = Some(format!("GPU validation: {err}"));
+        }
     }
 
     fn render_preview(&mut self, ctx: &egui::Context) {
@@ -498,6 +512,18 @@ impl eframe::App for PlanetGenApp {
             self.poll_export();
             ctx.request_repaint();
         }
+
+        // GPU error banner
+        let mut dismiss_error = false;
+        if let Some(ref err) = self.gpu_error {
+            egui::TopBottomPanel::top("gpu_error").show(ctx, |ui| {
+                ui.colored_label(egui::Color32::RED, format!("GPU Error: {err}"));
+                if ui.button("Dismiss").clicked() {
+                    dismiss_error = true;
+                }
+            });
+        }
+        if dismiss_error { self.gpu_error = None; }
 
         egui::SidePanel::left("params_panel")
             .resizable(true)

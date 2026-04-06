@@ -30,7 +30,12 @@ Requires a GPU with Vulkan, Metal, or DX12 support (most GPUs from 2018+).
 - **Night lights** — procedural city lights with cloud occlusion and scattered glow
 - **GPU-rendered preview** — real-time cubemap-sampled sphere with diffuse + specular lighting, AO, normal mapping
 - **Progressive erosion** — GPU hydraulic erosion with moisture-weighted intensity
-- **Selective EXR export** — height, albedo, normal, roughness, AO, water mask at up to 8K resolution
+- **Selective EXR export** — height, albedo, normal, roughness, AO, water mask, clouds, emission at up to 8K resolution
+- **Pressure-based wind** — continentality, pressure gradient, Coriolis deflection, terrain deflection
+- **Lava glow** — volcanic emission at plate boundaries with adjustable intensity
+- **Ocean sun glint** — PBR-correct specular reflection on water surface
+- **Ring system** — Saturn-like rings with Cassini gaps, planet shadow, tilt control
+- **Blender addon** — one-click import of exported textures with auto-wired Principled BSDF material
 
 ## Usage
 
@@ -58,7 +63,13 @@ The app opens with a sidebar of planet parameters and a 3D preview.
 
 **Preview:** Drag to rotate, scroll to zoom, middle-click to pan. View modes: Normal, Heightmap, Biome, Climate, Plates.
 
-**Export:** Select layers via checkboxes (height, albedo, normals, roughness, water mask), choose resolution, and export as equirectangular EXR files.
+**Export:** Select layers via checkboxes (height, albedo, normals, roughness, water mask, clouds, emission), choose resolution, and export as equirectangular EXR files.
+
+**Blender addon:** Install `blender_addon/` in Blender 4.x:
+1. Zip the addon: `cd blender_addon && zip -r ../planet_gen_blender.zip .`
+2. In Blender: Edit > Preferences > Add-ons > Install from Disk > select `planet_gen_blender.zip`
+3. Enable "Planet Gen Importer"
+4. 3D Viewport sidebar (N panel) > Planet Gen tab: "Import Planet" then "Create Planet"
 
 ## Architecture
 
@@ -123,12 +134,13 @@ See [Plans.md](Plans.md) for the full implementation plan.
 
 - [x] Phase 1-3: Scaffold, cube-sphere, planet physics
 - [x] Phase 4: Biomes, climate, atmosphere, craters
-- [x] Phase 5.1-5.12: Export, clouds, cities, visual polish, GPU plate terrain
-- [x] Phase 5.13: Wire continent controls to terrain pipeline
-- [ ] Phase 7: Blender importer addon
-- [ ] Phase 8: Advanced visual features (lava, rings, ocean glint)
-- [ ] Phase 9: Advanced tectonics (plate motion simulation)
-- [ ] Phase 10: Polish & distribution
+- [x] Phase 5.1-5.18: Export, clouds, cities, visual polish, GPU plate terrain, pressure wind
+- [x] Phase 5.19: Climate model refinement (Kaspi & Showman, ExoPlaSim scaling)
+- [x] Phase 5.20: Wind-shaped clouds (per-pixel streamline tracing)
+- [x] Phase 7: Blender importer addon
+- [x] Phase 8: Advanced visual features (lava, rings, ocean glint, lens flare)
+- [ ] Phase 9: Advanced tectonics (plate motion simulation, mantle convection)
+- [x] Phase 10: Polish & distribution (GPU error handling, CI, README)
 
 ## License
 

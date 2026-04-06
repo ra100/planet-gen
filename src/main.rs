@@ -6,8 +6,21 @@ use planet_gen::gpu::GpuContext;
 fn main() -> eframe::Result {
     env_logger::init();
 
-    let gpu = Arc::new(GpuContext::new().expect("Failed to initialize GPU"));
-    log::info!("Planet Gen started with GPU: {}", gpu.adapter_name());
+    let gpu = match GpuContext::new() {
+        Ok(ctx) => {
+            log::info!("Planet Gen started with GPU: {}", ctx.adapter_name());
+            Arc::new(ctx)
+        }
+        Err(e) => {
+            eprintln!("ERROR: GPU initialization failed: {e}");
+            eprintln!();
+            eprintln!("Planet Gen requires a GPU with WebGPU support.");
+            eprintln!("  macOS:   Metal is used automatically.");
+            eprintln!("  Linux:   Install Vulkan drivers (mesa-vulkan-drivers).");
+            eprintln!("  Windows: Update your GPU drivers.");
+            std::process::exit(1);
+        }
+    };
 
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
