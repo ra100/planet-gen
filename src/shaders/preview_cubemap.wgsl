@@ -695,9 +695,10 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     // cloud_tex alpha contains continentality (0=coast/ocean, ~1=deep interior)
     if (uniforms.cloud_advection > 0.5) {
         let cont = sample_continentality(sphere_pos);
-        // Strong effect: ocean/coast boost +25%, deep interior (>0.5) suppress up to -50%
-        // This creates visible dry interiors and wet coastlines
-        let cont_mod = mix(1.25, 0.50, smooth_step(0.05, 0.65, cont));
+        // Gradual: clouds only thin deep inland (cont > 0.3), fully dry at cont > 0.8
+        // Coast/ocean (cont < 0.2) gets a mild boost. Wide transition avoids hard edges.
+        let inland_dry = smooth_step(0.25, 0.80, cont); // 0 at coast, 1 deep inland
+        let cont_mod = mix(1.12, 0.55, inland_dry);
         local_coverage *= cont_mod;
     }
 
