@@ -218,7 +218,7 @@ Three-tier tectonic simulation with UI toggle between modes.
 
 | Task | 内容 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
-| 10.1 | Error handling: GPU OOM/device lost → UI error message | App doesn't crash on GPU errors | Phase 5 | cc:TODO |
-| 10.2 | Cross-platform CI: GitHub Actions for Linux, macOS, Windows | CI green on all 3 | Phase 5 | cc:TODO |
-| 10.3 | README: install, usage guide, parameter reference, example renders | Full documentation | 10.2 | cc:TODO |
-| 10.4 | Blender addon packaging: zip + install instructions | Install via Preferences | Phase 7 | cc:TODO |
+| 10.1 | Error handling: GPU OOM/device lost → UI error message | App doesn't crash on GPU errors | Phase 5 | cc:完了 [155a63f] |
+| 10.2 | Cross-platform CI: GitHub Actions for Linux, macOS, Windows | CI green on all 3 | Phase 5 | cc:完了 [155a63f] |
+| 10.3 | README: install, usage guide, parameter reference, example renders | Full documentation | 10.2 | cc:完了 [155a63f] |
+| 10.4 | Blender addon packaging: zip + install instructions | Install via Preferences | Phase 7 | cc:完了 [155a63f] |
