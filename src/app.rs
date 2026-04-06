@@ -6,14 +6,13 @@ use crate::gpu::GpuContext;
 use crate::planet::{DerivedProperties, PlanetParams};
 use crate::plates::{generate_plates, PlateGenParams};
 use crate::preview::{PreviewRenderer, PreviewUniforms};
-use crate::terrain_compute::{CloudAdvectionPipeline, ErosionPipeline, TerrainComputePipeline, WindFieldPipeline};
+use crate::terrain_compute::{ErosionPipeline, TerrainComputePipeline, WindFieldPipeline};
 
 pub struct PlanetGenApp {
     gpu: Arc<GpuContext>,
     preview_renderer: PreviewRenderer,
     terrain_compute: TerrainComputePipeline,
     erosion_pipeline: ErosionPipeline,
-    cloud_pipeline: CloudAdvectionPipeline,
     wind_pipeline: WindFieldPipeline,
     cloud_cubemap_view: Option<wgpu::TextureView>,
     // Debug data cubemap views (continentality, pressure — uploaded on demand)
@@ -96,7 +95,6 @@ impl PlanetGenApp {
         let preview_renderer = PreviewRenderer::new(&gpu);
         let terrain_compute = TerrainComputePipeline::new(&gpu);
         let erosion_pipeline = ErosionPipeline::new(&gpu);
-        let cloud_pipeline = CloudAdvectionPipeline::new(&gpu);
         let wind_pipeline = WindFieldPipeline::new(&gpu);
         let params = PlanetParams::default();
         let derived = DerivedProperties::from_params(&params);
@@ -106,7 +104,6 @@ impl PlanetGenApp {
             preview_renderer,
             terrain_compute,
             erosion_pipeline,
-            cloud_pipeline,
             wind_pipeline,
             cloud_cubemap_view: None,
             continentality_view: None,
