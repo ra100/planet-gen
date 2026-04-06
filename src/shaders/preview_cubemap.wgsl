@@ -605,9 +605,7 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     let region_type = clamp(region_raw * 0.4 + 0.5 + lat_type_bias + uniforms.cloud_type * 0.2, 0.0, 1.0);
 
     // === Step 1: Three fundamentally different noise patterns ===
-    // Anisotropic wind warp: compress noise along wind direction for elongated clouds
-    let wind_warped = wind_anisotropic_warp(vortex_sphere, uniforms.cloud_wind_trail);
-    let p_base = wind_warped * 7.0 + seed_off;
+    let p_base = vortex_sphere * 7.0 + seed_off;
 
     // --- STRATUS: flowing sheets with texture (5 octaves, heavy warp) ---
     let s_warp = vec3<f32>(
@@ -694,11 +692,12 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     var local_coverage = max(climate_coverage, coverage * 0.85); // floor ensures slider=1 → ~85%+
 
     // === Continentality modulation: ocean=more clouds, deep interior=fewer ===
-    // cloud_tex alpha channel contains continentality (0=coast, 1=deep interior)
+    // cloud_tex alpha contains continentality (0=coast/ocean, ~1=deep interior)
     if (uniforms.cloud_advection > 0.5) {
-        let cont = sample_continentality(sphere_pos); // 0-1: coast to interior
-        // Ocean: boost +15%, coast: neutral, deep interior (>0.6): suppress up to -25%
-        let cont_mod = mix(1.15, 0.75, smooth_step(0.1, 0.7, cont));
+        let cont = sample_continentality(sphere_pos);
+        // Strong effect: ocean/coast boost +25%, deep interior (>0.5) suppress up to -50%
+        // This creates visible dry interiors and wet coastlines
+        let cont_mod = mix(1.25, 0.50, smooth_step(0.05, 0.65, cont));
         local_coverage *= cont_mod;
     }
 
@@ -890,16 +889,12 @@ fn compute_cirrus_density(sphere_pos: vec3<f32>) -> f32 {
     let s = uniforms.cloud_seed;
     let seed_off = vec3<f32>(s, fract(s * 1.618) * 89.0, fract(s * 2.618) * 83.0);
 
-    // Cirrus: 2.5x stronger wind trail (ice crystals are light, blow far in jet stream)
-    let ci_trail = min(uniforms.cloud_wind_trail * 2.5, 1.0);
-    let ci_warped = wind_anisotropic_warp(sphere_pos, ci_trail);
-
     let tilt = uniforms.axial_tilt_rad;
     let tilted_y = sphere_pos.y * cos(tilt) + sphere_pos.z * sin(tilt);
     let ci_lat = asin(clamp(tilted_y, -1.0, 1.0));
     let lat_deg = abs(ci_lat) * 180.0 / 3.14159;
 
-    let p = ci_warped * 6.0 + seed_off + vec3<f32>(50.0, 30.0, 70.0);
+    let p = sphere_pos * 6.0 + seed_off + vec3<f32>(50.0, 30.0, 70.0);
 
     // 3-octave high-frequency wispy noise
     let ci = snoise(p) * 0.5

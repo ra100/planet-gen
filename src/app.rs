@@ -755,7 +755,7 @@ impl eframe::App for PlanetGenApp {
                     let debug_views: &[(u32, &str)] = &[
                         (8, "AO"), (6, "Plates"), (2, "Temp"), (3, "Moisture"),
                         (4, "Biome"), (5, "Ocean/Ice"), (11, "Boundary"), (12, "Snow"),
-                        (9, "Clouds"), (14, "Wind (analyt)"), (18, "Wind (press)"), (15, "Currents"), (16, "Continentality"), (17, "Pressure"),
+                        (9, "Clouds"), (14, "Wind"), (15, "Currents"), (16, "Continentality"), (17, "Pressure"),
                     ];
                     ui.label("Debug Views");
                     ui.horizontal_wrapped(|ui| {
@@ -843,16 +843,6 @@ impl eframe::App for PlanetGenApp {
                     }
                 }
 
-                // Wind trail control (when wind shaping is ON)
-                if self.show_cloud_advection {
-                    if ui.add(egui::Slider::new(&mut self.cloud_wind_trail, 0.0..=1.0)
-                        .text("Wind Trail"))
-                        .on_hover_text("Cloud elongation along wind: 0 = round blobs, 0.5 = moderate trails, 1.0 = long streaks")
-                        .changed()
-                    {
-                        self.needs_render = true;
-                    }
-                }
 
                 ui.separator();
                 ui.label("Civilization");
