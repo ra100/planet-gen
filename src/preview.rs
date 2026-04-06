@@ -247,6 +247,26 @@ impl PreviewRenderer {
         cubemap.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::Cube), ..Default::default() })
     }
 
+    /// Upload 6-face RGBA f32 data as Rgba16Float cubemap (4 channels per texel).
+    pub fn upload_cubemap_rgba16(&self, gpu: &GpuContext, faces: &[Vec<f32>; 6], res: u32) -> wgpu::TextureView {
+        let cubemap = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("rgba data cubemap"), size: wgpu::Extent3d { width: res, height: res, depth_or_array_layers: 6 },
+            mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[],
+        });
+        for (i, face_data) in faces.iter().enumerate() {
+            let f16_data: Vec<u16> = face_data.iter().map(|&v| half::f16::from_f32(v).to_bits()).collect();
+            gpu.queue.write_texture(
+                wgpu::TexelCopyTextureInfo { texture: &cubemap, mip_level: 0, origin: wgpu::Origin3d { x: 0, y: 0, z: i as u32 }, aspect: wgpu::TextureAspect::All },
+                bytemuck::cast_slice(&f16_data),
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(res * 4 * 2), rows_per_image: Some(res) },
+                wgpu::Extent3d { width: res, height: res, depth_or_array_layers: 1 },
+            );
+        }
+        cubemap.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::Cube), ..Default::default() })
+    }
+
     pub fn render(
         &self,
         gpu: &GpuContext,

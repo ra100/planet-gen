@@ -54,7 +54,22 @@ struct Uniforms {
 @group(0) @binding(2) var height_sampler: sampler;
 @group(0) @binding(3) var cloud_tex: texture_cube<f32>;
 
-// Sample advected cloud density from cubemap (0 if no cloud data uploaded)
+// Sample wind+continentality cubemap: RGBA = (wind.x, wind.y, wind.z, continentality)
+fn sample_wind_cont(dir: vec3<f32>) -> vec4<f32> {
+    return textureSample(cloud_tex, height_sampler, dir);
+}
+
+// Sample pressure-derived 3D wind vector from cubemap
+fn sample_wind_field(dir: vec3<f32>) -> vec3<f32> {
+    return textureSample(cloud_tex, height_sampler, dir).xyz;
+}
+
+// Sample continentality (0=coast, 1=deep interior) from cubemap alpha
+fn sample_continentality(dir: vec3<f32>) -> f32 {
+    return textureSample(cloud_tex, height_sampler, dir).a;
+}
+
+// Legacy alias for debug views that read .r
 fn sample_cloud_advected(dir: vec3<f32>) -> f32 {
     return textureSample(cloud_tex, height_sampler, dir).r;
 }
@@ -501,13 +516,10 @@ fn cloud_remap(value: f32, old_min: f32, old_max: f32, new_min: f32, new_max: f3
 fn wind_anisotropic_warp(sphere_pos: vec3<f32>, trail_strength: f32) -> vec3<f32> {
     if (trail_strength < 0.01) { return sphere_pos; }
 
-    let tilt = uniforms.axial_tilt_rad;
-    let tilted_y = sphere_pos.y * cos(tilt) + sphere_pos.z * sin(tilt);
-    let lat = asin(clamp(tilted_y, -1.0, 1.0));
-
-    // Get wind direction as tangent vector on sphere
-    let wind = wind_direction_vec(lat);
-    let wind_tangent = wind - sphere_pos * dot(wind, sphere_pos);
+    // Sample pressure-derived wind from cubemap (has continent/terrain influence)
+    let wind_3d = sample_wind_field(sphere_pos);
+    // Project to tangent plane
+    let wind_tangent = wind_3d - sphere_pos * dot(wind_3d, sphere_pos);
     let wind_len = length(wind_tangent);
     if (wind_len < 0.001) { return sphere_pos; }
     let wind_dir = wind_tangent / wind_len;
@@ -682,9 +694,9 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     var local_coverage = max(climate_coverage, coverage * 0.85); // floor ensures slider=1 → ~85%+
 
     // === Continentality modulation: ocean=more clouds, deep interior=fewer ===
-    // cloud_tex contains continentality data (0=coast, 1=deep interior)
+    // cloud_tex alpha channel contains continentality (0=coast, 1=deep interior)
     if (uniforms.cloud_advection > 0.5) {
-        let cont = sample_cloud_advected(sphere_pos); // 0-1: coast to interior
+        let cont = sample_continentality(sphere_pos); // 0-1: coast to interior
         // Ocean: boost +15%, coast: neutral, deep interior (>0.6): suppress up to -25%
         let cont_mod = mix(1.15, 0.75, smooth_step(0.1, 0.7, cont));
         local_coverage *= cont_mod;
@@ -1649,8 +1661,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 }
             }
             case 16u: {
-                // Continentality: sampled from cloud_tex (uploaded with continentality data)
-                let cont = sample_cloud_advected(rotated);
+                // Continentality: from cloud_tex alpha channel
+                let cont = sample_continentality(rotated);
                 debug_color = mix(vec3<f32>(0.1, 0.2, 0.5), vec3<f32>(0.8, 0.5, 0.2), cont);
             }
             case 17u: {
@@ -1664,16 +1676,23 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 debug_color = mix(debug_color, vec3<f32>(0.9, 0.3, 0.1), high);
             }
             case 18u: {
-                // Moisture transport weight: ocean-sourced moisture redistributed by wind
-                // Range ~0.1 (dry continental interior) to ~2.0 (wet convergence zone)
-                let w = sample_cloud_advected(rotated);
-                // Map 0-2 range to color: dark brown=dry, green=moderate, white/blue=wet
-                let dry = clamp(1.0 - w * 1.5, 0.0, 1.0);
-                let wet = clamp((w - 0.8) / 1.2, 0.0, 1.0);
-                let mid = 1.0 - dry - wet * 0.5;
-                debug_color = dry * vec3<f32>(0.35, 0.20, 0.08)  // dry = brown
-                            + mid * vec3<f32>(0.3, 0.5, 0.25)    // moderate = green
-                            + wet * vec3<f32>(0.8, 0.85, 1.0);   // wet = blue-white
+                // Pressure-derived wind from cubemap (RGB channels)
+                let w = sample_wind_field(rotated);
+                let tangent_w = w - rotated * dot(w, rotated);
+                let speed = length(tangent_w);
+                // Build local frame for color mapping
+                var up_ref = vec3<f32>(0.0, 1.0, 0.0);
+                if (abs(rotated.y) > 0.95) { up_ref = vec3<f32>(1.0, 0.0, 0.0); }
+                let local_east = normalize(cross(up_ref, rotated));
+                let local_north = normalize(cross(rotated, local_east));
+                let we = dot(tangent_w, local_east);
+                let wn = dot(tangent_w, local_north);
+                let east_frac = (we / max(speed, 0.01) + 1.0) * 0.5;
+                debug_color = vec3<f32>(
+                    smooth_step(0.4, 0.8, east_frac),
+                    speed * 0.8,
+                    smooth_step(0.6, 0.2, east_frac)
+                ) * (0.3 + speed * 0.7);
             }
             default: { debug_color = surface_color; }
         }

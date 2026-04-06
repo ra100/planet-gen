@@ -334,9 +334,27 @@ impl PlanetGenApp {
                 rotation_rate, self.derived.base_temperature_c, self.derived.atmosphere_strength,
             );
 
-            // Upload continentality as cloud_tex (used for cloud coverage modulation + debug)
+            // Pack wind (RGB) + continentality (A) into RGBA16Float cubemap
+            // This lets the preview shader sample real pressure-derived wind
+            let ppf = (cloud_res * cloud_res) as usize;
+            let mut wind_cont_faces: [Vec<f32>; 6] = Default::default();
+            for face in 0..6usize {
+                let mut rgba = Vec::with_capacity(ppf * 4);
+                for j in 0..ppf {
+                    let wind_base = (face * ppf + j) * 3;
+                    let wx = wind_field.wind[wind_base];
+                    let wy = wind_field.wind[wind_base + 1];
+                    let wz = wind_field.wind[wind_base + 2];
+                    let cont = wind_field.continentality[face][j];
+                    rgba.push(wx);
+                    rgba.push(wy);
+                    rgba.push(wz);
+                    rgba.push(cont);
+                }
+                wind_cont_faces[face] = rgba;
+            }
             self.cloud_cubemap_view = Some(
-                self.preview_renderer.upload_cubemap_r16(&self.gpu, &wind_field.continentality, cloud_res)
+                self.preview_renderer.upload_cubemap_rgba16(&self.gpu, &wind_cont_faces, cloud_res)
             );
             self.continentality_view = Some(
                 self.preview_renderer.upload_cubemap_r16(&self.gpu, &wind_field.continentality, cloud_res)
@@ -737,7 +755,7 @@ impl eframe::App for PlanetGenApp {
                     let debug_views: &[(u32, &str)] = &[
                         (8, "AO"), (6, "Plates"), (2, "Temp"), (3, "Moisture"),
                         (4, "Biome"), (5, "Ocean/Ice"), (11, "Boundary"), (12, "Snow"),
-                        (9, "Clouds"), (14, "Wind"), (15, "Currents"), (16, "Continentality"), (17, "Pressure"),
+                        (9, "Clouds"), (14, "Wind (analyt)"), (18, "Wind (press)"), (15, "Currents"), (16, "Continentality"), (17, "Pressure"),
                     ];
                     ui.label("Debug Views");
                     ui.horizontal_wrapped(|ui| {
