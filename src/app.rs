@@ -837,57 +837,6 @@ impl eframe::App for PlanetGenApp {
                 }
 
                 ui.separator();
-                ui.label("Tectonics");
-                if ui.add(egui::Slider::new(&mut self.lava_glow, 0.0..=1.0)
-                    .text("Lava Glow"))
-                    .on_hover_text("Volcanic emission at plate boundaries: 0 = none, 1 = intense")
-                    .changed()
-                {
-                    self.needs_render = true;
-                }
-
-                ui.separator();
-                ui.label("Rings");
-                if ui.add(egui::Slider::new(&mut self.ring_inner, 0.0..=3.0)
-                    .text("Inner Radius"))
-                    .on_hover_text("Ring inner edge in planet radii. 0 = no rings, 1.2-1.5 typical")
-                    .changed()
-                {
-                    self.needs_render = true;
-                }
-                if self.ring_inner > 0.0 {
-                    if ui.add(egui::Slider::new(&mut self.ring_outer, self.ring_inner..=5.0)
-                        .text("Outer Radius"))
-                        .on_hover_text("Ring outer edge in planet radii. 2.0-3.0 typical")
-                        .changed()
-                    {
-                        self.needs_render = true;
-                    }
-                    if ui.add(egui::Slider::new(&mut self.ring_tilt, 0.0..=45.0)
-                        .text("Ring Tilt"))
-                        .on_hover_text("Tilt of ring plane relative to view (degrees)")
-                        .changed()
-                    {
-                        self.needs_render = true;
-                    }
-                    if ui.add(egui::Slider::new(&mut self.ring_opacity, 0.0..=1.0)
-                        .text("Ring Opacity"))
-                        .on_hover_text("Ring transparency: 0 = invisible, 1 = solid")
-                        .changed()
-                    {
-                        self.needs_render = true;
-                    }
-                    if ui.button("Export Ring Texture").clicked() {
-                        let out = std::env::current_dir().unwrap_or_default().join("output");
-                        let _ = std::fs::create_dir_all(&out);
-                        match export::export_ring_gradient(&out, 4096) {
-                            Ok(p) => { self.export_status = format!("Ring saved: {}", p.display()); }
-                            Err(e) => { self.export_status = format!("Ring export failed: {e}"); }
-                        }
-                    }
-                }
-
-                ui.separator();
                 ui.label("Civilization");
                 if ui.add(egui::Slider::new(&mut self.night_lights, 0.0..=1.0)
                     .text("Development"))
