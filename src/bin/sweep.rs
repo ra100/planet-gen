@@ -5,7 +5,7 @@ use planet_gen::gpu::GpuContext;
 use planet_gen::planet::{DerivedProperties, PlanetParams};
 use planet_gen::plates::{generate_plates, PlateGenParams};
 use planet_gen::preview::{PreviewRenderer, PreviewUniforms};
-use planet_gen::terrain_compute::{CloudAdvectionPipeline, TerrainComputePipeline, WindFieldPipeline};
+use planet_gen::terrain_compute::{TerrainComputePipeline, WindFieldPipeline};
 use std::path::Path;
 
 struct PlanetPreset {
@@ -186,7 +186,7 @@ fn generate_planet_png(
         show_cities: 0.0,
         cloud_opacity: 1.0,
         cloud_advection: 0.0,
-        rotation_rate: 1.0, atm_pressure: 0.7, cloud_wind_trail: 0.0,
+        rotation_rate: 1.0, atm_pressure: 0.7, _pad_trail: 0.0,
         lava_glow: 0.0, ring_inner: 0.0, ring_outer: 0.0, ring_tilt: 0.0, ring_opacity: 0.0,
         _pad3: 0.0, _pad4: 0.0, _pad5: 0.0,
     };
@@ -249,9 +249,8 @@ fn main() {
 
     println!("\nDone! {} images saved to {}/", total, output_dir);
 
-    // === Cloud advection comparison: earth with clouds OFF vs ON ===
-    println!("\n--- Cloud Advection Comparison ---");
-    let cloud_pipeline = CloudAdvectionPipeline::new(&gpu);
+    // === Wind effects comparison: earth with wind effects OFF vs ON ===
+    println!("\n--- Wind Effects Comparison ---");
     let earth = &planet_presets[0]; // earth preset
     let seed = 42u32;
     let mut params = earth.params.clone();
@@ -280,7 +279,7 @@ fn main() {
     );
     let cubemap_view = renderer.upload_terrain(&gpu, &terrain);
 
-    // Generate pressure-based wind field + advected clouds
+    // Generate pressure-based wind field (wind + continentality packed as RGBA16Float)
     let cloud_res = (render_size / 2).max(192);
     let wind_pipeline = WindFieldPipeline::new(&gpu);
     let rotation_rate = 24.0 / params.rotation_period_h;
@@ -289,13 +288,21 @@ fn main() {
         ocean_level, params.axial_tilt_deg.to_radians(), 0.5,
         rotation_rate, derived.base_temperature_c, derived.atmosphere_strength,
     );
-    let cloud_density = cloud_pipeline.generate(
-        &gpu, &terrain, cloud_res, seed,
-        ocean_level, effective_ocean,
-        params.axial_tilt_deg.to_radians(), 0.5, 30,
-        Some(&wind_field.wind), 0.18,
-    );
-    let cloud_view = renderer.upload_cubemap_r16(&gpu, &cloud_density.faces, cloud_res);
+    // Pack wind (RGB) + continentality (A) into RGBA16Float cubemap
+    let ppf = (cloud_res * cloud_res) as usize;
+    let mut wind_cont_faces: [Vec<f32>; 6] = Default::default();
+    for face in 0..6usize {
+        let mut rgba = Vec::with_capacity(ppf * 4);
+        for j in 0..ppf {
+            let base = (face * ppf + j) * 3;
+            rgba.push(wind_field.wind[base]);
+            rgba.push(wind_field.wind[base + 1]);
+            rgba.push(wind_field.wind[base + 2]);
+            rgba.push(wind_field.continentality[face][j]);
+        }
+        wind_cont_faces[face] = rgba;
+    }
+    let cloud_view = renderer.upload_cubemap_rgba16(&gpu, &wind_cont_faces, cloud_res);
 
     let tilt = 0.35_f32;
     let ct = tilt.cos();
@@ -311,41 +318,41 @@ fn main() {
         storm_count: 2.0, storm_size: 1.0, night_lights: 0.0, star_color_temp: 0.5,
         city_light_hue: 0.0, show_ao: 1.0, show_water: 1.0, show_ice: 1.0, show_biomes: 1.0,
         show_clouds: 1.0, show_atmosphere_layer: 0.0, show_cities: 0.0, cloud_opacity: 1.0,
-        cloud_advection: 0.0, rotation_rate: 1.0, atm_pressure: 0.7, cloud_wind_trail: 0.0,
+        cloud_advection: 0.0, rotation_rate: 1.0, atm_pressure: 0.7, _pad_trail: 0.0,
         lava_glow: 0.0, ring_inner: 0.0, ring_outer: 0.0, ring_tilt: 0.0, ring_opacity: 0.0,
         _pad3: 0.0, _pad4: 0.0, _pad5: 0.0,
     };
 
-    // Render without advection
+    // Render without wind effects (analytical wind only)
     let px_off = renderer.render(&gpu, &base_uniforms, &cubemap_view, None, render_size);
     let img = image::RgbaImage::from_raw(render_size, render_size, px_off).unwrap();
-    img.save(Path::new(&format!("{}/cloud_advection_OFF.png", output_dir))).unwrap();
-    println!("  cloud_advection_OFF.png saved");
+    img.save(Path::new(&format!("{}/wind_effects_OFF.png", output_dir))).unwrap();
+    println!("  wind_effects_OFF.png saved");
 
-    // Render with advection
+    // Render with wind effects (cubemap wind + continentality)
     let mut on_uniforms = base_uniforms;
     on_uniforms.cloud_advection = 1.0;
     let px_on = renderer.render(&gpu, &on_uniforms, &cubemap_view, Some(&cloud_view), render_size);
     let img = image::RgbaImage::from_raw(render_size, render_size, px_on).unwrap();
-    img.save(Path::new(&format!("{}/cloud_advection_ON.png", output_dir))).unwrap();
-    println!("  cloud_advection_ON.png saved");
-    println!("Compare: {}/cloud_advection_OFF.png vs {}/cloud_advection_ON.png", output_dir, output_dir);
+    img.save(Path::new(&format!("{}/wind_effects_ON.png", output_dir))).unwrap();
+    println!("  wind_effects_ON.png saved");
+    println!("Compare: {}/wind_effects_OFF.png vs {}/wind_effects_ON.png", output_dir, output_dir);
 
-    // Zoomed-in comparison (3x zoom to match user's close-up view)
+    // Zoomed-in comparison
     let mut zoom_off = base_uniforms;
     zoom_off.zoom = 3.0;
-    zoom_off.pan_y = 0.2; // shift up to see equatorial cloud belt
+    zoom_off.pan_y = 0.2;
     let px = renderer.render(&gpu, &zoom_off, &cubemap_view, None, render_size);
     image::RgbaImage::from_raw(render_size, render_size, px).unwrap()
-        .save(Path::new(&format!("{}/cloud_zoom_OFF.png", output_dir))).unwrap();
-    println!("  cloud_zoom_OFF.png saved");
+        .save(Path::new(&format!("{}/wind_zoom_OFF.png", output_dir))).unwrap();
+    println!("  wind_zoom_OFF.png saved");
 
     let mut zoom_on = zoom_off;
     zoom_on.cloud_advection = 1.0;
     let px = renderer.render(&gpu, &zoom_on, &cubemap_view, Some(&cloud_view), render_size);
     image::RgbaImage::from_raw(render_size, render_size, px).unwrap()
-        .save(Path::new(&format!("{}/cloud_zoom_ON.png", output_dir))).unwrap();
-    println!("  cloud_zoom_ON.png saved");
+        .save(Path::new(&format!("{}/wind_zoom_ON.png", output_dir))).unwrap();
+    println!("  wind_zoom_ON.png saved");
 
     // Wind map visualization
     let mut wind_u = base_uniforms;

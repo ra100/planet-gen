@@ -31,8 +31,14 @@ Requirements: [docs/brainstorms/2026-03-29-planet-gen-requirements.md](docs/brai
 | 5.14 | Terrain variety, 12-biome system, regional climate, ocean currents | 6/6 | [ba19f5f] |
 | 8.5 | Performance (benchmark, progressive erosion, moisture-weighted) | 6/6 | [edb3904] |
 | 6.0–6.3 | HEALPix orogen port | Archived to branch `archive/healpix-orogen` | [1aac311] reverted |
+| 5.15 | Cloud layer overhaul (types, layers, storms, wind model) | 11/11 | [da89ff5] |
+| 5.16 | Cloud & wind quality pass (coverage, detail, seasonal, föhn) | 8/8 | [b48cd68] |
+| 5.17 | GPU cloud advection (semi-Lagrangian, source/sink) | 6/6 | [ae73bb0] |
+| 5.18 | Pressure-based wind model (continentality, pressure, Coriolis) | 7/7 | [09637ba] |
+| 5.19 | Climate model refinement (Kaspi-Showman, ExoPlaSim, monsoon) | 7/7 | [4e2d088] |
+| 5.20 | Wind-shaped cloud system (streamline warp, continentality modulation) | 6/6 | [49051bd] |
 
-**Total completed: ~120 tasks across 22 phases**
+**Total completed: ~165 tasks across 28 phases**
 
 ---
 
@@ -45,112 +51,21 @@ Requirements: [docs/brainstorms/2026-03-29-planet-gen-requirements.md](docs/brai
 
 ---
 
-## Phase 5.15: Cloud Layer Overhaul
+## Phase 5.21: Unified Wind Pipeline
 
-Multiple overlaid cloud layers with distinct cloud types, wind-driven warp following atmospheric circulation, and better cloud distribution from the Hadley cell wind model.
+Replace dual wind models (analytical per-pixel + GPU cubemap) with a single cubemap wind source for all effects. Currently the GPU computes a pressure-derived wind field (~160ms) but only the continentality channel is used — the actual wind vectors are wasted. This phase wires the cubemap wind into moisture, clouds, and currents for physically consistent wind everywhere.
 
-Current system: 2 layers (low stratus/cumulus blend + high cirrus), cyclone vortex warp, climate-modulated coverage.
-Target: 3-4 distinct layers, wind-streaked shapes, latitude-coherent cloud bands.
-
-| Task | 内容 | DoD | Depends | Status |
-|------|------|-----|---------|--------|
-| 5.15.0 | Fix cloud artifacts: reduce wind warp strength, merge all cloud types into single density with alpha compositing instead of separate layers, fix cubemap face boundary banding | Clouds look natural — no vertical streaks, no banding lines, smooth coverage | Phase 5.14 | cc:完了 |
-| 5.15.0b | Add debug views: Cloud density, Wind direction, Ocean currents, Moisture map — as new view_mode options in the shader + UI dropdown | Each debug view selectable from View Mode dropdown; shows the raw data driving the layer | 5.15.0 | cc:完了 |
-| 5.15.1 | Wind-driven cloud warp: replace random domain warp with wind_direction_vec-based stretching. Low clouds warp along trade winds/westerlies, cirrus along jet stream. Warp strength scales with wind speed at altitude | Cloud shapes visibly elongated along wind direction; trade wind zone clouds streak E-W, westerlies zone W-E | Phase 5.14 | cc:完了 |
-| 5.15.2 | Stratocumulus layer: new mid-level layer between low cumulus and high cirrus. Cellular/honeycomb pattern from abs(noise) with open-cell (marine) and closed-cell (land) variants. Covers subtropical ocean regions | Visible cellular cloud pattern over subtropical oceans; distinct from puffy cumulus and smooth stratus | 5.15.1 | cc:完了 |
-| 5.15.3 | Latitude-banded cloud distribution: ITCZ thick convective band, subtropical clear zone, mid-latitude frontal bands, polar thin overcast. Replace uniform coverage slider with climate-driven baseline + slider as multiplier | Clear subtropical gaps visible; thick ITCZ band; frontal cloud bands at mid-latitudes | 5.15.2 | cc:完了 |
-| 5.15.4 | Per-layer rendering: render low (cumulus/stratus), mid (stratocumulus), and high (cirrus) as separate passes with distinct altitude offsets, opacity, and self-shadow. Each layer casts shadow on layers below | Visible depth parallax between layers; low clouds shadow surface, cirrus shadows low clouds | 5.15.3 | cc:完了 |
-| 5.15.5 | Cloud type from climate: ITCZ → tall cumulonimbus (bright white), subtropics → thin stratocumulus, mid-lat → mixed frontal, polar → thin stratus. Cloud type auto-selected from latitude + moisture, cloud_type slider becomes a bias | Cloud appearance changes with latitude without user intervention; slider fine-tunes | 5.15.4 | cc:完了 |
-| 5.15.6 | Cloud opacity slider (0-1) multiplying Beer-Lambert alpha for both layers | Slider fades clouds smoothly | 5.15.0 | cc:完了 |
-| 5.15.7 | Storm variety: per-storm unique size (0.5x-2.0x), tropical tighter, mid-lat broader | Visible size variation between storms | 5.15.0 | cc:完了 |
-| 5.15.8 | Puffier storm clouds: cumulus peaks inside vortex, clear eye with towering wall | Puffy storm clouds, visible eye | 5.15.7 | cc:完了 |
-| 5.15.9 | Wind model: smooth Hadley/Ferrel/Polar cells, Coriolis meridional, terrain deflection | Smooth curved flow in debug view | 5.15.0b | cc:完了 |
-
----
-
-## Phase 5.16: Cloud & Wind Quality Pass
-
-Fix coverage scaling, storm artifacts, cloud detail, seasonal wind, and mountain interaction.
-Research: [docs/research/cloud-rendering.md], [docs/brainstorms/2026-03-31-cloud-layer-requirements.md]
+Plan: [docs/plans/2026-04-06-unified-wind-pipeline.md](docs/plans/2026-04-06-unified-wind-pipeline.md)
 
 | Task | 内容 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
-| 5.16.1 | Fix coverage scaling: slider=1.0 overrides climate suppression via `max(climate, coverage*0.85)` floor | slider=1.0 ≈ 90%+ coverage | Phase 5.15 | cc:完了 |
-| 5.16.2 | Cloud detail: 6 octaves (was 5), base freq 7.0 (was 5.0), weather-region noise breaks uniform spread | More cloud systems, wispy edges, regional clear patches | 5.16.1 | cc:完了 |
-| 5.16.3 | Seasonal wind: cell boundaries shift with thermal equator (season * tilt * 0.4) | Wind asymmetric between hemispheres at solstice | 5.16.1 | cc:完了 |
-| 5.16.4 | Stronger mountain clouds 0.25 (was 0.10) + föhn gap lee-side suppression | Visible buildup on windward, clear gap on leeward | 5.16.2 | cc:完了 |
-| 5.16.5 | Storm spirals: noise-perturbed angle (±0.35), capped vortex at min distance, softer gaps | No smooth tails, turbulent edges | 5.16.4 | cc:完了 |
-| 5.16.6 | Seasonal ocean currents: winter hemisphere +50% current strength | Currents stronger in winter | 5.16.3 | cc:完了 |
-| 5.16.7 | Cloud type regions: low-freq noise (0.8) + latitude bias selects stratus/cumulus/thin per region; varies fBm gain and warp per zone | Debug shows different texture patterns across planet | 5.16.2 | cc:完了 |
-| 5.16.8 | Fix coast edges: smooth_step land_factor replaces hard threshold; föhn gap smooth | No hard edges at continent borders in debug | 5.16.7 | cc:完了 |
-
----
-
-## Phase 5.17: GPU Cloud Advection
-
-Replace per-pixel noise clouds with GPU compute-generated cloud density texture advected by wind over N iterations. Clouds flow along atmospheric circulation, accumulate over convergence zones, and dissipate over divergence zones. Produces physically motivated cloud patterns that respect wind direction and terrain.
-
-| Task | 内容 | DoD | Depends | Status |
-|------|------|-----|---------|--------|
-| 5.17.1 | Cloud density cubemap (R16Float, 6×256²) initialized from noise | Texture created, noise-initialized | Phase 5.16 | cc:完了 [ae73bb0] |
-| 5.17.2 | Wind computed inline in advection shader (Hadley+seasonal) | Wind drives advection direction | 5.17.1 | cc:完了 [ae73bb0] |
-| 5.17.3 | Semi-Lagrangian advection with ping-pong buffers | 30 steps shifts density along wind | 5.17.2 | cc:完了 [ae73bb0] |
-| 5.17.4 | Source/sink: ITCZ condensation, ocean boost, subtropical suppression, rain shadow | Clouds accumulate at ITCZ, dissipate over deserts | 5.17.3 | cc:完了 [ae73bb0] |
-| 5.17.5 | 30-step pipeline in regenerate_terrain(), 119ms at 256px | Advected clouds within 0.5s | 5.17.4 | cc:完了 [ae73bb0] |
-| 5.17.6 | Preview samples cloud_tex (binding 3), 70/30 blend with noise detail | Wind-aligned patterns + noise detail | 5.17.5 | cc:完了 [ae73bb0] |
-
----
-
-## Phase 5.18: Pressure-Based Wind Model
-
-Replace latitude-only wind with pressure-gradient-derived wind that varies by longitude, terrain, and land/ocean distribution. Inspired by [planet_heightmap_generation](https://github.com/raguilar011095/planet_heightmap_generation) wind.js. Makes cloud advection produce visible, physically motivated cloud movement.
-
-Plan: [docs/plans/2026-04-05-pressure-wind-model.md](docs/plans/2026-04-05-pressure-wind-model.md)
-
-| Task | 内容 | DoD | Depends | Status |
-|------|------|-----|---------|--------|
-| 5.18.1 | GPU continentality: compute shader BFS from ocean cells on cubemap | Continentality cubemap 0=coast, 1=interior; debug view shows smooth gradient | Phase 5.17 | cc:完了 [cb33c99] |
-| 5.18.2 | Pressure field shader: ITCZ low, subtropical highs, continental thermal, elevation, noise | Pressure cubemap; debug view blue=low red=high; ITCZ varies by longitude | 5.18.1 | cc:完了 [cb33c99] |
-| 5.18.3 | Pressure gradient → wind: finite differences + Coriolis deflection + surface friction | Wind cubemap shows trades, westerlies, monsoon deflection | 5.18.2 | cc:完了 [cb33c99] |
-| 5.18.4 | Wire wind cubemap into cloud advection shader (replaces inline wind_at) | Advection uses precomputed pressure-derived wind | 5.18.3 | cc:完了 [cb33c99] |
-| 5.18.5 | Make advected clouds the PRIMARY density source (per-pixel noise adds detail only) | Toggle ON/OFF shows clear cloud movement difference | 5.18.4 | cc:完了 [cb33c99] |
-| 5.18.6 | Add Pressure + Continentality debug views to view mode dropdown | Selectable from UI; shows raw pressure/continentality data | 5.18.2 | cc:完了 [cb33c99] |
-| 5.18.7 | Tune and validate: compare with Earth-like wind/cloud patterns | Monsoon shift over continents, maritime westerlies, subtropical clear zones | 5.18.5 | cc:完了 [09637ba] |
-
----
-
-## Phase 5.19: Climate Model Refinement
-
-Apply quantitative data from worldbuildingpasta research to improve physical accuracy of wind, clouds, and precipitation.
-
-Research: [docs/research/worldbuildingpasta-climate-research.md](docs/research/worldbuildingpasta-climate-research.md)
-
-| Task | 内容 | DoD | Depends | Status |
-|------|------|-----|---------|--------|
-| 5.19.1 | Parameterize Hadley cell boundaries by rotation rate using Kaspi & Showman 2015 table | Cell boundaries shift with rotation_period_h; 16-day planet has single wide cell, 12h planet has 5+ cells | Phase 5.18 | cc:完了 [4e2d088] |
-| 5.19.2 | Pressure-dependent wind/precipitation scaling from ExoPlaSim data | Wind speed scales as `22*(1/P)^0.15`, precipitation as `P^-0.5`; thinner atmospheres = stronger winds, more rain | 5.19.1 | cc:完了 [4e2d088] |
-| 5.19.3 | Improve ITCZ longitude variation: monsoon rules, thermal equator follows land | ITCZ shifts 15-20° poleward over large continents in summer; trade wind reversal visible in wind debug | 5.19.1 | cc:完了 [4e2d088] |
-| 5.19.4 | Fix straight-line cloud stretching: add small-scale turbulence to wind field | Cloud patterns show turbulent eddies, not straight lines; visible in zoomed cloud view | 5.19.3 | cc:完了 [4e2d088] |
-| 5.19.5 | Apply moisture penetration distance rules: onshore 2000-3000km, offshore 1000km | Continental interiors >3000km from coast are dry; rain shadow at >2km mountain relief | 5.19.2 | cc:完了 [4e2d088] |
-| 5.19.6 | Hadley cell width vs temperature: widen 1° per 4°C warming up to 21°C global mean | Hot planets have wider tropics; cold planets have narrower Hadley cells | 5.19.1 | cc:完了 [4e2d088] |
-| 5.19.7 | Altitude-latitude equivalence: 1km altitude ~ 8° poleward for snow/vegetation lines | Mountain biome zonation follows 6.5°C/km lapse rate correctly | - | cc:完了 [4e2d088] |
-
----
-
-## Phase 5.20: Wind-Shaped Cloud System
-
-Replace the broken compute-based cloud advection pipeline with per-pixel wind streamline tracing. Clouds are visibly stretched along wind direction — trade wind trails, westerly frontal bands, monsoon cloud trains — all at full preview resolution with zero cubemap seam artifacts.
-
-**Approach:** For each cloud pixel, trace backward along the wind field for N steps. Use the integrated streamline position as the noise coordinate. Adjacent pixels trace to similar upstream positions → clouds naturally elongate into wind-aligned trails. The existing `wind_direction_at()` (terrain-deflected) provides the wind, `compute_moisture()` provides the climate awareness, and the continentality cubemap (from Phase 5.18, already smooth) provides coast/interior contrast.
-
-| Task | 内容 | DoD | Depends | Status |
-|------|------|-----|---------|--------|
-| 5.20.1 | Remove cloud advection compute from rendering path. Keep wind field compute for debug views. Remove advection-related UI (Steps, Blend). Keep Wind Advection checkbox as toggle for new system | Clouds render identically with toggle OFF. No compute advection dispatched. Debug views (Wind, Pressure, Continentality) still work | Phase 5.19 | cc:完了 [49051bd] |
-| 5.20.2 | Implement `wind_streamline_warp()`: multi-step backward trace along wind field in per-pixel shader. Replace the current `wind_stretch = tangent * 0.08` with N-step Euler integration along `wind_direction_at()`. Return the traced-back sphere position as noise coordinate | Cloud shapes visibly elongated along wind: trade wind zone shows E-W trails, westerlies show W-E streaks. Visible difference from OFF (round blobs) vs ON (elongated trails) | 5.20.1 | cc:完了 [49051bd] |
-| 5.20.3 | Add "Wind Trail" strength slider (0.0-1.0) controlling streamline trace length. 0 = no wind influence (current round blobs), 0.5 = moderate elongation, 1.0 = long wind trails | Slider continuously interpolates between round and elongated clouds | 5.20.2 | cc:完了 [49051bd] |
-| 5.20.4 | Sample continentality cubemap in cloud coverage: ocean cells get +20% coverage, deep interior (continentality > 0.7) gets -30% coverage. Smooth sampling to avoid face seams | Continental interiors visibly drier than coasts. No cubemap face seam artifacts in clouds | 5.20.2 | cc:完了 [49051bd] |
-| 5.20.5 | Apply wind trail to cirrus layer: high-altitude cirrus should be heavily wind-streaked (jet stream). Separate trail strength for cirrus (2-3x the low cloud trail) | Cirrus shows strong directional streaking, visibly different from low clouds | 5.20.2 | cc:完了 [49051bd] |
-| 5.20.6 | Tune and validate: compare with satellite imagery for trade wind cumulus trails, mid-latitude frontal cloud bands, ITCZ thick band, subtropical clear zones | Zoomed view shows recognizable wind-shaped cloud patterns at multiple latitudes | 5.20.5 | cc:完了 [49051bd] |
+| 5.21.1 | `sample_wind_tangent(pos)` helper with auto-fallback | Helper compiles, cubemap when ON, analytical when OFF | Phase 5.20 | cc:完了 |
+| 5.21.2 | Wire cubemap wind into moisture rain shadow | Rain shadows follow pressure wind | 5.21.1 | cc:完了 |
+| 5.21.3 | Wire cubemap wind into orographic clouds | Mountain clouds follow pressure wind | 5.21.2 | cc:完了 |
+| 5.21.4 | Wire cubemap wind into ocean currents (Ekman transport) | Currents use wind-derived east direction | 5.21.3 | cc:完了 |
+| 5.21.5 | Merge debug views 14+18 into single Wind view | One view, cubemap when ON, analytical when OFF | 5.21.4 | cc:完了 |
+| 5.21.6 | Remove CloudAdvectionPipeline + cloud_advect.wgsl, fix sweep.rs | Build succeeds, ~430 lines removed | 5.21.5 | cc:完了 |
+| 5.21.7 | Build + test validation | 42 tests pass, runtime shader compiles | 5.21.6 | cc:完了 |
 
 ---
 

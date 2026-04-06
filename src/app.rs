@@ -39,7 +39,7 @@ pub struct PlanetGenApp {
     show_ice: bool,
     show_biomes: bool,
     show_clouds: bool,
-    show_cloud_advection: bool, // GPU wind advection modulates cloud coverage
+    show_wind_effects: bool, // GPU wind/continentality modulates clouds and moisture
     show_cities: bool,
     show_erosion: bool,
     zoom: f32,            // viewport zoom level
@@ -57,7 +57,6 @@ pub struct PlanetGenApp {
     cloud_seed: u32,
     cloud_type: f32,
     cloud_opacity: f32,
-    cloud_wind_trail: f32,     // wind streamline trail strength (0.0-1.0)
     lava_glow: f32,            // tectonic emission intensity (0.0-1.0)
     ring_inner: f32,           // ring inner radius (planet radii)
     ring_outer: f32,           // ring outer radius
@@ -133,7 +132,7 @@ impl PlanetGenApp {
             show_ice: true,
             show_biomes: true,
             show_clouds: true,
-            show_cloud_advection: true,
+            show_wind_effects: true,
             show_cities: true,
             show_erosion: false,
             zoom: 1.0,
@@ -150,7 +149,6 @@ impl PlanetGenApp {
             cloud_seed: default_cloud_seed,
             cloud_type: 0.5,
             cloud_opacity: 1.0,
-            cloud_wind_trail: 0.5,
             lava_glow: 0.0,
             ring_inner: 0.0,
             ring_outer: 0.0,
@@ -241,10 +239,10 @@ impl PlanetGenApp {
             show_atmosphere_layer: if self.show_atmosphere { 1.0 } else { 0.0 },
             show_cities: if self.show_cities { 1.0 } else { 0.0 },
             cloud_opacity: self.cloud_opacity,
-            cloud_advection: if self.show_cloud_advection { 1.0 } else { 0.0 },
+            cloud_advection: if self.show_wind_effects { 1.0 } else { 0.0 },
             rotation_rate: 24.0 / self.params.rotation_period_h,
             atm_pressure: self.derived.atmosphere_strength,
-            cloud_wind_trail: if self.show_cloud_advection { self.cloud_wind_trail } else { 0.0 },
+            _pad_trail: 0.0,
             lava_glow: self.lava_glow,
             ring_inner: self.ring_inner,
             ring_outer: self.ring_outer,
@@ -713,8 +711,8 @@ impl eframe::App for PlanetGenApp {
                     }
                     if self.show_clouds {
                         ui.indent("cloud_sub", |ui| {
-                            if ui.checkbox(&mut self.show_cloud_advection, "Wind Advection")
-                                .on_hover_text("GPU wind advection modulates cloud coverage (toggle to compare)")
+                            if ui.checkbox(&mut self.show_wind_effects, "Wind Effects")
+                                .on_hover_text("Use GPU-computed wind/continentality to modulate clouds and moisture")
                                 .changed()
                             {
                                 self.needs_render = true;
@@ -755,7 +753,8 @@ impl eframe::App for PlanetGenApp {
                     let debug_views: &[(u32, &str)] = &[
                         (8, "AO"), (6, "Plates"), (2, "Temp"), (3, "Moisture"),
                         (4, "Biome"), (5, "Ocean/Ice"), (11, "Boundary"), (12, "Snow"),
-                        (9, "Clouds"), (14, "Wind"), (15, "Currents"), (16, "Continentality"), (17, "Pressure"),
+                        (9, "Clouds"), (14, "Wind"), (15, "Currents"),
+                        (16, "Continentality"), (17, "Pressure"),
                     ];
                     ui.label("Debug Views");
                     ui.horizontal_wrapped(|ui| {

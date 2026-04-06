@@ -35,7 +35,7 @@ fn smooth_step(edge0: f32, edge1: f32, x: f32) -> f32 {
     return t * t * (3.0 - 2.0 * t);
 }
 
-// === Cross-face sampling (same pattern as cloud_advect.wgsl) ===
+// === Cross-face sampling with bilinear interpolation ===
 
 fn sphere_to_face_uv(dir: vec3<f32>) -> vec3<f32> {
     let abs_dir = abs(dir);
@@ -69,18 +69,37 @@ fn sample_src(dir: vec3<f32>) -> f32 {
     let fuv = sphere_to_face_uv(dir);
     let face = u32(fuv.x);
     let res = params.resolution;
-    let px = clamp(u32(fuv.y * f32(res - 1u)), 0u, res - 1u);
-    let py = clamp(u32(fuv.z * f32(res - 1u)), 0u, res - 1u);
-    return src[face * res * res + py * res + px];
+    // Bilinear interpolation prevents discontinuities at cubemap face boundaries.
+    let fx = fuv.y * f32(res - 1u);
+    let fy = fuv.z * f32(res - 1u);
+    let x0 = clamp(u32(fx), 0u, res - 2u);
+    let y0 = clamp(u32(fy), 0u, res - 2u);
+    let tx = fx - f32(x0);
+    let ty = fy - f32(y0);
+    let base = face * res * res;
+    let v00 = src[base + y0 * res + x0];
+    let v10 = src[base + y0 * res + x0 + 1u];
+    let v01 = src[base + (y0 + 1u) * res + x0];
+    let v11 = src[base + (y0 + 1u) * res + x0 + 1u];
+    return mix(mix(v00, v10, tx), mix(v01, v11, tx), ty);
 }
 
 fn sample_height(dir: vec3<f32>) -> f32 {
     let fuv = sphere_to_face_uv(dir);
     let face = u32(fuv.x);
     let res = params.resolution;
-    let px = clamp(u32(fuv.y * f32(res - 1u)), 0u, res - 1u);
-    let py = clamp(u32(fuv.z * f32(res - 1u)), 0u, res - 1u);
-    return height_data[face * res * res + py * res + px];
+    let fx = fuv.y * f32(res - 1u);
+    let fy = fuv.z * f32(res - 1u);
+    let x0 = clamp(u32(fx), 0u, res - 2u);
+    let y0 = clamp(u32(fy), 0u, res - 2u);
+    let tx = fx - f32(x0);
+    let ty = fy - f32(y0);
+    let base = face * res * res;
+    let v00 = height_data[base + y0 * res + x0];
+    let v10 = height_data[base + y0 * res + x0 + 1u];
+    let v01 = height_data[base + (y0 + 1u) * res + x0];
+    let v11 = height_data[base + (y0 + 1u) * res + x0 + 1u];
+    return mix(mix(v00, v10, tx), mix(v01, v11, tx), ty);
 }
 
 // === Mode 0: Initialize continentality ===
@@ -212,12 +231,32 @@ fn compute_pressure(pos: vec3<f32>, idx: u32) {
         }
     }
 
-    // (f) Elevation (barometric) — mild
+    // (f) Semi-permanent ocean pressure cells — breaks latitude bands over water.
+    // On Earth, subtropical highs cluster into 3-5 distinct cells per hemisphere
+    // (Azores, Pacific, etc.) rather than forming a continuous belt.
+    // Low-freq noise seeded by position creates persistent cell structure.
+    if (continentality < 0.15) {
+        // Subtropical cell splitting: noise modulates high intensity by longitude
+        let cell_noise = snoise(pos * 2.5 + so * 0.7 + vec3<f32>(50.0, 0.0, 0.0)) * 0.5
+                       + snoise(pos * 1.2 + so * 0.4 + vec3<f32>(0.0, 70.0, 0.0)) * 0.3;
+        let sub_belt = smooth_step(hadley_lat - 12.0, hadley_lat, abs_lat_deg)
+                     * smooth_step(hadley_lat + 15.0, hadley_lat + 5.0, abs_lat_deg);
+        // Cells: ±5 hPa variation within subtropical belt
+        pressure += cell_noise * 5.0 * sub_belt;
+
+        // Mid-latitude storm track undulation: subpolar lows meander
+        let storm_track = smooth_step(polar_lat - 15.0, polar_lat - 5.0, abs_lat_deg)
+                        * smooth_step(polar_lat + 10.0, polar_lat, abs_lat_deg);
+        let meander = snoise(pos * 3.0 + so * 1.1 + vec3<f32>(30.0, 0.0, 50.0));
+        pressure += meander * 4.0 * storm_track;
+    }
+
+    // (g) Elevation (barometric) — mild
     let elev_km = max(height - params.ocean_level, 0.0) * 5.0; // rough height mapping
     pressure -= 3.0 * elev_km;
 
-    // (g) Noise perturbation (±2 hPa)
-    pressure += snoise(pos * 2.0 + so * 0.5 + vec3<f32>(100.0, 0.0, 0.0)) * 2.0;
+    // (h) Noise perturbation (±3 hPa, slightly stronger than before)
+    pressure += snoise(pos * 2.0 + so * 0.5 + vec3<f32>(100.0, 0.0, 0.0)) * 3.0;
 
     dst[idx] = pressure;
 }
