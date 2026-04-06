@@ -501,19 +501,26 @@ fn cloud_remap(value: f32, old_min: f32, old_max: f32, new_min: f32, new_max: f3
 fn wind_streamline_warp(sphere_pos: vec3<f32>, trail_strength: f32) -> vec3<f32> {
     if (trail_strength < 0.01) { return sphere_pos; }
 
+    // Fade out near poles to avoid tangent-frame singularity (bullseye artifact)
+    let tilt = uniforms.axial_tilt_rad;
+    let tilted_y = sphere_pos.y * cos(tilt) + sphere_pos.z * sin(tilt);
+    let abs_lat_deg = abs(asin(clamp(tilted_y, -1.0, 1.0))) * 180.0 / 3.14159;
+    let polar_fade = smooth_step(75.0, 55.0, abs_lat_deg); // 1.0 at <55°, fades to 0 at 75°
+    let effective_trail = trail_strength * polar_fade;
+    if (effective_trail < 0.01) { return sphere_pos; }
+
     var pos = sphere_pos;
-    let steps = 6; // enough for visible trails without being expensive
-    let step_size = trail_strength * 0.025; // total displacement = 6 * 0.025 * trail = ~0.15 at max
+    let steps = 4;
+    let step_size = effective_trail * 0.012; // gentler: total ~0.048 at max (was 0.15)
 
     for (var i = 0; i < steps; i++) {
-        // Get wind at current trace position (terrain-deflected)
-        let tilt = uniforms.axial_tilt_rad;
-        let tilted_y = pos.y * cos(tilt) + pos.z * sin(tilt);
-        let lat = asin(clamp(tilted_y, -1.0, 1.0));
-        let wind = wind_direction_at(pos, lat);
+        let ty = pos.y * cos(tilt) + pos.z * sin(tilt);
+        let lat = asin(clamp(ty, -1.0, 1.0));
+        // Use base wind direction (no terrain deflection) for smoother trails
+        let wind = wind_direction_vec(lat);
+        let tangent_wind = normalize(wind - pos * dot(wind, pos));
 
-        // Step backward along wind (trace to upstream position)
-        pos = normalize(pos - wind * step_size);
+        pos = normalize(pos - tangent_wind * step_size);
     }
 
     return pos;
