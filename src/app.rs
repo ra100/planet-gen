@@ -58,6 +58,11 @@ pub struct PlanetGenApp {
     cloud_type: f32,
     cloud_opacity: f32,
     cloud_wind_trail: f32,     // wind streamline trail strength (0.0-1.0)
+    lava_glow: f32,            // tectonic emission intensity (0.0-1.0)
+    ring_inner: f32,           // ring inner radius (planet radii)
+    ring_outer: f32,           // ring outer radius
+    ring_tilt: f32,            // ring tilt (degrees)
+    ring_opacity: f32,         // ring opacity
     storm_count: u32,
     storm_size: f32,
     night_lights: f32,
@@ -145,6 +150,11 @@ impl PlanetGenApp {
             cloud_type: 0.5,
             cloud_opacity: 1.0,
             cloud_wind_trail: 0.5,
+            lava_glow: 0.0,
+            ring_inner: 0.0,
+            ring_outer: 0.0,
+            ring_tilt: 15.0,
+            ring_opacity: 0.7,
             storm_count: 0,
             storm_size: 1.0,
             night_lights: 0.0,
@@ -233,6 +243,12 @@ impl PlanetGenApp {
             rotation_rate: 24.0 / self.params.rotation_period_h,
             atm_pressure: self.derived.atmosphere_strength,
             cloud_wind_trail: if self.show_cloud_advection { self.cloud_wind_trail } else { 0.0 },
+            lava_glow: self.lava_glow,
+            ring_inner: self.ring_inner,
+            ring_outer: self.ring_outer,
+            ring_tilt: self.ring_tilt.to_radians(),
+            ring_opacity: self.ring_opacity,
+            _pad3: 0.0, _pad4: 0.0, _pad5: 0.0,
         }
     }
 
@@ -791,6 +807,57 @@ impl eframe::App for PlanetGenApp {
                         .changed()
                     {
                         self.needs_render = true;
+                    }
+                }
+
+                ui.separator();
+                ui.label("Tectonics");
+                if ui.add(egui::Slider::new(&mut self.lava_glow, 0.0..=1.0)
+                    .text("Lava Glow"))
+                    .on_hover_text("Volcanic emission at plate boundaries: 0 = none, 1 = intense")
+                    .changed()
+                {
+                    self.needs_render = true;
+                }
+
+                ui.separator();
+                ui.label("Rings");
+                if ui.add(egui::Slider::new(&mut self.ring_inner, 0.0..=3.0)
+                    .text("Inner Radius"))
+                    .on_hover_text("Ring inner edge in planet radii. 0 = no rings, 1.2-1.5 typical")
+                    .changed()
+                {
+                    self.needs_render = true;
+                }
+                if self.ring_inner > 0.0 {
+                    if ui.add(egui::Slider::new(&mut self.ring_outer, self.ring_inner..=5.0)
+                        .text("Outer Radius"))
+                        .on_hover_text("Ring outer edge in planet radii. 2.0-3.0 typical")
+                        .changed()
+                    {
+                        self.needs_render = true;
+                    }
+                    if ui.add(egui::Slider::new(&mut self.ring_tilt, 0.0..=45.0)
+                        .text("Ring Tilt"))
+                        .on_hover_text("Tilt of ring plane relative to view (degrees)")
+                        .changed()
+                    {
+                        self.needs_render = true;
+                    }
+                    if ui.add(egui::Slider::new(&mut self.ring_opacity, 0.0..=1.0)
+                        .text("Ring Opacity"))
+                        .on_hover_text("Ring transparency: 0 = invisible, 1 = solid")
+                        .changed()
+                    {
+                        self.needs_render = true;
+                    }
+                    if ui.button("Export Ring Texture").clicked() {
+                        let out = std::env::current_dir().unwrap_or_default().join("output");
+                        let _ = std::fs::create_dir_all(&out);
+                        match export::export_ring_gradient(&out, 4096) {
+                            Ok(p) => { self.export_status = format!("Ring saved: {}", p.display()); }
+                            Err(e) => { self.export_status = format!("Ring export failed: {e}"); }
+                        }
                     }
                 }
 

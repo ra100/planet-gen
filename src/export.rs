@@ -957,6 +957,39 @@ pub struct ExportHandle {
     pub thread: std::thread::JoinHandle<()>,
 }
 
+/// Export a ring gradient texture as a 4K×1 RGBA PNG.
+/// Radial position 0 (inner) to width-1 (outer) maps to color + alpha.
+pub fn export_ring_gradient(output_dir: &Path, width: u32) -> Result<PathBuf, String> {
+    let height = 1u32;
+    let mut pixels = Vec::with_capacity((width * 4) as usize);
+
+    for x in 0..width {
+        let frac = x as f32 / (width - 1) as f32; // 0=inner, 1=outer
+
+        // Density: inner bright, outer faint, with Cassini-like gaps
+        let base_density = (1.0 - frac) * 0.85 + 0.15;
+        let gap1 = 1.0 - (1.0 - ((frac - 0.37) * 30.0).abs().min(1.0)) * 0.7;
+        let gap2 = 1.0 - (1.0 - ((frac - 0.67) * 40.0).abs().min(1.0)) * 0.5;
+        let density = base_density * gap1 * gap2;
+
+        // Color: warm ice/dust tones
+        let r = (0.75 + 0.15 * frac).min(1.0);
+        let g = (0.68 + 0.17 * frac).min(1.0);
+        let b = (0.55 + 0.20 * frac).min(1.0);
+
+        pixels.push((r * 255.0) as u8);
+        pixels.push((g * 255.0) as u8);
+        pixels.push((b * 255.0) as u8);
+        pixels.push((density * 255.0) as u8); // alpha = density
+    }
+
+    let path = output_dir.join("ring_gradient.png");
+    let img = image::RgbaImage::from_raw(width, height, pixels)
+        .ok_or("Failed to create ring image")?;
+    img.save(&path).map_err(|e| format!("Failed to save ring gradient: {e}"))?;
+    Ok(path)
+}
+
 pub fn spawn_export(
     gpu: Arc<GpuContext>,
     config: ExportConfig,

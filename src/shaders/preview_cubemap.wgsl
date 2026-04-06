@@ -39,6 +39,14 @@ struct Uniforms {
     rotation_rate: f32,    // relative to Earth (1.0 = 24h day)
     atm_pressure: f32,     // atmospheric pressure in bar (1.0 = Earth)
     cloud_wind_trail: f32, // wind streamline trail strength (0.0-1.0)
+    lava_glow: f32,        // tectonic emission intensity (0.0-1.0)
+    ring_inner: f32,       // ring inner radius (planet radii, 0 = disabled)
+    ring_outer: f32,       // ring outer radius
+    ring_tilt: f32,        // ring plane tilt (radians)
+    ring_opacity: f32,     // ring opacity (0-1)
+    _pad3: f32,
+    _pad4: f32,
+    _pad5: f32,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -1185,10 +1193,68 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let has_atm = uniforms.atmosphere_density > 0.001 && atm_h > 0.001;
     let outer_r = select(1.005, atm_radius + 0.015, has_atm);
 
-    // Miss everything — outside both planet and atmosphere → show starfield
+    // ---- Ring system: flat disc intersected by view ray ----
+    // Ring sits in a tilted plane through the planet center.
+    // View ray: origin (ndc.x, ndc.y, z_far) direction (0, 0, -1) in view space.
+    // Ring plane: y * cos(tilt) + z * sin(tilt) = 0 (tilted around X-axis)
+    var ring_color_accum = vec3<f32>(0.0);
+    var ring_alpha_accum = 0.0;
+    let has_rings = uniforms.ring_inner > 0.01 && uniforms.ring_outer > uniforms.ring_inner;
+    if (has_rings) {
+        let rt = uniforms.ring_tilt;
+        let ct = cos(rt);
+        let st = sin(rt);
+        // Ray: P = (ndc.x, ndc.y, t) for t along view. Plane: y*ct + t*st = 0
+        // Solve: t = -ndc.y * ct / st (if st != 0)
+        if (abs(st) > 0.001) {
+            let t_hit = -ndc.y * ct / st;
+            let hit_x = ndc.x;
+            let hit_y = ndc.y;
+            let ring_r = sqrt(hit_x * hit_x + t_hit * t_hit);
+
+            if (ring_r >= uniforms.ring_inner && ring_r <= uniforms.ring_outer) {
+                // Ring hit! Check if it's behind the planet
+                let behind_planet = r2 < 1.0 && t_hit < 0.0;
+                if (!behind_planet) {
+                    // Radial position within ring (0=inner, 1=outer)
+                    let ring_frac = (ring_r - uniforms.ring_inner) / (uniforms.ring_outer - uniforms.ring_inner);
+                    // Color gradient: inner bright, gaps in middle, outer faint
+                    let ring_density = (1.0 - ring_frac) * 0.8 + 0.2;
+                    // Procedural ring gaps (Cassini-division-like)
+                    let gap1 = 1.0 - smooth_step(0.35, 0.38, ring_frac) * smooth_step(0.42, 0.39, ring_frac) * 0.7;
+                    let gap2 = 1.0 - smooth_step(0.65, 0.67, ring_frac) * smooth_step(0.70, 0.68, ring_frac) * 0.5;
+                    let ring_band = ring_density * gap1 * gap2;
+                    // Lighting: ring is lit by sun on front, shadowed on back
+                    let ring_normal = vec3<f32>(0.0, ct, st);
+                    let ring_lit = max(dot(ring_normal, sun_dir), 0.0) * 0.7 + 0.3;
+                    // Ring color: warm ice/dust tones
+                    let base_ring = mix(vec3<f32>(0.75, 0.68, 0.55), vec3<f32>(0.9, 0.85, 0.75), ring_frac);
+                    ring_color_accum = base_ring * ring_lit * ring_band * s_color;
+                    ring_alpha_accum = ring_band * uniforms.ring_opacity;
+
+                    // Planet shadow on ring: check if ring point is in planet's shadow
+                    let shadow_proj = hit_x * sun_dir.x + t_hit * sun_dir.z;
+                    if (shadow_proj < 0.0) { // on shadow side
+                        let perp_dist = abs(hit_y * ct + t_hit * st - (hit_x * sun_dir.x + hit_y * sun_dir.y + t_hit * sun_dir.z) * sun_dir.y);
+                        // Approximate: in shadow if perpendicular distance to sun ray < 1 (planet radius)
+                        let shadow_r = sqrt(hit_x * hit_x * (1.0 - sun_dir.x * sun_dir.x) + t_hit * t_hit * (1.0 - sun_dir.z * sun_dir.z));
+                        if (shadow_r < 1.05) {
+                            ring_color_accum *= 0.15; // deep shadow
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Miss everything — outside both planet and atmosphere → show starfield (+ rings)
     if (r2 > outer_r * outer_r) {
-        let bg = starfield(ndc, sun_dir, s_color);
+        var bg = starfield(ndc, sun_dir, s_color);
         let bg_tm = bg / (bg + vec3<f32>(1.0)); // tonemap sun HDR
+        if (ring_alpha_accum > 0.01) {
+            let ring_tm = ring_color_accum / (ring_color_accum + vec3<f32>(1.0));
+            return vec4<f32>(mix(bg_tm, ring_tm, ring_alpha_accum), 1.0);
+        }
         return vec4<f32>(bg_tm, 1.0);
     }
 
@@ -1656,6 +1722,36 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         lit_color *= mix(1.0, surface_shadow, 0.65);
     }
 
+    // ---- Lava glow at tectonic boundaries ----
+    if (uniforms.lava_glow > 0.0 && !is_ocean) {
+        // Detect plate boundaries via height gradient (same logic as debug view 11)
+        let lstep = 0.006;
+        let lh_r = textureSample(height_tex, height_sampler, rotated + vec3<f32>(lstep, 0.0, 0.0)).r;
+        let lh_l = textureSample(height_tex, height_sampler, rotated - vec3<f32>(lstep, 0.0, 0.0)).r;
+        let lh_u = textureSample(height_tex, height_sampler, rotated + vec3<f32>(0.0, lstep, 0.0)).r;
+        let lh_d = textureSample(height_tex, height_sampler, rotated - vec3<f32>(0.0, lstep, 0.0)).r;
+        let lgrad = sqrt(pow(lh_r - lh_l, 2.0) + pow(lh_u - lh_d, 2.0));
+        // Strong gradient = plate boundary → lava emission
+        let boundary = smooth_step(0.015, 0.06, lgrad);
+        if (boundary > 0.01) {
+            // Flickering lava noise
+            let lava_noise = snoise(rotated * 80.0) * 0.3 + snoise(rotated * 160.0) * 0.2 + 0.5;
+            let lava_strength = boundary * uniforms.lava_glow * max(lava_noise, 0.2);
+            let lava_color = mix(vec3<f32>(1.0, 0.3, 0.0), vec3<f32>(1.0, 0.8, 0.1), lava_noise);
+            lit_color += lava_color * lava_strength * 3.0; // HDR emission
+        }
+    }
+
+    // ---- Ocean sun glint (specular highlight on water) ----
+    if (is_ocean && !ocean_ice) {
+        // Blinn-Phong sun glint: tight specular on smooth water
+        let glint_power = 256.0; // very tight highlight
+        let glint_spec = pow(max(dot(normal, half_vec), 0.0), glint_power);
+        let glint_fresnel = fresnel_schlick(max(dot(half_vec, view_dir), 0.0), 0.04);
+        let glint = glint_spec * glint_fresnel * n_dot_l * 8.0; // HDR bright
+        lit_color += s_color * glint;
+    }
+
     // Ice/snow brightness override (gated by show_ice)
     if (uniforms.show_ice > 0.5 && ice_amount > 0.01) {
         let ice_lit = s_color * (n_dot_l * 3.5 + 1.0); // HDR bright → tonemaps to white
@@ -1797,6 +1893,23 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let edge_bg_tm = edge_bg / (edge_bg + vec3<f32>(1.0));
         let edge_aa = 1.0 - smooth_step(0.99, 1.0, sqrt(r2));
         lit_color = mix(edge_bg_tm, lit_color, edge_aa);
+    }
+
+    // ---- Lens flare near planet limb ----
+    // Subtle cinematic flare when sun is near the planet edge
+    if (sun_dir.z < 0.3) { // sun near or behind the planet
+        let limb_dist = abs(sqrt(r2) - 1.0); // distance from planet edge
+        if (limb_dist < 0.15) {
+            // Sun direction projected to screen
+            let sun_screen = vec2<f32>(sun_dir.x, sun_dir.y) / max(abs(sun_dir.z) + 0.3, 0.3);
+            let to_sun = normalize(sun_screen - ndc);
+            let edge_angle = dot(normalize(ndc), normalize(sun_screen));
+
+            // Anamorphic streak: horizontal elongation toward sun
+            let streak = exp(-limb_dist * limb_dist * 200.0) * max(edge_angle, 0.0);
+            let flare_color = s_color * streak * 0.15;
+            lit_color += flare_color;
+        }
     }
 
     return vec4<f32>(lit_color, 1.0);

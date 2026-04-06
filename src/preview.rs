@@ -45,6 +45,14 @@ pub struct PreviewUniforms {
     pub rotation_rate: f32,    // relative to Earth (1.0 = 24h day)
     pub atm_pressure: f32,     // atmospheric pressure in bar (1.0 = Earth)
     pub cloud_wind_trail: f32, // wind streamline trail strength (0.0-1.0)
+    pub lava_glow: f32,        // tectonic emission intensity (0.0-1.0)
+    pub ring_inner: f32,       // ring system inner radius (planet radii, 0 = no rings)
+    pub ring_outer: f32,       // ring system outer radius
+    pub ring_tilt: f32,        // ring plane tilt angle (radians)
+    pub ring_opacity: f32,     // ring opacity (0-1)
+    pub _pad3: f32,
+    pub _pad4: f32,
+    pub _pad5: f32,
 }
 
 pub struct PreviewRenderer {
@@ -446,6 +454,8 @@ mod tests {
             cloud_opacity: 1.0,
             cloud_advection: 0.0,
             rotation_rate: 1.0, atm_pressure: 0.7, cloud_wind_trail: 0.0,
+            lava_glow: 0.0, ring_inner: 0.0, ring_outer: 0.0, ring_tilt: 0.0, ring_opacity: 0.0,
+            _pad3: 0.0, _pad4: 0.0, _pad5: 0.0,
         };
 
         let size = 256;

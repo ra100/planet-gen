@@ -187,6 +187,8 @@ fn generate_planet_png(
         cloud_opacity: 1.0,
         cloud_advection: 0.0,
         rotation_rate: 1.0, atm_pressure: 0.7, cloud_wind_trail: 0.0,
+        lava_glow: 0.0, ring_inner: 0.0, ring_outer: 0.0, ring_tilt: 0.0, ring_opacity: 0.0,
+        _pad3: 0.0, _pad4: 0.0, _pad5: 0.0,
     };
 
     renderer.render(gpu, &uniforms, &cubemap_view, None, render_size)
@@ -310,6 +312,8 @@ fn main() {
         city_light_hue: 0.0, show_ao: 1.0, show_water: 1.0, show_ice: 1.0, show_biomes: 1.0,
         show_clouds: 1.0, show_atmosphere_layer: 0.0, show_cities: 0.0, cloud_opacity: 1.0,
         cloud_advection: 0.0, rotation_rate: 1.0, atm_pressure: 0.7, cloud_wind_trail: 0.0,
+        lava_glow: 0.0, ring_inner: 0.0, ring_outer: 0.0, ring_tilt: 0.0, ring_opacity: 0.0,
+        _pad3: 0.0, _pad4: 0.0, _pad5: 0.0,
     };
 
     // Render without advection
