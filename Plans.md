@@ -40,8 +40,8 @@ Requirements: [docs/brainstorms/2026-03-29-planet-gen-requirements.md](docs/brai
 
 | Task | 内容 | Status |
 |------|------|--------|
-| 5.8.2 | Export cloud + night light layers as textures | cc:TODO |
-| 8a.7 | Performance + visual comparison: screenshot comparison and docs/research/ update | cc:TODO |
+| 5.8.2 | Export cloud + night light layers as textures | cc:完了 [9ed788c] |
+| 8a.7 | Performance + visual comparison: screenshot comparison and docs/research/ update | cc:完了 [9ed788c] |
 
 ---
 
