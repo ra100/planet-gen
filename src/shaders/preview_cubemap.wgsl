@@ -494,36 +494,38 @@ fn cloud_remap(value: f32, old_min: f32, old_max: f32, new_min: f32, new_max: f3
            / max(old_max - old_min, 0.001) * (new_max - new_min);
 }
 
-// Trace backward along wind streamline to create wind-elongated cloud shapes.
-// Returns a warped sphere position: adjacent pixels trace to similar upstream
-// positions → noise correlates along wind direction → clouds form trails.
-// trail_strength: 0 = no warp, 1 = full streamline trace
-fn wind_streamline_warp(sphere_pos: vec3<f32>, trail_strength: f32) -> vec3<f32> {
+// Anisotropic noise warp: compress noise coordinate along wind direction.
+// This makes cloud features appear elongated along wind without any multi-step
+// tracing, convergence singularities, or static-pattern bleed-through.
+// Returns a warped 3D position for noise sampling (NOT on the unit sphere).
+fn wind_anisotropic_warp(sphere_pos: vec3<f32>, trail_strength: f32) -> vec3<f32> {
     if (trail_strength < 0.01) { return sphere_pos; }
 
-    // Fade out near poles to avoid tangent-frame singularity (bullseye artifact)
     let tilt = uniforms.axial_tilt_rad;
     let tilted_y = sphere_pos.y * cos(tilt) + sphere_pos.z * sin(tilt);
-    let abs_lat_deg = abs(asin(clamp(tilted_y, -1.0, 1.0))) * 180.0 / 3.14159;
-    let polar_fade = smooth_step(75.0, 55.0, abs_lat_deg); // 1.0 at <55°, fades to 0 at 75°
-    let effective_trail = trail_strength * polar_fade;
-    if (effective_trail < 0.01) { return sphere_pos; }
+    let lat = asin(clamp(tilted_y, -1.0, 1.0));
 
-    var pos = sphere_pos;
-    let steps = 4;
-    let step_size = effective_trail * 0.012; // gentler: total ~0.048 at max (was 0.15)
+    // Get wind direction as tangent vector on sphere
+    let wind = wind_direction_vec(lat);
+    let wind_tangent = wind - sphere_pos * dot(wind, sphere_pos);
+    let wind_len = length(wind_tangent);
+    if (wind_len < 0.001) { return sphere_pos; }
+    let wind_dir = wind_tangent / wind_len;
 
-    for (var i = 0; i < steps; i++) {
-        let ty = pos.y * cos(tilt) + pos.z * sin(tilt);
-        let lat = asin(clamp(ty, -1.0, 1.0));
-        // Use base wind direction (no terrain deflection) for smoother trails
-        let wind = wind_direction_vec(lat);
-        let tangent_wind = normalize(wind - pos * dot(wind, pos));
+    // Perpendicular to wind on the tangent plane
+    let cross_wind = normalize(cross(sphere_pos, wind_dir));
 
-        pos = normalize(pos - tangent_wind * step_size);
-    }
+    // Decompose sphere_pos into: radial + along_wind + cross_wind
+    let radial = sphere_pos; // unit sphere, this IS the radial direction
+    let along = dot(sphere_pos, wind_dir);
+    let across = dot(sphere_pos, cross_wind);
 
-    return pos;
+    // Compress along wind direction → noise features elongate along wind
+    // compress = 0.5 means noise is sampled at half frequency along wind
+    // → features appear 2x stretched in wind direction
+    let compress = 1.0 - trail_strength * 0.4; // trail=1 → 0.6x along wind
+
+    return sphere_pos + wind_dir * (along * (compress - 1.0));
 }
 
 fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
@@ -591,8 +593,8 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     let region_type = clamp(region_raw * 0.4 + 0.5 + lat_type_bias + uniforms.cloud_type * 0.2, 0.0, 1.0);
 
     // === Step 1: Three fundamentally different noise patterns ===
-    // Wind streamline warp: trace backward along wind to create elongated trails
-    let wind_warped = wind_streamline_warp(vortex_sphere, uniforms.cloud_wind_trail);
+    // Anisotropic wind warp: compress noise along wind direction for elongated clouds
+    let wind_warped = wind_anisotropic_warp(vortex_sphere, uniforms.cloud_wind_trail);
     let p_base = wind_warped * 7.0 + seed_off;
 
     // --- STRATUS: flowing sheets with texture (5 octaves, heavy warp) ---
@@ -878,7 +880,7 @@ fn compute_cirrus_density(sphere_pos: vec3<f32>) -> f32 {
 
     // Cirrus: 2.5x stronger wind trail (ice crystals are light, blow far in jet stream)
     let ci_trail = min(uniforms.cloud_wind_trail * 2.5, 1.0);
-    let ci_warped = wind_streamline_warp(sphere_pos, ci_trail);
+    let ci_warped = wind_anisotropic_warp(sphere_pos, ci_trail);
 
     let tilt = uniforms.axial_tilt_rad;
     let tilted_y = sphere_pos.y * cos(tilt) + sphere_pos.z * sin(tilt);
