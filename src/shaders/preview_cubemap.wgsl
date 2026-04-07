@@ -634,11 +634,21 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     }
     noise_val = noise_val / amp_sum * 0.5 + 0.5;
 
-    // === Weather systems: pure noise, two scales ===
-    let weather = snoise(vortex_sphere * 1.0 + seed_off * 0.3 + vec3<f32>(77.0, 0.0, 0.0)) * 0.6
-                + snoise(vortex_sphere * 2.5 + seed_off * 0.5 + vec3<f32>(0.0, 77.0, 0.0)) * 0.4;
-    let weather_mod = weather * 0.5 + 0.5;
-    noise_val *= (0.4 + 0.6 * weather_mod);
+    // High-freq cellular detail: abs(noise) creates subtle cell-ridge texture.
+    // ADDITIVE (not multiplicative) — brightens ridges, can't create dark holes.
+    let cell_hi = abs(snoise(pw2 * 4.0 + seed_off * 2.0)) * 0.06
+                + abs(snoise(pw2 * 7.0 + seed_off * 3.0)) * 0.03;
+    noise_val += cell_hi;
+
+    // === Weather systems: THREE scales for natural variety ===
+    // Huge (freq 0.4): hemisphere-sized high/low pressure zones
+    // Large (freq 1.0): continent-sized clear/cloudy regions
+    // Medium (freq 2.5): individual weather fronts
+    let weather_huge = snoise(vortex_sphere * 0.4 + seed_off * 0.2 + vec3<f32>(33.0, 0.0, 0.0));
+    let weather_large = snoise(vortex_sphere * 1.0 + seed_off * 0.3 + vec3<f32>(77.0, 0.0, 0.0));
+    let weather_med = snoise(vortex_sphere * 2.5 + seed_off * 0.5 + vec3<f32>(0.0, 77.0, 0.0));
+    let weather_mod = (weather_huge * 0.35 + weather_large * 0.40 + weather_med * 0.25) * 0.5 + 0.5;
+    noise_val *= (0.35 + 0.65 * weather_mod);
 
     // === Coverage: latitude bands + slider ===
     let tilt_c = uniforms.axial_tilt_rad;
@@ -659,25 +669,6 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     let slider_override = cov_slider * cov_slider; // quadratic: slider=1→1, slider=0.5→0.25
     let effective_coverage = mix(coverage, cov_slider, slider_override * 0.3); // high slider partially bypasses moisture
     var local_coverage = (0.85 + itcz + subtropical + midlat + polar) * effective_coverage;
-
-    // === Gentle terrain/climate modulation (±10-15% max, all blurred) ===
-    // These NUDGE the coverage — the noise pattern stays dominant.
-    if (uniforms.cloud_advection > 0.5) {
-        // Continentality: ocean slightly cloudier, deep interior slightly drier
-        let cont = sample_continentality_wide(sphere_pos);
-        let cont_nudge = mix(0.06, -0.10, smooth_step(0.3, 0.8, cont));
-        local_coverage += cont_nudge;
-    }
-
-    // Orographic: mountains get more clouds on windward side (only high terrain)
-    let oro_h = textureSample(height_tex, height_sampler, sphere_pos).r;
-    let elevation = max(oro_h - uniforms.ocean_level, 0.0);
-    if (elevation > 0.04) { // only mountains >~1.5km
-        let wind_t = sample_wind_tangent(sphere_pos);
-        let upwind_h = textureSample(height_tex, height_sampler, normalize(sphere_pos + wind_t * 0.08)).r;
-        let lift = smooth_step(0.06, 0.20, max(upwind_h - uniforms.ocean_level, 0.0));
-        local_coverage += lift * 0.12; // up to +12% on windward mountains
-    }
 
     // === Storm boost (uses precomputed centers) ===
     var storm_boost = 0.0;
@@ -701,10 +692,14 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
                         + snoise(sphere_pos * 35.0 + seed_off * 1.3) * 0.3, 0.0) * storm_boost;
     let varied_noise = clamp(noise_val + storm_peaks, 0.0, 1.0);
 
-    // === Schneider remap (clean threshold, no soft-edge hacks) ===
+    // === Schneider remap with soft edge sigmoid ===
     let threshold = 1.0 - local_coverage;
     var density = cloud_remap(varied_noise, threshold, 1.0, 0.0, 1.0) * local_coverage;
-    density = pow(density, 0.9);
+    // Sigmoid softening: smooth_step near the threshold creates graduated opacity
+    // at cloud edges instead of the linear remap's abrupt cutoff.
+    let edge_soft = smooth_step(threshold - 0.06, threshold + 0.03, varied_noise) * 0.15 * local_coverage;
+    density = max(density, edge_soft);
+    density = pow(density, 0.92);
 
     // === Step 6: Carve spiral arms + eye into density (uses precomputed centers) ===
     if (n_storms > 0) {
@@ -779,13 +774,27 @@ fn compute_cirrus_density(sphere_pos: vec3<f32>) -> f32 {
     let ci_lat = asin(clamp(tilted_y, -1.0, 1.0));
     let lat_deg = abs(ci_lat) * 180.0 / 3.14159;
 
-    let p = sphere_pos * 6.0 + seed_off + vec3<f32>(50.0, 30.0, 70.0);
+    // Wind-aligned domain warp: cirrus streaks along jet stream direction.
+    // Uses sample_wind_tangent for wind direction → fibrous, streaky appearance.
+    let wind_t = sample_wind_tangent(sphere_pos);
+    let p_base = sphere_pos * 6.0 + seed_off + vec3<f32>(50.0, 30.0, 70.0);
+    // Anisotropic warp: stretch along wind for fibrous streaks
+    let ci_warp_raw = vec3<f32>(
+        snoise(p_base * 0.4 + vec3<f32>(17.3, 0.0, 0.0)),
+        snoise(p_base * 0.4 + vec3<f32>(0.0, 23.1, 0.0)),
+        snoise(p_base * 0.4 + vec3<f32>(0.0, 0.0, 31.7))
+    ) * 0.35;
+    let along = dot(ci_warp_raw, wind_t) * wind_t;
+    let across = ci_warp_raw - along;
+    let ci_warp = along * 2.0 + across * 0.5; // strong wind-aligned stretching
+    let p = p_base + ci_warp;
 
-    // 3-octave high-frequency wispy noise
-    let ci = snoise(p) * 0.5
-           + snoise(p * 2.1 + vec3<f32>(3.7, 1.1, 8.3)) * 0.3
-           + snoise(p * 4.4 + vec3<f32>(1.3, 5.9, 2.1)) * 0.2;
-    let ci_norm = ci * 0.5 + 0.5;
+    // 4-octave fibrous noise: abs() creates thin wispy filaments at zero crossings
+    let ci = abs(snoise(p)) * 0.4
+           + abs(snoise(p * 2.1 + vec3<f32>(3.7, 1.1, 8.3))) * 0.3
+           + snoise(p * 4.4 + vec3<f32>(1.3, 5.9, 2.1)) * 0.2
+           + snoise(p * 8.8 + vec3<f32>(7.1, 3.3, 1.7)) * 0.1;
+    let ci_norm = ci * 0.5 + 0.4; // offset to keep some density
 
     // Cirrus common at mid-to-high latitudes (jet stream), rare at equator and poles
     let lat_boost = smooth_step(20.0, 45.0, lat_deg) * smooth_step(75.0, 60.0, lat_deg) * 0.18;
@@ -1698,33 +1707,40 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         var low_density = compute_cloud_density(low_world, low_sfc_h);
 
         if (low_density > 0.005) {
-            // Beer-Lambert: CAPPED thickness prevents dense clouds from going fully opaque.
-            // Dense clouds still show internal structure through self-shadow variation.
-            let thickness = mix(2.0, 4.0, low_density); // capped at 4 (was 6)
+            // === Density-dependent Beer-Lambert ===
+            // Thin clouds (d<0.3): very translucent, wispy appearance
+            // Medium clouds (0.3-0.6): natural opacity ramp
+            // Thick clouds (d>0.6): opaque with strong self-shadow contrast
+            let thin = smooth_step(0.0, 0.3, low_density);
+            let thickness = mix(1.5, 4.5, thin); // thin=1.5 (translucent), thick=4.5 (opaque)
             let low_alpha = (1.0 - exp(-low_density * thickness)) * uniforms.cloud_opacity;
 
-            // Self-shadowing at TWO offsets: near (local detail) + far (broad shadow)
+            // Self-shadowing: density-dependent strength
+            // Thin clouds: weak shadow (they're translucent). Thick clouds: strong shadow contrast.
             let sh_near = normalize(low_world + sun_dir * 0.025);
             let sh_far = normalize(low_world + sun_dir * 0.06);
             let sh_near_h = textureSample(height_tex, height_sampler, sh_near).r;
             let sh_far_h = textureSample(height_tex, height_sampler, sh_far).r;
             let sd_near = compute_cloud_density(sh_near, sh_near_h);
             let sd_far = compute_cloud_density(sh_far, sh_far_h);
-            let shadow = exp(-(sd_near * 2.0 + sd_far * 1.5));
+            let shadow_strength = mix(1.0, 3.5, thin); // thin: weak, thick: strong
+            let shadow = exp(-(sd_near + sd_far) * shadow_strength);
 
-            // Cloud color: bright white → blue-grey shadow, with density-dependent darkening.
-            // Thicker clouds are slightly darker at their base (not just uniform white).
+            // Cloud color varies with density:
+            // Thin → bright, translucent white. Thick → deeper shadow contrast.
             let lit_cloud = vec3<f32>(1.0, 1.0, 0.98) * s_color;
-            let shadow_cloud = vec3<f32>(0.50, 0.53, 0.62);
+            let shadow_cloud = mix(vec3<f32>(0.65, 0.67, 0.72), vec3<f32>(0.45, 0.48, 0.58), thin);
             var low_color = mix(shadow_cloud, lit_cloud, shadow);
-            // Dense cloud base darkening: denser = slightly darker grey
-            let base_darken = 1.0 - low_density * 0.15;
+            let base_darken = 1.0 - low_density * 0.18;
             low_color *= base_darken;
 
-            // Internal texture: STRONGER variation prevents flat wash-out in dense areas
-            let cloud_tex_n = snoise(low_world * 20.0 + vec3<f32>(uniforms.cloud_seed * 5.3)) * 0.10
-                            + snoise(low_world * 40.0 + vec3<f32>(uniforms.cloud_seed * 9.1)) * 0.06
-                            + snoise(low_world * 80.0 + vec3<f32>(uniforms.cloud_seed * 2.7)) * 0.03;
+            // Internal texture: always visible, stronger for thick clouds.
+            // Multiple scales prevent flat uniform areas at any zoom level.
+            let tex_strength = mix(0.08, 0.16, thin);
+            let cloud_tex_n = snoise(low_world * 15.0 + vec3<f32>(uniforms.cloud_seed * 5.3)) * tex_strength
+                            + snoise(low_world * 30.0 + vec3<f32>(uniforms.cloud_seed * 9.1)) * tex_strength * 0.6
+                            + snoise(low_world * 60.0 + vec3<f32>(uniforms.cloud_seed * 2.7)) * tex_strength * 0.35
+                            + snoise(low_world * 120.0 + vec3<f32>(uniforms.cloud_seed * 7.3)) * tex_strength * 0.2;
             low_color *= 1.0 + cloud_tex_n;
 
             // Day/night terminator

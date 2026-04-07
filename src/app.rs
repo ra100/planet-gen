@@ -55,7 +55,6 @@ pub struct PlanetGenApp {
     continent_size_variety: f32, // 0 = equal sizes, 1 = heavily skewed
     cloud_coverage: f32,
     cloud_seed: u32,
-    cloud_type: f32,
     cloud_opacity: f32,
     wind_strength: f32,        // cloud wind stretching strength (0.0-1.0)
     lava_glow: f32,            // tectonic emission intensity (0.0-1.0)
@@ -148,7 +147,6 @@ impl PlanetGenApp {
             continent_size_variety: 0.35,
             cloud_coverage: 0.5,
             cloud_seed: default_cloud_seed,
-            cloud_type: 0.5,
             cloud_opacity: 1.0,
             wind_strength: 0.5,
             lava_glow: 0.0,
@@ -227,7 +225,7 @@ impl PlanetGenApp {
             cloud_coverage: self.cloud_coverage,
             cloud_seed: crate::preview::seed_to_offset(self.cloud_seed)[0],
             cloud_altitude: 0.008,
-            cloud_type: self.cloud_type,
+            cloud_type: 0.5,
             storm_count: self.storm_count as f32,
             storm_size: self.storm_size,
             night_lights: self.night_lights,
@@ -474,7 +472,7 @@ impl PlanetGenApp {
                 emission: self.export_emission,
             },
             cloud_coverage: self.cloud_coverage,
-            cloud_type: self.cloud_type,
+            cloud_type: 0.5,
             cloud_seed: self.cloud_seed,
             night_lights: self.night_lights,
         };
@@ -693,6 +691,71 @@ impl eframe::App for PlanetGenApp {
                 }
 
                 ui.separator();
+                ui.label("Clouds");
+                if ui.add(egui::Slider::new(&mut self.cloud_coverage, 0.0..=1.0)
+                    .text("Coverage"))
+                    .on_hover_text("Cloud coverage fraction. 0 = clear sky, 1 = heavy overcast")
+                    .changed()
+                {
+                    self.needs_render = true;
+                }
+                ui.horizontal(|ui| {
+                    if ui.small_button("🎲").on_hover_text("Randomize cloud pattern").clicked() {
+                        self.cloud_seed = rand_seed();
+                        self.needs_render = true;
+                    }
+                    let mut seed_i64 = self.cloud_seed as i64;
+                    if ui.add(egui::DragValue::new(&mut seed_i64).prefix("Seed: ")).changed() {
+                        self.cloud_seed = seed_i64.clamp(0, u32::MAX as i64) as u32;
+                        self.needs_render = true;
+                    }
+                });
+                if ui.add(egui::Slider::new(&mut self.cloud_opacity, 0.0..=1.0)
+                    .text("Opacity"))
+                    .on_hover_text("Cloud layer transparency: 0 = invisible, 1 = fully opaque")
+                    .changed()
+                {
+                    self.needs_render = true;
+                }
+                let mut storms_i32 = self.storm_count as i32;
+                if ui.add(egui::Slider::new(&mut storms_i32, 0..=8)
+                    .text("Storms"))
+                    .on_hover_text("Number of cyclone storm systems. 0 = none, 4 = Earth-like, 8 = stormy planet")
+                    .changed()
+                {
+                    self.storm_count = storms_i32 as u32;
+                    self.needs_render = true;
+                }
+                if self.storm_count > 0 {
+                    if ui.add(egui::Slider::new(&mut self.storm_size, 0.3..=3.0)
+                        .text("Storm Size"))
+                        .on_hover_text("Storm radius: 0.3 = compact, 1.0 = Earth-like, 3.0 = massive")
+                        .changed()
+                    {
+                        self.needs_render = true;
+                    }
+                }
+
+                ui.separator();
+                ui.label("Civilization");
+                if ui.add(egui::Slider::new(&mut self.night_lights, 0.0..=1.0)
+                    .text("Development"))
+                    .on_hover_text("Urbanization level: 0 = pristine wilderness, 1 = heavily developed. Shows grey cities by day, lights at night")
+                    .changed()
+                {
+                    self.needs_render = true;
+                }
+                if self.night_lights > 0.0 {
+                    if ui.add(egui::Slider::new(&mut self.city_light_hue, 0.0..=1.0)
+                        .text("Light Color"))
+                        .on_hover_text("Night light color: 0 = warm amber (sodium), 0.5 = white (LED), 1.0 = cool blue (alien/futuristic)")
+                        .changed()
+                    {
+                        self.needs_render = true;
+                    }
+                }
+
+                ui.separator();
                 egui::CollapsingHeader::new("Render Layers")
                     .default_open(true)
                     .show(ui, |ui| {
@@ -799,79 +862,6 @@ impl eframe::App for PlanetGenApp {
                         self.needs_render = true;
                     }
                 });
-
-                ui.separator();
-                ui.label("Clouds");
-                if ui.add(egui::Slider::new(&mut self.cloud_coverage, 0.0..=1.0)
-                    .text("Coverage"))
-                    .on_hover_text("Cloud coverage fraction. 0 = clear sky, 1 = heavy overcast")
-                    .changed()
-                {
-                    self.needs_render = true;
-                }
-                ui.horizontal(|ui| {
-                    if ui.small_button("🎲").on_hover_text("Randomize cloud pattern").clicked() {
-                        self.cloud_seed = rand_seed();
-                        self.needs_render = true;
-                    }
-                    let mut seed_i64 = self.cloud_seed as i64;
-                    if ui.add(egui::DragValue::new(&mut seed_i64).prefix("Seed: ")).changed() {
-                        self.cloud_seed = seed_i64.clamp(0, u32::MAX as i64) as u32;
-                        self.needs_render = true;
-                    }
-                });
-                if ui.add(egui::Slider::new(&mut self.cloud_type, 0.0..=1.0)
-                    .text("Type"))
-                    .on_hover_text("Cloud style: 0 = smooth flowing stratus, 1 = puffy cumulus blobs")
-                    .changed()
-                {
-                    self.needs_render = true;
-                }
-                if ui.add(egui::Slider::new(&mut self.cloud_opacity, 0.0..=1.0)
-                    .text("Opacity"))
-                    .on_hover_text("Cloud layer transparency: 0 = invisible, 1 = fully opaque")
-                    .changed()
-                {
-                    self.needs_render = true;
-                }
-                let mut storms_i32 = self.storm_count as i32;
-                if ui.add(egui::Slider::new(&mut storms_i32, 0..=8)
-                    .text("Storms"))
-                    .on_hover_text("Number of cyclone storm systems. 0 = none, 4 = Earth-like, 8 = stormy planet")
-                    .changed()
-                {
-                    self.storm_count = storms_i32 as u32;
-                    self.needs_render = true;
-                }
-                if self.storm_count > 0 {
-                    if ui.add(egui::Slider::new(&mut self.storm_size, 0.3..=3.0)
-                        .text("Storm Size"))
-                        .on_hover_text("Storm radius: 0.3 = compact, 1.0 = Earth-like, 3.0 = massive")
-                        .changed()
-                    {
-                        self.needs_render = true;
-                    }
-                }
-
-
-                ui.separator();
-                ui.label("Civilization");
-                if ui.add(egui::Slider::new(&mut self.night_lights, 0.0..=1.0)
-                    .text("Development"))
-                    .on_hover_text("Urbanization level: 0 = pristine wilderness, 1 = heavily developed. Shows grey cities by day, lights at night")
-                    .changed()
-                {
-                    self.needs_render = true;
-                }
-                if self.night_lights > 0.0 {
-                    if ui.add(egui::Slider::new(&mut self.city_light_hue, 0.0..=1.0)
-                        .text("Light Color"))
-                        .on_hover_text("Night light color: 0 = warm amber (sodium), 0.5 = white (LED), 1.0 = cool blue (alien/futuristic)")
-                        .changed()
-                    {
-                        self.needs_render = true;
-                    }
-                }
 
                 ui.separator();
                 egui::CollapsingHeader::new("Advanced Tweaks")
