@@ -69,6 +69,21 @@ Plan: [docs/plans/2026-04-06-unified-wind-pipeline.md](docs/plans/2026-04-06-uni
 
 ---
 
+## Phase 5.22: Terrain-Aware Wind
+
+Reintroduce continent/mountain effects on wind WITHOUT coastline ghosting. Uses the wobble mechanism (shift cell boundary latitude) instead of direct wind vector modification. Terrain influence flows through the existing `lat_deg + wobble` path — broad, gradual, no sharp edges.
+
+Plan: [docs/plans/2026-04-07-terrain-aware-wind.md](docs/plans/2026-04-07-terrain-aware-wind.md)
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 5.22.1 | Continental wobble: `cont * 5° * season_factor` shifts cell boundaries poleward over continents in summer | Cell boundaries shift over large continents. No ghosting | Phase 5.21 | cc:完了 |
+| 5.22.2 | Elevation wobble: `smooth_step(0.10, 0.25, elev) * 3°` for mountains >3km | Cell boundaries deflect around major ranges | 5.22.1 | cc:完了 |
+| 5.22.3 | Mountain speed boost: `1 + smooth_step(0.08, 0.20, elev) * 0.3` | Faster wind near high terrain | 5.22.2 | cc:完了 |
+| 5.22.4 | Build + test validation | 42 tests pass, runtime verified | 5.22.3 | cc:完了 |
+
+---
+
 ## Phase 7: Blender Importer Addon
 
 Pure-Python Blender addon that imports generated textures and sets up materials.

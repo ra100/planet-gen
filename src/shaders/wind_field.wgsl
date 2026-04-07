@@ -299,13 +299,28 @@ fn compute_wind(pos: vec3<f32>, idx: u32) {
     let season_shift = params.axial_tilt_rad * ((params.season - 0.5) * 2.0) * 0.4;
     let shifted_lat = lat - season_shift;
 
-    // Cell boundary wobble: noise shifts the effective latitude by ±8°.
-    // Near poles, 3D positions cluster → must increase noise frequency so
-    // the wobble actually varies by longitude instead of being constant.
+    // Cell boundary wobble: shifts effective latitude to break concentric rings.
+    // Three components: noise + continental (monsoon) + elevation (orographic).
     let so = vec3<f32>(f32(params.seed), fract(f32(params.seed) * 0.001618) * 89.0, 0.0);
-    let pole_boost = 1.0 + 5.0 * abs(sin(lat)); // freq 2→12 at poles
-    let wobble = snoise(tilted_pos * (2.0 * pole_boost) + so + vec3<f32>(150.0, 0.0, 0.0)) * 8.0;
-    let lat_deg = abs(shifted_lat) / DEG + wobble;
+    let pole_boost = 1.0 + 5.0 * abs(sin(lat));
+    let noise_wobble = snoise(tilted_pos * (2.0 * pole_boost) + so + vec3<f32>(150.0, 0.0, 0.0)) * 8.0;
+
+    // Continental wobble (monsoon): Hadley cell extends poleward over large continents.
+    // Reads smoothed continentality (80-iteration diffusion = no coastline edges).
+    // Has a base effect even at equinox (thermal forcing) + seasonal amplification.
+    let continentality = sample_src(pos);
+    let season_amp = (params.season - 0.5) * 2.0; // -1 to +1
+    let thermal_base = continentality * 2.0; // always-on: continents are warmer → shift
+    let seasonal_boost = continentality * 5.0 * season_amp * sign(lat + 0.0001);
+    let continental_wobble = thermal_base + seasonal_boost;
+
+    // Elevation wobble: major mountain ranges (>2km) shift cell boundaries.
+    // High threshold ensures flat coasts contribute zero → no coastline ghosting.
+    let height = height_data[idx];
+    let elevation = max(height - params.ocean_level, 0.0);
+    let mountain_wobble = smooth_step(0.06, 0.20, elevation) * 5.0;
+
+    let lat_deg = abs(shifted_lat) / DEG + noise_wobble + continental_wobble + mountain_wobble;
 
     // === Three-cell zonal wind (WIDE smooth_step for gentle transitions) ===
     // Wide transitions (15-20°) prevent sharp rings visible from pole view.
@@ -335,9 +350,12 @@ fn compute_wind(pos: vec3<f32>, idx: u32) {
     wind_e += lon_var * 0.10;
     wind_n += lon_var2 * 0.08;
 
+    // Mountain speed boost: wind accelerates near high terrain (venturi/gap wind)
+    let mountain_speed = 1.0 + smooth_step(0.08, 0.20, elevation) * 0.3;
+
     // Pressure-dependent speed scaling
     let p = max(params.atm_pressure, 0.05);
-    let speed_scale = pow(1.0 / p, 0.15);
+    let speed_scale = pow(1.0 / p, 0.15) * mountain_speed;
 
     // Convert to 3D tangent vector
     let wind_3d = (east * wind_e + north * wind_n) * speed_scale;
