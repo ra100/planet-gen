@@ -38,7 +38,7 @@ struct Uniforms {
     cloud_advection: f32,  // 1.0 = advected cubemap modulates clouds, 0.0 = per-pixel only
     rotation_rate: f32,    // relative to Earth (1.0 = 24h day)
     atm_pressure: f32,     // atmospheric pressure in bar (1.0 = Earth)
-    _pad_trail: f32,       // reserved (was cloud_wind_trail)
+    wind_strength: f32,    // cloud wind stretching (0.0-1.0)
     lava_glow: f32,        // tectonic emission intensity (0.0-1.0)
     ring_inner: f32,       // ring inner radius (planet radii, 0 = disabled)
     ring_outer: f32,       // ring outer radius
@@ -66,16 +66,23 @@ fn sample_wind_field(dir: vec3<f32>) -> vec3<f32> {
 
 // Unified wind accessor: returns normalized tangent-plane wind direction.
 // Uses GPU-computed pressure wind (cubemap) when available, falls back to analytical.
-// This is the SINGLE entry point for wind direction in all climate/cloud effects.
+// Cubemap wind is 3-tap blurred to soften sharp cell boundary transitions.
 fn sample_wind_tangent(sphere_pos: vec3<f32>) -> vec3<f32> {
     if (uniforms.cloud_advection > 0.5) {
-        // Pressure-derived wind from cubemap (accounts for continentality, terrain, Coriolis)
-        let w = sample_wind_field(sphere_pos);
+        // 3-tap blur: center + 2 diagonal offsets to smooth cell boundaries
+        let pc_w = abs(sphere_pos.y);
+        let ub_w = smooth_step(0.80, 0.98, pc_w);
+        let up_ref = normalize(mix(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), ub_w));
+        let t1 = normalize(cross(up_ref, sphere_pos));
+        let t2 = normalize(cross(sphere_pos, t1));
+        let r = 0.05; // ~320km blur radius
+        let w = sample_wind_field(sphere_pos) * 2.0
+              + sample_wind_field(normalize(sphere_pos + (t1 + t2) * r))
+              + sample_wind_field(normalize(sphere_pos - (t1 + t2) * r));
         let tangent = w - sphere_pos * dot(w, sphere_pos);
         let speed = length(tangent);
-        if (speed > 0.001) { return tangent / speed; }
+        if (speed > 0.003) { return tangent / speed; }
     }
-    // Fallback: analytical Hadley/Ferrel/Polar cells with terrain deflection
     let tilt = uniforms.axial_tilt_rad;
     let tilted_y = sphere_pos.y * cos(tilt) + sphere_pos.z * sin(tilt);
     let lat = asin(clamp(tilted_y, -1.0, 1.0));
@@ -530,7 +537,12 @@ fn cloud_remap(value: f32, old_min: f32, old_max: f32, new_min: f32, new_max: f3
 fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
     let cov_slider = uniforms.cloud_coverage;
     if (cov_slider <= 0.0) { return 0.0; }
-    let coverage = pow(cov_slider, 0.8);
+
+    // Global moisture scaling: less ocean or thinner atmosphere → fewer clouds.
+    // ocean_fraction already incorporates climate_moisture slider from CPU side.
+    let moisture_scale = 0.4 + 0.6 * uniforms.ocean_fraction; // 0.4 at no ocean → 1.0 at full ocean
+    let atm_scale = smooth_step(0.1, 0.5, uniforms.atm_pressure); // thin atm → fewer clouds
+    let coverage = pow(cov_slider, 0.8) * moisture_scale * atm_scale;
 
     let s = uniforms.cloud_seed;
     let seed_off = vec3<f32>(s, fract(s * 1.618) * 89.0, fract(s * 2.618) * 83.0);
@@ -576,21 +588,45 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
         }
     }
 
-    // === Cloud noise: domain-warped fBm — pure noise, no terrain or wind displacement ===
+    // === Cloud noise: ANISOTROPIC domain-warped fBm ===
+    // Domain warp is stretched along wind direction: cloud features elongate with wind.
+    // No coordinate displacement — the warp ITSELF is directionally biased.
     let p = vortex_sphere * 7.0 + seed_off;
-    let warp = vec3<f32>(
+    let warp_raw = vec3<f32>(
         snoise(p * 0.5 + vec3<f32>(31.7, 0.0, 0.0)),
         snoise(p * 0.5 + vec3<f32>(0.0, 47.3, 0.0)),
         snoise(p * 0.5 + vec3<f32>(0.0, 0.0, 73.1))
     ) * 0.30;
+
+    // When wind available: decompose warp into along-wind and cross-wind,
+    // then amplify along-wind and suppress cross-wind → anisotropic stretching.
+    // wind_strength uniform controls the effect: 0 = isotropic, 1 = strong stretching.
+    var warp = warp_raw;
+    if (uniforms.cloud_advection > 0.5 && uniforms.wind_strength > 0.01) {
+        let ws = uniforms.wind_strength;
+        let wind_t = sample_wind_tangent(sphere_pos);
+        let along_wind = dot(warp_raw, wind_t) * wind_t;
+        let cross_wind = warp_raw - along_wind;
+        let stretch = mix(1.0, 2.5, ws); // 1.0 at ws=0, 2.5 at ws=2
+        let compress = mix(1.0, 0.3, ws); // 1.0 at ws=0, 0.3 at ws=2
+        warp = along_wind * stretch + cross_wind * compress;
+    }
+    // Double domain warp (warp-the-warp): first warp creates large-scale flow,
+    // second warp adds smaller organic variation.
     let pw = p + warp;
+    let warp2 = vec3<f32>(
+        snoise(pw * 0.7 + vec3<f32>(97.1, 0.0, 0.0)),
+        snoise(pw * 0.7 + vec3<f32>(0.0, 61.3, 0.0)),
+        snoise(pw * 0.7 + vec3<f32>(0.0, 0.0, 53.7))
+    ) * 0.20;
+    let pw2 = pw + warp2;
 
     var noise_val = 0.0;
     var freq = 1.0;
     var amp = 1.0;
     var amp_sum = 0.0;
     for (var i = 0; i < 5; i++) {
-        let n = snoise(pw * freq);
+        let n = snoise(pw2 * freq);
         noise_val += max(n, -0.1) * amp;
         amp_sum += amp;
         freq *= 2.1;
@@ -618,8 +654,30 @@ fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
                * smooth_step(cl_polar + 5.0, cl_polar - 5.0, cloud_lat_deg) * 0.08;
     let polar = smooth_step(55.0, 70.0, cloud_lat_deg) * 0.05;
 
-    // Base 0.65: at slider=1.0, coverage ~70-80%. Latitude modulates ±15%.
-    var local_coverage = (0.65 + itcz + subtropical + midlat + polar) * coverage;
+    // Base 0.85: at slider=1.0, coverage ~75-90%. Latitude modulates gently.
+    // The slider can override moisture scaling at high values for artistic control.
+    let slider_override = cov_slider * cov_slider; // quadratic: slider=1→1, slider=0.5→0.25
+    let effective_coverage = mix(coverage, cov_slider, slider_override * 0.3); // high slider partially bypasses moisture
+    var local_coverage = (0.85 + itcz + subtropical + midlat + polar) * effective_coverage;
+
+    // === Gentle terrain/climate modulation (±10-15% max, all blurred) ===
+    // These NUDGE the coverage — the noise pattern stays dominant.
+    if (uniforms.cloud_advection > 0.5) {
+        // Continentality: ocean slightly cloudier, deep interior slightly drier
+        let cont = sample_continentality_wide(sphere_pos);
+        let cont_nudge = mix(0.06, -0.10, smooth_step(0.3, 0.8, cont));
+        local_coverage += cont_nudge;
+    }
+
+    // Orographic: mountains get more clouds on windward side (only high terrain)
+    let oro_h = textureSample(height_tex, height_sampler, sphere_pos).r;
+    let elevation = max(oro_h - uniforms.ocean_level, 0.0);
+    if (elevation > 0.04) { // only mountains >~1.5km
+        let wind_t = sample_wind_tangent(sphere_pos);
+        let upwind_h = textureSample(height_tex, height_sampler, normalize(sphere_pos + wind_t * 0.08)).r;
+        let lift = smooth_step(0.06, 0.20, max(upwind_h - uniforms.ocean_level, 0.0));
+        local_coverage += lift * 0.12; // up to +12% on windward mountains
+    }
 
     // === Storm boost (uses precomputed centers) ===
     var storm_boost = 0.0;
@@ -1433,31 +1491,31 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             }
             case 14u: {
                 // Wind direction: unified view — cubemap wind when available, analytical fallback.
-                // Red=eastward (westerlies), Blue=westward (trades), Green=meridional+speed
                 let tangent_w = sample_wind_tangent(rotated);
 
-                // Local east/north aligned with TILTED axis (avoids circle artifact)
+                // Local east/north with smooth pole blend (no ring artifact)
                 let ct_w = cos(uniforms.axial_tilt_rad);
                 let st_w = sin(uniforms.axial_tilt_rad);
                 let tilted_pole = vec3<f32>(0.0, ct_w, st_w);
-                var up_ref = tilted_pole;
-                if (abs(dot(rotated, tilted_pole)) > 0.99) {
-                    up_ref = vec3<f32>(1.0, 0.0, 0.0);
-                }
-                let local_east = normalize(cross(up_ref, rotated));
+                let pc = abs(dot(rotated, tilted_pole));
+                let ub = smooth_step(0.80, 0.99, pc);
+                let up_ref_w = normalize(mix(tilted_pole, vec3<f32>(1.0, 0.0, 0.0), ub));
+                let local_east = normalize(cross(up_ref_w, rotated));
                 let local_north = normalize(cross(rotated, local_east));
 
                 let wind_east = dot(tangent_w, local_east);
                 let wind_north = dot(tangent_w, local_north);
                 let speed = length(vec2<f32>(wind_east, wind_north));
 
+                // Wider color ramp: full 0→1 range instead of narrow smooth_step band.
+                // Prevents the visualization from making cell boundaries look sharper than they are.
                 let east_frac = (wind_east / max(speed, 0.01) + 1.0) * 0.5;
                 let merid_frac = abs(wind_north) / max(speed, 0.01);
                 debug_color = vec3<f32>(
-                    smooth_step(0.4, 0.8, east_frac),
-                    merid_frac * 0.5 + speed * 0.3,
-                    smooth_step(0.6, 0.2, east_frac)
-                ) * (0.4 + speed * 0.6);
+                    east_frac,                          // R: east (0=west, 1=east) — linear, no threshold
+                    merid_frac * 0.4 + speed * 0.3,     // G: meridional + speed
+                    1.0 - east_frac                     // B: west — linear complement
+                ) * (0.5 + speed * 0.5);
             }
             case 15u: {
                 // Ocean currents: warm (red) vs cold (blue) current zones

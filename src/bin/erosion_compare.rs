@@ -118,7 +118,7 @@ fn main() {
                 show_cities: 0.0,
                 cloud_opacity: 1.0,
                 cloud_advection: 0.0,
-                rotation_rate: 1.0, atm_pressure: 0.7, _pad_trail: 0.0,
+                rotation_rate: 1.0, atm_pressure: 0.7, wind_strength: 0.5,
                 lava_glow: 0.0, ring_inner: 0.0, ring_outer: 0.0, ring_tilt: 0.0, ring_opacity: 0.0,
                 _pad3: 0.0, _pad4: 0.0, _pad5: 0.0,
             };

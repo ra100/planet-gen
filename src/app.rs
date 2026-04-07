@@ -57,6 +57,7 @@ pub struct PlanetGenApp {
     cloud_seed: u32,
     cloud_type: f32,
     cloud_opacity: f32,
+    wind_strength: f32,        // cloud wind stretching strength (0.0-1.0)
     lava_glow: f32,            // tectonic emission intensity (0.0-1.0)
     ring_inner: f32,           // ring inner radius (planet radii)
     ring_outer: f32,           // ring outer radius
@@ -149,6 +150,7 @@ impl PlanetGenApp {
             cloud_seed: default_cloud_seed,
             cloud_type: 0.5,
             cloud_opacity: 1.0,
+            wind_strength: 0.5,
             lava_glow: 0.0,
             ring_inner: 0.0,
             ring_outer: 0.0,
@@ -242,7 +244,7 @@ impl PlanetGenApp {
             cloud_advection: if self.show_wind_effects { 1.0 } else { 0.0 },
             rotation_rate: 24.0 / self.params.rotation_period_h,
             atm_pressure: self.derived.atmosphere_strength,
-            _pad_trail: 0.0,
+            wind_strength: if self.show_wind_effects { self.wind_strength } else { 0.0 },
             lava_glow: self.lava_glow,
             ring_inner: self.ring_inner,
             ring_outer: self.ring_outer,
@@ -716,6 +718,15 @@ impl eframe::App for PlanetGenApp {
                                 .changed()
                             {
                                 self.needs_render = true;
+                            }
+                            if self.show_wind_effects {
+                                if ui.add(egui::Slider::new(&mut self.wind_strength, 0.0..=2.0)
+                                    .text("Strength"))
+                                    .on_hover_text("Wind stretching: 0 = round, 0.5 = moderate, 1.0 = strong, 2.0 = extreme (shears clouds apart)")
+                                    .changed()
+                                {
+                                    self.needs_render = true;
+                                }
                             }
                         });
                     }

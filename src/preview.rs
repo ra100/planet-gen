@@ -44,7 +44,7 @@ pub struct PreviewUniforms {
     pub cloud_advection: f32,  // 1.0 = advected cubemap modulates clouds, 0.0 = per-pixel only
     pub rotation_rate: f32,    // relative to Earth (1.0 = 24h day)
     pub atm_pressure: f32,     // atmospheric pressure in bar (1.0 = Earth)
-    pub _pad_trail: f32,       // reserved (was cloud_wind_trail)
+    pub wind_strength: f32,    // cloud wind stretching strength (0.0-1.0)
     pub lava_glow: f32,        // tectonic emission intensity (0.0-1.0)
     pub ring_inner: f32,       // ring system inner radius (planet radii, 0 = no rings)
     pub ring_outer: f32,       // ring system outer radius
@@ -473,7 +473,7 @@ mod tests {
             show_cities: 0.0,
             cloud_opacity: 1.0,
             cloud_advection: 0.0,
-            rotation_rate: 1.0, atm_pressure: 0.7, _pad_trail: 0.0,
+            rotation_rate: 1.0, atm_pressure: 0.7, wind_strength: 0.5,
             lava_glow: 0.0, ring_inner: 0.0, ring_outer: 0.0, ring_tilt: 0.0, ring_opacity: 0.0,
             _pad3: 0.0, _pad4: 0.0, _pad5: 0.0,
         };

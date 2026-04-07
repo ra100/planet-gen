@@ -186,7 +186,7 @@ fn generate_planet_png(
         show_cities: 0.0,
         cloud_opacity: 1.0,
         cloud_advection: 0.0,
-        rotation_rate: 1.0, atm_pressure: 0.7, _pad_trail: 0.0,
+        rotation_rate: 1.0, atm_pressure: 0.7, wind_strength: 0.5,
         lava_glow: 0.0, ring_inner: 0.0, ring_outer: 0.0, ring_tilt: 0.0, ring_opacity: 0.0,
         _pad3: 0.0, _pad4: 0.0, _pad5: 0.0,
     };
@@ -318,7 +318,7 @@ fn main() {
         storm_count: 2.0, storm_size: 1.0, night_lights: 0.0, star_color_temp: 0.5,
         city_light_hue: 0.0, show_ao: 1.0, show_water: 1.0, show_ice: 1.0, show_biomes: 1.0,
         show_clouds: 1.0, show_atmosphere_layer: 0.0, show_cities: 0.0, cloud_opacity: 1.0,
-        cloud_advection: 0.0, rotation_rate: 1.0, atm_pressure: 0.7, _pad_trail: 0.0,
+        cloud_advection: 0.0, rotation_rate: 1.0, atm_pressure: 0.7, wind_strength: 0.5,
         lava_glow: 0.0, ring_inner: 0.0, ring_outer: 0.0, ring_tilt: 0.0, ring_opacity: 0.0,
         _pad3: 0.0, _pad4: 0.0, _pad5: 0.0,
     };

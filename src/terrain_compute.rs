@@ -1243,11 +1243,11 @@ impl WindFieldPipeline {
         // Read back pressure
         let pressure_data = self.readback_1c(gpu, pressure_dst, total_1c);
 
-        // === Phase 3: Wind from pressure gradient ===
+        // === Phase 3: Direct analytical wind (reads continentality for monsoon effects) ===
         for face in 0..6u32 {
             self.dispatch_mode(gpu, 3, face, resolution, seed, ocean_level, axial_tilt_rad, season, 0.0,
                 rotation_rate, base_temp_c, atm_pressure,
-                pressure_dst, &wind_buf, &height_buf);
+                cont_result, &wind_buf, &height_buf);
         }
 
         // Read back wind (3-component)

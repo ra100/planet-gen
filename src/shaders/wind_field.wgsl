@@ -203,16 +203,17 @@ fn compute_pressure(pos: vec3<f32>, idx: u32) {
     pressure -= 15.0 * exp(-0.5 * pow(d_itcz / 8.0, 2.0));
 
     // (b) Subtropical highs at ±hadley_lat — weakened over hot land
+    // Wide Gaussians (sigma 14°) for smooth pressure transitions → no sharp wind lines
     let season_shift = season_sign * 5.0;
     let nh_sub = hadley_lat + season_shift;
     let sh_sub = -(hadley_lat - season_shift);
     let high_intensity = 12.0 * (1.0 - 0.35 * continentality);
-    pressure += high_intensity * exp(-0.5 * pow((lat_deg - nh_sub) / 10.0, 2.0));
-    pressure += high_intensity * exp(-0.5 * pow((lat_deg - sh_sub) / 10.0, 2.0));
+    pressure += high_intensity * exp(-0.5 * pow((lat_deg - nh_sub) / 14.0, 2.0));
+    pressure += high_intensity * exp(-0.5 * pow((lat_deg - sh_sub) / 14.0, 2.0));
 
-    // (c) Subpolar lows at ±polar_lat
-    pressure -= 10.0 * exp(-0.5 * pow((lat_deg - polar_lat) / 10.0, 2.0));
-    pressure -= 10.0 * exp(-0.5 * pow((lat_deg + polar_lat) / 10.0, 2.0));
+    // (c) Subpolar lows at ±polar_lat — wide Gaussians
+    pressure -= 10.0 * exp(-0.5 * pow((lat_deg - polar_lat) / 14.0, 2.0));
+    pressure -= 10.0 * exp(-0.5 * pow((lat_deg + polar_lat) / 14.0, 2.0));
 
     // (d) Polar highs at ±85°
     pressure += 8.0 * exp(-0.5 * pow((lat_deg - 85.0) / 8.0, 2.0));
@@ -261,70 +262,86 @@ fn compute_pressure(pos: vec3<f32>, idx: u32) {
     dst[idx] = pressure;
 }
 
-// === Mode 3: Wind from pressure gradient + Coriolis ===
+// === Mode 3: Direct analytical wind (no pressure gradients) ===
+// Computes wind directly from latitude + noise + terrain deflection.
+// Smooth by construction: uses smooth_step for cell boundaries, not finite differences.
+// src buffer contains continentality (for monsoon/land effects).
 
 fn compute_wind(pos: vec3<f32>, idx: u32) {
     let res = params.resolution;
 
-    // Build local east/north frame
-    var up_ref = vec3<f32>(0.0, 1.0, 0.0);
-    if (abs(pos.y) > 0.95) { up_ref = vec3<f32>(1.0, 0.0, 0.0); }
+    // Tilt setup — needed by everything below
+    let tilt = params.axial_tilt_rad;
+    let ct = cos(tilt);
+    let st = sin(tilt);
+
+    // Local east/north frame aligned with TILTED pole.
+    // Smooth blend near poles prevents the frame singularity ring.
+    let tilted_pole = vec3<f32>(0.0, ct, st);
+    let pole_closeness = abs(dot(pos, tilted_pole));
+    let up_blend = smooth_step(0.80, 0.98, pole_closeness);
+    let up_ref = normalize(mix(tilted_pole, vec3<f32>(1.0, 0.0, 0.0), up_blend));
     let east = normalize(cross(up_ref, pos));
     let north = normalize(cross(pos, east));
 
-    // Finite differences for pressure gradient
-    let step = 1.5 / f32(res); // ~1.5 texels for smoother gradient
-    let p_e = sample_src(normalize(pos + east * step));
-    let p_w = sample_src(normalize(pos - east * step));
-    let p_n = sample_src(normalize(pos + north * step));
-    let p_s = sample_src(normalize(pos - north * step));
+    // Latitude in tilted frame
+    let tilted_y = pos.y * ct + pos.z * st;
+    let lat = asin(clamp(tilted_y, -1.0, 1.0));
+    let hemisphere = sign(lat + 0.0001);
+    // Position rotated into tilted frame for noise alignment
+    let tilted_pos = vec3<f32>(pos.x, pos.y * ct + pos.z * st, -pos.y * st + pos.z * ct);
 
-    // Pressure gradient force: from high to low = negative gradient
-    let pgf_e = -(p_e - p_w) / (2.0 * step);
-    let pgf_n = -(p_n - p_s) / (2.0 * step);
+    // Rotation-dependent cell boundaries (same as preview shader)
+    let hadley = hadley_top_lat();
+    let polar = subpolar_lat();
 
-    // Coriolis deflection
-    let tilt = params.axial_tilt_rad;
-    let tilted_y = pos.y * cos(tilt) + pos.z * sin(tilt);
-    let sin_lat = clamp(tilted_y, -1.0, 1.0);
-    let abs_sin_lat = abs(sin_lat);
+    // Seasonal shift
+    let season_shift = params.axial_tilt_rad * ((params.season - 0.5) * 2.0) * 0.4;
+    let shifted_lat = lat - season_shift;
 
-    // Geostrophic angle: 0° at equator → 70° at ≥5° latitude
-    let geo_angle = 70.0 * DEG * smooth_step(0.0, sin(5.0 * DEG), abs_sin_lat);
-
-    // Surface friction: 20° back toward low pressure
-    let friction_angle = 20.0 * DEG;
-
-    // NH: clockwise deflection (negative angle), SH: counterclockwise (positive)
-    let hemisphere_sign = select(1.0, -1.0, sin_lat >= 0.0);
-    let total_angle = hemisphere_sign * (geo_angle - friction_angle);
-
-    let cos_a = cos(total_angle);
-    let sin_a = sin(total_angle);
-
-    // Pressure-dependent wind speed scaling (ExoPlaSim: v ~ (1/P)^0.15)
-    // Thinner atmospheres have faster winds; thicker have slower
-    let p = max(params.atm_pressure, 0.05);
-    let pressure_wind_scale = pow(1.0 / p, 0.15);
-
-    // Rotate PGF and apply friction speed reduction (0.6×) + pressure scaling
-    let wind_e = (pgf_e * cos_a - pgf_n * sin_a) * 0.6 * pressure_wind_scale;
-    let wind_n = (pgf_e * sin_a + pgf_n * cos_a) * 0.6 * pressure_wind_scale;
-
-    // Convert to 3D tangent vector for advection shader
-    var wind_3d = east * wind_e + north * wind_n;
-
-    // Small-scale turbulence: perturb wind direction with noise
-    // Breaks straight-line cloud stretching; creates eddies and swirls
+    // Cell boundary wobble: noise shifts the effective latitude by ±8°.
+    // Near poles, 3D positions cluster → must increase noise frequency so
+    // the wobble actually varies by longitude instead of being constant.
     let so = vec3<f32>(f32(params.seed), fract(f32(params.seed) * 0.001618) * 89.0, 0.0);
-    let turb_e = snoise(pos * 8.0 + so + vec3<f32>(200.0, 0.0, 0.0)) * 0.12
-               + snoise(pos * 16.0 + so + vec3<f32>(300.0, 0.0, 0.0)) * 0.06;
-    let turb_n = snoise(pos * 8.0 + so + vec3<f32>(0.0, 200.0, 0.0)) * 0.12
-               + snoise(pos * 16.0 + so + vec3<f32>(0.0, 300.0, 0.0)) * 0.06;
-    let wind_speed = length(wind_3d);
-    wind_3d += (east * turb_e + north * turb_n) * wind_speed;
+    let pole_boost = 1.0 + 5.0 * abs(sin(lat)); // freq 2→12 at poles
+    let wobble = snoise(tilted_pos * (2.0 * pole_boost) + so + vec3<f32>(150.0, 0.0, 0.0)) * 8.0;
+    let lat_deg = abs(shifted_lat) / DEG + wobble;
 
-    // Store as 3 components: [x, y, z] at offset 3*idx
+    // === Three-cell zonal wind (WIDE smooth_step for gentle transitions) ===
+    // Wide transitions (15-20°) prevent sharp rings visible from pole view.
+    let trade_top = hadley * 0.6;
+    let trade_full = hadley * 1.2;
+    let west_start = hadley * 0.7;
+    let west_end = polar * 0.85;
+    let polar_start = polar * 0.8;
+
+    let trade = (1.0 - smooth_step(trade_top, trade_full, lat_deg)) * -0.8;
+    let westerly = smooth_step(west_start, west_start + 15.0, lat_deg)
+                 * (1.0 - smooth_step(west_end - 8.0, west_end + 12.0, lat_deg)) * 0.85;
+    let polar_east = smooth_step(polar_start, polar_start + 15.0, lat_deg) * -0.45;
+    var wind_e = trade + westerly + polar_east;
+
+    // Meridional component (also widened)
+    let hadley_m = -smooth_step(5.0, hadley * 0.6, lat_deg)
+                  * (1.0 - smooth_step(hadley * 0.8, hadley * 1.3, lat_deg)) * 0.35;
+    let ferrel_center = (hadley + polar) * 0.5;
+    let ferrel_m = smooth_step(ferrel_center - 15.0, ferrel_center, lat_deg)
+                  * (1.0 - smooth_step(ferrel_center, ferrel_center + 15.0, lat_deg)) * 0.25;
+    var wind_n = (hadley_m + ferrel_m) * hemisphere;
+
+    // === Longitude variation (gentle speed noise, boundary wobble handles ring-breaking) ===
+    let lon_var = snoise(tilted_pos * 2.0 + so + vec3<f32>(100.0, 0.0, 0.0));
+    let lon_var2 = snoise(tilted_pos * 1.0 + so + vec3<f32>(0.0, 100.0, 0.0));
+    wind_e += lon_var * 0.10;
+    wind_n += lon_var2 * 0.08;
+
+    // Pressure-dependent speed scaling
+    let p = max(params.atm_pressure, 0.05);
+    let speed_scale = pow(1.0 / p, 0.15);
+
+    // Convert to 3D tangent vector
+    let wind_3d = (east * wind_e + north * wind_n) * speed_scale;
+
     let base = idx * 3u;
     dst[base] = wind_3d.x;
     dst[base + 1u] = wind_3d.y;
