@@ -32,7 +32,11 @@ pub fn generate_plates(params: &PlateGenParams) -> Vec<PlateGpu> {
     let base_n = if params.num_plates_override > 0 {
         params.num_plates_override as usize
     } else {
-        compute_plate_count(params.mass_earth, params.tectonics_factor, params.continental_scale)
+        compute_plate_count(
+            params.mass_earth,
+            params.tectonics_factor,
+            params.continental_scale,
+        )
     };
     let continental_count = if params.num_continents > 0 {
         params.num_continents as usize
@@ -119,7 +123,7 @@ fn fibonacci_sphere(n: usize, seed: u32) -> Vec<[f32; 3]> {
     for i in 0..n {
         // Fibonacci lattice on sphere
         let theta = 2.0 * std::f64::consts::PI * (i as f64) / golden_ratio;
-        let phi = ((1.0 - 2.0 * (i as f64 + 0.5) / n as f64)).acos();
+        let phi = (1.0 - 2.0 * (i as f64 + 0.5) / n as f64).acos();
 
         let x = phi.sin() * theta.cos();
         let y = phi.cos();
@@ -146,7 +150,12 @@ fn fibonacci_sphere(n: usize, seed: u32) -> Vec<[f32; 3]> {
 /// pole axis, giving velocity = cross(pole, center) * speed.
 /// The radial component is explicitly projected out to guarantee tangency.
 /// Requires the actual plate centers so the projection is accurate.
-fn generate_velocities(n: usize, seed: u32, tectonics_factor: f32, centers: &[[f32; 3]]) -> Vec<[f32; 3]> {
+fn generate_velocities(
+    n: usize,
+    seed: u32,
+    tectonics_factor: f32,
+    centers: &[[f32; 3]],
+) -> Vec<[f32; 3]> {
     let mut velocities = Vec::with_capacity(n);
     let speed = tectonics_factor * 0.5;
 
@@ -185,7 +194,8 @@ fn generate_velocities(n: usize, seed: u32, tectonics_factor: f32, centers: &[[f
 
 /// Simple deterministic hash returning a float in [-1, 1].
 fn hash_f32(seed: u32, index: u32, channel: u32) -> f32 {
-    let mut h = seed.wrapping_mul(374761393)
+    let mut h = seed
+        .wrapping_mul(374761393)
         .wrapping_add(index.wrapping_mul(668265263))
         .wrapping_add(channel.wrapping_mul(1274126177));
     h = (h ^ (h >> 13)).wrapping_mul(1103515245);
@@ -257,7 +267,8 @@ mod tests {
             assert!(
                 (len - 1.0).abs() < 0.01,
                 "Plate {} center not on unit sphere: len={}",
-                i, len
+                i,
+                len
             );
         }
     }
@@ -284,14 +295,20 @@ mod tests {
             num_continents: 0,
             continent_size_variety: 0.0,
         });
-        let diff: f32 = p1.iter().zip(p2.iter())
+        let diff: f32 = p1
+            .iter()
+            .zip(p2.iter())
             .map(|(a, b)| {
                 (a.center[0] - b.center[0]).abs()
                     + (a.center[1] - b.center[1]).abs()
                     + (a.center[2] - b.center[2]).abs()
             })
-            .sum::<f32>() / p1.len() as f32;
-        assert!(diff > 0.01, "Different seeds should produce different plates");
+            .sum::<f32>()
+            / p1.len() as f32;
+        assert!(
+            diff > 0.01,
+            "Different seeds should produce different plates"
+        );
     }
 
     #[test]
@@ -327,11 +344,13 @@ mod tests {
         };
         let plates = generate_plates(&params);
         for (i, p) in plates.iter().enumerate() {
-            let mag = (p.velocity[0].powi(2) + p.velocity[1].powi(2) + p.velocity[2].powi(2)).sqrt();
+            let mag =
+                (p.velocity[0].powi(2) + p.velocity[1].powi(2) + p.velocity[2].powi(2)).sqrt();
             assert!(
                 mag > 0.001,
                 "Plate {} velocity should be non-zero, got {}",
-                i, mag
+                i,
+                mag
             );
         }
     }
@@ -358,16 +377,21 @@ mod tests {
             num_continents: 0,
             continent_size_variety: 0.0,
         });
-        let avg_low: f32 = plates_low.iter()
+        let avg_low: f32 = plates_low
+            .iter()
             .map(|p| (p.velocity[0].powi(2) + p.velocity[1].powi(2) + p.velocity[2].powi(2)).sqrt())
-            .sum::<f32>() / plates_low.len() as f32;
-        let avg_high: f32 = plates_high.iter()
+            .sum::<f32>()
+            / plates_low.len() as f32;
+        let avg_high: f32 = plates_high
+            .iter()
             .map(|p| (p.velocity[0].powi(2) + p.velocity[1].powi(2) + p.velocity[2].powi(2)).sqrt())
-            .sum::<f32>() / plates_high.len() as f32;
+            .sum::<f32>()
+            / plates_high.len() as f32;
         assert!(
             avg_high > avg_low * 2.0,
             "High tectonics_factor should produce faster plates: low={:.4}, high={:.4}",
-            avg_low, avg_high
+            avg_low,
+            avg_high
         );
     }
 
@@ -389,13 +413,19 @@ mod tests {
             let dot = p.velocity[0] * p.center[0]
                 + p.velocity[1] * p.center[1]
                 + p.velocity[2] * p.center[2];
-            let v_mag = (p.velocity[0].powi(2) + p.velocity[1].powi(2) + p.velocity[2].powi(2)).sqrt();
+            let v_mag =
+                (p.velocity[0].powi(2) + p.velocity[1].powi(2) + p.velocity[2].powi(2)).sqrt();
             // Normalize dot by velocity magnitude; should be small
-            let normalized_dot = if v_mag > 1e-6 { (dot / v_mag).abs() } else { 0.0 };
+            let normalized_dot = if v_mag > 1e-6 {
+                (dot / v_mag).abs()
+            } else {
+                0.0
+            };
             assert!(
                 normalized_dot < 0.1,
                 "Plate {} velocity not tangent to sphere: normalized dot = {:.4}",
-                i, normalized_dot
+                i,
+                normalized_dot
             );
         }
     }
@@ -446,11 +476,13 @@ mod tests {
         });
 
         // Continental plate centers should differ when variety changes
-        let cont_equal: Vec<_> = plates_equal.iter()
+        let cont_equal: Vec<_> = plates_equal
+            .iter()
             .filter(|p| p.plate_type > 0.5)
             .map(|p| p.center)
             .collect();
-        let cont_clustered: Vec<_> = plates_clustered.iter()
+        let cont_clustered: Vec<_> = plates_clustered
+            .iter()
             .filter(|p| p.plate_type > 0.5)
             .map(|p| p.center)
             .collect();
@@ -458,9 +490,15 @@ mod tests {
         assert_eq!(cont_equal.len(), cont_clustered.len());
         let mut any_different = false;
         for (a, b) in cont_equal.iter().zip(cont_clustered.iter()) {
-            let dist = ((a[0]-b[0]).powi(2) + (a[1]-b[1]).powi(2) + (a[2]-b[2]).powi(2)).sqrt();
-            if dist > 0.01 { any_different = true; }
+            let dist =
+                ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
+            if dist > 0.01 {
+                any_different = true;
+            }
         }
-        assert!(any_different, "Variety=1 should shift continental centers relative to variety=0");
+        assert!(
+            any_different,
+            "Variety=1 should shift continental centers relative to variety=0"
+        );
     }
 }

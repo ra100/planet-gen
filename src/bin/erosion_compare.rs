@@ -4,7 +4,7 @@
 
 use planet_gen::gpu::GpuContext;
 use planet_gen::planet::{DerivedProperties, PlanetParams};
-use planet_gen::plates::{generate_plates, PlateGenParams};
+use planet_gen::plates::{PlateGenParams, generate_plates};
 use planet_gen::preview::{PreviewRenderer, PreviewUniforms};
 use planet_gen::terrain_compute::{ErosionPipeline, TerrainComputePipeline};
 use std::path::Path;
@@ -56,22 +56,16 @@ fn main() {
     let cx = rot_x.cos();
     let sx = rot_x.sin();
 
-    let erosion_levels = [
-        (0, "no_erosion"),
-        (25, "default_25"),
-        (50, "heavy_50"),
-    ];
+    let erosion_levels = [(0, "no_erosion"), (25, "default_25"), (50, "heavy_50")];
 
     // Also render normal view for each
-    let view_modes = [
-        (0u32, "normal"),
-        (1u32, "height"),
-    ];
+    let view_modes = [(0u32, "normal"), (1u32, "height")];
 
     for (iterations, erosion_name) in &erosion_levels {
         // Generate fresh terrain for each (erosion modifies in place)
         let mut terrain = compute.generate(
-            &gpu, &plates, 512, seed, amplitude, frequency, octaves, gain, lacunarity, 1.0, 0.10, 1.0, 1.0, 9.81, 0.85, 0.2, 1.0,
+            &gpu, &plates, 512, seed, amplitude, frequency, octaves, gain, lacunarity, 1.0, 0.10,
+            1.0, 1.0, 9.81, 0.85, 0.2, 1.0,
         );
 
         // Apply erosion
@@ -118,9 +112,17 @@ fn main() {
                 show_cities: 0.0,
                 cloud_opacity: 1.0,
                 cloud_advection: 0.0,
-                rotation_rate: 1.0, atm_pressure: 0.7, wind_strength: 0.5,
-                lava_glow: 0.0, ring_inner: 0.0, ring_outer: 0.0, ring_tilt: 0.0, ring_opacity: 0.0,
-                _pad3: 0.0, _pad4: 0.0, _pad5: 0.0,
+                rotation_rate: 1.0,
+                atm_pressure: 0.7,
+                wind_strength: 0.5,
+                lava_glow: 0.0,
+                ring_inner: 0.0,
+                ring_outer: 0.0,
+                ring_tilt: 0.0,
+                ring_opacity: 0.0,
+                _pad3: 0.0,
+                _pad4: 0.0,
+                _pad5: 0.0,
             };
 
             let pixels = renderer.render(&gpu, &uniforms, &cubemap_view, None, render_size);

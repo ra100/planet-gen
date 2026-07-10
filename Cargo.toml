@@ -7,13 +7,13 @@ license = "MIT"
 
 [dependencies]
 # GPU compute
-wgpu = "26"
+wgpu = "27"
 bytemuck = { version = "1", features = ["derive"] }
 pollster = "0.4"
 
 # UI
-eframe = { version = "0.31", features = ["wgpu"] }
-egui = "0.31"
+eframe = { version = "0.33", features = ["wgpu"] }
+egui = "0.33"
 
 # Image export
 image = "0.25"

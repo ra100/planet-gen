@@ -1,7 +1,7 @@
 ---
 title: "feat: Rewrite cloud layer with Schneider remap, domain warping, and self-shadowing"
 type: feat
-status: active
+status: superseded
 date: 2026-03-31
 origin: docs/brainstorms/2026-03-31-cloud-layer-requirements.md
 ---

@@ -1546,9 +1546,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 }
             }
             case 16u: {
-                // Continentality: cloud_tex is swapped to standalone R16Float for this view,
-                // so read .r (not .a which is for the packed RGBA version)
-                let cont = textureSample(cloud_tex, height_sampler, rotated).r;
+                let cont = textureSample(cloud_tex, height_sampler, rotated).a;
                 debug_color = mix(vec3<f32>(0.1, 0.2, 0.5), vec3<f32>(0.8, 0.5, 0.2), cont);
             }
             case 17u: {

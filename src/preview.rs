@@ -16,23 +16,23 @@ pub struct PreviewUniforms {
     pub ocean_fraction: f32,
     pub axial_tilt_rad: f32,
     pub view_mode: u32,
-    pub season: f32, // 0=winter, 0.5=equinox, 1=summer
+    pub season: f32,             // 0=winter, 0.5=equinox, 1=summer
     pub atmosphere_density: f32, // 0.0 = none, 1.0 = Earth-like (reserved for future)
     pub atmosphere_height: f32,  // scale height in planet radii (reserved for future)
     pub height_scale: f32,       // normal map height exaggeration (1.0 = subtle, 5.0 = dramatic)
     pub zoom: f32,               // viewport zoom (1.0 = default, >1 = zoomed in)
     pub pan_x: f32,              // viewport pan in NDC units
     pub pan_y: f32,
-    pub cloud_coverage: f32,     // 0.0 = clear, 1.0 = overcast
-    pub cloud_seed: f32,         // noise seed for cloud pattern
-    pub cloud_altitude: f32,     // cloud shell altitude above surface (planet radii)
-    pub cloud_type: f32,         // 0.0 = smooth stratus, 1.0 = puffy cumulus
-    pub storm_count: f32,        // 0-8 cyclone storm systems
-    pub storm_size: f32,         // storm radius multiplier (0.5 = small, 1.0 = default, 2.0 = large)
-    pub night_lights: f32,       // 0.0 = pristine, 1.0 = heavily urbanized
-    pub star_color_temp: f32,    // 0.0 = blue hot star, 0.5 = sun-like, 1.0 = red dwarf
-    pub city_light_hue: f32,    // 0.0 = warm amber, 0.5 = white, 1.0 = cool blue
-    pub show_ao: f32,           // 1.0 = AO enabled, 0.0 = disabled
+    pub cloud_coverage: f32,  // 0.0 = clear, 1.0 = overcast
+    pub cloud_seed: f32,      // noise seed for cloud pattern
+    pub cloud_altitude: f32,  // cloud shell altitude above surface (planet radii)
+    pub cloud_type: f32,      // 0.0 = smooth stratus, 1.0 = puffy cumulus
+    pub storm_count: f32,     // 0-8 cyclone storm systems
+    pub storm_size: f32,      // storm radius multiplier (0.5 = small, 1.0 = default, 2.0 = large)
+    pub night_lights: f32,    // 0.0 = pristine, 1.0 = heavily urbanized
+    pub star_color_temp: f32, // 0.0 = blue hot star, 0.5 = sun-like, 1.0 = red dwarf
+    pub city_light_hue: f32,  // 0.0 = warm amber, 0.5 = white, 1.0 = cool blue
+    pub show_ao: f32,         // 1.0 = AO enabled, 0.0 = disabled
     // Layer toggles (1.0 = enabled, 0.0 = disabled)
     pub show_water: f32,
     pub show_ice: f32,
@@ -41,15 +41,15 @@ pub struct PreviewUniforms {
     pub show_atmosphere_layer: f32,
     pub show_cities: f32,
     pub cloud_opacity: f32,
-    pub cloud_advection: f32,  // 1.0 = advected cubemap modulates clouds, 0.0 = per-pixel only
-    pub rotation_rate: f32,    // relative to Earth (1.0 = 24h day)
-    pub atm_pressure: f32,     // atmospheric pressure in bar (1.0 = Earth)
-    pub wind_strength: f32,    // cloud wind stretching strength (0.0-1.0)
-    pub lava_glow: f32,        // tectonic emission intensity (0.0-1.0)
-    pub ring_inner: f32,       // ring system inner radius (planet radii, 0 = no rings)
-    pub ring_outer: f32,       // ring system outer radius
-    pub ring_tilt: f32,        // ring plane tilt angle (radians)
-    pub ring_opacity: f32,     // ring opacity (0-1)
+    pub cloud_advection: f32, // 1.0 = advected cubemap modulates clouds, 0.0 = per-pixel only
+    pub rotation_rate: f32,   // relative to Earth (1.0 = 24h day)
+    pub atm_pressure: f32,    // atmospheric pressure in bar (1.0 = Earth)
+    pub wind_strength: f32,   // cloud wind stretching strength (0.0-1.0)
+    pub lava_glow: f32,       // tectonic emission intensity (0.0-1.0)
+    pub ring_inner: f32,      // ring system inner radius (planet radii, 0 = no rings)
+    pub ring_outer: f32,      // ring system outer radius
+    pub ring_tilt: f32,       // ring plane tilt angle (radians)
+    pub ring_opacity: f32,    // ring opacity (0-1)
     pub _pad3: f32,
     pub _pad4: f32,
     pub _pad5: f32,
@@ -57,8 +57,11 @@ pub struct PreviewUniforms {
 
 pub struct PreviewRenderer {
     pipeline: wgpu::RenderPipeline,
+    interactive_pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    target: wgpu::Texture,
+    target_view: wgpu::TextureView,
     pub size: u32,
 }
 
@@ -125,44 +128,47 @@ impl PreviewRenderer {
                     ],
                 });
 
-        let pipeline_layout =
-            gpu.device
-                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                    label: Some("preview pipeline layout"),
-                    bind_group_layouts: &[&bind_group_layout],
-                    push_constant_ranges: &[],
-                });
-
-        let pipeline = gpu
+        let pipeline_layout = gpu
             .device
-            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("preview pipeline"),
-                layout: Some(&pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs_main"),
-                    buffers: &[],
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs_main"),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                    compilation_options: Default::default(),
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    ..Default::default()
-                },
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                multiview: None,
-                cache: None,
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("preview pipeline layout"),
+                bind_group_layouts: &[&bind_group_layout],
+                push_constant_ranges: &[],
             });
+
+        let create_pipeline = |format| {
+            gpu.device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("preview pipeline"),
+                    layout: Some(&pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: Some("vs_main"),
+                        buffers: &[],
+                        compilation_options: Default::default(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: Some("fs_main"),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                        compilation_options: Default::default(),
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        ..Default::default()
+                    },
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    multiview: None,
+                    cache: None,
+                })
+        };
+        let pipeline = create_pipeline(wgpu::TextureFormat::Rgba8UnormSrgb);
+        let interactive_pipeline = create_pipeline(wgpu::TextureFormat::Rgba8Unorm);
 
         let sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("height sampler"),
@@ -171,12 +177,175 @@ impl PreviewRenderer {
             ..Default::default()
         });
 
+        let (target, target_view) = Self::create_target(gpu, DEFAULT_PREVIEW_SIZE);
+
         Self {
             pipeline,
+            interactive_pipeline,
             bind_group_layout,
             sampler,
+            target,
+            target_view,
             size: DEFAULT_PREVIEW_SIZE,
         }
+    }
+
+    fn create_target(gpu: &GpuContext, size: u32) -> (wgpu::Texture, wgpu::TextureView) {
+        let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("preview render target"),
+            size: wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&Default::default());
+        (target, view)
+    }
+
+    pub fn target_view(&self) -> &wgpu::TextureView {
+        &self.target_view
+    }
+
+    /// Rebind the new view before dropping the old target.
+    pub fn resize_target(
+        &mut self,
+        gpu: &GpuContext,
+        size: u32,
+        register: impl FnOnce(&wgpu::TextureView),
+    ) {
+        if self.size == size {
+            return;
+        }
+        let (target, target_view) = Self::create_target(gpu, size);
+        register(&target_view);
+        self.target = target;
+        self.target_view = target_view;
+        self.size = size;
+    }
+
+    pub fn render_interactive(
+        &self,
+        gpu: &GpuContext,
+        uniforms: &PreviewUniforms,
+        cubemap_view: &wgpu::TextureView,
+        cloud_view: Option<&wgpu::TextureView>,
+    ) {
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("preview encoder"),
+            });
+        self.encode_render(
+            gpu,
+            &mut encoder,
+            &self.interactive_pipeline,
+            uniforms,
+            cubemap_view,
+            cloud_view,
+            &self.target_view,
+        );
+        gpu.queue.submit(Some(encoder.finish()));
+    }
+
+    fn encode_render(
+        &self,
+        gpu: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+        pipeline: &wgpu::RenderPipeline,
+        uniforms: &PreviewUniforms,
+        cubemap_view: &wgpu::TextureView,
+        cloud_view: Option<&wgpu::TextureView>,
+        render_view: &wgpu::TextureView,
+    ) {
+        let uniform_buffer = gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("preview uniforms"),
+                contents: bytemuck::bytes_of(uniforms),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+
+        let dummy_cloud_tex;
+        let dummy_cloud_view;
+        let effective_cloud_view = match cloud_view {
+            Some(view) => view,
+            None => {
+                dummy_cloud_tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("dummy cloud"),
+                    size: wgpu::Extent3d {
+                        width: 1,
+                        height: 1,
+                        depth_or_array_layers: 6,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::R16Float,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                });
+                dummy_cloud_view = dummy_cloud_tex.create_view(&wgpu::TextureViewDescriptor {
+                    dimension: Some(wgpu::TextureViewDimension::Cube),
+                    ..Default::default()
+                });
+                &dummy_cloud_view
+            }
+        };
+        let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("preview bind group"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(cubemap_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(effective_cloud_view),
+                },
+            ],
+        });
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("preview pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: render_view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: 0.02,
+                        g: 0.02,
+                        b: 0.05,
+                        a: 1.0,
+                    }),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.draw(0..3, 0..1);
     }
 
     /// Upload terrain data to a cubemap texture (R16Float for filterability).
@@ -207,7 +376,11 @@ impl PreviewRenderer {
                 wgpu::TexelCopyTextureInfo {
                     texture: &cubemap,
                     mip_level: 0,
-                    origin: wgpu::Origin3d { x: 0, y: 0, z: i as u32 },
+                    origin: wgpu::Origin3d {
+                        x: 0,
+                        y: 0,
+                        z: i as u32,
+                    },
                     aspect: wgpu::TextureAspect::All,
                 },
                 bytemuck::cast_slice(&f16_data),
@@ -216,7 +389,11 @@ impl PreviewRenderer {
                     bytes_per_row: Some(res * 2),
                     rows_per_image: Some(res),
                 },
-                wgpu::Extent3d { width: res, height: res, depth_or_array_layers: 1 },
+                wgpu::Extent3d {
+                    width: res,
+                    height: res,
+                    depth_or_array_layers: 1,
+                },
             );
         }
 
@@ -228,43 +405,115 @@ impl PreviewRenderer {
 
     /// Render the planet preview to an RGBA pixel buffer using a pre-computed cubemap.
     /// Upload arbitrary 6-face f32 data as R16Float cubemap.
-    pub fn upload_cubemap_r16(&self, gpu: &GpuContext, faces: &[Vec<f32>; 6], res: u32) -> wgpu::TextureView {
+    pub fn upload_cubemap_r16(
+        &self,
+        gpu: &GpuContext,
+        faces: &[Vec<f32>; 6],
+        res: u32,
+    ) -> wgpu::TextureView {
         let cubemap = gpu.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("data cubemap"), size: wgpu::Extent3d { width: res, height: res, depth_or_array_layers: 6 },
-            mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+            label: Some("data cubemap"),
+            size: wgpu::Extent3d {
+                width: res,
+                height: res,
+                depth_or_array_layers: 6,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::R16Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[],
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
         });
         for (i, face_data) in faces.iter().enumerate() {
-            let f16_data: Vec<u16> = face_data.iter().map(|&v| half::f16::from_f32(v).to_bits()).collect();
+            let f16_data: Vec<u16> = face_data
+                .iter()
+                .map(|&v| half::f16::from_f32(v).to_bits())
+                .collect();
             gpu.queue.write_texture(
-                wgpu::TexelCopyTextureInfo { texture: &cubemap, mip_level: 0, origin: wgpu::Origin3d { x: 0, y: 0, z: i as u32 }, aspect: wgpu::TextureAspect::All },
+                wgpu::TexelCopyTextureInfo {
+                    texture: &cubemap,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: 0,
+                        y: 0,
+                        z: i as u32,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
                 bytemuck::cast_slice(&f16_data),
-                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(res * 2), rows_per_image: Some(res) },
-                wgpu::Extent3d { width: res, height: res, depth_or_array_layers: 1 },
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(res * 2),
+                    rows_per_image: Some(res),
+                },
+                wgpu::Extent3d {
+                    width: res,
+                    height: res,
+                    depth_or_array_layers: 1,
+                },
             );
         }
-        cubemap.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::Cube), ..Default::default() })
+        cubemap.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::Cube),
+            ..Default::default()
+        })
     }
 
     /// Upload 6-face RGBA f32 data as Rgba16Float cubemap (4 channels per texel).
-    pub fn upload_cubemap_rgba16(&self, gpu: &GpuContext, faces: &[Vec<f32>; 6], res: u32) -> wgpu::TextureView {
+    pub fn upload_cubemap_rgba16(
+        &self,
+        gpu: &GpuContext,
+        faces: &[Vec<f32>; 6],
+        res: u32,
+    ) -> wgpu::TextureView {
         let cubemap = gpu.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("rgba data cubemap"), size: wgpu::Extent3d { width: res, height: res, depth_or_array_layers: 6 },
-            mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+            label: Some("rgba data cubemap"),
+            size: wgpu::Extent3d {
+                width: res,
+                height: res,
+                depth_or_array_layers: 6,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba16Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[],
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
         });
         for (i, face_data) in faces.iter().enumerate() {
-            let f16_data: Vec<u16> = face_data.iter().map(|&v| half::f16::from_f32(v).to_bits()).collect();
+            let f16_data: Vec<u16> = face_data
+                .iter()
+                .map(|&v| half::f16::from_f32(v).to_bits())
+                .collect();
             gpu.queue.write_texture(
-                wgpu::TexelCopyTextureInfo { texture: &cubemap, mip_level: 0, origin: wgpu::Origin3d { x: 0, y: 0, z: i as u32 }, aspect: wgpu::TextureAspect::All },
+                wgpu::TexelCopyTextureInfo {
+                    texture: &cubemap,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: 0,
+                        y: 0,
+                        z: i as u32,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
                 bytemuck::cast_slice(&f16_data),
-                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(res * 4 * 2), rows_per_image: Some(res) },
-                wgpu::Extent3d { width: res, height: res, depth_or_array_layers: 1 },
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(res * 4 * 2),
+                    rows_per_image: Some(res),
+                },
+                wgpu::Extent3d {
+                    width: res,
+                    height: res,
+                    depth_or_array_layers: 1,
+                },
             );
         }
-        cubemap.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::Cube), ..Default::default() })
+        cubemap.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::Cube),
+            ..Default::default()
+        })
     }
 
     pub fn render(
@@ -277,47 +526,13 @@ impl PreviewRenderer {
     ) -> Vec<u8> {
         let size = render_size;
 
-        let uniform_buffer =
-            gpu.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("preview uniforms"),
-                    contents: bytemuck::bytes_of(uniforms),
-                    usage: wgpu::BufferUsages::UNIFORM,
-                });
-
-        // Cloud cubemap: use provided or create 1x1 zero dummy
-        let dummy_cloud_tex;
-        let dummy_cloud_view;
-        let effective_cloud_view = match cloud_view {
-            Some(v) => v,
-            None => {
-                dummy_cloud_tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("dummy cloud"), size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 6 },
-                    mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::R16Float,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING, view_formats: &[],
-                });
-                dummy_cloud_view = dummy_cloud_tex.create_view(&wgpu::TextureViewDescriptor {
-                    dimension: Some(wgpu::TextureViewDimension::Cube), ..Default::default()
-                });
-                &dummy_cloud_view
-            }
-        };
-
-        let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("preview bind group"),
-            layout: &self.bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: uniform_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(cubemap_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(effective_cloud_view) },
-            ],
-        });
-
         let render_target = gpu.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("preview render target"),
-            size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+            label: Some("preview readback target"),
+            size: wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -329,28 +544,19 @@ impl PreviewRenderer {
 
         let mut encoder = gpu
             .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("preview encoder") });
-
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("preview pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &render_view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.02, g: 0.02, b: 0.05, a: 1.0 }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("preview encoder"),
             });
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.draw(0..3, 0..1);
-        }
+
+        self.encode_render(
+            gpu,
+            &mut encoder,
+            &self.pipeline,
+            uniforms,
+            cubemap_view,
+            cloud_view,
+            &render_view,
+        );
 
         // Readback
         let bytes_per_row = size * 4;
@@ -377,13 +583,20 @@ impl PreviewRenderer {
                     rows_per_image: Some(size),
                 },
             },
-            wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: 1,
+            },
         );
 
         gpu.queue.submit(Some(encoder.finish()));
 
         readback.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-        let _ = gpu.device.poll(wgpu::PollType::Wait);
+        let _ = gpu.device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
 
         let mapped = readback.slice(..).get_mapped_range();
         let mut pixels = Vec::with_capacity((size * size * 4) as usize);
@@ -410,7 +623,7 @@ pub fn seed_to_offset(seed: u32) -> [f32; 3] {
 mod tests {
     use super::*;
     use crate::gpu::GpuContext;
-    use crate::plates::{generate_plates, PlateGenParams};
+    use crate::plates::{PlateGenParams, generate_plates};
     use crate::terrain_compute::TerrainComputePipeline;
 
     #[test]
@@ -429,7 +642,9 @@ mod tests {
             num_continents: 0,
             continent_size_variety: 0.0,
         });
-        let terrain = compute.generate(&gpu, &plates, 64, 42, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0, 9.81, 0.85, 0.2, 1.0);
+        let terrain = compute.generate(
+            &gpu, &plates, 64, 42, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0, 9.81, 0.85, 0.2, 1.0,
+        );
 
         // Upload and render
         let renderer = PreviewRenderer::new(&gpu);
@@ -473,9 +688,17 @@ mod tests {
             show_cities: 0.0,
             cloud_opacity: 1.0,
             cloud_advection: 0.0,
-            rotation_rate: 1.0, atm_pressure: 0.7, wind_strength: 0.5,
-            lava_glow: 0.0, ring_inner: 0.0, ring_outer: 0.0, ring_tilt: 0.0, ring_opacity: 0.0,
-            _pad3: 0.0, _pad4: 0.0, _pad5: 0.0,
+            rotation_rate: 1.0,
+            atm_pressure: 0.7,
+            wind_strength: 0.5,
+            lava_glow: 0.0,
+            ring_inner: 0.0,
+            ring_outer: 0.0,
+            ring_tilt: 0.0,
+            ring_opacity: 0.0,
+            _pad3: 0.0,
+            _pad4: 0.0,
+            _pad5: 0.0,
         };
 
         let size = 256;
@@ -495,6 +718,19 @@ mod tests {
     }
 
     #[test]
+    fn test_preview_target_resize_rebinds_once() {
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let mut renderer = PreviewRenderer::new(&gpu);
+        let mut rebinds = 0;
+
+        renderer.resize_target(&gpu, DEFAULT_PREVIEW_SIZE, |_| rebinds += 1);
+        renderer.resize_target(&gpu, 256, |_| rebinds += 1);
+
+        assert_eq!(renderer.size, 256);
+        assert_eq!(rebinds, 1);
+    }
+
+    #[test]
     fn test_seed_offset_distinct_for_different_seeds() {
         let seeds = [0u32, 1, 42, 100_000, 999_999, u32::MAX];
         let offsets: Vec<_> = seeds.iter().map(|&s| seed_to_offset(s)).collect();
@@ -503,7 +739,12 @@ mod tests {
                 let diff = (offsets[i][0] - offsets[j][0]).abs()
                     + (offsets[i][1] - offsets[j][1]).abs()
                     + (offsets[i][2] - offsets[j][2]).abs();
-                assert!(diff > 0.1, "seeds {} and {} too similar", seeds[i], seeds[j]);
+                assert!(
+                    diff > 0.1,
+                    "seeds {} and {} too similar",
+                    seeds[i],
+                    seeds[j]
+                );
             }
         }
     }
@@ -513,7 +754,10 @@ mod tests {
         for seed in [0u32, 1, 42, 100_000, 999_999, u32::MAX] {
             let off = seed_to_offset(seed);
             for (i, &v) in off.iter().enumerate() {
-                assert!(v >= 0.0 && v < 100.0, "seed {seed} offset[{i}] = {v} out of range");
+                assert!(
+                    v >= 0.0 && v < 100.0,
+                    "seed {seed} offset[{i}] = {v} out of range"
+                );
             }
         }
     }

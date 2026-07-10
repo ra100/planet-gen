@@ -4,9 +4,14 @@ use std::sync::Arc;
 use crate::export::{self, ExportConfig, ExportHandle, ExportLayers, ExportProgress};
 use crate::gpu::GpuContext;
 use crate::planet::{DerivedProperties, PlanetParams};
-use crate::plates::{generate_plates, PlateGenParams};
+use crate::plates::{PlateGenParams, generate_plates};
 use crate::preview::{PreviewRenderer, PreviewUniforms};
-use crate::terrain_compute::{ErosionPipeline, TerrainComputePipeline, WindFieldPipeline};
+use crate::terrain_compute::{
+    DynamicsTextures, ErosionPipeline, TerrainComputePipeline, WindFieldPipeline,
+};
+use crate::weather::{
+    DEFAULT_WEATHER_RESOLUTION, WeatherFieldPipeline, WeatherSnapshot, WeatherTextures,
+};
 
 pub struct PlanetGenApp {
     gpu: Arc<GpuContext>,
@@ -14,11 +19,11 @@ pub struct PlanetGenApp {
     terrain_compute: TerrainComputePipeline,
     erosion_pipeline: ErosionPipeline,
     wind_pipeline: WindFieldPipeline,
-    cloud_cubemap_view: Option<wgpu::TextureView>,
-    // Debug data cubemap views (continentality, pressure — uploaded on demand)
-    continentality_view: Option<wgpu::TextureView>,
-    pressure_view: Option<wgpu::TextureView>,
-    texture_handle: Option<egui::TextureHandle>,
+    dynamics: Option<DynamicsTextures>,
+    weather_pipeline: WeatherFieldPipeline,
+    weather: Option<WeatherTextures>,
+    texture_id: egui::TextureId,
+    render_state: eframe::egui_wgpu::RenderState,
     params: PlanetParams,
     derived: DerivedProperties,
     rotation_y: f32,
@@ -27,11 +32,11 @@ pub struct PlanetGenApp {
     continental_scale: f32,
     water_loss: f32,
     climate_moisture: f32, // 0=bone dry atmosphere, 1=full moisture from physics
-    season: f32, // 0=winter, 0.5=equinox, 1=summer
+    season: f32,           // 0=winter, 0.5=equinox, 1=summer
     erosion_iterations: u32,
-    light_azimuth: f32,   // sun horizontal angle in radians
-    light_elevation: f32, // sun vertical angle in radians
-    height_scale: f32,    // normal map height exaggeration
+    light_azimuth: f32,    // sun horizontal angle in radians
+    light_elevation: f32,  // sun vertical angle in radians
+    height_scale: f32,     // normal map height exaggeration
     show_atmosphere: bool, // toggle atmosphere rendering
     show_ao: bool,         // toggle ambient occlusion
     // Layer toggles for Normal view
@@ -42,26 +47,26 @@ pub struct PlanetGenApp {
     show_wind_effects: bool, // GPU wind/continentality modulates clouds and moisture
     show_cities: bool,
     show_erosion: bool,
-    zoom: f32,            // viewport zoom level
-    pan: [f32; 2],        // viewport pan in NDC units
+    zoom: f32,     // viewport zoom level
+    pan: [f32; 2], // viewport pan in NDC units
     // Advanced terrain tweaks
     mountain_scale: f32,
     boundary_width: f32,
     warp_strength: f32,
     detail_scale: f32,
     age_override: Option<f32>, // None = derived from physics, Some = manual override
-    num_plates_override: u32, // 0 = auto from physics
-    num_continents: u32,      // target number of distinct landmasses (1-10)
+    num_plates_override: u32,  // 0 = auto from physics
+    num_continents: u32,       // target number of distinct landmasses (1-10)
     continent_size_variety: f32, // 0 = equal sizes, 1 = heavily skewed
     cloud_coverage: f32,
     cloud_seed: u32,
     cloud_opacity: f32,
-    wind_strength: f32,        // cloud wind stretching strength (0.0-1.0)
-    lava_glow: f32,            // tectonic emission intensity (0.0-1.0)
-    ring_inner: f32,           // ring inner radius (planet radii)
-    ring_outer: f32,           // ring outer radius
-    ring_tilt: f32,            // ring tilt (degrees)
-    ring_opacity: f32,         // ring opacity
+    wind_strength: f32, // cloud wind stretching strength (0.0-1.0)
+    lava_glow: f32,     // tectonic emission intensity (0.0-1.0)
+    ring_inner: f32,    // ring inner radius (planet radii)
+    ring_outer: f32,    // ring outer radius
+    ring_tilt: f32,     // ring tilt (degrees)
+    ring_opacity: f32,  // ring opacity
     storm_count: u32,
     storm_size: f32,
     night_lights: f32,
@@ -96,24 +101,36 @@ pub struct PlanetGenApp {
 }
 
 impl PlanetGenApp {
-    pub fn new(gpu: Arc<GpuContext>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Result<Self, String> {
+        let render_state = cc
+            .wgpu_render_state
+            .as_ref()
+            .ok_or_else(|| "eframe did not provide the required wgpu render state".to_owned())?;
+        let gpu = Arc::new(GpuContext::from_eframe(render_state));
         let preview_renderer = PreviewRenderer::new(&gpu);
+        let texture_id = render_state.renderer.write().register_native_texture(
+            &gpu.device,
+            preview_renderer.target_view(),
+            wgpu::FilterMode::Linear,
+        );
         let terrain_compute = TerrainComputePipeline::new(&gpu);
         let erosion_pipeline = ErosionPipeline::new(&gpu);
-        let wind_pipeline = WindFieldPipeline::new(&gpu);
+        let wind_pipeline = WindFieldPipeline::new(&gpu)?;
+        let weather_pipeline = WeatherFieldPipeline::new(&gpu)?;
         let params = PlanetParams::default();
         let derived = DerivedProperties::from_params(&params);
         let default_cloud_seed = params.seed.wrapping_add(1000);
-        Self {
+        Ok(Self {
             gpu,
             preview_renderer,
             terrain_compute,
             erosion_pipeline,
             wind_pipeline,
-            cloud_cubemap_view: None,
-            continentality_view: None,
-            pressure_view: None,
-            texture_handle: None,
+            dynamics: None,
+            weather_pipeline,
+            weather: None,
+            texture_id,
+            render_state: render_state.clone(),
             params,
             derived,
             rotation_y: 0.0,
@@ -182,7 +199,7 @@ impl PlanetGenApp {
             export_status: String::new(),
             export_progress: 0.0,
             gpu_error: None,
-        }
+        })
     }
 
     fn build_uniforms(&self) -> PreviewUniforms {
@@ -216,7 +233,11 @@ impl PlanetGenApp {
             axial_tilt_rad: self.params.axial_tilt_deg.to_radians(),
             view_mode: self.view_mode,
             season: self.season,
-            atmosphere_density: if self.show_atmosphere { self.derived.atmosphere_strength } else { 0.0 },
+            atmosphere_density: if self.show_atmosphere {
+                self.derived.atmosphere_strength
+            } else {
+                0.0
+            },
             atmosphere_height: 0.02 + 0.02 * self.derived.atmosphere_strength,
             height_scale: self.height_scale,
             zoom: self.zoom,
@@ -242,13 +263,19 @@ impl PlanetGenApp {
             cloud_advection: if self.show_wind_effects { 1.0 } else { 0.0 },
             rotation_rate: 24.0 / self.params.rotation_period_h,
             atm_pressure: self.derived.atmosphere_strength,
-            wind_strength: if self.show_wind_effects { self.wind_strength } else { 0.0 },
+            wind_strength: if self.show_wind_effects {
+                self.wind_strength
+            } else {
+                0.0
+            },
             lava_glow: self.lava_glow,
             ring_inner: self.ring_inner,
             ring_outer: self.ring_outer,
             ring_tilt: self.ring_tilt.to_radians(),
             ring_opacity: self.ring_opacity,
-            _pad3: 0.0, _pad4: 0.0, _pad5: 0.0,
+            _pad3: 0.0,
+            _pad4: 0.0,
+            _pad5: 0.0,
         }
     }
 
@@ -276,8 +303,12 @@ impl PlanetGenApp {
 
     fn regenerate_terrain(&mut self) {
         // Install custom wgpu error handler that stores errors instead of panicking
-        self.gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
-        self.gpu.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        self.gpu
+            .device
+            .push_error_scope(wgpu::ErrorFilter::Validation);
+        self.gpu
+            .device
+            .push_error_scope(wgpu::ErrorFilter::OutOfMemory);
 
         use std::time::Instant;
         let t0 = Instant::now();
@@ -326,42 +357,59 @@ impl PlanetGenApp {
             let t_wind = std::time::Instant::now();
 
             let rotation_rate = 24.0 / self.params.rotation_period_h;
-            let wind_field = self.wind_pipeline.generate(
-                &self.gpu, &terrain, cloud_res, self.params.seed,
-                ocean_level, self.params.axial_tilt_deg.to_radians(), self.season,
-                rotation_rate, self.derived.base_temperature_c, self.derived.atmosphere_strength,
-            );
-
-            // Pack wind (RGB) + continentality (A) into RGBA16Float cubemap
-            // This lets the preview shader sample real pressure-derived wind
-            let ppf = (cloud_res * cloud_res) as usize;
-            let mut wind_cont_faces: [Vec<f32>; 6] = Default::default();
-            for face in 0..6usize {
-                let mut rgba = Vec::with_capacity(ppf * 4);
-                for j in 0..ppf {
-                    let wind_base = (face * ppf + j) * 3;
-                    let wx = wind_field.wind[wind_base];
-                    let wy = wind_field.wind[wind_base + 1];
-                    let wz = wind_field.wind[wind_base + 2];
-                    let cont = wind_field.continentality[face][j];
-                    rgba.push(wx);
-                    rgba.push(wy);
-                    rgba.push(wz);
-                    rgba.push(cont);
-                }
-                wind_cont_faces[face] = rgba;
+            if self.dynamics.as_ref().map(|textures| textures.resolution) != Some(cloud_res) {
+                self.dynamics = Some(self.wind_pipeline.create_textures(&self.gpu, cloud_res));
             }
-            self.cloud_cubemap_view = Some(
-                self.preview_renderer.upload_cubemap_rgba16(&self.gpu, &wind_cont_faces, cloud_res)
+            let dynamics = self.dynamics.as_ref().unwrap();
+            self.wind_pipeline.generate_gpu(
+                &self.gpu,
+                &terrain,
+                dynamics,
+                self.params.seed,
+                ocean_level,
+                self.params.axial_tilt_deg.to_radians(),
+                self.season,
+                rotation_rate,
+                self.derived.base_temperature_c,
+                self.derived.atmosphere_strength,
             );
-            self.continentality_view = Some(
-                self.preview_renderer.upload_cubemap_r16(&self.gpu, &wind_field.continentality, cloud_res)
-            );
-            self.pressure_view = Some(
-                self.preview_renderer.upload_cubemap_r16(&self.gpu, &wind_field.pressure, cloud_res)
+            if self.weather.is_none() {
+                self.weather = Some(
+                    self.weather_pipeline
+                        .create_textures(&self.gpu, DEFAULT_WEATHER_RESOLUTION),
+                );
+            }
+            let weather = self.weather.as_ref().unwrap();
+            self.weather_pipeline.generate(
+                &self.gpu,
+                WeatherSnapshot {
+                    face: 0,
+                    resolution: weather.resolution,
+                    seed: self.cloud_seed,
+                    storm_count: self.storm_count,
+                    coverage: self.cloud_coverage,
+                    moisture: self.climate_moisture,
+                    atm_pressure: self.derived.atmosphere_strength,
+                    base_temp_c: self.derived.base_temperature_c,
+                    ocean_level,
+                    axial_tilt_rad: self.params.axial_tilt_deg.to_radians(),
+                    season: self.season,
+                    storm_size: self.storm_size,
+                    cloud_character: 0.5,
+                    _pad0: 0.0,
+                    _pad1: 0.0,
+                    _pad2: 0.0,
+                },
+                &terrain,
+                dynamics,
+                weather,
             );
 
-            eprintln!("[wind {}px] {:.0}ms", cloud_res, t_wind.elapsed().as_secs_f64() * 1000.0);
+            eprintln!(
+                "[wind {}px] {:.0}ms",
+                cloud_res,
+                t_wind.elapsed().as_secs_f64() * 1000.0
+            );
         }
 
         // Schedule progressive erosion (skipped when erosion layer is disabled)
@@ -371,7 +419,8 @@ impl PlanetGenApp {
                 r if r <= 512 => (self.erosion_iterations as f32 * 0.4) as u32,
                 r if r <= 768 => (self.erosion_iterations as f32 * 0.6) as u32,
                 _ => self.erosion_iterations,
-            }.max(1);
+            }
+            .max(1);
             self.erosion_terrain = Some(terrain);
             self.erosion_remaining = adaptive_iters;
             self.erosion_ocean_level = ocean_level;
@@ -381,11 +430,13 @@ impl PlanetGenApp {
 
         eprintln!(
             "[terrain {}px] plates+compute: {:.0}ms, {} plates ({}c/{}o), continents={}, variety={:.2}, scheduling {} erosion iters",
-            self.preview_resolution, t0.elapsed().as_secs_f64() * 1000.0,
+            self.preview_resolution,
+            t0.elapsed().as_secs_f64() * 1000.0,
             plates.len(),
             plates.iter().filter(|p| p.plate_type > 0.5).count(),
             plates.iter().filter(|p| p.plate_type <= 0.5).count(),
-            self.num_continents, self.continent_size_variety,
+            self.num_continents,
+            self.continent_size_variety,
             self.erosion_remaining,
         );
 
@@ -401,13 +452,17 @@ impl PlanetGenApp {
 
         if let Some(ref mut terrain) = self.erosion_terrain {
             let t = Instant::now();
-            self.erosion_pipeline.erode(&self.gpu, terrain, iters, self.erosion_ocean_level);
-            self.cached_cubemap_view = Some(self.preview_renderer.upload_terrain(&self.gpu, terrain));
+            self.erosion_pipeline
+                .erode(&self.gpu, terrain, iters, self.erosion_ocean_level);
+            self.cached_cubemap_view =
+                Some(self.preview_renderer.upload_terrain(&self.gpu, terrain));
             self.erosion_remaining -= iters;
 
             eprintln!(
                 "[erosion batch] {} iters in {:.0}ms, {} remaining",
-                iters, t.elapsed().as_secs_f64() * 1000.0, self.erosion_remaining,
+                iters,
+                t.elapsed().as_secs_f64() * 1000.0,
+                self.erosion_remaining,
             );
         }
 
@@ -426,26 +481,28 @@ impl PlanetGenApp {
         }
     }
 
-    fn render_preview(&mut self, ctx: &egui::Context) {
+    fn render_preview(&mut self) {
         if let Some(ref cubemap_view) = self.cached_cubemap_view {
             let uniforms = self.build_uniforms();
             let size = self.preview_resolution;
             // Debug views 16/17 use continentality/pressure cubemap in the cloud_tex slot
-            let cloud_ref = match self.view_mode {
-                16 => self.continentality_view.as_ref(),
-                17 => self.pressure_view.as_ref(),
-                _ => self.cloud_cubemap_view.as_ref(),
-            };
-            let pixels = self.preview_renderer.render(&self.gpu, &uniforms, cubemap_view, cloud_ref, size);
-
-            let image =
-                egui::ColorImage::from_rgba_unmultiplied([size as usize, size as usize], &pixels);
-
-            self.texture_handle = Some(ctx.load_texture(
-                "planet_preview",
-                image,
-                egui::TextureOptions::LINEAR,
-            ));
+            let cloud_ref = self.dynamics.as_ref().map(|dynamics| match self.view_mode {
+                17 => &dynamics.pressure,
+                _ => &dynamics.wind_continentality,
+            });
+            let renderer = self.render_state.renderer.clone();
+            let texture_id = self.texture_id;
+            self.preview_renderer
+                .resize_target(&self.gpu, size, |view| {
+                    renderer.write().update_egui_texture_from_wgpu_texture(
+                        &self.gpu.device,
+                        view,
+                        wgpu::FilterMode::Linear,
+                        texture_id,
+                    );
+                });
+            self.preview_renderer
+                .render_interactive(&self.gpu, &uniforms, cubemap_view, cloud_ref);
         }
         self.needs_render = false;
     }
@@ -539,7 +596,9 @@ impl eframe::App for PlanetGenApp {
                 }
             });
         }
-        if dismiss_error { self.gpu_error = None; }
+        if dismiss_error {
+            self.gpu_error = None;
+        }
 
         egui::SidePanel::left("params_panel")
             .resizable(true)
@@ -1067,18 +1126,16 @@ impl eframe::App for PlanetGenApp {
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            if let Some(ref tex) = self.texture_handle {
+            if self.cached_cubemap_view.is_some() {
                 // Square image aligned left, 1:1 pixel ratio
                 let available = ui.available_size();
                 let size = available.x.min(available.y);
 
-                let (response, painter) = ui.allocate_painter(
-                    egui::Vec2::splat(size),
-                    egui::Sense::click_and_drag(),
-                );
+                let (response, painter) =
+                    ui.allocate_painter(egui::Vec2::splat(size), egui::Sense::click_and_drag());
 
                 painter.image(
-                    tex.id(),
+                    self.texture_id,
                     response.rect,
                     egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                     egui::Color32::WHITE,
@@ -1142,7 +1199,10 @@ impl eframe::App for PlanetGenApp {
             }
 
             // Loading overlay — only show if generation takes >1s
-            let gen_elapsed = self.terrain_start.map(|t| t.elapsed().as_secs_f32()).unwrap_or(0.0);
+            let gen_elapsed = self
+                .terrain_start
+                .map(|t| t.elapsed().as_secs_f32())
+                .unwrap_or(0.0);
             if (self.terrain_pending || self.erosion_remaining > 0) && gen_elapsed > 1.0 {
                 let panel_rect = ui.max_rect();
                 let painter = ui.painter();
@@ -1176,9 +1236,7 @@ impl eframe::App for PlanetGenApp {
         }
         // Progressive erosion: apply one batch per frame, but skip when mouse is
         // pressed to avoid blocking input processing (prevents slider sticking)
-        let mouse_busy = ctx.input(|i| {
-            i.pointer.any_pressed() || i.pointer.any_down()
-        });
+        let mouse_busy = ctx.input(|i| i.pointer.any_pressed() || i.pointer.any_down());
         if self.erosion_remaining > 0 && !mouse_busy {
             self.erode_batch();
             ctx.request_repaint();
@@ -1186,8 +1244,15 @@ impl eframe::App for PlanetGenApp {
             ctx.request_repaint(); // retry next frame when mouse released
         }
         if self.needs_render {
-            self.render_preview(ctx);
+            self.render_preview();
         }
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.render_state
+            .renderer
+            .write()
+            .free_texture(&self.texture_id);
     }
 }
 

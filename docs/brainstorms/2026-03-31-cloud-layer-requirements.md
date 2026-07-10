@@ -1,94 +1,131 @@
 ---
 date: 2026-03-31
+revised: 2026-07-10
 topic: cloud-layer
 ---
 
-# Procedural Cloud Layer
+# Shallow Volumetric Cloud Layer
+
+## Summary
+
+Replace the flat cloud shells with an interactive shallow volume for Earth-like rocky planets. One GPU-generated weather field will drive cloud depth, lighting, surface shadows, preview, and export.
+
+---
 
 ## Problem Frame
 
-The planet preview needs a convincing cloud layer rendered as a 2D shell. The current implementation suffers from four critical visual defects:
+The current clouds read as painted overlays. Density is evaluated on two infinitesimally thin shells, lighting does not integrate through cloud depth, and large noise regions produce broad grey sheets. Cloud placement is also disconnected from the moisture and pressure fields already available to the renderer.
 
-1. **Slider cliff** — Coverage slider has non-linear response; small changes flip the planet between nearly clear and heavily overcast
-2. **Flat appearance** — Clouds render as uniform white/grey with no depth, self-shadowing, or thickness variation
-3. **Latitude banding** — Multiplying noise by Hadley cell moisture creates obvious horizontal climate bands that dominate cloud placement
-4. **No texture** — Cloud formations lack visible internal structure at planet scale
+Preview and export use different cloud algorithms, so the authored result is not the exported result. Repeated visual tuning cannot resolve these structural limitations.
 
-The target aesthetic is Space Engine / procedural planet generators: plausible cloud patterns that work across planet types, with climate accuracy as the foundation but visual quality as the measure of success.
+---
+
+## Key Flows
+
+- F1. Interactive planet preview
+  - **Trigger:** The user enables clouds or changes cloud, climate, terrain, or lighting controls.
+  - **Steps:** The weather state updates, the bounded cloud volume is rendered, and lighting and shadows respond to the same density field.
+  - **Outcome:** Orbiting and editing remain interactive while clouds show visible depth.
+  - **Covered by:** R1-R12, R15
+- F2. Cloud export
+  - **Trigger:** The user exports cloud-related maps.
+  - **Steps:** Export samples the authored weather state and produces maps consistent with the preview.
+  - **Outcome:** Exported coverage and major formations match the visible planet.
+  - **Covered by:** R13-R14
+
+---
 
 ## Requirements
 
-**Density Generation**
+**Cloud volume**
 
-- R1. Cloud density uses domain-warped fBm noise (not plain fBm) for organic, non-uniform shapes
-- R2. 5 octaves minimum for visible detail at planet scale (wispy edges, cellular structure)
-- R3. Base frequency ~5.0 to produce 6-10 major cloud systems visible from space
+- R1. Low clouds occupy a bounded atmospheric layer with spatially varying base altitude and thickness rather than a single spherical shell.
+- R2. Preview rendering integrates density through the cloud layer using 6-10 samples, with empty-space early exit where practical.
+- R3. The vertical density profile produces soft bases and tops, dense cores, broken edges, and visible parallax at the limb.
+- R4. High cirrus remains a distinct, thinner layer with sparse fibrous formations rather than a second opaque shell.
 
-**Coverage Slider**
+**Weather state and shape**
 
-- R4. Coverage slider (0.0–1.0) produces approximately linear visual response — each 0.1 increment adds roughly equal visible cloud area
-- R5. Use Schneider remap technique: `remap(noise, 1-coverage, 1, 0, 1) * coverage` for natural density distribution (lighter thin clouds, denser large clouds)
-- R6. No cliff effects — smooth transition from clear to overcast across the full slider range
+- R5. A persistent weather field controls local coverage, cloud base, thickness, and cloud character.
+- R6. Weather placement responds to atmospheric moisture, pressure convergence and divergence, temperature, terrain lift, rain shadows, latitude, and season without tracing coastlines or forming rigid latitude bands.
+- R7. Cloud formations contain coherent clear regions, fronts, cells, and broken systems across multiple spatial scales; additive detail must not create a global grey veil.
+- R8. Explicit storms remain localized additions to the weather field and must not dominate unrelated cloud systems.
+- R9. Coverage changes produce a smooth increase in occupied cloud area across the full control range, with zero coverage producing no cloud contribution.
 
-**Climate Modulation**
+**Lighting and integration**
 
-- R7. Climate data (moisture) controls the local coverage threshold, NOT multiplied with density — this is the key technique to avoid latitude bands
-- R8. Domain-warp the moisture lookup position so climate zones become wavy, not straight latitude lines
-- R9. Climate influence blended at ~30-35% with global coverage — noise drives shape, climate nudges placement
+- R10. Opacity uses integrated optical depth so thin edges remain translucent and dense cores become opaque.
+- R11. Direct lighting accounts for cloud self-shadowing and forward scattering, producing bright sun-facing regions, darker interiors, and restrained silver linings.
+- R12. Surface cloud shadows use the same density field and sun direction as visible clouds, with soft edges appropriate to cloud altitude and thickness.
 
-**Rendering**
+**Consistency and controls**
 
-- R10. Beer-Lambert exponential opacity: `alpha = 1 - exp(-density * thickness_param)` instead of linear alpha — thin clouds translucent, thick clouds opaque
-- R11. Self-shadowing: sample cloud density offset toward sun direction to approximate light depth — creates bright sun-facing tops and darker shadow sides
-- R12. Cloud color varies: bright warm-white (lit) to blue-grey (shadow), not flat uniform white
-- R13. Optional: Henyey-Greenstein forward scattering for bright edges when backlit (silver lining)
+- R13. Preview and export derive from the same weather state and density definition.
+- R14. Export provides both a ready-to-use integrated optical-depth map and reconstruction channels for coverage, cloud base, thickness, cloud character, and cirrus while preserving the major formations visible in preview.
+- R15. Existing coverage, seed, opacity, storm, wind, layer visibility, and season controls remain functional and deterministic.
 
-**Scope Control**
+**Performance and validation**
 
-- R14. Independent cloud seed for pattern variation
-- R15. Cloud coverage = 0 produces zero visual change (early-out for performance)
-- R16. Drop cyclone/spiral features — focus on getting base cloud quality right first
+- R16. Weather generation and cloud rendering remain GPU-resident during interactive use; no per-frame GPU-to-CPU readback is allowed.
+- R17. At the standard preview resolution, cloud-enabled orbiting and control changes remain responsive, targeting at least 30 frames per second on the project's baseline GPU.
+- R18. Deterministic reference renders cover clear, scattered, overcast, storm, backlit, limb, and polar views.
+
+---
+
+## Acceptance Examples
+
+- AE1. **Covers R1-R4, R10-R11.** Given scattered clouds and a grazing camera angle, when the planet is rotated, cloud masses show bounded depth, internal shading, and parallax without a visible shell edge.
+- AE2. **Covers R6-R9.** Given Earth-like climate parameters, when coverage is set near 0.5, the result contains coherent cloudy and clear weather regions without continent outlines, horizontal bands, or a global grey veil.
+- AE3. **Covers R9, R15-R17.** Given clouds are enabled, when coverage is changed from zero through intermediate values to one, occupied area increases continuously, zero has no cloud cost beyond the early-out path, and interaction remains responsive.
+- AE4. **Covers R11-R12.** Given a low sun angle, when a dense cloud system crosses the lit hemisphere, its bright edge, shaded interior, and soft surface shadow move consistently with the sun.
+- AE5. **Covers R13-R15.** Given a fixed seed and parameters, when cloud maps are exported, the optical-depth map aligns with the preview and the reconstruction channels describe the same major systems and clear regions.
+
+---
 
 ## Success Criteria
 
-- Moving the coverage slider from 0.0 to 1.0 shows a smooth, continuous increase in cloud area with no cliff effects
-- At coverage ~0.5, the planet shows a plausible mix of clear sky and cloud formations with visible internal texture
-- At coverage 1.0, most of the planet is covered but with density variation (not flat white)
-- No visible latitude banding — cloud patterns look organic and spatially varied
-- Clouds have visible depth: bright sun-lit tops, darker shadowed undersides, thin translucent edges
-- Different seeds produce visually distinct cloud patterns
+- Clouds no longer read as textures pasted onto the planet in normal, limb, or backlit views.
+- Scattered and partly cloudy settings show recognizable weather systems with varied thickness and genuinely clear gaps.
+- Lighting supplies depth without turning clouds uniformly grey or uniformly white.
+- Preview and export agree for the same seed and controls.
+- The standard preview remains interactive with clouds enabled.
+- Planning can trace every implementation unit and validation render to an R-ID.
+
+---
 
 ## Scope Boundaries
 
-- NOT adding cyclone/spiral storm patterns (future enhancement)
-- NOT rendering volumetric 3D clouds — 2D shell only
-- NOT adding cloud shadows on the surface (future enhancement)
-- NOT exporting clouds as a separate texture map (future)
-- NOT simulating cloud dynamics/weather — static snapshot per seed
+- Earth-like rocky planets are the first target.
+- The cloud volume is shallow and planet-scale, not a general 3D voxel atmosphere.
+- Ground-level and flight-level cloud rendering are deferred.
+- Full atmospheric fluid dynamics and time-evolving numerical weather prediction are deferred.
+- The geological terrain pipeline is not replaced in this phase.
+- Non-rocky, icy, and gas-giant cloud regimes are deferred.
+
+---
 
 ## Key Decisions
 
-- **Schneider remap over naive thresholding**: The `remap(noise, 1-cov, 1, 0, 1) * cov` technique naturally produces lighter small clouds and denser large clouds, solving the slider cliff problem. This is the industry standard (Horizon Zero Dawn, Skybolt).
-- **Domain warping for both noise and climate**: Warping the noise input creates organic shapes; warping the climate lookup breaks latitude bands. Two separate warp applications.
-- **Beer-Lambert over linear alpha**: Exponential opacity creates the critical visual distinction between thin translucent clouds and thick opaque clouds. Linear alpha makes everything look like the same semi-transparent overlay.
-- **Self-shadowing as primary depth cue**: Even a single density sample offset toward the sun transforms flat white into dimensional cloud masses. This is the #1 technique for visual quality.
-- **Drop cyclones**: The spiral storm code was causing most visual artifacts (geometric lollipop patterns). Clean removal lets us focus on getting the foundation right.
+- **Shallow volume over layered shells:** A bounded ray-marched layer fixes silhouettes, parallax, and optical depth without the cost of a full 3D atmosphere.
+- **Interactive quality first:** A short ray march is preferred over maximum close-up quality because planet editing must remain responsive.
+- **Shared weather state:** Preview, shadows, and export must not maintain separate procedural interpretations of clouds.
+- **GPU residency:** Cloud state stays on the GPU so additional depth does not introduce readback stalls.
+
+---
 
 ## Dependencies / Assumptions
 
-- Existing `snoise()` simplex noise function available (from noise.wgsl)
-- Existing `compute_moisture()` and `compute_temperature()` provide climate data
-- PreviewUniforms already has cloud_coverage, cloud_seed, cloud_altitude fields
-- Cloud UI (coverage slider, seed control) already exists in app.rs
+- The existing cubemap terrain, climate inputs, wind field, and preview renderer remain available during this phase.
+- Planet radius can be derived well enough to express plausible cloud altitudes relative to the surface.
+- The baseline performance target will be measured on the same hardware and preview resolution used for current visual acceptance.
+
+---
 
 ## Outstanding Questions
 
 ### Deferred to Planning
 
-- [Affects R11][Needs research] How many shadow samples give good quality without noticeable perf cost? Research suggests 1-3; test empirically.
-- [Affects R1][Technical] What domain warp strength looks best? Research suggests 0.5-0.8; tune during implementation.
-- [Affects R3][Technical] Exact base frequency — 5.0 is the starting point but may need adjustment for this planet's scale.
-
-## Next Steps
-
-→ `/ce:plan` for structured implementation planning
+- [Affects R2, R17][Technical] Determine the smallest sample count and empty-space strategy that meet both visual and frame-time targets.
+- [Affects R5-R6][Technical] Select weather-field channels and update triggers without duplicating existing wind and climate data.
+- [Affects R11][Needs research] Calibrate the minimum light sampling and phase approximation needed for convincing planet-scale clouds.
+- [Affects R18][Technical] Define the baseline GPU, render resolution, camera poses, and image comparison thresholds.

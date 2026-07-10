@@ -1,15 +1,17 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
 use crate::gpu::GpuContext;
 use crate::planet::{DerivedProperties, PlanetParams};
-use crate::plates::{generate_plates, PlateGenParams};
-use crate::terrain_compute::{ErosionPipeline, TerrainComputePipeline, TerrainGenParams, TectonicTerrain};
+use crate::plates::{PlateGenParams, generate_plates};
+use crate::terrain_compute::{
+    ErosionPipeline, TectonicTerrain, TerrainComputePipeline, TerrainGenParams,
+};
 
 // ============ Constants ============
 
@@ -30,7 +32,15 @@ pub struct ExportLayers {
 
 impl Default for ExportLayers {
     fn default() -> Self {
-        Self { height: true, albedo: true, normals: true, roughness: true, water_mask: true, clouds: true, emission: true }
+        Self {
+            height: true,
+            albedo: true,
+            normals: true,
+            roughness: true,
+            water_mask: true,
+            clouds: true,
+            emission: true,
+        }
     }
 }
 
@@ -238,13 +248,13 @@ impl MapPipeline {
                     ],
                 });
 
-        let pipeline_layout =
-            gpu.device
-                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                    label: Some(label),
-                    bind_group_layouts: &[&bind_group_layout],
-                    push_constant_ranges: &[],
-                });
+        let pipeline_layout = gpu
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some(label),
+                bind_group_layouts: &[&bind_group_layout],
+                push_constant_ranges: &[],
+            });
 
         let shader = gpu
             .device
@@ -281,13 +291,13 @@ impl MapPipeline {
         let total_pixels = (tile_size * tile_size) as usize;
         let output_size = (total_pixels * output_element_bytes) as u64;
 
-        let params_buffer =
-            gpu.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("map params"),
-                    contents: params_bytes,
-                    usage: wgpu::BufferUsages::UNIFORM,
-                });
+        let params_buffer = gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("map params"),
+                contents: params_bytes,
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
 
         let output_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("map output"),
@@ -344,7 +354,10 @@ impl MapPipeline {
         staging_buffer
             .slice(..)
             .map_async(wgpu::MapMode::Read, |_| {});
-        let _ = gpu.device.poll(wgpu::PollType::Wait);
+        let _ = gpu.device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
 
         let mapped = staging_buffer.slice(..).get_mapped_range();
         let result = mapped.to_vec();
@@ -529,7 +542,6 @@ fn generate_ocean_mask(heightmap: &[f32], ocean_level: f32) -> Vec<f32> {
         .collect()
 }
 
-
 /// Inverse of cube_to_sphere: given a 3D direction, find which cube face and UV.
 fn direction_to_face_uv(dx: f32, dy: f32, dz: f32) -> (usize, f32, f32) {
     let ax = dx.abs();
@@ -538,20 +550,20 @@ fn direction_to_face_uv(dx: f32, dy: f32, dz: f32) -> (usize, f32, f32) {
 
     let (face, s, t) = if ax >= ay && ax >= az {
         if dx > 0.0 {
-            (0, -dz / ax, -dy / ax)     // +X
+            (0, -dz / ax, -dy / ax) // +X
         } else {
-            (1, dz / ax, -dy / ax)      // -X
+            (1, dz / ax, -dy / ax) // -X
         }
     } else if ay >= ax && ay >= az {
         if dy > 0.0 {
-            (2, dx / ay, dz / ay)        // +Y
+            (2, dx / ay, dz / ay) // +Y
         } else {
-            (3, dx / ay, -dz / ay)       // -Y
+            (3, dx / ay, -dz / ay) // -Y
         }
     } else if dz > 0.0 {
-        (4, dx / az, -dy / az)           // +Z
+        (4, dx / az, -dy / az) // +Z
     } else {
-        (5, -dx / az, -dy / az)          // -Z
+        (5, -dx / az, -dy / az) // -Z
     };
 
     let u = ((s + 1.0) * 0.5).clamp(0.0, 1.0);
@@ -608,7 +620,12 @@ fn cubemap_to_equirect(
 }
 
 /// Write RGBA EXR with DWAB compression (lossy, ~80% quality).
-fn export_equirect_exr_rgba(data: &[f32], width: u32, height: u32, path: &Path) -> Result<(), String> {
+fn export_equirect_exr_rgba(
+    data: &[f32],
+    width: u32,
+    height: u32,
+    path: &Path,
+) -> Result<(), String> {
     use exr::prelude::*;
     let w = width as usize;
     let h = height as usize;
@@ -633,7 +650,12 @@ fn export_equirect_exr_rgba(data: &[f32], width: u32, height: u32, path: &Path) 
 }
 
 /// Write single-channel EXR as RGB (all same value) with DWAB compression.
-fn export_equirect_exr_gray(data: &[f32], width: u32, height: u32, path: &Path) -> Result<(), String> {
+fn export_equirect_exr_gray(
+    data: &[f32],
+    width: u32,
+    height: u32,
+    path: &Path,
+) -> Result<(), String> {
     use exr::prelude::*;
     let w = width as usize;
     let h = height as usize;
@@ -674,7 +696,8 @@ pub fn run_export(
 
     // Create output directory
     let planet_dir = config.output_dir.join(&config.planet_name);
-    std::fs::create_dir_all(&planet_dir).map_err(|e| format!("Failed to create output dir: {e}"))?;
+    std::fs::create_dir_all(&planet_dir)
+        .map_err(|e| format!("Failed to create output dir: {e}"))?;
 
     let effective_ocean = derived.ocean_fraction * (1.0 - water_loss);
     let ocean_level = -0.5 + 1.7 * effective_ocean; // match app.rs formula
@@ -683,10 +706,28 @@ pub fn run_export(
     // Compute total steps for progress based on selected layers
     let layers = &config.layers;
     let tiles_per_face = coordinator.tiles_per_face();
-    let map_count = [layers.normals, layers.roughness, layers.albedo, layers.albedo /*ao bundled with albedo*/, layers.clouds]
-        .iter().filter(|&&b| b).count() as u32;
-    let export_count = [layers.height, layers.albedo, layers.normals, layers.roughness, layers.albedo /*ao*/, layers.water_mask, layers.clouds]
-        .iter().filter(|&&b| b).count() as u32;
+    let map_count = [
+        layers.normals,
+        layers.roughness,
+        layers.albedo,
+        layers.albedo, /*ao bundled with albedo*/
+        layers.clouds,
+    ]
+    .iter()
+    .filter(|&&b| b)
+    .count() as u32;
+    let export_count = [
+        layers.height,
+        layers.albedo,
+        layers.normals,
+        layers.roughness,
+        layers.albedo, /*ao*/
+        layers.water_mask,
+        layers.clouds,
+    ]
+    .iter()
+    .filter(|&&b| b)
+    .count() as u32;
     let total_steps = coordinator.total_tiles() // terrain generation
         + 6 // erosion
         + map_count * 6 * tiles_per_face // map tiles for selected layers
@@ -733,48 +774,83 @@ pub fn run_export(
         }
         progress.advance(&format!("Eroding face {face}"));
     }
-    erosion_pipeline.erode(
-        gpu,
-        &mut terrain,
-        config.erosion_iterations,
-        ocean_level,
-    );
+    erosion_pipeline.erode(gpu, &mut terrain, config.erosion_iterations, ocean_level);
 
     // --- Phase 4: Create map pipelines (only for selected layers) ---
     let normal_pipeline = if layers.normals {
-        Some(MapPipeline::new(gpu, include_str!("shaders/normal_map.wgsl"), "normal map"))
-    } else { None };
+        Some(MapPipeline::new(
+            gpu,
+            include_str!("shaders/normal_map.wgsl"),
+            "normal map",
+        ))
+    } else {
+        None
+    };
     let roughness_pipeline = if layers.roughness {
-        Some(MapPipeline::new(gpu, &format!("{}\n{}\n{}",
-            include_str!("shaders/cube_sphere.wgsl"),
-            include_str!("shaders/noise.wgsl"),
-            include_str!("shaders/roughness_map.wgsl"),
-        ), "roughness map"))
-    } else { None };
+        Some(MapPipeline::new(
+            gpu,
+            &format!(
+                "{}\n{}\n{}",
+                include_str!("shaders/cube_sphere.wgsl"),
+                include_str!("shaders/noise.wgsl"),
+                include_str!("shaders/roughness_map.wgsl"),
+            ),
+            "roughness map",
+        ))
+    } else {
+        None
+    };
     let albedo_pipeline = if layers.albedo {
-        Some(MapPipeline::new(gpu, &format!("{}\n{}\n{}",
-            include_str!("shaders/cube_sphere.wgsl"),
-            include_str!("shaders/noise.wgsl"),
-            include_str!("shaders/albedo_map.wgsl"),
-        ), "albedo map"))
-    } else { None };
+        Some(MapPipeline::new(
+            gpu,
+            &format!(
+                "{}\n{}\n{}",
+                include_str!("shaders/cube_sphere.wgsl"),
+                include_str!("shaders/noise.wgsl"),
+                include_str!("shaders/albedo_map.wgsl"),
+            ),
+            "albedo map",
+        ))
+    } else {
+        None
+    };
     let ao_pipeline = if layers.albedo {
-        Some(MapPipeline::new(gpu, include_str!("shaders/ao_map.wgsl"), "ao map"))
-    } else { None };
+        Some(MapPipeline::new(
+            gpu,
+            include_str!("shaders/ao_map.wgsl"),
+            "ao map",
+        ))
+    } else {
+        None
+    };
     let cloud_pipeline = if layers.clouds {
-        Some(MapPipeline::new(gpu, &format!("{}\n{}\n{}",
-            include_str!("shaders/cube_sphere.wgsl"),
-            include_str!("shaders/noise.wgsl"),
-            include_str!("shaders/cloud_map.wgsl"),
-        ), "cloud map"))
-    } else { None };
+        Some(MapPipeline::new(
+            gpu,
+            &format!(
+                "{}\n{}\n{}",
+                include_str!("shaders/cube_sphere.wgsl"),
+                include_str!("shaders/noise.wgsl"),
+                include_str!("shaders/cloud_map.wgsl"),
+            ),
+            "cloud map",
+        ))
+    } else {
+        None
+    };
     let emission_pipeline = if layers.emission {
-        Some(MapPipeline::new(gpu, &format!("{}\n{}\n{}",
-            include_str!("shaders/cube_sphere.wgsl"),
-            include_str!("shaders/noise.wgsl"),
-            include_str!("shaders/emission_map.wgsl"),
-        ), "emission map"))
-    } else { None };
+        Some(MapPipeline::new(
+            gpu,
+            &format!(
+                "{}\n{}\n{}",
+                include_str!("shaders/cube_sphere.wgsl"),
+                include_str!("shaders/noise.wgsl"),
+                include_str!("shaders/emission_map.wgsl"),
+            ),
+            "emission map",
+        ))
+    } else {
+        None
+    };
 
     // --- Phase 5: Generate all maps per face, store in memory ---
     let tile_size = coordinator.tile_size;
@@ -790,67 +866,126 @@ pub fn run_export(
     let mut all_emission: [Vec<f32>; 6] = Default::default();
 
     for face in 0..6u32 {
-        if cancel.load(Ordering::Relaxed) { return Err("Cancelled".into()); }
+        if cancel.load(Ordering::Relaxed) {
+            return Err("Cancelled".into());
+        }
 
         let face_data = &terrain.faces[face as usize];
-        let heightmap_buffer = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("export heightmap"),
-            contents: bytemuck::cast_slice(face_data),
-            usage: wgpu::BufferUsages::STORAGE,
-        });
+        let heightmap_buffer = gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("export heightmap"),
+                contents: bytemuck::cast_slice(face_data),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
 
         all_heights[face as usize] = face_data.clone();
 
         if let Some(ref pipeline) = normal_pipeline {
             let normal_bytes = generate_map_tiled(
-                gpu, pipeline, &heightmap_buffer, &coordinator,
+                gpu,
+                pipeline,
+                &heightmap_buffer,
+                &coordinator,
                 |ox, oy| NormalMapParams {
-                    resolution: tile_size, height_scale: 50.0,
-                    tile_offset_x: ox, tile_offset_y: oy,
-                    full_resolution: full_res, _pad0: 0, _pad1: 0, _pad2: 0,
-                }, 16, &mut progress, "Normal", face, cancel,
+                    resolution: tile_size,
+                    height_scale: 50.0,
+                    tile_offset_x: ox,
+                    tile_offset_y: oy,
+                    full_resolution: full_res,
+                    _pad0: 0,
+                    _pad1: 0,
+                    _pad2: 0,
+                },
+                16,
+                &mut progress,
+                "Normal",
+                face,
+                cancel,
             )?;
             all_normals[face as usize] = bytemuck::cast_slice::<u8, f32>(&normal_bytes).to_vec();
         }
 
         if let Some(ref pipeline) = roughness_pipeline {
             let roughness_bytes = generate_map_tiled(
-                gpu, pipeline, &heightmap_buffer, &coordinator,
+                gpu,
+                pipeline,
+                &heightmap_buffer,
+                &coordinator,
                 |ox, oy| RoughnessMapParams {
-                    face, resolution: tile_size, seed: params.seed,
-                    base_temp_c: derived.base_temperature_c, ocean_level,
+                    face,
+                    resolution: tile_size,
+                    seed: params.seed,
+                    base_temp_c: derived.base_temperature_c,
+                    ocean_level,
                     ocean_fraction: effective_ocean,
-                    tile_offset_x: ox, tile_offset_y: oy,
-                    full_resolution: full_res, _pad0: 0, _pad1: 0, _pad2: 0,
-                }, 4, &mut progress, "Roughness", face, cancel,
+                    tile_offset_x: ox,
+                    tile_offset_y: oy,
+                    full_resolution: full_res,
+                    _pad0: 0,
+                    _pad1: 0,
+                    _pad2: 0,
+                },
+                4,
+                &mut progress,
+                "Roughness",
+                face,
+                cancel,
             )?;
-            all_roughness[face as usize] = bytemuck::cast_slice::<u8, f32>(&roughness_bytes).to_vec();
+            all_roughness[face as usize] =
+                bytemuck::cast_slice::<u8, f32>(&roughness_bytes).to_vec();
         }
 
         if let Some(ref pipeline) = albedo_pipeline {
             let albedo_bytes = generate_map_tiled(
-                gpu, pipeline, &heightmap_buffer, &coordinator,
+                gpu,
+                pipeline,
+                &heightmap_buffer,
+                &coordinator,
                 |ox, oy| AlbedoMapParams {
-                    face, resolution: tile_size, seed: params.seed,
-                    base_temp_c: derived.base_temperature_c, ocean_level,
+                    face,
+                    resolution: tile_size,
+                    seed: params.seed,
+                    base_temp_c: derived.base_temperature_c,
+                    ocean_level,
                     ocean_fraction: effective_ocean,
                     axial_tilt_rad: params.axial_tilt_deg.to_radians(),
                     season: config.season,
-                    tile_offset_x: ox, tile_offset_y: oy,
-                    full_resolution: full_res, _pad0: 0,
-                }, 16, &mut progress, "Albedo", face, cancel,
+                    tile_offset_x: ox,
+                    tile_offset_y: oy,
+                    full_resolution: full_res,
+                    _pad0: 0,
+                },
+                16,
+                &mut progress,
+                "Albedo",
+                face,
+                cancel,
             )?;
             all_albedo[face as usize] = bytemuck::cast_slice::<u8, f32>(&albedo_bytes).to_vec();
         }
 
         if let Some(ref pipeline) = ao_pipeline {
             let ao_bytes = generate_map_tiled(
-                gpu, pipeline, &heightmap_buffer, &coordinator,
+                gpu,
+                pipeline,
+                &heightmap_buffer,
+                &coordinator,
                 |ox, oy| AoMapParams {
-                    face, full_resolution: full_res, ao_strength: 30.0, ocean_level,
-                    tile_offset_x: ox, tile_offset_y: oy,
-                    resolution: tile_size, _pad0: 0,
-                }, 4, &mut progress, "AO", face, cancel,
+                    face,
+                    full_resolution: full_res,
+                    ao_strength: 30.0,
+                    ocean_level,
+                    tile_offset_x: ox,
+                    tile_offset_y: oy,
+                    resolution: tile_size,
+                    _pad0: 0,
+                },
+                4,
+                &mut progress,
+                "AO",
+                face,
+                cancel,
             )?;
             all_ao[face as usize] = bytemuck::cast_slice::<u8, f32>(&ao_bytes).to_vec();
         }
@@ -861,34 +996,62 @@ pub fn run_export(
 
         if let Some(ref pipeline) = cloud_pipeline {
             let cloud_bytes = generate_map_tiled(
-                gpu, pipeline, &heightmap_buffer, &coordinator,
+                gpu,
+                pipeline,
+                &heightmap_buffer,
+                &coordinator,
                 |ox, oy| CloudMapParams {
-                    face, resolution: tile_size, seed: config.cloud_seed,
-                    base_temp_c: derived.base_temperature_c, ocean_level,
+                    face,
+                    resolution: tile_size,
+                    seed: config.cloud_seed,
+                    base_temp_c: derived.base_temperature_c,
+                    ocean_level,
                     ocean_fraction: effective_ocean,
                     axial_tilt_rad: params.axial_tilt_deg.to_radians(),
                     season: config.season,
                     cloud_coverage: config.cloud_coverage,
                     cloud_type: config.cloud_type,
-                    tile_offset_x: ox, tile_offset_y: oy,
+                    tile_offset_x: ox,
+                    tile_offset_y: oy,
                     full_resolution: full_res,
-                    _pad0: 0, _pad1: 0, _pad2: 0,
-                }, 4, &mut progress, "Clouds", face, cancel,
+                    _pad0: 0,
+                    _pad1: 0,
+                    _pad2: 0,
+                },
+                4,
+                &mut progress,
+                "Clouds",
+                face,
+                cancel,
             )?;
             all_clouds[face as usize] = bytemuck::cast_slice::<u8, f32>(&cloud_bytes).to_vec();
         }
 
         if let Some(ref pipeline) = emission_pipeline {
             let emission_bytes = generate_map_tiled(
-                gpu, pipeline, &heightmap_buffer, &coordinator,
+                gpu,
+                pipeline,
+                &heightmap_buffer,
+                &coordinator,
                 |ox, oy| EmissionMapParams {
-                    face, resolution: tile_size, seed: params.seed,
-                    base_temp_c: derived.base_temperature_c, ocean_level,
+                    face,
+                    resolution: tile_size,
+                    seed: params.seed,
+                    base_temp_c: derived.base_temperature_c,
+                    ocean_level,
                     night_lights: config.night_lights,
                     axial_tilt_rad: params.axial_tilt_deg.to_radians(),
-                    tile_offset_x: ox, tile_offset_y: oy,
-                    full_resolution: full_res, _pad0: 0, _pad1: 0,
-                }, 4, &mut progress, "Emission", face, cancel,
+                    tile_offset_x: ox,
+                    tile_offset_y: oy,
+                    full_resolution: full_res,
+                    _pad0: 0,
+                    _pad1: 0,
+                },
+                4,
+                &mut progress,
+                "Emission",
+                face,
+                cancel,
             )?;
             all_emission[face as usize] = bytemuck::cast_slice::<u8, f32>(&emission_bytes).to_vec();
         }
@@ -984,9 +1147,10 @@ pub fn export_ring_gradient(output_dir: &Path, width: u32) -> Result<PathBuf, St
     }
 
     let path = output_dir.join("ring_gradient.png");
-    let img = image::RgbaImage::from_raw(width, height, pixels)
-        .ok_or("Failed to create ring image")?;
-    img.save(&path).map_err(|e| format!("Failed to save ring gradient: {e}"))?;
+    let img =
+        image::RgbaImage::from_raw(width, height, pixels).ok_or("Failed to create ring image")?;
+    img.save(&path)
+        .map_err(|e| format!("Failed to save ring gradient: {e}"))?;
     Ok(path)
 }
 
@@ -1069,7 +1233,9 @@ mod tests {
         });
 
         // Generate directly at 64x64
-        let direct = pipeline.generate(&gpu, &plates, 64, 42, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0, 9.81, 0.85, 0.2, 1.0);
+        let direct = pipeline.generate(
+            &gpu, &plates, 64, 42, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0, 9.81, 0.85, 0.2, 1.0,
+        );
 
         // Generate tiled at 64x64 (2x2 tiles of 32)
         let plates_buffer = pipeline.create_plates_buffer(&gpu, &plates);
@@ -1127,7 +1293,10 @@ mod tests {
             erosion_iterations: 2,
             season: 0.5,
             layers: ExportLayers::default(),
-            cloud_coverage: 0.5, cloud_type: 0.5, cloud_seed: 42, night_lights: 0.5,
+            cloud_coverage: 0.5,
+            cloud_type: 0.5,
+            cloud_seed: 42,
+            night_lights: 0.5,
         };
 
         let (tx, rx) = std::sync::mpsc::channel();
@@ -1138,8 +1307,8 @@ mod tests {
             &config,
             &params,
             &derived,
-            1.0,  // continental_scale
-            0.0,  // water_loss
+            1.0,                     // continental_scale
+            0.0,                     // water_loss
             (1.0, 1.2, 8, 0.5, 2.0), // terrain params
             &tx,
             &cancel,
@@ -1183,7 +1352,10 @@ mod tests {
             erosion_iterations: 2,
             season: 0.5,
             layers: ExportLayers::default(),
-            cloud_coverage: 0.5, cloud_type: 0.5, cloud_seed: 42, night_lights: 0.5,
+            cloud_coverage: 0.5,
+            cloud_type: 0.5,
+            cloud_seed: 42,
+            night_lights: 0.5,
         };
 
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -1226,7 +1398,10 @@ mod tests {
             erosion_iterations: 10,
             season: 0.5,
             layers: ExportLayers::default(),
-            cloud_coverage: 0.5, cloud_type: 0.5, cloud_seed: 42, night_lights: 0.5,
+            cloud_coverage: 0.5,
+            cloud_type: 0.5,
+            cloud_seed: 42,
+            night_lights: 0.5,
         };
 
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -1246,12 +1421,13 @@ mod tests {
         );
         let elapsed = start.elapsed();
 
-        assert!(result.is_ok(), "Benchmark export failed: {:?}", result.err());
-        println!("2K export completed in {:.2}s", elapsed.as_secs_f64());
-        println!(
-            "GPU: {}",
-            gpu.adapter_name()
+        assert!(
+            result.is_ok(),
+            "Benchmark export failed: {:?}",
+            result.err()
         );
+        println!("2K export completed in {:.2}s", elapsed.as_secs_f64());
+        println!("GPU: {}", gpu.adapter_name());
 
         // At 2K, should complete well under 30s even on modest hardware
         assert!(

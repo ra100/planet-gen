@@ -6,12 +6,12 @@ pub fn cube_to_sphere(face: u32, u: f32, v: f32) -> [f32; 3] {
 
     // Standard cubemap convention (OpenGL/Vulkan/WebGPU)
     let p = match face {
-        0 => [1.0, -t, -s],   // +X
-        1 => [-1.0, -t, s],   // -X
-        2 => [s, 1.0, t],     // +Y
-        3 => [s, -1.0, -t],   // -Y
-        4 => [s, -t, 1.0],    // +Z
-        5 => [-s, -t, -1.0],  // -Z
+        0 => [1.0, -t, -s],  // +X
+        1 => [-1.0, -t, s],  // -X
+        2 => [s, 1.0, t],    // +Y
+        3 => [s, -1.0, -t],  // -Y
+        4 => [s, -t, 1.0],   // +Z
+        5 => [-s, -t, -1.0], // -Z
         _ => [0.0, 0.0, 1.0],
     };
 
@@ -36,12 +36,30 @@ mod tests {
     fn face_centers_map_to_axis_directions() {
         // Center of each face (UV = 0.5, 0.5) should map to the face normal direction
         let eps = 1e-5;
-        assert!(approx_eq(cube_to_sphere(0, 0.5, 0.5), [1.0, 0.0, 0.0], eps), "+X face center");
-        assert!(approx_eq(cube_to_sphere(1, 0.5, 0.5), [-1.0, 0.0, 0.0], eps), "-X face center");
-        assert!(approx_eq(cube_to_sphere(2, 0.5, 0.5), [0.0, 1.0, 0.0], eps), "+Y face center");
-        assert!(approx_eq(cube_to_sphere(3, 0.5, 0.5), [0.0, -1.0, 0.0], eps), "-Y face center");
-        assert!(approx_eq(cube_to_sphere(4, 0.5, 0.5), [0.0, 0.0, 1.0], eps), "+Z face center");
-        assert!(approx_eq(cube_to_sphere(5, 0.5, 0.5), [0.0, 0.0, -1.0], eps), "-Z face center");
+        assert!(
+            approx_eq(cube_to_sphere(0, 0.5, 0.5), [1.0, 0.0, 0.0], eps),
+            "+X face center"
+        );
+        assert!(
+            approx_eq(cube_to_sphere(1, 0.5, 0.5), [-1.0, 0.0, 0.0], eps),
+            "-X face center"
+        );
+        assert!(
+            approx_eq(cube_to_sphere(2, 0.5, 0.5), [0.0, 1.0, 0.0], eps),
+            "+Y face center"
+        );
+        assert!(
+            approx_eq(cube_to_sphere(3, 0.5, 0.5), [0.0, -1.0, 0.0], eps),
+            "-Y face center"
+        );
+        assert!(
+            approx_eq(cube_to_sphere(4, 0.5, 0.5), [0.0, 0.0, 1.0], eps),
+            "+Z face center"
+        );
+        assert!(
+            approx_eq(cube_to_sphere(5, 0.5, 0.5), [0.0, 0.0, -1.0], eps),
+            "-Z face center"
+        );
     }
 
     #[test]
@@ -51,9 +69,15 @@ mod tests {
             for &u in &[0.0f32, 0.25, 0.5, 0.75, 1.0] {
                 for &v in &[0.0f32, 0.25, 0.5, 0.75, 1.0] {
                     let p = cube_to_sphere(face, u, v);
-                    assert!(is_unit(p, eps), "face={face} uv=({u},{v}) not unit: {:?}", p);
-                    assert!(!p[0].is_nan() && !p[1].is_nan() && !p[2].is_nan(),
-                        "NaN at face={face} uv=({u},{v})");
+                    assert!(
+                        is_unit(p, eps),
+                        "face={face} uv=({u},{v}) not unit: {:?}",
+                        p
+                    );
+                    assert!(
+                        !p[0].is_nan() && !p[1].is_nan() && !p[2].is_nan(),
+                        "NaN at face={face} uv=({u},{v})"
+                    );
                 }
             }
         }
@@ -68,12 +92,13 @@ mod tests {
         // Correct adjacency: +X s=-1 (u=0) → p=(1,-t,1) and +Z s=1 (u=1) → p=(1,-t,1). Yes!
         let eps = 1e-5;
         for &v in &[0.0f32, 0.25, 0.5, 0.75, 1.0] {
-            let p_x = cube_to_sphere(0, 0.0, v);  // +X, u=0 → s=-1 → (1, -t, 1)
-            let p_z = cube_to_sphere(4, 1.0, v);   // +Z, u=1 → s=1  → (1, -t, 1)
+            let p_x = cube_to_sphere(0, 0.0, v); // +X, u=0 → s=-1 → (1, -t, 1)
+            let p_z = cube_to_sphere(4, 1.0, v); // +Z, u=1 → s=1  → (1, -t, 1)
             assert!(
                 approx_eq(p_x, p_z, eps),
                 "+X(u=0) and +Z(u=1) should match at v={v}: {:?} vs {:?}",
-                p_x, p_z
+                p_x,
+                p_z
             );
         }
     }

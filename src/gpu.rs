@@ -5,6 +5,7 @@ pub struct GpuContext {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub adapter_info: wgpu::AdapterInfo,
+    pub rgba16float_features: wgpu::TextureFormatFeatures,
 }
 
 impl GpuContext {
@@ -23,6 +24,8 @@ impl GpuContext {
         .map_err(|_| GpuError::NoAdapter)?;
 
         let adapter_info = adapter.get_info();
+        let rgba16float_features =
+            adapter.get_texture_format_features(wgpu::TextureFormat::Rgba16Float);
         log::info!(
             "GPU adapter: {} ({:?})",
             adapter_info.name,
@@ -32,6 +35,7 @@ impl GpuContext {
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("planet-gen"),
             required_features: wgpu::Features::empty(),
+            experimental_features: wgpu::ExperimentalFeatures::disabled(),
             required_limits: wgpu::Limits::default(),
             memory_hints: wgpu::MemoryHints::Performance,
             trace: wgpu::Trace::Off,
@@ -42,7 +46,20 @@ impl GpuContext {
             device,
             queue,
             adapter_info,
+            rgba16float_features,
         })
+    }
+
+    /// Borrow eframe's GPU allocation for the interactive application.
+    pub fn from_eframe(render_state: &eframe::egui_wgpu::RenderState) -> Self {
+        Self {
+            device: render_state.device.clone(),
+            queue: render_state.queue.clone(),
+            adapter_info: render_state.adapter.get_info(),
+            rgba16float_features: render_state
+                .adapter
+                .get_texture_format_features(wgpu::TextureFormat::Rgba16Float),
+        }
     }
 
     pub fn adapter_name(&self) -> &str {

@@ -43,41 +43,41 @@ pub fn run_noise_test(gpu: &GpuContext, width: u32, height: u32, scale: f32) -> 
         scale,
         _pad: 0,
     };
-    let uniform_buffer =
-        gpu.device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("noise params"),
-                contents: bytemuck::bytes_of(&params),
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
+    let uniform_buffer = gpu
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("noise params"),
+            contents: bytemuck::bytes_of(&params),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
 
-    let bind_group_layout =
-        gpu.device
-            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("noise test bgl"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: false },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
+    let bind_group_layout = gpu
+        .device
+        .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("noise test bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
-                ],
-            });
+                    count: None,
+                },
+            ],
+        });
 
     let pipeline_layout = gpu
         .device
@@ -142,7 +142,10 @@ pub fn run_noise_test(gpu: &GpuContext, width: u32, height: u32, scale: f32) -> 
     staging_buffer
         .slice(..)
         .map_async(wgpu::MapMode::Read, |_| {});
-    let _ = gpu.device.poll(wgpu::PollType::Wait);
+    let _ = gpu.device.poll(wgpu::PollType::Wait {
+        submission_index: None,
+        timeout: None,
+    });
 
     let mapped = staging_buffer.slice(..).get_mapped_range();
     let result: Vec<f32> = bytemuck::cast_slice(&mapped).to_vec();
@@ -165,10 +168,7 @@ mod tests {
         let min_val = values.iter().cloned().fold(f32::INFINITY, f32::min);
         let max_val = values.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
 
-        assert!(
-            min_val >= -1.0,
-            "noise minimum {min_val} should be >= -1.0"
-        );
+        assert!(min_val >= -1.0, "noise minimum {min_val} should be >= -1.0");
         assert!(max_val <= 1.0, "noise maximum {max_val} should be <= 1.0");
 
         // Should have meaningful variation (not all zeros or constant)

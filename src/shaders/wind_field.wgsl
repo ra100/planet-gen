@@ -26,6 +26,7 @@ struct WindFieldParams {
 @group(0) @binding(1) var<storage, read> src: array<f32>;     // source data (all 6 faces)
 @group(0) @binding(2) var<storage, read_write> dst: array<f32>; // destination (all 6 faces)
 @group(0) @binding(3) var<storage, read> height_data: array<f32>; // terrain height (all 6 faces)
+@group(0) @binding(4) var output_tex: texture_storage_2d_array<rgba16float, write>;
 
 const PI: f32 = 3.14159265;
 const DEG: f32 = 0.01745329; // PI / 180
@@ -183,7 +184,7 @@ fn compute_pressure(pos: vec3<f32>, idx: u32) {
     let lat_deg = lat / DEG;
     let abs_lat_deg = abs(lat_deg);
 
-    let season_sign = select(-1.0, 1.0, params.season > 0.5);
+    let season_sign = clamp((params.season - 0.5) * 2.0, -1.0, 1.0);
 
     // Rotation-dependent cell boundaries
     let hadley_lat = hadley_top_lat();
@@ -224,12 +225,8 @@ fn compute_pressure(pos: vec3<f32>, idx: u32) {
     if (continental_scale > 0.001) {
         let lat_factor = smooth_step(15.0, 30.0, abs_lat_deg)
                        * smooth_step(90.0, 60.0, abs_lat_deg);
-        let is_summer = (season_sign > 0.0 && lat > 0.0) || (season_sign < 0.0 && lat < 0.0);
-        if (is_summer) {
-            pressure -= 10.0 * lat_factor * continental_scale; // thermal low
-        } else {
-            pressure += 14.0 * lat_factor * continental_scale; // thermal high (Siberian)
-        }
+        let local_summer = season_sign * sign(lat) * 0.5 + 0.5;
+        pressure += mix(14.0, -10.0, local_summer) * lat_factor * continental_scale;
     }
 
     // (f) Semi-permanent ocean pressure cells — breaks latitude bands over water.
@@ -260,6 +257,7 @@ fn compute_pressure(pos: vec3<f32>, idx: u32) {
     pressure += snoise(pos * 2.0 + so * 0.5 + vec3<f32>(100.0, 0.0, 0.0)) * 3.0;
 
     dst[idx] = pressure;
+    textureStore(output_tex, vec2<i32>(i32(idx % params.resolution), i32((idx / params.resolution) % params.resolution)), i32(params.face), vec4<f32>(pressure, 0.0, 0.0, 0.0));
 }
 
 // === Mode 3: Direct analytical wind (no pressure gradients) ===
@@ -364,6 +362,7 @@ fn compute_wind(pos: vec3<f32>, idx: u32) {
     dst[base] = wind_3d.x;
     dst[base + 1u] = wind_3d.y;
     dst[base + 2u] = wind_3d.z;
+    textureStore(output_tex, vec2<i32>(i32(idx % params.resolution), i32((idx / params.resolution) % params.resolution)), i32(params.face), vec4<f32>(wind_3d, continentality));
 }
 
 // === Main dispatch ===

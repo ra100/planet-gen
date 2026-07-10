@@ -42,40 +42,28 @@ impl PlanetParams {
         if self.star_distance_au <= 0.0 || self.star_distance_au > 100.0 {
             errors.push(ValidationError {
                 field: "star_distance_au",
-                message: format!(
-                    "must be in (0, 100] AU, got {}",
-                    self.star_distance_au
-                ),
+                message: format!("must be in (0, 100] AU, got {}", self.star_distance_au),
             });
         }
 
         if self.mass_earth <= 0.0 || self.mass_earth > 20.0 {
             errors.push(ValidationError {
                 field: "mass_earth",
-                message: format!(
-                    "must be in (0, 20] Earth masses, got {}",
-                    self.mass_earth
-                ),
+                message: format!("must be in (0, 20] Earth masses, got {}", self.mass_earth),
             });
         }
 
         if self.metallicity < -2.0 || self.metallicity > 2.0 {
             errors.push(ValidationError {
                 field: "metallicity",
-                message: format!(
-                    "must be in [-2, 2] dex, got {}",
-                    self.metallicity
-                ),
+                message: format!("must be in [-2, 2] dex, got {}", self.metallicity),
             });
         }
 
         if self.axial_tilt_deg < 0.0 || self.axial_tilt_deg > 180.0 {
             errors.push(ValidationError {
                 field: "axial_tilt_deg",
-                message: format!(
-                    "must be in [0, 180] degrees, got {}",
-                    self.axial_tilt_deg
-                ),
+                message: format!("must be in [0, 180] degrees, got {}", self.axial_tilt_deg),
             });
         }
 
@@ -161,10 +149,8 @@ impl DerivedProperties {
         let atmosphere_strength =
             compute_atmosphere_strength(params.mass_earth, params.star_distance_au);
         let atmosphere_type = classify_atmosphere(atmosphere_strength, planet_type);
-        let base_temperature_c = compute_base_temperature(
-            params.star_distance_au,
-            atmosphere_strength,
-        );
+        let base_temperature_c =
+            compute_base_temperature(params.star_distance_au, atmosphere_strength);
         let ocean_fraction = compute_ocean_fraction(
             params.star_distance_au,
             params.mass_earth,
@@ -327,7 +313,11 @@ fn compute_surface_age(tectonics_factor: f32, mass_earth: f32) -> f32 {
 /// Σ(r) = 1700(r/AU)^(-3/2) g/cm², M_iso ≈ 0.11 (r/AU)^(3/4) M⊕
 fn compute_isolation_mass(distance_au: f32) -> f32 {
     // Beyond frost line, surface density jumps 4× → higher isolation mass
-    let ice_factor = if distance_au > 2.7 { 4.0_f32.powf(0.75) } else { 1.0 };
+    let ice_factor = if distance_au > 2.7 {
+        4.0_f32.powf(0.75)
+    } else {
+        1.0
+    };
     0.11 * distance_au.powf(0.75) * ice_factor
 }
 

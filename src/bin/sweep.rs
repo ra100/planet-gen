@@ -3,7 +3,7 @@
 
 use planet_gen::gpu::GpuContext;
 use planet_gen::planet::{DerivedProperties, PlanetParams};
-use planet_gen::plates::{generate_plates, PlateGenParams};
+use planet_gen::plates::{PlateGenParams, generate_plates};
 use planet_gen::preview::{PreviewRenderer, PreviewUniforms};
 use planet_gen::terrain_compute::{TerrainComputePipeline, WindFieldPipeline};
 use std::path::Path;
@@ -138,7 +138,23 @@ fn generate_planet_png(
     let lacunarity = 1.9 + 0.2 * rotation_factor;
 
     let terrain = compute.generate(
-        gpu, &plates, 512, seed, amplitude, frequency, octaves, gain, lacunarity, 1.0, 0.10, 1.0, 1.0, derived.surface_gravity, derived.tectonics_factor, derived.surface_age, 1.0,
+        gpu,
+        &plates,
+        512,
+        seed,
+        amplitude,
+        frequency,
+        octaves,
+        gain,
+        lacunarity,
+        1.0,
+        0.10,
+        1.0,
+        1.0,
+        derived.surface_gravity,
+        derived.tectonics_factor,
+        derived.surface_age,
+        1.0,
     );
 
     let cubemap_view = renderer.upload_terrain(gpu, &terrain);
@@ -186,9 +202,17 @@ fn generate_planet_png(
         show_cities: 0.0,
         cloud_opacity: 1.0,
         cloud_advection: 0.0,
-        rotation_rate: 1.0, atm_pressure: 0.7, wind_strength: 0.5,
-        lava_glow: 0.0, ring_inner: 0.0, ring_outer: 0.0, ring_tilt: 0.0, ring_opacity: 0.0,
-        _pad3: 0.0, _pad4: 0.0, _pad5: 0.0,
+        rotation_rate: 1.0,
+        atm_pressure: 0.7,
+        wind_strength: 0.5,
+        lava_glow: 0.0,
+        ring_inner: 0.0,
+        ring_outer: 0.0,
+        ring_tilt: 0.0,
+        ring_opacity: 0.0,
+        _pad3: 0.0,
+        _pad4: 0.0,
+        _pad5: 0.0,
     };
 
     renderer.render(gpu, &uniforms, &cubemap_view, None, render_size)
@@ -258,9 +282,14 @@ fn main() {
     let derived = DerivedProperties::from_params(&params);
     let effective_ocean = derived.ocean_fraction * (1.0 - earth.water_loss);
     let plates = generate_plates(&PlateGenParams {
-        seed, mass_earth: params.mass_earth, ocean_fraction: effective_ocean,
-        tectonics_factor: derived.tectonics_factor, continental_scale: earth.continental_scale,
-        num_plates_override: 0, num_continents: 0, continent_size_variety: 0.0,
+        seed,
+        mass_earth: params.mass_earth,
+        ocean_fraction: effective_ocean,
+        tectonics_factor: derived.tectonics_factor,
+        continental_scale: earth.continental_scale,
+        num_plates_override: 0,
+        num_continents: 0,
+        continent_size_variety: 0.0,
     });
     let dist = params.star_distance_au;
     let dist_factor = (dist.ln() / 3.0_f32.ln()).clamp(0.0, 1.0);
@@ -274,19 +303,41 @@ fn main() {
     let lacunarity = 2.0f32;
     let ocean_level = -1.0 + 2.0 * effective_ocean;
     let terrain = compute.generate(
-        &gpu, &plates, 512, seed, amplitude, frequency, octaves, gain, lacunarity,
-        1.0, 0.10, 1.0, 1.0, derived.surface_gravity, derived.tectonics_factor, derived.surface_age, 1.0,
+        &gpu,
+        &plates,
+        512,
+        seed,
+        amplitude,
+        frequency,
+        octaves,
+        gain,
+        lacunarity,
+        1.0,
+        0.10,
+        1.0,
+        1.0,
+        derived.surface_gravity,
+        derived.tectonics_factor,
+        derived.surface_age,
+        1.0,
     );
     let cubemap_view = renderer.upload_terrain(&gpu, &terrain);
 
     // Generate pressure-based wind field (wind + continentality packed as RGBA16Float)
     let cloud_res = (render_size / 2).max(192);
-    let wind_pipeline = WindFieldPipeline::new(&gpu);
+    let wind_pipeline = WindFieldPipeline::new(&gpu).expect("Rgba16Float dynamics unsupported");
     let rotation_rate = 24.0 / params.rotation_period_h;
     let wind_field = wind_pipeline.generate(
-        &gpu, &terrain, cloud_res, seed,
-        ocean_level, params.axial_tilt_deg.to_radians(), 0.5,
-        rotation_rate, derived.base_temperature_c, derived.atmosphere_strength,
+        &gpu,
+        &terrain,
+        cloud_res,
+        seed,
+        ocean_level,
+        params.axial_tilt_deg.to_radians(),
+        0.5,
+        rotation_rate,
+        derived.base_temperature_c,
+        derived.atmosphere_strength,
     );
     // Pack wind (RGB) + continentality (A) into RGBA16Float cubemap
     let ppf = (cloud_res * cloud_res) as usize;
@@ -308,50 +359,106 @@ fn main() {
     let ct = tilt.cos();
     let st = tilt.sin();
     let base_uniforms = PreviewUniforms {
-        rotation: [[1.0,0.0,0.0,0.0],[0.0,ct,-st,0.0],[0.0,st,ct,0.0],[0.0,0.0,0.0,1.0]],
-        light_dir: [0.5, 0.7, -1.0], ocean_level,
-        base_temp_c: derived.base_temperature_c, ocean_fraction: effective_ocean,
-        axial_tilt_rad: params.axial_tilt_deg.to_radians(), view_mode: 0, season: 0.5,
-        atmosphere_density: 0.0, atmosphere_height: 0.0, height_scale: 3.0,
-        zoom: 1.0, pan_x: 0.0, pan_y: 0.0,
-        cloud_coverage: 0.6, cloud_seed: 42.0, cloud_altitude: 0.008, cloud_type: 0.5,
-        storm_count: 2.0, storm_size: 1.0, night_lights: 0.0, star_color_temp: 0.5,
-        city_light_hue: 0.0, show_ao: 1.0, show_water: 1.0, show_ice: 1.0, show_biomes: 1.0,
-        show_clouds: 1.0, show_atmosphere_layer: 0.0, show_cities: 0.0, cloud_opacity: 1.0,
-        cloud_advection: 0.0, rotation_rate: 1.0, atm_pressure: 0.7, wind_strength: 0.5,
-        lava_glow: 0.0, ring_inner: 0.0, ring_outer: 0.0, ring_tilt: 0.0, ring_opacity: 0.0,
-        _pad3: 0.0, _pad4: 0.0, _pad5: 0.0,
+        rotation: [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, ct, -st, 0.0],
+            [0.0, st, ct, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        light_dir: [0.5, 0.7, -1.0],
+        ocean_level,
+        base_temp_c: derived.base_temperature_c,
+        ocean_fraction: effective_ocean,
+        axial_tilt_rad: params.axial_tilt_deg.to_radians(),
+        view_mode: 0,
+        season: 0.5,
+        atmosphere_density: 0.0,
+        atmosphere_height: 0.0,
+        height_scale: 3.0,
+        zoom: 1.0,
+        pan_x: 0.0,
+        pan_y: 0.0,
+        cloud_coverage: 0.6,
+        cloud_seed: 42.0,
+        cloud_altitude: 0.008,
+        cloud_type: 0.5,
+        storm_count: 2.0,
+        storm_size: 1.0,
+        night_lights: 0.0,
+        star_color_temp: 0.5,
+        city_light_hue: 0.0,
+        show_ao: 1.0,
+        show_water: 1.0,
+        show_ice: 1.0,
+        show_biomes: 1.0,
+        show_clouds: 1.0,
+        show_atmosphere_layer: 0.0,
+        show_cities: 0.0,
+        cloud_opacity: 1.0,
+        cloud_advection: 0.0,
+        rotation_rate: 1.0,
+        atm_pressure: 0.7,
+        wind_strength: 0.5,
+        lava_glow: 0.0,
+        ring_inner: 0.0,
+        ring_outer: 0.0,
+        ring_tilt: 0.0,
+        ring_opacity: 0.0,
+        _pad3: 0.0,
+        _pad4: 0.0,
+        _pad5: 0.0,
     };
 
     // Render without wind effects (analytical wind only)
     let px_off = renderer.render(&gpu, &base_uniforms, &cubemap_view, None, render_size);
     let img = image::RgbaImage::from_raw(render_size, render_size, px_off).unwrap();
-    img.save(Path::new(&format!("{}/wind_effects_OFF.png", output_dir))).unwrap();
+    img.save(Path::new(&format!("{}/wind_effects_OFF.png", output_dir)))
+        .unwrap();
     println!("  wind_effects_OFF.png saved");
 
     // Render with wind effects (cubemap wind + continentality)
     let mut on_uniforms = base_uniforms;
     on_uniforms.cloud_advection = 1.0;
-    let px_on = renderer.render(&gpu, &on_uniforms, &cubemap_view, Some(&cloud_view), render_size);
+    let px_on = renderer.render(
+        &gpu,
+        &on_uniforms,
+        &cubemap_view,
+        Some(&cloud_view),
+        render_size,
+    );
     let img = image::RgbaImage::from_raw(render_size, render_size, px_on).unwrap();
-    img.save(Path::new(&format!("{}/wind_effects_ON.png", output_dir))).unwrap();
+    img.save(Path::new(&format!("{}/wind_effects_ON.png", output_dir)))
+        .unwrap();
     println!("  wind_effects_ON.png saved");
-    println!("Compare: {}/wind_effects_OFF.png vs {}/wind_effects_ON.png", output_dir, output_dir);
+    println!(
+        "Compare: {}/wind_effects_OFF.png vs {}/wind_effects_ON.png",
+        output_dir, output_dir
+    );
 
     // Zoomed-in comparison
     let mut zoom_off = base_uniforms;
     zoom_off.zoom = 3.0;
     zoom_off.pan_y = 0.2;
     let px = renderer.render(&gpu, &zoom_off, &cubemap_view, None, render_size);
-    image::RgbaImage::from_raw(render_size, render_size, px).unwrap()
-        .save(Path::new(&format!("{}/wind_zoom_OFF.png", output_dir))).unwrap();
+    image::RgbaImage::from_raw(render_size, render_size, px)
+        .unwrap()
+        .save(Path::new(&format!("{}/wind_zoom_OFF.png", output_dir)))
+        .unwrap();
     println!("  wind_zoom_OFF.png saved");
 
     let mut zoom_on = zoom_off;
     zoom_on.cloud_advection = 1.0;
-    let px = renderer.render(&gpu, &zoom_on, &cubemap_view, Some(&cloud_view), render_size);
-    image::RgbaImage::from_raw(render_size, render_size, px).unwrap()
-        .save(Path::new(&format!("{}/wind_zoom_ON.png", output_dir))).unwrap();
+    let px = renderer.render(
+        &gpu,
+        &zoom_on,
+        &cubemap_view,
+        Some(&cloud_view),
+        render_size,
+    );
+    image::RgbaImage::from_raw(render_size, render_size, px)
+        .unwrap()
+        .save(Path::new(&format!("{}/wind_zoom_ON.png", output_dir)))
+        .unwrap();
     println!("  wind_zoom_ON.png saved");
 
     // Wind map visualization
@@ -359,7 +466,9 @@ fn main() {
     wind_u.view_mode = 14;
     wind_u.show_clouds = 0.0;
     let px = renderer.render(&gpu, &wind_u, &cubemap_view, None, render_size);
-    image::RgbaImage::from_raw(render_size, render_size, px).unwrap()
-        .save(Path::new(&format!("{}/wind_map.png", output_dir))).unwrap();
+    image::RgbaImage::from_raw(render_size, render_size, px)
+        .unwrap()
+        .save(Path::new(&format!("{}/wind_map.png", output_dir)))
+        .unwrap();
     println!("  wind_map.png saved");
 }
