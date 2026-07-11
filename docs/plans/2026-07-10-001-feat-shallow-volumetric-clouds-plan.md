@@ -4,20 +4,22 @@ type: feat
 status: active
 date: 2026-07-10
 origin: docs/brainstorms/2026-03-31-cloud-layer-requirements.md
-deepened: 2026-07-10
+deepened: 2026-07-12
 ---
 
 # feat: Add shallow volumetric clouds
 
 ## Summary
 
-Unify the UI and renderer on one GPU device, generate a persistent weather cubemap, and consume it through a short bounded cloud ray march. The same weather and density definitions will drive preview lighting, surface shadows, optical-depth export, and reconstruction-channel export.
+Keep the completed unified GPU foundation, but replace stamped cloud masks with one causal diagnostic weather pass. Existing wind, pressure, moisture, temperature, terrain, latitude, season, and rotation inputs produce overlapping low, deep/storm, and high/cirrus mass plus physical geometry; procedural detail only shapes eligible mass into decks, cells, fronts, towers, anvils, or fibres. A short moisture spin-up is a gated fallback, not mandatory architecture. The same snapshot, algorithms, and field contract drive preview lighting, surface shadows, and export.
 
 ---
 
 ## Problem Frame
 
-The current preview samples cloud density on two thin shells and the exporter implements a separate cloud algorithm. The result cannot produce real depth or reliable preview/export parity, and the current CPU readback path prevents a fully GPU-resident interactive renderer (see origin: `docs/brainstorms/2026-03-31-cloud-layer-requirements.md`).
+The original shell, readback, and weather-lifecycle problems are structurally addressed, but the current visual result remains artificial. `src/shaders/weather_field.wgsl` stamps a fixed inventory of sheets, ellipses, fronts, convective regions, and storms; `src/shaders/cloud_density.wgsl` then thresholds more noise inside those masks. This varies density without varying meteorological cause, topology, vertical structure, or lifecycle. A single character scalar also makes stratus, convection, frontal cloud, and cirrus mutually exclusive where real systems overlap vertically.
+
+The revised problem is therefore not "more cloud noise." The generator must reproduce the correlations that make cloud forms readable from orbit: moisture transported into convergence, low decks capped by inversions, cells growing from surface flux, frontal layering along temperature gradients, anvils spreading downshear, windward uplift and lee drying, and hemisphere-correct rotation around pressure systems. Fine cloud elements may remain procedural, but their location, scale, altitude, thickness, and orientation must follow a shared causal weather state (see origin: `docs/brainstorms/2026-03-31-cloud-layer-requirements.md`).
 
 ---
 
@@ -28,6 +30,8 @@ The current preview samples cloud density on two thin shells and the exporter im
 - R10-R12. Integrate optical depth, self-shadowing, forward scattering, and surface shadows from one density field.
 - R13-R15. Preserve deterministic controls and use the same weather state for preview and both export products.
 - R16-R18. Keep interactive work GPU-resident, meet the 30 FPS baseline target, and maintain deterministic visual references.
+
+**Revised interpretation of R5-R9:** structured weather is generated from signed convergence/divergence, broad terrain response, stability, moisture, temperature, wind, and scale-separated eligibility rather than independent cloud-shape stamps. Noise may perturb boundaries and unresolved detail only after coarse cloud mass exists. Iterative transport is required only if this diagnostic baseline fails AE2 across multiple seeds.
 
 **Origin flows:** F1 (interactive planet preview), F2 (cloud export)
 
@@ -40,18 +44,26 @@ F1 regenerates weather only for density-affecting inputs. Camera and lighting ch
 ## Scope Boundaries
 
 - Target Earth-like rocky planets only.
+- Define the visual-fidelity envelope provisionally as 0.75-1.5 Earth radii, 0.5-2.0 Earth gravities, 8-72 hour rotation, 0.3-1.0 bar surface-pressure proxy, and -40 to 40 C base temperature. Inputs outside it must remain finite and deterministic but are not required to reproduce Earth cloud taxonomy in this phase.
 - Use a shallow planet-scale volume, not a general voxel atmosphere.
 - Do not add ground-level or flight-level cloud rendering.
-- Do not add numerical weather prediction or time-evolving fluid simulation.
+- Do not add a forecast, continuously evolving weather, full primitive-equation atmosphere, or cloud-resolving 3D fluid volume.
+- Permit one fixed-step, low-resolution, deterministic spin-up that resets from the parameter snapshot whenever weather-affecting inputs change. It exists only to produce a static authored weather state.
 - Do not replace the geological terrain pipeline.
 - Do not add non-rocky, icy, or gas-giant cloud regimes.
 - Do not preserve the old shell renderer or duplicated cloud export algorithm as compatibility modes.
+
+### Conditional Within This Plan
+
+- U12 fixed-step moisture transport and phase change activates only from the recorded diagnostic-baseline failure defined in U3. It is not default work.
 
 ### Deferred to Follow-Up Work
 
 - Temporal reprojection or temporal upscaling: add only if the short stable ray march misses a measured quality or frame-time target.
 - Animated weather advection: defer until the static weather field, seams, and deterministic parity are validated.
 - Close-range cloud LODs and 3D detail textures: defer until planet-scale rendering demonstrates a concrete need.
+- Dynamically coupled moist shallow-water flow requires a separate future plan and evidence that fixed-flow assumptions, rather than cloud diagnosis or rendering, caused an accepted-case failure.
+- Learned cloud detail requires a separate future plan, independent training targets, and evidence that the physical/procedural detail pass is the remaining problem.
 
 ---
 
@@ -59,27 +71,65 @@ F1 regenerates weather only for density-affecting inputs. Camera and lighting ch
 
 ### Relevant Code and Patterns
 
-- `src/preview.rs` owns the preview pipeline and currently returns CPU pixels after a blocking readback.
-- `src/app.rs` owns persistent pipelines and dirty flags; terrain changes and visual-only changes already have separate update paths.
-- `src/terrain_compute.rs` and `src/shaders/wind_field.wgsl` provide compute-pipeline and cubemap-generation patterns, but currently read wind and climate intermediates back to the CPU.
-- `src/shaders/preview_cubemap.wgsl` contains reusable sphere intersection, atmosphere marching, climate inputs, cloud lighting order, and cube-direction sampling.
-- `src/export.rs` has deterministic parameter snapshots and integration tests, but `src/shaders/cloud_map.wgsl` duplicates and diverges from preview cloud behavior.
-- `src/bin/sweep.rs` is the existing deterministic visual-comparison harness; `src/bin/perf_bench.rs` is the existing performance harness.
+- U8, U1, and U2 are completed foundations: eframe/egui 0.33 and wgpu 27 share one interactive device and queue; the preview target is persistent and GPU-visible; wind/continentality and pressure are persistent filterable `Rgba16Float` cubemaps.
+- `src/weather.rs` already owns deterministic snapshots, front/back weather textures, latest-wins revision coalescing, and asynchronous queue completion. It should own the additional spin-up pipelines rather than adding another subsystem.
+- `src/shaders/wind_field.wgsl` currently generates analytic tangent wind independently from pressure. `pressure.r` stores absolute pressure while GBA are unused. The revision must derive or at least reconcile pressure gradient, convergence, vorticity, and wind instead of treating low pressure as convergence.
+- `src/shaders/weather_field.wgsl` currently stamps 2 sheets, 4 fronts, and 6 convective ellipses, samples only a global moisture scalar, and uses a short nearest-height difference for terrain forcing. These are the immediate sources of repeated topology and coastline-shaped artifacts.
+- `src/shaders/cloud_density.wgsl` currently thresholds noise by one character scalar and reconstructs cyclone geometry independently from the weather field. It cannot represent low cloud, deep towers, and high anvil or cirrus at the same location.
+- `src/shaders/preview_cubemap.wgsl` has an eight-level density estimate and basic lighting, but does not yet perform the planned bounded front-to-back optical-depth march or render cloud depth through the atmosphere-only limb path.
+- `src/export.rs` still compiles the independent `src/shaders/cloud_map.wgsl`; `src/bin/sweep.rs` cannot provide a separate weather texture; `src/bin/perf_bench.rs` does not measure cloud work.
+
+### Meteorological Formation Model
+
+Approximate heights are above local surface and vary with latitude: WMO high-cloud ranges are roughly 3-8 km in polar regions, 5-13 km in temperate regions, and 6-18 km in tropical regions. The plan uses ranges as conditional priors, not rigid bands.
+
+| Regime | Orbital shape | Typical vertical extent | Causal eligibility and evolution | Procedural remainder |
+|---|---|---|---|---|
+| Marine stratus / stratocumulus | Broad smooth or cellular decks; closed cells, open cells, rolls, and downstream breakup | Base near surface-1.5 km; top about 0.7-2 km; usually a few hundred metres to 1 km thick | Cool moist ocean boundary layer, strong inversion, subsidence aloft, cloud-top cooling, weak-to-moderate wind; warmer downstream water or land heating breaks the deck | Cell walls, holes, tessellation, drizzle pockets, scalloped edges |
+| Trade cumulus / cloud streets | Detached small bright cells, popcorn fields, or parallel streets aligned with low wind | Base about 0.5-1 km; top about 1.5-3 km; congestus may reach 4-8 km | Surface evaporation/heating, lifting-condensation level, shallow instability capped by an inversion; convergence clusters cells and shear organizes streets | Individual cell positions, cauliflower lobes, gaps, roll spacing |
+| Deep convection / cumulonimbus | Bright towers, clustered cells, squall lines, dark cores and shadows, smooth/fibrous anvils downshear | Base about 0.5-2 km; top 8-13 km temperate or 12-18 km tropical | Deep moisture, instability, inhibition release, convergence/front/terrain/land-heating trigger; precipitation removes water and upper divergence/shear spreads anvil ice | Tower lobes, overshoots, cell breakup, precipitation streaks, anvil fibres |
+| Warm/cold/occluded fronts | Broad layered warm-front shield; narrow sharp cold-front line; curved multilayer occlusion | High cloud descends from 5-13 km toward low cloud below 2 km; convective cold-front tops may reach tropopause | Horizontal temperature/humidity gradient, convergent deformation, broad warm ascent versus narrow cold undercutting, parent low and cyclone age | Ragged bands, embedded cells, small gaps, precipitation texture |
+| Extratropical cyclone | 1,000-3,000 km comma head, frontal tail, wraparound hook, and dry slot | Multilayer boundary layer to roughly 8-13 km | Midlatitude pressure low, strong temperature gradient, Coriolis, vertical shear, low-level convergence, upper divergence, warm/cold conveyor transport | Exact curvature, head texture, segmentation, embedded convection |
+| Tropical cyclone | Central dense overcast, eye/eyewall, curved rainbands, upper cirrus outflow | Base about 0.3-1.5 km; eyewall/outflow to 12-18 km | Warm ocean, deep humidity, pre-existing vorticity, low shear, convergence/outflow, and sufficient non-equatorial Coriolis; weakens over land/cool water/dry air | Rainband spacing, hot towers, eyewall texture, moats, asymmetric erosion |
+| Orographic cloud / rain shadow | Windward ridge banks and caps, stationary lenticular lenses, sharp lee clearing | Base at local lifting-condensation level; shallow caps often 0.1-3 km thick, deep convection may reach tropopause | Positive cross-ridge wind/elevation gradient, humidity, stability, ridge height; precipitation removes moisture and descending lee air warms/dries | Lens count, edge detail, rotor texture, local cells |
+| High cirrus | Thin filaments, hooks, veils, jet bands, and anvil debris | WMO high-cloud ranges; often about 0.1-3 km thick | Upper-level ice saturation, frontal/jet ascent, gravity waves, or convective detrainment; upper wind and shear stretch while sedimentation/sublimation erode | Wisps, fall streaks, hooks, optical-depth variation |
+
+The scientific model identifies surface type/heating, elevation, wind, pressure/temperature gradients, humidity, convergence, stability, shear, lift, and tropopause as useful causes. The active baseline approximates these from existing wind, pressure, global climate moisture/temperature, terrain, latitude, and season instead of persisting every diagnostic. U12 transports separate vapor/condensate reservoirs only if the baseline gate proves those proxies insufficient. Neither path resolves droplets, kilometre-scale towers, or full vertical fluid dynamics.
 
 ### Institutional Learnings
 
-- `docs/research/performance-visual-comparison.md` records that per-face semi-Lagrangian cloud advection produced seams, banding, and blocky low-resolution modulation. Do not revive it.
+- `docs/research/performance-visual-comparison.md` records that a 30-step 256-square per-face semi-Lagrangian cloud advection cost about 120 ms and produced face seams, stretched noise bands, and blocky modulation. Do not revive its planar offsets, independent faces, or noise-as-initial-condition design.
 - `docs/solutions/architecture/tectonic-terrain-architecture-2026-03-30.md` establishes that sphere-space sampling and standard cubemap conventions avoid face discontinuities; custom neighbor operations still require seam-aware handling.
 - `docs/research/cloud-rendering.md` recommends cheap coverage rejection before detail work, front-to-back integration, early transmittance termination, and limited shadow samples.
 - The superseded `docs/plans/2026-03-31-003-feat-cloud-layer-v2-plan.md` remains useful failure evidence: threshold cliffs, latitude multiplication, flat alpha, and dominant procedural cyclones should not return.
+- If U12 activates, it resets from U9 diagnostics, runs at coarse resolution, and backtraces through world-space cube directions with a fixed small pass count. It must not repeat the failed per-face planar advection or use noise as its primary initial state.
 
-### External References
+### Scientific and Production Research
 
-- Andrew Schneider, *The Real-time Volumetric Cloudscapes of Horizon: Zero Dawn*: bounded spherical layer, weather channels, vertical profiles, coarse-to-fine marching, Beer-Lambert extinction, and HG lighting.
-- Andrew Schneider, *Nubis: Authoring Real-Time Volumetric Cloudscapes with the Decima Engine*: production weather authoring and optimization.
-- Andrew Schneider, *Nubis, Evolved*: local and long-range shadowing plus limits of temporal reconstruction for fast cloud motion.
-- WMO International Cloud Atlas: physically plausible low, middle, and high cloud altitude ranges.
-- wgpu 27 and WebGPU texture-view rules: one six-layer 2D texture can expose a compute `D2Array` view and a sampled `Cube` view; queue ordering supplies compute-to-fragment synchronization.
+- Hartney, Bendall, and Shipton, *Exploring Forms of the Moist Shallow-Water Equations* (2025), provides the useful reduced state: horizontal flow, depth/buoyancy, vapor, cloud water, rain, saturation conversion, latent heat, and mountain-triggered cloud. The plan borrows the moisture reservoirs and phase changes, not its finite-element solver.
+- Zhou, Xue, and Shen, *HOPE* (2025), demonstrates GPU-oriented shallow-water computation on a cubed sphere and confirms that cross-panel vector rotation, shared edge fluxes, and corner treatment are required even when the equations are sound.
+- Yang et al., *Real-Time Fluid Simulation on the Surface of a Sphere* (2019), demonstrates hundreds of stable spherical transport steps per second at comparable cell counts. The plan borrows world-space tangent transport and fixed-step GPU iteration, not its latitude-longitude grid or incompressibility solve.
+- Harris et al., *Simulation of Cloud Dynamics on Graphics Hardware* (2003), shows the minimal transported thermodynamic state: potential temperature, water vapor, condensed water, buoyancy, and latent heating. It supports a reduced phase-change pass without requiring a planet-wide 3D volume.
+- Amador Herrera et al., *Weatherscapes* (2021), featured by Two Minute Papers as "New Weather Simulator: Almost Perfect!", demonstrates rich local 3D cloud microphysics and terrain/weather coupling. Its 3D CUDA solver is a visual and process reference, not an architecture suitable for a whole-planet preview.
+- Dobashi et al., *A Simple, Efficient Method for Realistic Animation of Clouds* (2000), and reaction-diffusion work by Witkin/Kass and Turk support cheap local growth/extinction or cellular breakup after coarse cloud mass exists. These methods must not choose synoptic placement.
+- Schneider's *Horizon Zero Dawn* and *Nubis* work remains the rendering basis: bounded layers, weather controls, vertical profiles, Beer-Lambert extinction, phase lighting, and cheap rejection.
+- WMO, NOAA, NASA, Met Office, UCAR, and the University of Reading cyclone atlas provide formation, height, frontal, orographic, cloud-street, cyclone, and conveyor-belt constraints summarized above.
+
+### Simulation and Parallelism Decision
+
+| Option | Strength | Failure or cost | Decision |
+|---|---|---|---|
+| Independent procedural generators | All formations can dispatch in parallel and are cheap | Repeats stamped topology; systems disagree about moisture, wind, altitude, and overlap; this is the current failure | Reject as the primary generator |
+| Causal diagnostic mass from climate fields | One parallel pass; deterministic, inexpensive, and directly addresses stamped placement | Cannot evolve transport history or cyclone lifecycle | Chosen baseline; judge across seeds before adding iteration |
+| Fixed-flow moisture spin-up | Parallel work per texel/pass; adds transport, condensation, rainout, and broad depletion | Iterations are sequential; needs ping-pong state and cross-face sampling | Gated U12 only if the baseline fails named tests |
+| Dynamically coupled moist shallow water | Can grow balanced vortices, fronts, and waves instead of relying on initialized pressure/wind | Larger implementation, stability, seam, tuning, and latency burden | Deferred to a separate plan |
+| Planet-wide 3D cloud solver / full NWP | Highest physical fidelity | Far beyond memory, latency, vertical-state, and authoring scope | Reject |
+
+The chosen diagnostic path runs all texels and all six faces in parallel in one bounded generation. If U12 activates, one simulation iteration cannot run concurrently with the next because each consumes the previous state, but texels/faces remain parallel within each iteration. U12 starts with 128 square per face and 16 iterations, then measures only the nearest smaller/larger variant needed to find a passing bound; this work remains asynchronous while the last-good field is visible.
+
+### Machine Learning Assessment
+
+Global learned forecasters such as GraphCast, Pangu-Weather, FourCastNet, GenCast, and NeuralGCM require complete Earth reanalysis states, large Earth-specific weights, and do not emit renderable cloud optical depth for arbitrary planets. Learned downscalers and neural cellular automata could later add residual detail, but this repository has no independent high-fidelity training targets. No ML runtime, model, data pipeline, or architectural seam is active in this plan.
 
 ---
 
@@ -88,7 +138,12 @@ F1 regenerates weather only for density-affecting inputs. Camera and lighting ch
 - **One interactive GPU stack:** Upgrade to eframe/egui 0.33 and wgpu 27. The interactive app uses eframe's adapter, device, and queue; headless binaries and GPU tests retain one standalone context per process.
 - **Persistent GPU fields:** Keep dynamics and weather textures allocated across frames. Recreate them only when resolution or format changes; regenerate content through explicit dirty revisions.
 - **Portable half-float cubemaps:** Use `Rgba16Float` for filterable compute-written dynamics and weather fields after validating storage, sampling, filtering, six-layer array, and cube-view support. Fail clearly on unsupported adapters rather than adding speculative format fallbacks.
-- **Static authored state first:** Generate deterministic weather from an explicit parameter snapshot. Do not add temporal simulation or history until static quality and parity pass.
+- **Causal diagnostic baseline:** Generate one static weather result directly from the existing climate/dynamics snapshot. Signed convergence, broad orographic response, moisture, temperature, stability, wind, latitude, season, and rotation choose mass and geometry; no fixed inventory of cloud systems remains.
+- **Simulate correlations, synthesize texture:** Preserve causal low-frequency relationships and use procedural work only for unresolved cells, fibres, holes, and edges inside eligible mass.
+- **Spin-up only on failure:** U12 may add fixed-flow vapor/condensate transport if the diagnostic baseline fails the named multi-seed topology, directional-continuity, or rain-shadow gates. It preserves the same published field ABI so rendering/export do not branch.
+- **Overlapping mass fields, not one cloud character:** Replace the single mutually exclusive character channel with separate low liquid, deep convective, and high ice/stratiform contributions plus geometric/environmental diagnostics. A location may contain low deck, tower, and anvil simultaneously.
+- **World-space cubemap operations:** Sample broad gradients and, if U12 activates, backtraces by normalized sphere direction. No planar per-face offsets; any finite-difference stencil must validate edge/corner neighbors.
+- **Coriolis at synoptic scale:** Use rotation rate and `sin(latitude)` only to orient broad storm/frontal curvature and suppress tropical-style rotation near the equator. Full pressure-gradient/geostrophic reconciliation is staged, and individual cumulus cells are never curled merely to expose Coriolis.
 - **Short physically based march:** Begin with eight view samples inside the bounded layer, front-to-back Beer-Lambert integration, world-stable start jitter, cheap occupancy rejection, and transmittance early exit.
 - **Minimal light sampling:** Start with one local sun-direction density sample plus ambient height lighting. Add a coarse long-range sample only when references prove local shadowing insufficient.
 - **Shared density include:** Preview and export compile the same weather interpretation, vertical profiles, and density functions. Export may evaluate at another resolution but cannot maintain a separate algorithm.
@@ -96,6 +151,22 @@ F1 regenerates weather only for density-affecting inputs. Camera and lighting ch
 - **Both export products:** Produce integrated optical depth for direct material use and reconstruction channels for downstream volumetric reconstruction.
 - **Front/back revision state:** Track requested, submitted, and ready revisions. Generate into back resources, coalesce rapid edits to the latest request, and swap only a completed current revision; failures leave the front resources untouched.
 - **Bounded export memory:** Export uses bounded-resolution weather fields and tiled density integration/readback. Final output resolution must not require a full-resolution six-face weather cubemap.
+- **No current ML dependency:** Do not add model runtimes, weights, training data work, or ML-specific interfaces.
+
+### Provisional Published Field Contract
+
+The active baseline persists only fields consumed by preview or export. Optional diagnostics remain debug-time calculations until a measured consumer requires storage.
+
+| Logical field | Channels | Units / range | Resolution and lifetime | Consumers |
+|---|---|---|---|---|
+| Existing dynamics | World-space tangent wind XYZ; continentality A | Existing normalized wind contract initially; document physical conversion before U12 | Existing persistent U2 cubemap | U9, U13, U3 |
+| Existing pressure | Synoptic pressure R | Existing hPa contract; use as a broad relative/anomaly signal, not canonical surface pressure | Existing persistent U2 cubemap | U9 frontal eligibility |
+| Cloud mass | Low/deck mass R; deep/storm mass G; high/cirrus mass B; overall occupancy A | Normalized 0-1 | Weather resolution, front/back published | U13, U3, U4, U5 |
+| Cloud geometry | Base R; low top G; deep top B; high top A | Kilometres above local surface | Weather resolution, front/back published | U3, U4, U5 |
+
+Signed convergence/divergence, broad windward/lee response, stability/inversion, frontal eligibility, and cheap upper-wind/shear direction are derived during U9/U13 from existing inputs. Do not persist separate textures for them unless profiling or visual validation proves recomputation inadequate. `low + deep` must partition available low/mid condensate or eligibility rather than duplicate it; high mass is independently bounded by cirrus/anvil eligibility. Occupancy is never overloaded with depletion or another diagnostic.
+
+Canonical scalar inputs are resolved before U9 shader work: `planet_radius_km = 6371 * mass_earth^0.27`, rotation rate is radians per second from `rotation_period_h`, and `surface_pressure_bar` is the current `atmosphere_strength` value explicitly treated as a 0-1 bar proxy. The approximately 1013 hPa pressure texture remains a synoptic pattern and is never confused with this surface-pressure proxy.
 
 ---
 
@@ -108,13 +179,15 @@ F1 regenerates weather only for density-affecting inputs. Camera and lighting ch
 - **Preview/export identity:** Regenerate deterministic export-resolution weather from the same parameter snapshot and WGSL definitions rather than copying preview-resolution texels.
 - **Zero coverage:** Retain cached weather but skip cloud integration, cirrus, lighting, and surface-shadow work.
 - **Progressive erosion:** Keep the last valid weather field during erosion and regenerate once the final terrain revision is available.
+- **Published field ABI:** Use separate low, deep, and high mass plus occupancy, and separate base/low-top/deep-top/high-top geometry. Preserve origin-required export semantics by deriving coverage, thickness, character, and cirrus from this shared state.
+- **Canonical physical scalars:** Expose planet radius in kilometres, rotation in radians per second, and the current atmosphere-strength value under the explicit `surface_pressure_bar` proxy name; do not mix it with the synoptic hPa texture.
 
 ### Deferred to Implementation
 
-- **Exact field packing:** Final channel allocation depends on shader binding limits and measured precision, but must preserve coverage, base, thickness, character, cirrus, moisture, pressure/convergence, wind, and continentality inputs.
 - **Exact sample count:** Start at eight within the allowed 6-10 range and tune only against the visual matrix and 30 FPS gate.
 - **Long-range shadow method:** Choose a second density sample or a coarse shadow field after measuring local-shadow quality and cost.
 - **Visual comparison tolerances:** Establish coverage, correlation, seam, and image-difference thresholds from the first approved baseline set rather than inventing arbitrary values.
+- **Conditional spin-up budget:** If U12 activates, start with 128 square per face and 16 fixed iterations, then test only adjacent variants needed to find a passing quality/latency bound.
 
 ---
 
@@ -125,11 +198,14 @@ F1 regenerates weather only for density-affecting inputs. Camera and lighting ch
 ```mermaid
 flowchart TB
     UI[Planet and cloud parameters] --> Revision[Weather revision snapshot]
-    Terrain[GPU terrain cubemap] --> Dynamics[GPU dynamics fields]
-    Revision --> Dynamics
-    Dynamics --> Weather[GPU weather cubemap]
-    Revision --> Weather
-    Weather --> Preview[Bounded cloud ray march]
+    Terrain[GPU terrain cubemap] --> Forcing[Surface and atmospheric forcing]
+    Revision --> Forcing
+    Forcing --> Mass[Diagnostic low, deep, and high cloud mass]
+    Mass --> Regimes[Parallel family and geometry diagnosis]
+    Mass -. baseline gate fails .-> Spin[Optional fixed-flow moisture spin-up]
+    Spin -. same mass ABI .-> Regimes
+    Regimes --> Weather[Persistent causal weather fields]
+    Weather --> Preview[Regime-aware bounded cloud ray march]
     Terrain --> Preview
     Preview --> Target[egui-visible GPU texture]
     Weather --> Shadow[Surface cloud shadows]
@@ -137,6 +213,18 @@ flowchart TB
     Export --> Optical[Integrated optical depth]
     Export --> Channels[Reconstruction channels]
 ```
+
+The active diagnostic path follows the same bounded process for every seed:
+
+```text
+existing moisture + pressure + temperature + terrain + latitude/season/rotation
+    -> signed convergence, broad windward/lee response, stability, and upper-flow direction
+    -> diagnostic low/deep/high mass and physical base/top bounds
+    -> diagnose overlapping broad cloud families
+    -> synthesize only sub-grid cells, fibres, holes, and edge erosion
+```
+
+The active forcing, diagnosis, and packing are GPU-parallel over texels and faces. If the baseline gate activates U12, each transport iteration remains parallel over texels/faces but waits for the previous iteration; it is bounded regeneration work, not frame-time work or continuous simulation.
 
 Weather state follows a latest-wins lifecycle:
 
@@ -155,9 +243,12 @@ missing -> generating(revision N) -> ready(revision N)
 flowchart TB
     U8[U8 Dependency migration baseline] --> U1[U1 Unified GPU presentation]
     U1 --> U2[U2 GPU dynamics textures]
-    U2 --> U9[U9 Weather field generation]
-    U9 --> U10[U10 Weather revision lifecycle]
-    U10 --> U3[U3 Shared volumetric density]
+    U2 --> U9[U9 Diagnostic mass and geometry]
+    U9 --> U10[U10 Published-field lifecycle delta]
+    U10 --> U13[U13 Broad-family diagnosis]
+    U13 --> U3[U3 Shared volumetric density]
+    U3 -. baseline fails .-> U12[U12 Optional moisture spin-up]
+    U12 -. same mass ABI .-> U13
     U3 --> U4[U4 Lighting and shadows]
     U3 --> U5[U5 Export parity and channels]
     U4 --> U6[U6 Visual and parity gates]
@@ -165,6 +256,8 @@ flowchart TB
     U6 --> U11[U11 Performance and stress gates]
     U11 --> U7[U7 Remove superseded paths and document]
 ```
+
+U8, U1, and U2 remain below as architectural traceability for the existing branch; their foundation work is complete. Active implementation begins at U9.
 
 ### U8. Establish the dependency migration baseline
 
@@ -288,49 +381,55 @@ flowchart TB
 - Normal interactive weather generation performs no GPU-to-CPU map or repack.
 - Debug views inspect GPU dynamics channels without triggering readback or alternate generation.
 
-### U9. Generate the deterministic weather field
+### U9. Generate diagnostic cloud mass and geometry
 
-**Goal:** Generate coverage, base altitude, thickness, cloud character, and cirrus from one documented parameter and channel contract.
+**Goal:** Replace cloud-shape stamps with one compact causal pass that emits overlapping low, deep/storm, and high/cirrus mass plus physical base/top geometry from existing inputs.
 
 **Requirements:** R5-R9, R13, R15-R16, F1, AE2-AE3
 
 **Dependencies:** U2
 
 **Files:**
-- Create: `src/weather.rs`
-- Create: `src/shaders/weather_field.wgsl`
-- Modify: `src/lib.rs`
+- Modify: `src/weather.rs`
+- Modify: `src/shaders/weather_field.wgsl`
 - Modify: `src/app.rs`
 - Modify: `src/preview.rs`
+- Modify: `src/planet.rs`
 - Test: `src/weather.rs`
+- Test: `src/planet.rs`
 
 **Approach:**
-- Define one Rust snapshot containing every density-affecting input with a matching documented Rust/WGSL layout and physical units.
-- Generate the packed `Rgba16Float` weather cubemap from moisture, pressure convergence/divergence, temperature, terrain lift, rain shadows, latitude, season, seed, storms, wind, and continentality.
-- Keep weather resolution independent from viewport and export resolution; begin at half standard preview resolution.
-- Separate coarse occupancy from procedural cloud detail so the later ray marcher can reject empty regions cheaply.
-- Record an allocation table for dynamics, weather, front/back revisions, debug targets, and transient resources before accepting the field layout.
+- Retain the existing immutable Rust/WGSL weather snapshot and add the canonical planet radius, rotation rate, and surface-pressure proxy. Reuse existing wind, synoptic pressure, continentality, climate moisture, temperature, terrain, latitude, season, seed, coverage, and storm controls.
+- Remove the fixed inventory of sheets, fronts, ellipses, and cloud-space cyclone stamps. Seeded sphere-space variation may break symmetry or boundaries but cannot directly create cloud mass.
+- Derive signed convergence/divergence from broad world-space samples of the existing tangent wind. Derive broad windward lift/rain-shadow response from wind crossing a smoothed terrain gradient. Neither operation may clamp to face UVs or use raw coastline distance.
+- Derive one stability/inversion scalar from temperature, pressure, moisture, latitude/season, and continentality. Derive a cheap upper-flow/shear direction from existing wind and broad circulation; do not persist separate diagnostic textures.
+- Emit low/deck mass from moist stable or weakly lifting conditions, deep/storm mass from moist unstable convergence or the localized storm control, and high/cirrus mass from frontal/high-level eligibility or deep-cloud detrainment. Partition low versus deep eligibility so the same source mass is not counted twice.
+- Produce asymmetric frontal eligibility from broad pressure/temperature change and convergence rather than a fixed ribbon. Existing storms remain localized environmental biases; eye, eyewall, comma, and spiral anatomy are not acceptance requirements.
+- Derive base, low top, deep top, and high top from the same stability, temperature, terrain, latitude, and family eligibility used for mass. Apply coverage as a smooth bias over eligible mass across the full control range; zero writes zero mass and occupancy. Write both published fields in the same generation and keep optional diagnostics ephemeral.
 
 **Patterns to follow:**
-- Matching `#[repr(C)]`/WGSL parameter layouts and compute pipeline ownership in `src/terrain_compute.rs`.
-- Wide continentality smoothing and sphere-space sampling in `src/shaders/wind_field.wgsl`.
+- Matching `#[repr(C)]`/WGSL layouts and persistent compute ownership in `src/weather.rs`.
+- Wide continentality sampling and world-space cube directions in `src/shaders/wind_field.wgsl`.
 
 **Test scenarios:**
-- Happy path: fixed Earth-like inputs generate finite weather channels in documented ranges on all faces.
-- Determinism: identical snapshots match; changing cloud seed changes formations without invalid channel values.
-- Covers AE2: coverage 0.5 contains coherent occupied and clear regions without coastline or latitude correlation spikes.
-- Driver influence: controlled changes to temperature, terrain lift/rain shadow, convergence/divergence, latitude, and season produce deterministic changes in the intended weather channels.
-- Edge case: negligible atmosphere or moisture produces a valid clear weather field.
-- Seam: every edge and corner is continuous within approved half-float tolerance.
-- Layout: Rust/WGSL sizes, alignment, channel semantics, and units remain synchronized.
+- Physical scalars: Earth mass/rotation map to about 6371 km and the expected radians-per-second rate; atmosphere strength reaches the shader unchanged under the explicit bar-proxy contract.
+- Happy path: fixed Earth-like inputs produce finite low, deep, high, occupancy, and geometry channels in documented ranges.
+- Multi-seed structure: at least eight fixed seeds produce coherent clear/cloudy regions and varied component-size distributions without a fixed count of systems, coastline traces, rigid latitude bands, or a global veil.
+- Driver response: stable moist conditions favor shallow mass; unstable moist convergence favors deep mass; dry or divergent conditions remain clear; frontal eligibility forms an asymmetric broad band rather than a seeded ellipse.
+- Orography: moist cross-ridge wind produces broad windward cloud and lee clearing; reversing wind reverses the asymmetry without moving terrain.
+- Overlap: eligible deep cloud may also produce low base and high anvil/cirrus mass without channel overwrite or duplicated total mass.
+- Coverage: occupancy increases continuously from zero through intermediate values; zero writes no mass regardless of seed noise.
+- Determinism: identical snapshots match; changing seed changes boundaries/detail without replacing the climate response.
+- Seam: broad derivatives and every published channel remain continuous across all cube edges and corners.
 
 **Verification:**
-- Preview and export can consume the same snapshot and weather-generation shader contract.
-- Persistent preview weather memory stays within the documented budget before front/back lifecycle is added.
+- No shader function writes a cloud formation solely from a seeded geometric mask.
+- Detail/noise disabled leaves the broad low, deep, frontal, orographic, and high mass recognizable; removing moisture/mass clears all clouds.
+- The completed U2 textures remain inputs rather than duplicated persisted diagnostics.
 
-### U10. Add revision-aware weather lifecycle
+### U10. Publish the expanded weather fields atomically
 
-**Goal:** Coalesce rapid edits, retain last-good weather, and atomically swap only completed current revisions.
+**Goal:** Extend the existing latest-wins lifecycle only enough to publish the new mass and geometry fields together while retaining last-good weather.
 
 **Requirements:** R15-R17, F1, AE3
 
@@ -343,48 +442,94 @@ flowchart TB
 - Test: `src/weather.rs`
 
 **Approach:**
-- Track requested, submitted, and ready revisions with an immutable snapshot per submitted revision.
-- Keep distinct front/back field resources; at most one generation is in flight and intermediate edits coalesce to the newest request.
-- Represent generation as explicit idle/submitted/completed states, receive queue-completion notification asynchronously, and advance completion from the eframe update loop without blocking device polls.
-- Track the latest completed revision separately from the latest requested revision. Publish the newest completed current result, retain a newer completed fallback when another request is pending, and promote that fallback if the newest request fails or is cancelled.
-- Terrain, season, climate, seed, storms, and dynamics invalidate weather; camera, light, opacity, visibility, and resize do not.
+- Extend the existing requested/submitted/ready counters, immutable snapshot, and front/back resources to cover both published cubemaps as one revision. Do not rebuild the lifecycle as a new job system.
+- Keep at most one generation in flight, coalesce intermediate edits, advance completion from the eframe update loop, and never block on device polling.
+- Wrap generation in the weather subsystem's serialized validation/out-of-memory error scope. Publish mass and geometry only after queue completion and successful asynchronous scope resolution for the same revision.
+- With only two field pairs, publish every completed revision newer than the current front before reusing the old front as back, even when a newer request is pending. This keeps display revisions monotonic and preserves the newest completed result if the next request fails without claiming an unavailable third fallback pair.
+- Coverage, terrain, season, rotation, climate moisture/temperature, seed, storms, and dynamics invalidate weather; camera, light, opacity, visibility, and resize do not. Split terrain, dynamics, weather, and render revisions so season or wind changes do not regenerate unrelated geology.
 - Retain previous weather during progressive erosion and regenerate once from the final terrain revision.
+- If U12 activates, extend this same state machine with bounded 2-4-iteration chunks after preview submission; do not add chunk scheduling before it is needed.
 
 **Test scenarios:**
 - Invalidation: density-affecting controls request weather while presentation-only controls request render only.
-- Rapid edits: many seed/season changes produce one latest ready revision and no stale swap.
+- Rapid edits: many seed/season changes coalesce requests; any intermediate completion published before buffer reuse is newer than the visible front, and no later completion can move the display backward.
+- Atomic publication: mass and geometry from different revisions can never be sampled together.
 - Starvation: continuous edits cannot leave the display indefinitely pinned to an arbitrarily old revision; displayed-versus-requested lag remains observable.
 - Edge case: resize during generation preserves weather and only recreates presentation resources.
 - Integration: progressive erosion triggers one final weather update, not one per batch.
-- Error path: allocation or dispatch failure leaves front resources and ready revision unchanged.
+- Recoverable error: a scoped validation or out-of-memory error leaves both front resources and the ready revision unchanged.
+- Fatal error: device loss follows the existing renderer-fatal GPU error path; the plan does not claim last-good textures survive a lost device.
 
 **Verification:**
 - No obsolete revision can replace a newer requested state.
 - Front/back allocations fit the declared peak preview memory budget.
-- Weather regeneration latency and coalescing behavior are observable to U11 instrumentation.
+- Weather latency and coalescing behavior remain observable to U11 instrumentation.
 
-### U3. Implement shared shallow-volume density and ray marching
+### U13. Interpret broad cloud families in density
 
-**Goal:** Replace shell sampling with a bounded low-cloud volume and a distinct thin cirrus layer using one shared density definition.
+**Goal:** Interpret U9 mass and geometry as physically distinct overlapping low-deck, shallow-cell, deep/storm, frontal, orographic, and high/cirrus density without returning to mutually exclusive stamps.
 
-**Requirements:** R1-R4, R7, R9-R10, R13, R17, F1, AE1-AE3
+**Requirements:** R1, R3-R9, R13, R15-R16, F1, AE1-AE3
 
 **Dependencies:** U10
 
 **Files:**
-- Create: `src/shaders/cloud_density.wgsl`
+- Modify: `src/shaders/cloud_density.wgsl`
+- Modify: `src/shaders/preview_cubemap.wgsl`
+- Test: `src/preview.rs`
+
+**Approach:**
+- Consume the fixed contract exactly: mass = low/deck, deep/storm, high/cirrus, occupancy; geometry = base, low top, deep top, high top. Derive export coverage, thickness, character, and cirrus from these fields rather than replacing origin R14 semantics.
+- Diagnose broad families in parallel from the same mass and existing inputs. Families may overlap and weight vertical profiles or sub-grid morphology rather than select one exclusive branch.
+- Low deck uses moist stable low mass and remains broad/smooth with restrained cellular breakup. Shallow cells use moist weakly unstable low mass and form detached clusters; organized cloud streets are staged unless ordinary wind-aligned variation is insufficient.
+- Deep/storm cloud uses deep mass to grow localized thick cores and may transfer some high mass down the cheap upper-flow direction for an anvil. Overshoots and precipitation streaks are deferred.
+- Frontal cloud is one asymmetric broad family driven by U9 eligibility; separate warm/cold/occluded anatomy is staged.
+- Orographic cloud uses U9 windward mass and lee clearing directly. High cirrus comes from high mass associated with broad frontal eligibility or deep-cloud detrainment.
+- Existing storm controls may curve and localize eligible deep mass with hemisphere-aware handedness, but comma heads, dry slots, eyes, eyewalls, and explicit rainbands are staged and cannot activate U12 or shallow-water work.
+- Apply only low-amplitude sphere-space boundary/detail variation inside eligible mass. Stage cellular automata or reaction-diffusion unless the simple detail pass fails after causal mass is approved.
+
+**Patterns to follow:**
+- Existing shared density include and cube sampling in `src/shaders/cloud_density.wgsl`, after removing its preview-global coupling and duplicated cyclone reconstruction.
+- WMO height ranges as latitude-dependent priors rather than fixed altitude bands.
+
+**Test scenarios:**
+- Low families: stable moist input produces a shallow broad deck while weakly unstable moist input produces detached shallow cells with distinct component scales.
+- Deep/storm: moist unstable convergence or localized storm bias produces thick cores and optional downshear high mass; stable or dry conditions suppress them.
+- Front: broad gradient/convergence input produces one asymmetric coherent band rather than a symmetric ribbon or fixed ellipse.
+- Orography: windward cap/ridge cloud and lee clearing remain anchored to terrain while constituent flow direction changes their side.
+- Cirrus: high mass forms sparse wind-stretched fibres; low cloud alone cannot generate global cirrus noise.
+- Overlap: a convective system can contain low cloud, deep tower, and upper anvil simultaneously without one channel overwriting another.
+- Detail ablation: disabling detail preserves family centroids, broad silhouettes, and occupancy; disabling mass clears every family.
+
+**Verification:**
+- Validation across seeds contains recognizable broad families with distinct scale, altitude, thickness, and orientation without requiring a fixed inventory in one seed.
+- Disabling procedural detail leaves coarse meteorological systems recognizable; disabling causal mass leaves no clouds.
+- The current 2-sheet/4-front/6-region loop and analytic cyclone stamp are removed.
+
+### U3. Implement shared shallow-volume density and ray marching
+
+**Goal:** Render overlapping low, deep-convective, and high-ice mass through bounded physical layers using one shared density definition.
+
+**Requirements:** R1-R4, R7, R9-R10, R13, R17, F1, AE1-AE3
+
+**Dependencies:** U13
+
+**Files:**
+- Modify: `src/shaders/cloud_density.wgsl`
 - Modify: `src/shaders/preview_cubemap.wgsl`
 - Modify: `src/preview.rs`
+- Create: `docs/research/shallow-volumetric-cloud-validation.md`
 - Test: `src/preview.rs`
 
 **Approach:**
 - Intersect the camera ray with inner and outer cloud radii and clamp the interval against the planet surface.
 - Express cloud altitude in physical distance converted to planet-radius units; clip density below terrain and keep thickness positive.
-- Use weather coverage and character to choose a cheap vertical density profile, then add sphere-space low-frequency formation and conditional edge erosion.
+- Use U9 mass/geometry through U13 family interpretation to evaluate overlapping vertical profiles: inversion-capped low decks, detached shallow cells, deep towers tapering toward tropopause, frontal multilayers, and thin high ice. Do not collapse them back into one character branch.
+- Preserve coarse condensate when adding detail: cell/fibre/erosion functions can redistribute density locally inside eligible mass but cannot threshold a cloudy system into perforated noise or create density in clear air.
 - March front-to-back with an eight-sample baseline, world-stable start jitter, coarse occupancy rejection, Beer-Lambert segment transmittance, and early termination near opacity.
 - Treat each occupied view step plus its light lookup as a density-evaluation budget; do not run unconditional multi-octave noise in both paths.
-- Provide measured 6/8/10-sample quality variants, with eight as the acceptance baseline rather than silently increasing cost.
-- Render cirrus from a separate sparse high-altitude profile while sharing weather coordinates and deterministic inputs.
+- Compare the required 6-sample floor with the 8-sample baseline; add 10 only if neither passes both quality and performance.
+- Render cirrus and anvils from upper ice with separate sparse high-altitude profiles, upper-wind orientation, and latitude-dependent tropopause bounds.
 - Keep the shared density functions independent of preview-only color composition so export can compile them unchanged.
 
 **Patterns to follow:**
@@ -396,6 +541,8 @@ flowchart TB
 - Covers AE1: grazing limb views show bounded cloud depth, soft top/base transitions, and no visible shell edge.
 - Temporal limb: continuous orbit through grazing angles keeps optical depth stable without popping or shimmer beyond the approved tolerance.
 - Covers AE2: coverage 0.5 produces coherent clear and cloudy regions without a global veil.
+- Vertical overlap: a deep-convective validation cell contains a low base, vertically developed core, and downshear anvil with no gaps caused by exclusive regime selection.
+- Regime integrity: removing procedural detail preserves each system's coarse silhouette and occupied area within tolerance.
 - Covers AE3: coverage zero produces identical pixels to clouds disabled and bypasses density marching.
 - Edge case: camera rays missing the cloud layer contribute no cloud radiance or opacity.
 - Edge case: high terrain intersecting the nominal cloud base contains no below-ground density.
@@ -407,6 +554,53 @@ flowchart TB
 - Low-cloud rendering no longer samples density at one shell point.
 - The visual cloud debug view can isolate integrated density from lighting and atmosphere.
 - Eight samples meet the visual baseline before any sample-count increase is considered.
+- Before U4/U5, save an eight-seed cloud-only contact sheet plus the wind-reversal orographic case to `docs/research/shallow-volumetric-cloud-validation.md`. A reviewer marks each AE2 frame for fixed-inventory repetition, noise-only patches, and broken directional continuity. Skip U12 when all frames and the orographic reversal pass. Activate U12 only when a recorded rejection specifically identifies repeated low-frequency topology, missing directional continuity, or failed broad rain-shadow response; lighting, density detail, or cyclone anatomy failures remain in U13/U3 and cannot activate it.
+
+### U12. Conditionally add a deterministic moisture spin-up
+
+**Goal:** If the diagnostic baseline fails, add the smallest fixed-flow transport and phase-change loop that corrects the measured failure while preserving the published field ABI.
+
+**Requirements:** R5-R9, R13, R15-R17, F1, AE2-AE3
+
+**Dependencies:** U3; activate only after U9/U13/U3 fail the multi-seed topology, directional-continuity, or broad rain-shadow gate
+
+**Files:**
+- Modify: `src/weather.rs`
+- Create: `src/shaders/weather_spinup.wgsl`
+- Modify: `src/app.rs`
+- Test: `src/weather.rs`
+
+**Approach:**
+- Record the exact failed U9/U13/U3 gate before enabling this unit. Do not use cyclone anatomy or cloud-atlas completeness as activation evidence.
+- Allocate low-resolution ping-pong `Rgba16Float` state for vapor, low condensate, upper ice, and one spare/local sink channel; depletion remains transient unless a later consumer is demonstrated.
+- Initialize from U9 diagnostics instead of white noise or zero state. Start at 128 square per face and 16 iterations; test an adjacent resolution/count only if the default misses quality or latency.
+- Each iteration performs world-space backtraced vapor/condensate transport, broad moisture recovery, saturation/condensation, a simple precipitation sink, and upper-ice detrainment. Add explicit lee drying only if condensation/rainout does not already pass the orographic gate.
+- Keep pressure and wind fixed for the first accepted implementation. This makes the pass a bounded advection/phase-change relaxation rather than a weather forecast and avoids a pressure projection or long dynamical equilibration.
+- Convert wind to metres per second and include planet radius. Backtrace approximately by angular displacement `wind * dt / radius`, choosing deterministic `dt` so the maximum step remains below 0.75 weather texel.
+- Sample previous state through a cube view using normalized world direction; reproject world-space tangent vectors at the destination. Never clamp to a face or offset face UVs.
+- Use fixed iteration count, deterministic hash only where required, no unordered atomics, and no prior-generation history. Schedule bounded 2-4-iteration chunks through U10 if a monolithic submission causes visible frame stalls.
+- Partition the final condensate into the existing low/deep/high contract; U13 and every downstream consumer remain unchanged.
+
+**Patterns to follow:**
+- Existing front/back weather ownership and asynchronous queue completion in `src/weather.rs`.
+- Sphere-space cube sampling used by rendering; explicitly avoid the failed planar per-face advection in `docs/research/performance-visual-comparison.md`.
+
+**Test scenarios:**
+- Formation: vapor transported into a convergence/lift zone exceeds saturation and becomes condensate; the same air in divergence or subsidence remains clear.
+- Conservation envelope: absent configured source, sink, and boundary relaxation, total vapor plus condensate changes only within the approved semi-Lagrangian error bound.
+- Phase change: warming raises saturation capacity and reduces condensate; cooling or lifting increases condensate; rainout removes dense condensate and leaves a deterministic depleted wake.
+- Orography: a moist flow crossing a ridge condenses windward and dries leeward; flat terrain removes this asymmetry.
+- Shear: deep convective condensate detrains upper ice downshear rather than forming a concentric high-noise halo.
+- Determinism: fixed snapshot, timestep, pass count, and seed reproduce the same field on the same adapter/backend.
+- Seam: a transported pulse crosses each cube edge and corner without loss, duplication, directional kink, or visible line.
+- Edge case: zero moisture or negligible atmosphere remains clear for every iteration and avoids invalid saturation math.
+- Parameter envelope: Earth-like radius, gravity, rotation, pressure, temperature, and wind corners remain stable under the angular displacement bound; outside-envelope inputs remain finite.
+- Performance: the accepted default reports generation p95 and active-generation preview p95 without requiring a full tuning matrix.
+
+**Verification:**
+- Debug captures show vapor supply, transport, condensation, rainout, and upper-ice production as separate stages of one causal result.
+- Removing phase change produces no cloud mass even though wind and noise remain present.
+- No spin-up pass runs during camera/light-only frames.
 
 ### U4. Add volumetric lighting and surface shadows
 
@@ -463,9 +657,9 @@ flowchart TB
 
 **Approach:**
 - Capture an immutable export snapshot containing every density-affecting input; preview visibility and display opacity remain presentation-only.
-- Regenerate dynamics and weather deterministically from shared shader definitions at a bounded field resolution, then evaluate final outputs in tiles rather than allocating full-resolution cubemaps.
-- Integrate low-cloud and cirrus density vertically into a direct-use optical-depth map.
-- Export reconstruction data for coverage, base altitude, thickness, cloud character, and cirrus using documented units and channel semantics.
+- Regenerate the accepted generator (diagnostic baseline, or U12 only if activated), diagnosis, and density deterministically from the same snapshot and shared shader definitions at a bounded field resolution, then evaluate final outputs in tiles rather than allocating full-resolution cubemaps. Parity means identical snapshot/algorithms and fixed-resolution ray agreement, not byte-identical textures across different field resolutions.
+- Integrate low/deck, deep/storm, and high/cirrus density vertically into one direct-use optical-depth map so every major preview formation is represented.
+- Export the origin-required reconstruction semantics: coverage, cloud base, thickness, broad cloud character, and cirrus. Derive them from the shared low/deep/high mass and geometry fields; additional internal diagnostics are not supported export products in this phase.
 - Keep selective export independent from preview layer visibility.
 - Stream bounded tile or scanline buffers directly to temporary EXR outputs rather than retaining complete six-face arrays for every product; publish final files only after all selected writers close successfully.
 - Advance interactive export through bounded in-flight submissions and asynchronous map-completion channels driven by the eframe update loop. Headless export may block on its standalone device.
@@ -492,7 +686,7 @@ flowchart TB
 
 ### U6. Establish deterministic visual, seam, and parity gates
 
-**Goal:** Make cloud quality, preview/export parity, and seam continuity measurable before old paths are removed.
+**Goal:** Make AE1-AE5, multi-seed causal variance, preview/export parity, and seam continuity measurable before old paths are removed.
 
 **Requirements:** R18, AE1-AE5
 
@@ -502,22 +696,26 @@ flowchart TB
 - Modify: `src/bin/sweep.rs`
 - Modify: `src/preview.rs`
 - Modify: `src/export.rs`
-- Create: `docs/research/shallow-volumetric-cloud-validation.md`
+- Modify: `docs/research/shallow-volumetric-cloud-validation.md`
 - Test: `src/preview.rs`
 - Test: `src/export.rs`
 
 **Approach:**
-- Freeze deterministic seeds, camera poses, light directions, season, and jitter indices for clear, scattered, overcast, storm, backlit, limb, and polar references.
+- Freeze deterministic seeds, camera poses, light directions, season, and jitter indices for the required clear, scattered, overcast, storm, backlit, limb, and polar references. Add compact targeted mass cases for low deck, shallow cells, front, orographic response, deep/storm, and cirrus without expanding the render matrix into a cloud atlas.
 - Add isolated cloud-density and cloud-lighting views so failures can be attributed without terrain, ice, atmosphere, or cities.
+- Add low/deep/high mass and geometry debug views. If U12 activates, add only the vapor/condensate view needed to explain its failed baseline case.
 - Compare preview and export in unlit optical-depth space using coverage, directional correlation, and seam metrics before judging final color renders.
-- Start with explicit gates: absolute coverage difference at most 0.03, world-ray optical-depth correlation at least 0.95, and normalized seam discontinuity at most 0.02. Store baselines under `docs/images/cloud-validation/`; changing a baseline requires an explicit review rather than automatic replacement.
+- Establish numeric coverage, correlation, image-difference, and seam tolerances from the first approved baseline rather than hard-coding unvalidated thresholds.
+- Require the minimum causal ablations: detail-off preserves systems, mass/moisture-off clears them, and wind reversal reverses broad orographic asymmetry.
 
 **Patterns to follow:**
 - Existing deterministic sweep cases in `src/bin/sweep.rs`.
 - Existing timing summaries in `src/bin/perf_bench.rs` and `docs/research/performance-visual-comparison.md`.
 
 **Test scenarios:**
-- Covers AE1-AE4: generate all seven required visual references and verify finite, non-empty outputs where clouds are expected.
+- Covers AE1-AE4: generate the seven required references and verify finite, non-empty outputs where clouds are expected.
+- Variety: the fixed multi-seed AE2 set varies family mix, component scale, altitude, thickness, and orientation without repeating a fixed inventory or reducing to dense noise plus cirrus noise.
+- Causality: the targeted U9/U13 cases pass the three minimum ablations and no clouds appear from noise alone.
 - Covers AE5: preview/export optical-depth coverage and formation correlation pass the approved thresholds.
 - Seam: edge and corner probes pass for dynamics, weather, integrated density, and export projections.
 - Regression: clouds disabled preserve the approved surface/atmosphere reference and avoid cloud GPU passes.
@@ -528,7 +726,7 @@ flowchart TB
 
 ### U11. Establish performance and lifecycle stress gates
 
-**Goal:** Prove interactive frame time, bounded memory, revision coalescing, and export coexistence under worst-case cloud occupancy.
+**Goal:** Prove the required interactive frame time, bounded memory, revision coalescing, and failure safety.
 
 **Requirements:** R16-R18, F1-F2, AE3
 
@@ -546,13 +744,12 @@ flowchart TB
 - Test: `src/export.rs`
 
 **Approach:**
-- Measure continuous orbit for ten seconds after warmup and report p95, p99, and worst frame time for clouds-off and clouds-on cases.
-- Treat p95 at or below 33.3 ms at a 768x768 render target as the acceptance target on the named baseline GPU, with no more than 8-10 ms p95 incremental cloud GPU time. Missing it blocks U7 until optimization succeeds or the requirement is explicitly revised.
+- Measure continuous orbit for ten seconds after warmup and report p95 frame time for clouds-off and clouds-on cases.
+- Treat p95 at or below 33.3 ms at a 768x768 render target as the acceptance target on the named baseline GPU. Missing it blocks U7 until optimization succeeds or the requirement is explicitly revised.
 - Measure clear, scattered, overcast, storm, grazing-limb, and backlit cases so early exits are not mistaken for worst-case feasibility.
-- Record weather-generation latency and clouds-on incremental cost separately. Add deeper occupancy or per-stage counters only if end-to-end measurements cannot identify a failed budget.
-- Use delayed GPU timestamps when supported; retain end-to-end frame percentiles as the portable acceptance metric and avoid building a profiling subsystem beyond what a failed gate requires.
-- Measure preview frame time during active tiled export and require bounded memory independent of final export resolution.
-- Stress rapid edits, resize, cancellation, generation failure, and export contention while tracking revisions, allocations, and validation errors.
+- Record weather-generation latency separately from clouds-on frame cost. If U12 activates, also record active-generation preview p95 and require the last-good field to remain visible.
+- Retain end-to-end frame p95 as the portable acceptance metric; add GPU timestamps only if a failed gate cannot otherwise be attributed.
+- Stress rapid edits, resize, cancellation, and generation failure while tracking revisions, allocations, and validation errors.
 
 **Patterns to follow:**
 - Existing benchmark reporting in `src/bin/perf_bench.rs` and fixed-seed cases in `src/bin/sweep.rs`.
@@ -561,9 +758,9 @@ flowchart TB
 - Covers AE3: ten seconds of continuous orbit meets the p95 frame gate with standard Earth-like scattered clouds.
 - Worst case: overcast storm, grazing limb, and backlit cases remain within the documented frame budget or fail the gate explicitly.
 - Zero coverage: cloud cost is statistically indistinguishable from clouds disabled and no cloud pass executes.
-- Sample variants: 6, 8, and 10 samples report quality and GPU time; eight passes both visual and performance acceptance across the maximum accepted shell interval.
-- Queue contention: interactive preview remains responsive during 4K cloud export without device-wide waits.
-- Memory: persistent preview weather remains within the documented budget and 4K/8K export memory is bounded by tiles.
+- Sample variants: 6 and 8 samples report quality and GPU time; test 10 only if both fail.
+- Conditional spin-up: only if U12 activates, its accepted default reports generation and active-preview p95 without a full parameter matrix.
+- Memory: persistent preview weather and tiled export remain bounded independently of final output resolution.
 - Stress: repeated resize and parameter edits produce no allocation growth, stale revision swaps, validation errors, or leaked egui registrations.
 - Failure: cancelling export or forcing weather generation failure preserves last-good preview and leaves no complete-looking partial export.
 
@@ -612,22 +809,25 @@ flowchart TB
 ```mermaid
 flowchart TB
     UI[egui controls] --> App[revision and dirty state]
-    App --> Compute[terrain, dynamics, weather compute]
-    Compute --> Render[preview ray march]
+    App --> Compute[terrain and diagnostic cloud mass]
+    Compute --> Diagnose[broad-family geometry]
+    Compute -. baseline failure only .-> Spin[optional moisture spin-up]
+    Spin -. same mass ABI .-> Diagnose
+    Diagnose --> Render[preview ray march]
     Render --> Egui[registered preview texture]
     App --> Export[immutable export snapshot]
-    Compute --> Export
+    Diagnose --> Export
     Export --> Files[EXR cloud products]
 ```
 
-- **Interaction graph:** Cloud-, climate-, terrain-, and season-changing controls invalidate weather; camera, light, opacity, and visibility remain render-only. Export snapshots the current authored inputs and runs independently.
+- **Interaction graph:** Coverage-, climate-, terrain-, rotation-, wind-, storm-, and season-changing controls invalidate diagnostic weather; camera, light, opacity, visibility, and resize remain render-only. Export snapshots the authored inputs and deterministically repeats the accepted generator independently.
 - **Error propagation:** GPU setup, allocation, shader, or dispatch failures retain the last-good preview and surface through the existing GPU error UI. Export cancellation or failure reports through the progress channel and does not publish complete-looking partial outputs.
-- **State lifecycle risks:** Old weather jobs must not replace newer revisions. Resizes recreate presentation targets but should not rebuild weather. Progressive erosion invalidates weather once at completion.
+- **State lifecycle risks:** Old weather jobs must not replace newer revisions, and mass/geometry fields must publish atomically. If U12 activates, partial iterations never publish. Progressive erosion invalidates weather once at completion.
 - **GPU consumers:** The interactive app uses eframe-backed GPU ownership; sweeps, benchmarks, headless export, and GPU tests retain standalone contexts and must remain valid migration targets.
-- **Queue contention:** Interactive export and weather generation share the app queue, use bounded submissions, and must not introduce device-wide waits that starve preview rendering.
+- **Queue contention:** The active diagnostic pass remains bounded. If U12 activates, its chunks share the app queue and must not introduce waits that starve preview rendering.
 - **Error ownership:** Replace frame-path nested device error scopes with subsystem-labelled submission/completion results or a serialized scope coordinator. One subsystem cannot consume another's error or clear its last-good state.
 - **API surface parity:** Preview, export, debug views, sweep tooling, and Blender-facing outputs must share channel definitions and units.
-- **Integration coverage:** Unit tests cannot prove visual depth, seam continuity, device-sharing behavior, preview/export alignment, or queue coexistence; U6 owns visual/parity validation and U11 owns performance/lifecycle validation.
+- **Integration coverage:** Unit tests cannot prove visual depth, seam continuity, device sharing, or preview/export alignment; U6 owns visual/parity validation and U11 owns performance/lifecycle validation.
 - **Unchanged invariants:** Terrain generation, biome classification, atmosphere scattering, camera interaction, selective layer export, and non-cloud maps retain current behavior except where GPU ownership migration requires mechanical API updates.
 
 ---
@@ -639,6 +839,12 @@ flowchart TB
 - **Keep CPU preview readback:** Avoids dependency migration but directly violates GPU residency and makes the 30 FPS contract structurally fragile.
 - **Custom egui-wgpu fork for wgpu 26:** Preserves the current renderer version at permanent maintenance cost; upgrading both sides to a compatible released pair is smaller.
 - **Reuse preview-resolution weather for export:** Guarantees texel identity but caps export detail and couples offline output to UI resolution. Deterministic regeneration from shared definitions preserves formations without that ceiling.
+- **More independent formation generators:** Cheap and parallel, but repeats the current failure: stamped systems compete by maximum mask and have no shared moisture budget, layered overlap, lifecycle, depletion, or causal relationship to terrain and flow.
+- **One-pass diagnostic cloud mass:** Chosen baseline because it directly connects cloud families to existing physical fields with the smallest GPU and code cost. It must pass multi-seed structure, directionality, and rain-shadow gates before iteration is considered.
+- **Fixed-flow moisture spin-up:** Gated U12. It adds transport and phase change only when the diagnostic baseline has a measured failure.
+- **Moist shallow-water dynamics:** Scientifically stronger for emergent waves, fronts, and cyclogenesis, but materially more code and stability work. It requires a separate future plan rather than expanding this one.
+- **Weatherscapes-style 3D simulation:** Produces excellent local clouds but requires a vertically resolved planet-wide fluid and microphysics state, exceeding the memory and generation budget.
+- **Global learned weather models:** GraphCast, Pangu-Weather, FourCastNet, GenCast, and NeuralGCM forecast Earth from full reanalysis states; they do not synthesize arbitrary planets or renderable clouds and require large Earth-specific weights.
 
 ---
 
@@ -646,44 +852,54 @@ flowchart TB
 
 | Risk | Likelihood | Impact | Mitigation |
 |------|------------|--------|------------|
-| eframe/wgpu upgrade causes broad API churn | High | High | Isolate and validate U8 before proceeding to U1; preserve fixed cloud-off render references. |
+| Diagnostic pass still looks like field-conditioned noise | Medium | High | Judge multiple seeds with detail disabled; require distinct low/deep/high scales, asymmetric fronts, clear gaps, and broad orographic reversal before accepting it. |
+| Optional spin-up repeats prior seams or stalls interaction | Low | High | Activate only from a recorded baseline failure, use world-direction transport and bounded chunks, and require edge/corner plus active-preview p95 tests. |
 | Eight-step march remains too expensive | Medium | High | Cheap occupancy rejection, conditional detail, early transmittance exit, half-float fields, and measured sample tuning. |
 | Clouds still appear flat with short light sampling | Medium | High | Validate isolated lighting references; add one coarse long-range term only after measured failure. |
-| Weather cubemap reveals seams | Medium | High | Sphere-space generation, true cube sampling, explicit edge/corner tests, and no per-face advection. |
-| Weather follows coastlines or latitude bands | Medium | High | Use smoothed continentality, convergence, and warped climate inputs; validate density independently across fixed seeds. |
+| Weather follows coastlines or latitude bands | Medium | High | Use broad terrain/wind derivatives and multi-seed checks; do not multiply final density directly by raw geography or latitude. |
 | Preview and export drift again | Medium | High | Shared WGSL density definitions, immutable snapshots, optical-depth parity metrics, and deletion of the duplicate algorithm. |
-| GPU memory grows unexpectedly | Low | Medium | Start at half preview resolution with no mip chain or ping-pong history; document allocations and add only measured needs. |
+| GPU memory grows unexpectedly | Low | Medium | Persist only two compact published fields; allocate coarse ping-pong state only if U12 activates. |
+| Family synthesis becomes another set of stamps | Medium | High | Require families to depend on U9 mass; detail removal preserves systems and mass removal clears them. |
 | Old revisions replace newer edits | Medium | Medium | Revision-key generation and atomic latest-wins swap while retaining last-good state. |
 
 ---
 
 ## Phased Delivery
 
-### Phase 1: Rendering foundation
+### Completed foundation
 
 - U8 aligns dependency versions and captures characterization baselines.
 - U1 aligns interactive GPU ownership and removes preview frame readback.
 - U2 establishes persistent GPU dynamics textures.
-- U9 adds deterministic weather generation and its channel contract.
-- U10 adds front/back revision lifecycle and invalidation.
 
-### Phase 2: Volumetric appearance
+### Phase 1: Diagnostic weather and volume
 
-- U3 adds bounded density integration and cirrus.
+- U9 replaces cloud stamps with diagnostic low/deep/high mass and physical geometry from existing fields.
+- U10 atomically publishes expanded mass and geometry through the existing lifecycle.
+- U13 interprets the published fields as broad overlapping density families.
+- U3 adds bounded integration of overlapping low, deep, and high cloud mass.
+
+### Conditional gate
+
+- Run the U3 multi-seed diagnostic baseline. Skip U12 when topology, directional continuity, and broad rain-shadow behavior pass.
+- U12 adds fixed-flow moisture transport and phase change only from a recorded failed gate, then republishes the same mass ABI and reruns U13/U3.
+
+### Phase 2: Lighting and output
+
 - U4 adds lighting and surface shadows.
-
-### Phase 3: Output and proof
-
 - U5 unifies export and adds both output products.
+
+### Phase 3: Proof and cleanup
+
 - U6 establishes visual, seam, and parity gates.
-- U11 establishes frame-time, memory, export-contention, and lifecycle gates.
+- U11 establishes frame-time, memory, and lifecycle gates.
 - U7 removes superseded paths and updates tracking only after every gate passes.
 
 ---
 
 ## Documentation / Operational Notes
 
-- Record the baseline GPU, driver/backend, preview resolution, sample count, weather resolution, and clouds-on/off timings.
+- Record the baseline GPU, driver/backend, preview resolution, sample count, weather resolution, persistent memory, generation latency, and clouds-on/off timings. Add spin-up details only if U12 activates.
 - Document optical-depth units and every reconstruction channel for Blender and other downstream tools.
 - Keep unsupported-GPU behavior consistent with existing startup and OOM messaging.
 - Update `Plans.md` only as implementation units complete, following repository completion-marker conventions.
@@ -694,9 +910,23 @@ flowchart TB
 
 - **Origin document:** [docs/brainstorms/2026-03-31-cloud-layer-requirements.md](../brainstorms/2026-03-31-cloud-layer-requirements.md)
 - Related code: `src/app.rs`, `src/preview.rs`, `src/terrain_compute.rs`, `src/export.rs`
-- Related shaders: `src/shaders/preview_cubemap.wgsl`, `src/shaders/wind_field.wgsl`, `src/shaders/cloud_map.wgsl`
+- Related shaders: `src/shaders/preview_cubemap.wgsl`, `src/shaders/wind_field.wgsl`, `src/shaders/weather_field.wgsl`, `src/shaders/cloud_density.wgsl`, `src/shaders/cloud_map.wgsl`
 - Local research: `docs/research/cloud-rendering.md`, `docs/research/performance-visual-comparison.md`, `docs/research/pbr-materials-pipeline.md`
 - External: [Horizon Zero Dawn cloudscapes](https://advances.realtimerendering.com/s2015/The%20Real-time%20Volumetric%20Cloudscapes%20of%20Horizon%20-%20Zero%20Dawn%20-%20ARTR.pdf)
 - External: [Nubis, Evolved](https://advances.realtimerendering.com/s2022/SIGGRAPH2022-Advances-NubisEvolved-NoVideos.pdf)
 - External: [WMO cloud levels](https://cloudatlas.wmo.int/en/clouds-definitions.html)
+- External: [WMO orographic cloud influences](https://cloudatlas.wmo.int/en/orographic-influences-on-clouds.html)
+- External: [NOAA cloud streets](https://psl.noaa.gov/outreach/education/science/convection/Pattern_s2.html)
+- External: [Met Office tropical cyclone facts](https://www.metoffice.gov.uk/research/weather/tropical-cyclones/facts)
+- External: [University of Reading Extratropical Cyclone Atlas](https://www.met.reading.ac.uk/~storms/concep/conveyor_belt/)
+- External: [Wood, Stratocumulus Clouds (2012)](https://doi.org/10.1175/MWR-D-11-00121.1)
+- External: [Hartney et al., Moist Shallow-Water Equations (2025)](https://doi.org/10.1002/qj.70018)
+- External: [Zhou et al., HOPE cubed-sphere shallow-water core (2025)](https://doi.org/10.5194/gmd-18-8175-2025)
+- External: [Yang et al., Real-Time Fluid Simulation on the Surface of a Sphere (2019)](https://doi.org/10.1145/3320285)
+- External: [Harris et al., Simulation of Cloud Dynamics on Graphics Hardware (2003)](https://doi.org/10.1145/1198555.1198793)
+- External: [Amador Herrera et al., Weatherscapes (2021)](https://doi.org/10.1145/3478513.3480532)
+- External: [Dobashi et al., Efficient Cloud Animation (2000)](https://doi.org/10.1145/344779.344795)
+- External: [Growing Neural Cellular Automata (2020)](https://doi.org/10.23915/distill.00023)
+- External: [GraphCast](https://www.science.org/doi/10.1126/science.adi2336), [Pangu-Weather](https://www.nature.com/articles/s41586-023-06185-3), [FourCastNet](https://arxiv.org/abs/2202.11214), [GenCast](https://www.nature.com/articles/s41586-024-08252-9), and [NeuralGCM](https://www.nature.com/articles/s41586-024-07744-y) ML alternatives
+- Discovery trail: [Two Minute Papers, New Weather Simulator: Almost Perfect!](https://www.youtube.com/watch?v=mY2ozPHn0w4); scientific decisions use the linked original papers above.
 - External: [wgpu documentation](https://docs.rs/wgpu/27)
