@@ -53,6 +53,7 @@ struct Uniforms {
 @group(0) @binding(1) var height_tex: texture_cube<f32>;
 @group(0) @binding(2) var height_sampler: sampler;
 @group(0) @binding(3) var cloud_tex: texture_cube<f32>;
+@group(0) @binding(4) var weather_tex: texture_cube<f32>;
 
 // Sample wind+continentality cubemap: RGBA = (wind.x, wind.y, wind.z, continentality)
 fn sample_wind_cont(dir: vec3<f32>) -> vec4<f32> {
@@ -1697,12 +1698,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let low_world = (uniforms.rotation * vec4<f32>(low_dir, 0.0)).xyz;
 
         let low_sfc_h = textureSample(height_tex, height_sampler, low_world).r;
-        // Always use per-pixel cloud noise (full visual quality: Schneider remap,
-        // cloud types, storms, coverage threshold).
-        // When advection is ON, the advected cubemap provides a redistribution
-        // WEIGHT that modulates where clouds appear — convergence zones get denser,
-        // divergence/rain shadow gets cleared.
-        var low_density = compute_cloud_density(low_world, low_sfc_h);
+        // Eight bounded vertical samples turn the weather layer into a shallow volume.
+        // ponytail: radial marching is sufficient for the current orthographic preview;
+        // replace with full camera-ray intersections when perspective navigation ships.
+        var low_density = 0.0;
+        for (var step = 0u; step < 8u; step++) {
+            low_density += weather_density(low_world, (f32(step) + 0.5) / 8.0) / 8.0;
+        }
 
         if (low_density > 0.005) {
             // === Density-dependent Beer-Lambert ===
@@ -1761,7 +1763,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let high_dir = normalize(vec3<f32>(ndc.x, ndc.y, z_high));
         let high_world = (uniforms.rotation * vec4<f32>(high_dir, 0.0)).xyz;
 
-        let cirrus_density = compute_cirrus_density(high_world);
+        let cirrus_density = weather_cirrus_density(high_world);
 
         if (cirrus_density > 0.01) {
             // Cirrus: much thinner optical depth, more translucent

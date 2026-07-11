@@ -10,7 +10,7 @@ use crate::terrain_compute::{
     DynamicsTextures, ErosionPipeline, TerrainComputePipeline, WindFieldPipeline,
 };
 use crate::weather::{
-    DEFAULT_WEATHER_RESOLUTION, WeatherFieldPipeline, WeatherSnapshot, WeatherTextures,
+    DEFAULT_WEATHER_RESOLUTION, WeatherFieldPipeline, WeatherLifecycle, WeatherSnapshot,
 };
 
 pub struct PlanetGenApp {
@@ -21,7 +21,8 @@ pub struct PlanetGenApp {
     wind_pipeline: WindFieldPipeline,
     dynamics: Option<DynamicsTextures>,
     weather_pipeline: WeatherFieldPipeline,
-    weather: Option<WeatherTextures>,
+    weather: Option<WeatherLifecycle>,
+    weather_terrain: Option<crate::terrain_compute::TectonicTerrain>,
     texture_id: egui::TextureId,
     render_state: eframe::egui_wgpu::RenderState,
     params: PlanetParams,
@@ -129,6 +130,7 @@ impl PlanetGenApp {
             dynamics: None,
             weather_pipeline,
             weather: None,
+            weather_terrain: None,
             texture_id,
             render_state: render_state.clone(),
             params,
@@ -373,38 +375,6 @@ impl PlanetGenApp {
                 self.derived.base_temperature_c,
                 self.derived.atmosphere_strength,
             );
-            if self.weather.is_none() {
-                self.weather = Some(
-                    self.weather_pipeline
-                        .create_textures(&self.gpu, DEFAULT_WEATHER_RESOLUTION),
-                );
-            }
-            let weather = self.weather.as_ref().unwrap();
-            self.weather_pipeline.generate(
-                &self.gpu,
-                WeatherSnapshot {
-                    face: 0,
-                    resolution: weather.resolution,
-                    seed: self.cloud_seed,
-                    storm_count: self.storm_count,
-                    coverage: self.cloud_coverage,
-                    moisture: self.climate_moisture,
-                    atm_pressure: self.derived.atmosphere_strength,
-                    base_temp_c: self.derived.base_temperature_c,
-                    ocean_level,
-                    axial_tilt_rad: self.params.axial_tilt_deg.to_radians(),
-                    season: self.season,
-                    storm_size: self.storm_size,
-                    cloud_character: 0.5,
-                    _pad0: 0.0,
-                    _pad1: 0.0,
-                    _pad2: 0.0,
-                },
-                &terrain,
-                dynamics,
-                weather,
-            );
-
             eprintln!(
                 "[wind {}px] {:.0}ms",
                 cloud_res,
@@ -425,6 +395,9 @@ impl PlanetGenApp {
             self.erosion_remaining = adaptive_iters;
             self.erosion_ocean_level = ocean_level;
         } else {
+            self.weather_terrain = Some(terrain);
+            self.request_weather(ocean_level);
+            self.dispatch_weather();
             self.erosion_remaining = 0;
         }
 
@@ -467,8 +440,10 @@ impl PlanetGenApp {
         }
 
         if self.erosion_remaining == 0 {
-            self.erosion_terrain = None;
+            self.weather_terrain = self.erosion_terrain.take();
             self.terrain_start = None;
+            self.request_weather(self.erosion_ocean_level);
+            self.dispatch_weather();
         }
         self.needs_render = true;
 
@@ -501,10 +476,81 @@ impl PlanetGenApp {
                         texture_id,
                     );
                 });
-            self.preview_renderer
-                .render_interactive(&self.gpu, &uniforms, cubemap_view, cloud_ref);
+            let weather_ref = self
+                .weather
+                .as_ref()
+                .map(|weather| &weather.front().weather);
+            self.preview_renderer.render_interactive(
+                &self.gpu,
+                &uniforms,
+                cubemap_view,
+                cloud_ref,
+                weather_ref,
+            );
         }
         self.needs_render = false;
+    }
+
+    fn request_weather(&mut self, ocean_level: f32) {
+        if self.weather.is_none() {
+            self.weather = Some(WeatherLifecycle::new(
+                &self.weather_pipeline,
+                &self.gpu,
+                DEFAULT_WEATHER_RESOLUTION,
+            ));
+        }
+        let resolution = self.weather.as_ref().unwrap().front().resolution;
+        self.weather.as_mut().unwrap().request(WeatherSnapshot {
+            face: 0,
+            resolution,
+            seed: self.cloud_seed,
+            storm_count: self.storm_count,
+            coverage: self.cloud_coverage,
+            moisture: self.climate_moisture,
+            atm_pressure: self.derived.atmosphere_strength,
+            base_temp_c: self.derived.base_temperature_c,
+            ocean_level,
+            axial_tilt_rad: self.params.axial_tilt_deg.to_radians(),
+            season: self.season,
+            storm_size: self.storm_size,
+            cloud_character: 0.5,
+            _pad0: 0.0,
+            _pad1: 0.0,
+            _pad2: 0.0,
+        });
+    }
+
+    fn invalidate_weather(&mut self) {
+        let ocean_level = -0.5 + 1.7 * self.derived.ocean_fraction * (1.0 - self.water_loss);
+        self.request_weather(ocean_level);
+        self.needs_render = true;
+    }
+
+    fn dispatch_weather(&mut self) {
+        let Some(terrain) = self.weather_terrain.as_ref() else {
+            return;
+        };
+        let Some(dynamics) = self.dynamics.as_ref() else {
+            return;
+        };
+        let Some(weather) = self.weather.as_mut() else {
+            return;
+        };
+        let Some((revision, snapshot)) = weather.next_submission() else {
+            return;
+        };
+        self.weather_pipeline
+            .generate(&self.gpu, snapshot, terrain, dynamics, weather.back());
+        weather.mark_submitted(&self.gpu.queue, revision);
+    }
+
+    fn poll_weather(&mut self) -> bool {
+        let _ = self.gpu.device.poll(wgpu::PollType::Poll);
+        if self.weather.as_mut().is_some_and(WeatherLifecycle::poll) {
+            self.needs_render = true;
+        }
+        self.dispatch_weather();
+        self.weather.as_ref().is_some_and(WeatherLifecycle::is_busy)
     }
 
     fn update_derived(&mut self) {
@@ -700,7 +746,7 @@ impl eframe::App for PlanetGenApp {
                     .on_hover_text("Atmospheric moisture. 0 = bone dry (desert world), 1 = full moisture. Independent of water loss.")
                     .changed()
                 {
-                    self.needs_render = true;
+                    self.invalidate_weather();
                 }
 
                 let mut erosion_i32 = self.erosion_iterations as i32;
@@ -718,7 +764,7 @@ impl eframe::App for PlanetGenApp {
                     .on_hover_text("0 = deep winter, 0.5 = equinox, 1 = deep summer. Affects vegetation color and ice extent")
                     .changed()
                 {
-                    self.needs_render = true;
+                    self.needs_terrain = true;
                 }
 
                 ui.separator();
@@ -756,17 +802,17 @@ impl eframe::App for PlanetGenApp {
                     .on_hover_text("Cloud coverage fraction. 0 = clear sky, 1 = heavy overcast")
                     .changed()
                 {
-                    self.needs_render = true;
+                    self.invalidate_weather();
                 }
                 ui.horizontal(|ui| {
                     if ui.small_button("🎲").on_hover_text("Randomize cloud pattern").clicked() {
                         self.cloud_seed = rand_seed();
-                        self.needs_render = true;
+                        self.invalidate_weather();
                     }
                     let mut seed_i64 = self.cloud_seed as i64;
                     if ui.add(egui::DragValue::new(&mut seed_i64).prefix("Seed: ")).changed() {
                         self.cloud_seed = seed_i64.clamp(0, u32::MAX as i64) as u32;
-                        self.needs_render = true;
+                        self.invalidate_weather();
                     }
                 });
                 if ui.add(egui::Slider::new(&mut self.cloud_opacity, 0.0..=1.0)
@@ -783,7 +829,7 @@ impl eframe::App for PlanetGenApp {
                     .changed()
                 {
                     self.storm_count = storms_i32 as u32;
-                    self.needs_render = true;
+                    self.invalidate_weather();
                 }
                 if self.storm_count > 0 {
                     if ui.add(egui::Slider::new(&mut self.storm_size, 0.3..=3.0)
@@ -791,7 +837,7 @@ impl eframe::App for PlanetGenApp {
                         .on_hover_text("Storm radius: 0.3 = compact, 1.0 = Earth-like, 3.0 = massive")
                         .changed()
                     {
-                        self.needs_render = true;
+                        self.invalidate_weather();
                     }
                 }
 
@@ -1242,6 +1288,9 @@ impl eframe::App for PlanetGenApp {
             ctx.request_repaint();
         } else if self.erosion_remaining > 0 {
             ctx.request_repaint(); // retry next frame when mouse released
+        }
+        if self.poll_weather() {
+            ctx.request_repaint();
         }
         if self.needs_render {
             self.render_preview();

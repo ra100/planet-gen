@@ -68,8 +68,9 @@ pub struct PreviewRenderer {
 impl PreviewRenderer {
     pub fn new(gpu: &GpuContext) -> Self {
         let shader_source = format!(
-            "{}\n{}",
+            "{}\n{}\n{}",
             include_str!("shaders/noise.wgsl"),
+            include_str!("shaders/cloud_density.wgsl"),
             include_str!("shaders/preview_cubemap.wgsl"),
         );
 
@@ -117,6 +118,16 @@ impl PreviewRenderer {
                         // Cloud density cubemap
                         wgpu::BindGroupLayoutEntry {
                             binding: 3,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                                view_dimension: wgpu::TextureViewDimension::Cube,
+                                multisampled: false,
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 4,
                             visibility: wgpu::ShaderStages::FRAGMENT,
                             ty: wgpu::BindingType::Texture {
                                 sample_type: wgpu::TextureSampleType::Float { filterable: true },
@@ -238,6 +249,7 @@ impl PreviewRenderer {
         uniforms: &PreviewUniforms,
         cubemap_view: &wgpu::TextureView,
         cloud_view: Option<&wgpu::TextureView>,
+        weather_view: Option<&wgpu::TextureView>,
     ) {
         let mut encoder = gpu
             .device
@@ -251,6 +263,7 @@ impl PreviewRenderer {
             uniforms,
             cubemap_view,
             cloud_view,
+            weather_view,
             &self.target_view,
         );
         gpu.queue.submit(Some(encoder.finish()));
@@ -264,6 +277,7 @@ impl PreviewRenderer {
         uniforms: &PreviewUniforms,
         cubemap_view: &wgpu::TextureView,
         cloud_view: Option<&wgpu::TextureView>,
+        weather_view: Option<&wgpu::TextureView>,
         render_view: &wgpu::TextureView,
     ) {
         let uniform_buffer = gpu
@@ -300,6 +314,7 @@ impl PreviewRenderer {
                 &dummy_cloud_view
             }
         };
+        let effective_weather_view = weather_view.unwrap_or(effective_cloud_view);
         let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("preview bind group"),
             layout: &self.bind_group_layout,
@@ -319,6 +334,10 @@ impl PreviewRenderer {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: wgpu::BindingResource::TextureView(effective_cloud_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(effective_weather_view),
                 },
             ],
         });
@@ -555,6 +574,7 @@ impl PreviewRenderer {
             uniforms,
             cubemap_view,
             cloud_view,
+            None,
             &render_view,
         );
 

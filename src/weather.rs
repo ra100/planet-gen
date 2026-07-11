@@ -1,6 +1,7 @@
 use crate::gpu::GpuContext;
 use crate::terrain_compute::{DynamicsTextures, TectonicTerrain};
 use bytemuck::{Pod, Zeroable};
+use std::sync::mpsc;
 use wgpu::util::DeviceExt;
 
 /// Preview weather stays independent of viewport and export resolution.
@@ -36,6 +37,114 @@ pub struct WeatherTextures {
     storage: wgpu::TextureView,
     pub weather: wgpu::TextureView,
     pub resolution: u32,
+}
+
+#[derive(Default)]
+struct RevisionState {
+    requested: u64,
+    submitted: Option<u64>,
+    ready: Option<u64>,
+    pending: Option<WeatherSnapshot>,
+}
+
+impl RevisionState {
+    fn request(&mut self, snapshot: WeatherSnapshot) {
+        self.requested += 1;
+        self.pending = Some(snapshot);
+    }
+
+    fn next_submission(&mut self) -> Option<(u64, WeatherSnapshot)> {
+        if self.submitted.is_some() {
+            return None;
+        }
+        let snapshot = self.pending.take()?;
+        self.submitted = Some(self.requested);
+        Some((self.requested, snapshot))
+    }
+
+    fn complete(&mut self, revision: u64) -> bool {
+        if self.submitted != Some(revision) {
+            return false;
+        }
+        self.submitted = None;
+        self.ready = Some(revision);
+        revision == self.requested
+    }
+
+    fn is_busy(&self) -> bool {
+        self.submitted.is_some() || self.pending.is_some()
+    }
+}
+
+/// Double-buffered weather generation with a latest-wins publication gate.
+pub struct WeatherLifecycle {
+    front: WeatherTextures,
+    back: WeatherTextures,
+    front_is_a: bool,
+    revisions: RevisionState,
+    completed_tx: mpsc::Sender<u64>,
+    completed_rx: mpsc::Receiver<u64>,
+}
+
+impl WeatherLifecycle {
+    pub fn new(pipeline: &WeatherFieldPipeline, gpu: &GpuContext, resolution: u32) -> Self {
+        let (completed_tx, completed_rx) = mpsc::channel();
+        Self {
+            front: pipeline.create_textures(gpu, resolution),
+            back: pipeline.create_textures(gpu, resolution),
+            front_is_a: true,
+            revisions: RevisionState::default(),
+            completed_tx,
+            completed_rx,
+        }
+    }
+
+    pub fn request(&mut self, snapshot: WeatherSnapshot) {
+        self.revisions.request(snapshot);
+    }
+
+    pub fn next_submission(&mut self) -> Option<(u64, WeatherSnapshot)> {
+        self.revisions.next_submission()
+    }
+
+    pub fn back(&self) -> &WeatherTextures {
+        if self.front_is_a {
+            &self.back
+        } else {
+            &self.front
+        }
+    }
+
+    pub fn front(&self) -> &WeatherTextures {
+        if self.front_is_a {
+            &self.front
+        } else {
+            &self.back
+        }
+    }
+
+    pub fn mark_submitted(&self, queue: &wgpu::Queue, revision: u64) {
+        let completed_tx = self.completed_tx.clone();
+        queue.on_submitted_work_done(move || {
+            let _ = completed_tx.send(revision);
+        });
+    }
+
+    /// Poll completion callbacks without waiting; only the latest completed revision publishes.
+    pub fn poll(&mut self) -> bool {
+        let mut published = false;
+        while let Ok(revision) = self.completed_rx.try_recv() {
+            if self.revisions.complete(revision) {
+                self.front_is_a = !self.front_is_a;
+                published = true;
+            }
+        }
+        published
+    }
+
+    pub fn is_busy(&self) -> bool {
+        self.revisions.is_busy()
+    }
 }
 
 pub struct WeatherFieldPipeline {
@@ -458,5 +567,19 @@ mod tests {
             16,
         );
         assert_ne!(baseline, warm);
+    }
+
+    #[test]
+    fn revisions_coalesce_and_never_publish_stale_weather() {
+        let mut revisions = RevisionState::default();
+        revisions.request(snapshot(16));
+        let (first, _) = revisions.next_submission().unwrap();
+        revisions.request(snapshot(16));
+        revisions.request(snapshot(16));
+        assert!(!revisions.complete(first));
+        let (latest, _) = revisions.next_submission().unwrap();
+        assert_eq!(latest, 3);
+        assert!(revisions.complete(latest));
+        assert_eq!(revisions.ready, Some(3));
     }
 }
