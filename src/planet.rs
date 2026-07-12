@@ -121,6 +121,12 @@ pub struct DerivedProperties {
     pub atmosphere_strength: f32,
     /// Surface gravity in m/s² (assuming rocky composition)
     pub surface_gravity: f32,
+    /// Rocky-planet radius in kilometers, using R ∝ M^0.27.
+    pub radius_km: f32,
+    /// Sidereal rotation rate in radians per second.
+    pub rotation_rate_rad_s: f32,
+    /// Surface pressure proxy in bar (1.0 = Earth-like).
+    pub surface_pressure_bar: f32,
     /// Base equatorial temperature in °C
     pub base_temperature_c: f32,
     /// Ocean coverage fraction (0.0 - 1.0)
@@ -139,6 +145,8 @@ impl DerivedProperties {
         let frost_line_au = compute_frost_line(params.metallicity);
         let planet_type = classify_planet(params.star_distance_au, frost_line_au);
         let surface_gravity = compute_surface_gravity(params.mass_earth);
+        let radius_km = 6371.0 * params.mass_earth.powf(0.27);
+        let rotation_rate_rad_s = std::f32::consts::TAU / (params.rotation_period_h * 3600.0);
         let tectonics_factor =
             compute_tectonics_factor(params.mass_earth, params.star_distance_au, surface_gravity);
         let tectonic_regime = if tectonics_factor > 0.5 {
@@ -167,6 +175,9 @@ impl DerivedProperties {
             atmosphere_type,
             atmosphere_strength,
             surface_gravity,
+            radius_km,
+            rotation_rate_rad_s,
+            surface_pressure_bar: atmosphere_strength,
             base_temperature_c,
             ocean_fraction,
             surface_age,
@@ -359,6 +370,9 @@ mod tests {
         assert_eq!(derived.planet_type, PlanetType::Terrestrial);
         assert_eq!(derived.tectonic_regime, TectonicRegime::PlateTectonics);
         assert_eq!(derived.atmosphere_type, AtmosphereType::Nitrogen);
+        assert!((derived.radius_km - 6371.0).abs() < 0.1);
+        assert!((derived.rotation_rate_rad_s - std::f32::consts::TAU / 86400.0).abs() < 1e-9);
+        assert_eq!(derived.surface_pressure_bar, derived.atmosphere_strength);
     }
 
     #[test]

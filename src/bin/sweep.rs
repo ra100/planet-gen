@@ -186,10 +186,6 @@ fn generate_planet_png(
         pan_y: 0.0,
         cloud_coverage: 0.0,
         cloud_seed: 0.0,
-        cloud_altitude: 0.008,
-        cloud_type: 0.5,
-        storm_count: 0.0,
-        storm_size: 1.0,
         night_lights: 0.0,
         star_color_temp: 0.5,
         city_light_hue: 0.0,
@@ -210,12 +206,12 @@ fn generate_planet_png(
         ring_outer: 0.0,
         ring_tilt: 0.0,
         ring_opacity: 0.0,
-        _pad3: 0.0,
+        planet_radius_km: derived.radius_km,
         _pad4: 0.0,
         _pad5: 0.0,
     };
 
-    renderer.render(gpu, &uniforms, &cubemap_view, None, render_size)
+    renderer.render(gpu, &uniforms, &cubemap_view, None, None, render_size)
 }
 
 fn main() {
@@ -380,10 +376,6 @@ fn main() {
         pan_y: 0.0,
         cloud_coverage: 0.6,
         cloud_seed: 42.0,
-        cloud_altitude: 0.008,
-        cloud_type: 0.5,
-        storm_count: 2.0,
-        storm_size: 1.0,
         night_lights: 0.0,
         star_color_temp: 0.5,
         city_light_hue: 0.0,
@@ -404,13 +396,13 @@ fn main() {
         ring_outer: 0.0,
         ring_tilt: 0.0,
         ring_opacity: 0.0,
-        _pad3: 0.0,
+        planet_radius_km: derived.radius_km,
         _pad4: 0.0,
         _pad5: 0.0,
     };
 
     // Render without wind effects (analytical wind only)
-    let px_off = renderer.render(&gpu, &base_uniforms, &cubemap_view, None, render_size);
+    let px_off = renderer.render(&gpu, &base_uniforms, &cubemap_view, None, None, render_size);
     let img = image::RgbaImage::from_raw(render_size, render_size, px_off).unwrap();
     img.save(Path::new(&format!("{}/wind_effects_OFF.png", output_dir)))
         .unwrap();
@@ -424,6 +416,7 @@ fn main() {
         &on_uniforms,
         &cubemap_view,
         Some(&cloud_view),
+        None,
         render_size,
     );
     let img = image::RgbaImage::from_raw(render_size, render_size, px_on).unwrap();
@@ -439,7 +432,7 @@ fn main() {
     let mut zoom_off = base_uniforms;
     zoom_off.zoom = 3.0;
     zoom_off.pan_y = 0.2;
-    let px = renderer.render(&gpu, &zoom_off, &cubemap_view, None, render_size);
+    let px = renderer.render(&gpu, &zoom_off, &cubemap_view, None, None, render_size);
     image::RgbaImage::from_raw(render_size, render_size, px)
         .unwrap()
         .save(Path::new(&format!("{}/wind_zoom_OFF.png", output_dir)))
@@ -453,6 +446,7 @@ fn main() {
         &zoom_on,
         &cubemap_view,
         Some(&cloud_view),
+        None,
         render_size,
     );
     image::RgbaImage::from_raw(render_size, render_size, px)
@@ -465,7 +459,7 @@ fn main() {
     let mut wind_u = base_uniforms;
     wind_u.view_mode = 14;
     wind_u.show_clouds = 0.0;
-    let px = renderer.render(&gpu, &wind_u, &cubemap_view, None, render_size);
+    let px = renderer.render(&gpu, &wind_u, &cubemap_view, None, None, render_size);
     image::RgbaImage::from_raw(render_size, render_size, px)
         .unwrap()
         .save(Path::new(&format!("{}/wind_map.png", output_dir)))

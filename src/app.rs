@@ -173,7 +173,7 @@ impl PlanetGenApp {
             ring_outer: 0.0,
             ring_tilt: 15.0,
             ring_opacity: 0.7,
-            storm_count: 0,
+            storm_count: 2,
             storm_size: 1.0,
             night_lights: 0.0,
             star_color_temp: 0.5,
@@ -214,6 +214,10 @@ impl PlanetGenApp {
         let sy = self.rotation_y.sin();
         let cx = self.rotation_x.cos();
         let sx = self.rotation_x.sin();
+        let weather_snapshot = self
+            .weather
+            .as_ref()
+            .and_then(WeatherLifecycle::front_snapshot);
 
         PreviewUniforms {
             rotation: [
@@ -245,12 +249,14 @@ impl PlanetGenApp {
             zoom: self.zoom,
             pan_x: self.pan[0],
             pan_y: self.pan[1],
-            cloud_coverage: self.cloud_coverage,
-            cloud_seed: crate::preview::seed_to_offset(self.cloud_seed)[0],
-            cloud_altitude: 0.008,
-            cloud_type: 0.5,
-            storm_count: self.storm_count as f32,
-            storm_size: self.storm_size,
+            cloud_coverage: weather_snapshot
+                .map(|snapshot| snapshot.coverage)
+                .unwrap_or(self.cloud_coverage),
+            cloud_seed: crate::preview::seed_to_offset(
+                weather_snapshot
+                    .map(|snapshot| snapshot.seed)
+                    .unwrap_or(self.cloud_seed),
+            )[0],
             night_lights: self.night_lights,
             star_color_temp: self.star_color_temp,
             city_light_hue: self.city_light_hue,
@@ -263,8 +269,8 @@ impl PlanetGenApp {
             show_cities: if self.show_cities { 1.0 } else { 0.0 },
             cloud_opacity: self.cloud_opacity,
             cloud_advection: if self.show_wind_effects { 1.0 } else { 0.0 },
-            rotation_rate: 24.0 / self.params.rotation_period_h,
-            atm_pressure: self.derived.atmosphere_strength,
+            rotation_rate: self.derived.rotation_rate_rad_s / (std::f32::consts::TAU / 86400.0),
+            atm_pressure: self.derived.surface_pressure_bar,
             wind_strength: if self.show_wind_effects {
                 self.wind_strength
             } else {
@@ -275,7 +281,9 @@ impl PlanetGenApp {
             ring_outer: self.ring_outer,
             ring_tilt: self.ring_tilt.to_radians(),
             ring_opacity: self.ring_opacity,
-            _pad3: 0.0,
+            planet_radius_km: weather_snapshot
+                .map(|snapshot| snapshot.radius_km)
+                .unwrap_or(self.derived.radius_km),
             _pad4: 0.0,
             _pad5: 0.0,
         }
@@ -476,16 +484,16 @@ impl PlanetGenApp {
                         texture_id,
                     );
                 });
-            let weather_ref = self
+            let weather_views = self
                 .weather
                 .as_ref()
-                .map(|weather| &weather.front().weather);
+                .map(|weather| (&weather.front().mass, &weather.front().geometry));
             self.preview_renderer.render_interactive(
                 &self.gpu,
                 &uniforms,
                 cubemap_view,
                 cloud_ref,
-                weather_ref,
+                weather_views,
             );
         }
         self.needs_render = false;
@@ -507,16 +515,15 @@ impl PlanetGenApp {
             storm_count: self.storm_count,
             coverage: self.cloud_coverage,
             moisture: self.climate_moisture,
-            atm_pressure: self.derived.atmosphere_strength,
+            surface_pressure_bar: self.derived.surface_pressure_bar,
             base_temp_c: self.derived.base_temperature_c,
             ocean_level,
             axial_tilt_rad: self.params.axial_tilt_deg.to_radians(),
             season: self.season,
             storm_size: self.storm_size,
-            cloud_character: 0.5,
+            radius_km: self.derived.radius_km,
+            rotation_rate_rad_s: self.derived.rotation_rate_rad_s,
             _pad0: 0.0,
-            _pad1: 0.0,
-            _pad2: 0.0,
         });
     }
 
@@ -824,8 +831,8 @@ impl eframe::App for PlanetGenApp {
                 }
                 let mut storms_i32 = self.storm_count as i32;
                 if ui.add(egui::Slider::new(&mut storms_i32, 0..=8)
-                    .text("Storms"))
-                    .on_hover_text("Number of cyclone storm systems. 0 = none, 4 = Earth-like, 8 = stormy planet")
+                    .text("Storm Bias"))
+                    .on_hover_text("Convective storm bias within physically eligible weather. 0 = none, 8 = strongest")
                     .changed()
                 {
                     self.storm_count = storms_i32 as u32;
@@ -834,7 +841,7 @@ impl eframe::App for PlanetGenApp {
                 if self.storm_count > 0 {
                     if ui.add(egui::Slider::new(&mut self.storm_size, 0.3..=3.0)
                         .text("Storm Size"))
-                        .on_hover_text("Storm radius: 0.3 = compact, 1.0 = Earth-like, 3.0 = massive")
+                        .on_hover_text("Scale of eligible storm regions: 0.3 = compact, 3.0 = broad")
                         .changed()
                     {
                         self.invalidate_weather();

@@ -96,10 +96,6 @@ fn main() {
                 pan_y: 0.0,
                 cloud_coverage: 0.0,
                 cloud_seed: 0.0,
-                cloud_altitude: 0.008,
-                cloud_type: 0.5,
-                storm_count: 0.0,
-                storm_size: 1.0,
                 night_lights: 0.0,
                 star_color_temp: 0.5,
                 city_light_hue: 0.0,
@@ -120,12 +116,12 @@ fn main() {
                 ring_outer: 0.0,
                 ring_tilt: 0.0,
                 ring_opacity: 0.0,
-                _pad3: 0.0,
+                planet_radius_km: derived.radius_km,
                 _pad4: 0.0,
                 _pad5: 0.0,
             };
 
-            let pixels = renderer.render(&gpu, &uniforms, &cubemap_view, None, render_size);
+            let pixels = renderer.render(&gpu, &uniforms, &cubemap_view, None, None, render_size);
             let filename = format!("{}/{}_{}.png", output_dir, erosion_name, view_name);
             let img = image::RgbaImage::from_raw(render_size, render_size, pixels)
                 .expect("Failed to create image");

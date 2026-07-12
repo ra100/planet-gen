@@ -25,10 +25,6 @@ pub struct PreviewUniforms {
     pub pan_y: f32,
     pub cloud_coverage: f32,  // 0.0 = clear, 1.0 = overcast
     pub cloud_seed: f32,      // noise seed for cloud pattern
-    pub cloud_altitude: f32,  // cloud shell altitude above surface (planet radii)
-    pub cloud_type: f32,      // 0.0 = smooth stratus, 1.0 = puffy cumulus
-    pub storm_count: f32,     // 0-8 cyclone storm systems
-    pub storm_size: f32,      // storm radius multiplier (0.5 = small, 1.0 = default, 2.0 = large)
     pub night_lights: f32,    // 0.0 = pristine, 1.0 = heavily urbanized
     pub star_color_temp: f32, // 0.0 = blue hot star, 0.5 = sun-like, 1.0 = red dwarf
     pub city_light_hue: f32,  // 0.0 = warm amber, 0.5 = white, 1.0 = cool blue
@@ -50,7 +46,7 @@ pub struct PreviewUniforms {
     pub ring_outer: f32,      // ring system outer radius
     pub ring_tilt: f32,       // ring plane tilt angle (radians)
     pub ring_opacity: f32,    // ring opacity (0-1)
-    pub _pad3: f32,
+    pub planet_radius_km: f32,
     pub _pad4: f32,
     pub _pad5: f32,
 }
@@ -128,6 +124,16 @@ impl PreviewRenderer {
                         },
                         wgpu::BindGroupLayoutEntry {
                             binding: 4,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                                view_dimension: wgpu::TextureViewDimension::Cube,
+                                multisampled: false,
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 5,
                             visibility: wgpu::ShaderStages::FRAGMENT,
                             ty: wgpu::BindingType::Texture {
                                 sample_type: wgpu::TextureSampleType::Float { filterable: true },
@@ -249,7 +255,7 @@ impl PreviewRenderer {
         uniforms: &PreviewUniforms,
         cubemap_view: &wgpu::TextureView,
         cloud_view: Option<&wgpu::TextureView>,
-        weather_view: Option<&wgpu::TextureView>,
+        weather_views: Option<(&wgpu::TextureView, &wgpu::TextureView)>,
     ) {
         let mut encoder = gpu
             .device
@@ -263,7 +269,7 @@ impl PreviewRenderer {
             uniforms,
             cubemap_view,
             cloud_view,
-            weather_view,
+            weather_views,
             &self.target_view,
         );
         gpu.queue.submit(Some(encoder.finish()));
@@ -277,7 +283,7 @@ impl PreviewRenderer {
         uniforms: &PreviewUniforms,
         cubemap_view: &wgpu::TextureView,
         cloud_view: Option<&wgpu::TextureView>,
-        weather_view: Option<&wgpu::TextureView>,
+        weather_views: Option<(&wgpu::TextureView, &wgpu::TextureView)>,
         render_view: &wgpu::TextureView,
     ) {
         let uniform_buffer = gpu
@@ -314,7 +320,43 @@ impl PreviewRenderer {
                 &dummy_cloud_view
             }
         };
-        let effective_weather_view = weather_view.unwrap_or(effective_cloud_view);
+        let dummy_weather_mass_tex;
+        let dummy_weather_geometry_tex;
+        let dummy_weather_mass_view;
+        let dummy_weather_geometry_view;
+        let (effective_mass_view, effective_geometry_view) = if let Some(views) = weather_views {
+            views
+        } else {
+            let create_zero_weather = |label| {
+                gpu.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: wgpu::Extent3d {
+                        width: 1,
+                        height: 1,
+                        depth_or_array_layers: 6,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                })
+            };
+            dummy_weather_mass_tex = create_zero_weather("zero weather mass");
+            dummy_weather_geometry_tex = create_zero_weather("zero weather geometry");
+            dummy_weather_mass_view =
+                dummy_weather_mass_tex.create_view(&wgpu::TextureViewDescriptor {
+                    dimension: Some(wgpu::TextureViewDimension::Cube),
+                    ..Default::default()
+                });
+            dummy_weather_geometry_view =
+                dummy_weather_geometry_tex.create_view(&wgpu::TextureViewDescriptor {
+                    dimension: Some(wgpu::TextureViewDimension::Cube),
+                    ..Default::default()
+                });
+            (&dummy_weather_mass_view, &dummy_weather_geometry_view)
+        };
         let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("preview bind group"),
             layout: &self.bind_group_layout,
@@ -337,7 +379,11 @@ impl PreviewRenderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
-                    resource: wgpu::BindingResource::TextureView(effective_weather_view),
+                    resource: wgpu::BindingResource::TextureView(effective_mass_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(effective_geometry_view),
                 },
             ],
         });
@@ -541,6 +587,7 @@ impl PreviewRenderer {
         uniforms: &PreviewUniforms,
         cubemap_view: &wgpu::TextureView,
         cloud_view: Option<&wgpu::TextureView>,
+        weather_views: Option<(&wgpu::TextureView, &wgpu::TextureView)>,
         render_size: u32,
     ) -> Vec<u8> {
         let size = render_size;
@@ -574,7 +621,7 @@ impl PreviewRenderer {
             uniforms,
             cubemap_view,
             cloud_view,
-            None,
+            weather_views,
             &render_view,
         );
 
@@ -644,7 +691,57 @@ mod tests {
     use super::*;
     use crate::gpu::GpuContext;
     use crate::plates::{PlateGenParams, generate_plates};
-    use crate::terrain_compute::TerrainComputePipeline;
+    use crate::terrain_compute::{TectonicTerrain, TerrainComputePipeline, WindFieldPipeline};
+    use crate::weather::{WeatherFieldPipeline, WeatherSnapshot};
+
+    fn uniforms() -> PreviewUniforms {
+        PreviewUniforms {
+            rotation: [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            light_dir: [0.5, 0.7, -1.0],
+            ocean_level: -0.1,
+            base_temp_c: 15.0,
+            ocean_fraction: 0.7,
+            axial_tilt_rad: 0.41,
+            view_mode: 0,
+            season: 0.5,
+            atmosphere_density: 0.0,
+            atmosphere_height: 0.0,
+            height_scale: 3.0,
+            zoom: 1.0,
+            pan_x: 0.0,
+            pan_y: 0.0,
+            cloud_coverage: 0.5,
+            cloud_seed: 42.0,
+            night_lights: 0.0,
+            star_color_temp: 0.5,
+            city_light_hue: 0.0,
+            show_ao: 1.0,
+            show_water: 1.0,
+            show_ice: 1.0,
+            show_biomes: 1.0,
+            show_clouds: 0.0,
+            show_atmosphere_layer: 0.0,
+            show_cities: 0.0,
+            cloud_opacity: 1.0,
+            cloud_advection: 0.0,
+            rotation_rate: 1.0,
+            atm_pressure: 0.7,
+            wind_strength: 0.5,
+            lava_glow: 0.0,
+            ring_inner: 0.0,
+            ring_outer: 0.0,
+            ring_tilt: 0.0,
+            ring_opacity: 0.0,
+            planet_radius_km: 6371.0,
+            _pad4: 0.0,
+            _pad5: 0.0,
+        }
+    }
 
     #[test]
     fn test_preview_renders_non_empty() {
@@ -670,59 +767,10 @@ mod tests {
         let renderer = PreviewRenderer::new(&gpu);
         let cubemap_view = renderer.upload_terrain(&gpu, &terrain);
 
-        let uniforms = PreviewUniforms {
-            rotation: [
-                [1.0, 0.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0, 0.0],
-                [0.0, 0.0, 1.0, 0.0],
-                [0.0, 0.0, 0.0, 1.0],
-            ],
-            light_dir: [0.5, 0.7, -1.0],
-            ocean_level: -0.1,
-            base_temp_c: 15.0,
-            ocean_fraction: 0.7,
-            axial_tilt_rad: 0.41,
-            view_mode: 0,
-            season: 0.5,
-            atmosphere_density: 0.0,
-            atmosphere_height: 0.0,
-            height_scale: 3.0,
-            zoom: 1.0,
-            pan_x: 0.0,
-            pan_y: 0.0,
-            cloud_coverage: 0.5,
-            cloud_seed: 42.0,
-            cloud_altitude: 0.008,
-            cloud_type: 0.5,
-            storm_count: 0.0,
-            storm_size: 1.0,
-            night_lights: 0.0,
-            star_color_temp: 0.5,
-            city_light_hue: 0.0,
-            show_ao: 1.0,
-            show_water: 1.0,
-            show_ice: 1.0,
-            show_biomes: 1.0,
-            show_clouds: 0.0,
-            show_atmosphere_layer: 0.0,
-            show_cities: 0.0,
-            cloud_opacity: 1.0,
-            cloud_advection: 0.0,
-            rotation_rate: 1.0,
-            atm_pressure: 0.7,
-            wind_strength: 0.5,
-            lava_glow: 0.0,
-            ring_inner: 0.0,
-            ring_outer: 0.0,
-            ring_tilt: 0.0,
-            ring_opacity: 0.0,
-            _pad3: 0.0,
-            _pad4: 0.0,
-            _pad5: 0.0,
-        };
+        let uniforms = uniforms();
 
         let size = 256;
-        let pixels = renderer.render(&gpu, &uniforms, &cubemap_view, None, size);
+        let pixels = renderer.render(&gpu, &uniforms, &cubemap_view, None, None, size);
         assert_eq!(pixels.len(), (size * size * 4) as usize);
 
         let non_background: usize = pixels
@@ -734,6 +782,180 @@ mod tests {
         assert!(
             non_background > total_pixels / 4,
             "preview should have visible sphere pixels ({non_background}/{total_pixels})"
+        );
+    }
+
+    #[test]
+    fn zero_producer_mass_matches_clouds_disabled() {
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let terrain = TectonicTerrain {
+            faces: std::array::from_fn(|_| vec![0.0; 16 * 16]),
+            resolution: 16,
+        };
+        let renderer = PreviewRenderer::new(&gpu);
+        let terrain_view = renderer.upload_terrain(&gpu, &terrain);
+        let wind = WindFieldPipeline::new(&gpu).expect("dynamics unavailable");
+        let dynamics = wind.create_textures(&gpu, 16);
+        wind.generate_gpu(&gpu, &terrain, &dynamics, 42, 0.0, 0.4, 0.5, 1.0, 15.0, 1.0);
+        let weather_pipeline = WeatherFieldPipeline::new(&gpu).expect("weather unavailable");
+
+        let mut cloud_off = uniforms();
+        cloud_off.cloud_coverage = 1.0;
+        cloud_off.show_cities = 1.0;
+        cloud_off.night_lights = 1.0;
+        cloud_off.light_dir = [-1.0, 0.0, -0.2];
+        let expected = renderer.render(
+            &gpu,
+            &cloud_off,
+            &terrain_view,
+            Some(&dynamics.wind_continentality),
+            None,
+            64,
+        );
+
+        let mut cloud_on_without_weather = cloud_off;
+        cloud_on_without_weather.show_clouds = 1.0;
+        assert_eq!(
+            renderer.render(
+                &gpu,
+                &cloud_on_without_weather,
+                &terrain_view,
+                Some(&dynamics.wind_continentality),
+                None,
+                64,
+            ),
+            expected
+        );
+
+        for (moisture, coverage) in [(0.0, 1.0), (1.0, 0.0)] {
+            let weather = weather_pipeline.create_textures(&gpu, 16);
+            weather_pipeline.generate(
+                &gpu,
+                WeatherSnapshot {
+                    face: 0,
+                    resolution: 16,
+                    seed: 42,
+                    storm_count: 8,
+                    coverage,
+                    moisture,
+                    surface_pressure_bar: 1.0,
+                    base_temp_c: 15.0,
+                    ocean_level: 0.0,
+                    axial_tilt_rad: 0.4,
+                    season: 0.5,
+                    storm_size: 2.0,
+                    radius_km: 6371.0,
+                    rotation_rate_rad_s: std::f32::consts::TAU / 86400.0,
+                    _pad0: 0.0,
+                },
+                &terrain,
+                &dynamics,
+                &weather,
+            );
+            let mut cloud_on = cloud_off;
+            cloud_on.show_clouds = 1.0;
+            cloud_on.cloud_coverage = coverage;
+            let actual = renderer.render(
+                &gpu,
+                &cloud_on,
+                &terrain_view,
+                Some(&dynamics.wind_continentality),
+                Some((&weather.mass, &weather.geometry)),
+                64,
+            );
+            assert_eq!(actual, expected, "moisture={moisture}, coverage={coverage}");
+        }
+
+        let dense_snapshot = WeatherSnapshot {
+            face: 0,
+            resolution: 16,
+            seed: 42,
+            storm_count: 8,
+            coverage: 1.0,
+            moisture: 1.0,
+            surface_pressure_bar: 1.0,
+            base_temp_c: 15.0,
+            ocean_level: -0.1,
+            axial_tilt_rad: 0.4,
+            season: 0.5,
+            storm_size: 2.0,
+            radius_km: 500.0,
+            rotation_rate_rad_s: std::f32::consts::TAU / 86400.0,
+            _pad0: 0.0,
+        };
+        let dense_weather = weather_pipeline.create_textures(&gpu, 16);
+        weather_pipeline.generate(&gpu, dense_snapshot, &terrain, &dynamics, &dense_weather);
+
+        assert_eq!(
+            renderer.render(
+                &gpu,
+                &cloud_off,
+                &terrain_view,
+                Some(&dynamics.wind_continentality),
+                Some((&dense_weather.mass, &dense_weather.geometry)),
+                64,
+            ),
+            expected,
+            "hidden clouds must not block city lights"
+        );
+
+        let mut transparent_clouds = cloud_off;
+        transparent_clouds.show_clouds = 1.0;
+        transparent_clouds.cloud_opacity = 0.0;
+        assert_eq!(
+            renderer.render(
+                &gpu,
+                &transparent_clouds,
+                &terrain_view,
+                Some(&dynamics.wind_continentality),
+                Some((&dense_weather.mass, &dense_weather.geometry)),
+                64,
+            ),
+            expected,
+            "zero-opacity clouds must not cast shadows or block city lights"
+        );
+
+        let mut limb_clear = cloud_off;
+        limb_clear.planet_radius_km = 500.0;
+        limb_clear.atmosphere_density = 1.0;
+        limb_clear.atmosphere_height = 0.05;
+        limb_clear.show_atmosphere_layer = 1.0;
+        let size = 128;
+        let clear_limb = renderer.render(
+            &gpu,
+            &limb_clear,
+            &terrain_view,
+            Some(&dynamics.wind_continentality),
+            Some((&dense_weather.mass, &dense_weather.geometry)),
+            size,
+        );
+        let mut cloudy_limb = limb_clear;
+        cloudy_limb.show_clouds = 1.0;
+        let cloudy_limb = renderer.render(
+            &gpu,
+            &cloudy_limb,
+            &terrain_view,
+            Some(&dynamics.wind_continentality),
+            Some((&dense_weather.mass, &dense_weather.geometry)),
+            size,
+        );
+        let changed_limb_pixels = clear_limb
+            .chunks_exact(4)
+            .zip(cloudy_limb.chunks_exact(4))
+            .enumerate()
+            .filter(|(index, (clear, cloudy))| {
+                let x = (*index % size as usize) as f32 + 0.5;
+                let y = (*index / size as usize) as f32 + 0.5;
+                let ndc = [
+                    ((x / size as f32 - 0.5) * 2.0) / 0.85,
+                    ((y / size as f32 - 0.5) * 2.0) / 0.85,
+                ];
+                ndc[0] * ndc[0] + ndc[1] * ndc[1] > 1.0 && clear != cloudy
+            })
+            .count();
+        assert!(
+            changed_limb_pixels > 0,
+            "clouds must contribute outside the solid planet limb"
         );
     }
 

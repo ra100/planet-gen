@@ -19,10 +19,6 @@ struct Uniforms {
     pan_y: f32,
     cloud_coverage: f32,     // 0.0 = clear, 1.0 = overcast
     cloud_seed: f32,
-    cloud_altitude: f32,
-    cloud_type: f32,         // 0.0 = smooth stratus, 1.0 = puffy cumulus
-    storm_count: f32,        // 0-8 cyclone systems
-    storm_size: f32,         // storm radius multiplier
     night_lights: f32,       // 0.0 = pristine, 1.0 = urbanized
     star_color_temp: f32,    // 0.0 = blue, 0.5 = sun, 1.0 = red dwarf
     city_light_hue: f32,    // 0.0 = warm amber, 0.5 = white, 1.0 = cool blue
@@ -44,7 +40,7 @@ struct Uniforms {
     ring_outer: f32,       // ring outer radius
     ring_tilt: f32,        // ring plane tilt (radians)
     ring_opacity: f32,     // ring opacity (0-1)
-    _pad3: f32,
+    planet_radius_km: f32,
     _pad4: f32,
     _pad5: f32,
 }
@@ -53,7 +49,8 @@ struct Uniforms {
 @group(0) @binding(1) var height_tex: texture_cube<f32>;
 @group(0) @binding(2) var height_sampler: sampler;
 @group(0) @binding(3) var cloud_tex: texture_cube<f32>;
-@group(0) @binding(4) var weather_tex: texture_cube<f32>;
+@group(0) @binding(4) var weather_mass_tex: texture_cube<f32>;
+@group(0) @binding(5) var weather_geometry_tex: texture_cube<f32>;
 
 // Sample wind+continentality cubemap: RGBA = (wind.x, wind.y, wind.z, continentality)
 fn sample_wind_cont(dir: vec3<f32>) -> vec4<f32> {
@@ -226,6 +223,52 @@ fn ray_march_atmosphere(
     var result: ScatterResult;
     result.in_scatter = in_scatter * 25.0;
     result.transmittance = exp(-optical_depth);
+    return result;
+}
+
+fn ray_march_limb_clouds(
+    ndc: vec2<f32>,
+    z_start: f32,
+    z_end: f32,
+    sun_dir: vec3<f32>,
+) -> ScatterResult {
+    let steps = 8;
+    let step_len = (z_start - z_end) / f32(steps);
+    let radius_km = max(uniforms.planet_radius_km, 1.0);
+    let display_scale = cloud_display_scale();
+    var transmittance = 1.0;
+    var in_scatter = vec3<f32>(0.0);
+
+    for (var i = 0; i < steps; i++) {
+        let z = z_start - (f32(i) + 0.5) * step_len;
+        let pos = vec3<f32>(ndc, z);
+        let altitude_km = max((length(pos) - 1.0) * radius_km, 0.0);
+        let direction = normalize(pos);
+        let world = (uniforms.rotation * vec4<f32>(direction, 0.0)).xyz;
+        let density = (weather_density(world, altitude_km)
+            + weather_cirrus_density(world, altitude_km)) * display_scale;
+        if (density <= 0.001) { continue; }
+
+        let light_world = normalize(world + sun_dir * 0.025);
+        let light_density = (weather_density(light_world, altitude_km)
+            + weather_cirrus_density(light_world, altitude_km)) * display_scale;
+        let sun_facing = smooth_step(-0.05, 0.2, dot(direction, sun_dir));
+        let light_transmittance = exp(-light_density * 1.2);
+        let cloud_color = mix(
+            vec3<f32>(0.56, 0.60, 0.68),
+            vec3<f32>(1.0, 1.0, 0.98) * star_color(uniforms.star_color_temp),
+            light_transmittance * (sun_facing * 0.85 + 0.15),
+        );
+        let segment_transmittance = exp(-density * abs(step_len) * radius_km * 0.35);
+        let segment_alpha = 1.0 - segment_transmittance;
+        in_scatter += cloud_color * transmittance * segment_alpha;
+        transmittance *= segment_transmittance;
+        if (transmittance < 0.01) { break; }
+    }
+
+    var result: ScatterResult;
+    result.in_scatter = in_scatter;
+    result.transmittance = vec3<f32>(transmittance);
     return result;
 }
 
@@ -522,287 +565,6 @@ fn compute_moisture(sphere_pos: vec3<f32>, height: f32, season: f32) -> f32 {
     moisture *= pow(atm_p, -0.5);
 
     return clamp(moisture, 0.0, 400.0);
-}
-
-// ---- Cloud density (Schneider remap + domain-warped fBm) ----
-// Based on HZD/Quilez/Skybolt research. See docs/research/cloud-layer-rendering.md
-//
-// Key technique: climate controls the coverage THRESHOLD, not density amplitude.
-// This prevents latitude banding while keeping climate-correlated placement.
-
-fn cloud_remap(value: f32, old_min: f32, old_max: f32, new_min: f32, new_max: f32) -> f32 {
-    return new_min + (clamp(value, old_min, old_max) - old_min)
-           / max(old_max - old_min, 0.001) * (new_max - new_min);
-}
-
-fn compute_cloud_density(sphere_pos: vec3<f32>, height: f32) -> f32 {
-    let cov_slider = uniforms.cloud_coverage;
-    if (cov_slider <= 0.0) { return 0.0; }
-
-    // Global moisture scaling: less ocean or thinner atmosphere → fewer clouds.
-    // ocean_fraction already incorporates climate_moisture slider from CPU side.
-    let moisture_scale = 0.4 + 0.6 * uniforms.ocean_fraction; // 0.4 at no ocean → 1.0 at full ocean
-    let atm_scale = smooth_step(0.1, 0.5, uniforms.atm_pressure); // thin atm → fewer clouds
-    let coverage = pow(cov_slider, 0.8) * moisture_scale * atm_scale;
-
-    let s = uniforms.cloud_seed;
-    let seed_off = vec3<f32>(s, fract(s * 1.618) * 89.0, fract(s * 2.618) * 83.0);
-
-    // === Storm precomputation ===
-    let n_storms = i32(min(uniforms.storm_count, 8.0));
-    var sc_center: array<vec3<f32>, 8>;
-    var sc_d: array<f32, 8>;
-    var sc_ps: array<f32, 8>;
-    var sc_sign: array<f32, 8>;
-    var sc_slat: array<f32, 8>;
-    if (n_storms > 0) {
-        let ct_ax = cos(uniforms.axial_tilt_rad);
-        let st_ax = sin(uniforms.axial_tilt_rad);
-        for (var i = 0; i < 8; i++) {
-            if (i >= n_storms) { break; }
-            let fi = f32(i);
-            let slat = (30.0 + fract(sin(fi * 127.1 + s) * 43758.5) * 25.0) * 3.14159 / 180.0;
-            let slon = fract(sin(fi * 311.7 + s * 1.3) * 23421.6) * 6.28318;
-            let sy = select(-1.0, 1.0, i % 2 == 0);
-            let raw_c = vec3<f32>(cos(slat) * cos(slon), sin(slat) * sy, cos(slat) * sin(slon));
-            let center = normalize(vec3<f32>(raw_c.x, raw_c.y * ct_ax - raw_c.z * st_ax, raw_c.y * st_ax + raw_c.z * ct_ax));
-            sc_center[i] = center;
-            sc_d[i] = acos(clamp(dot(sphere_pos, center), -1.0, 1.0));
-            sc_ps[i] = 0.5 + fract(sin(fi * 73.1 + s * 0.7) * 19283.3) * 1.5;
-            sc_sign[i] = sy;
-            sc_slat[i] = slat;
-        }
-    }
-
-    // === Vortex warp for storms ===
-    var vortex_sphere = sphere_pos;
-    if (n_storms > 0) {
-        let ss2 = max(uniforms.storm_size * uniforms.storm_size, 0.1);
-        for (var i = 0; i < 8; i++) {
-            if (i >= n_storms) { break; }
-            let d = sc_d[i];
-            let ps = sc_ps[i];
-            let lat_tightness = mix(1.0, 1.5, smooth_step(15.0, 35.0, sc_slat[i] * 180.0 / 3.14159));
-            let influence = exp(-d * d * (18.0 + ps * 10.0) * lat_tightness / ss2);
-            let rotation_amount = influence * sc_sign[i] * (1.5 + ps * 0.5) / max(d * 6.0, 0.3);
-            vortex_sphere = normalize(vortex_sphere + cross(sc_center[i], sphere_pos) * rotation_amount * 0.02);
-        }
-    }
-
-    // === Cloud noise: ANISOTROPIC domain-warped fBm ===
-    // Domain warp is stretched along wind direction: cloud features elongate with wind.
-    // No coordinate displacement — the warp ITSELF is directionally biased.
-    let p = vortex_sphere * 7.0 + seed_off;
-    let warp_raw = vec3<f32>(
-        snoise(p * 0.5 + vec3<f32>(31.7, 0.0, 0.0)),
-        snoise(p * 0.5 + vec3<f32>(0.0, 47.3, 0.0)),
-        snoise(p * 0.5 + vec3<f32>(0.0, 0.0, 73.1))
-    ) * 0.30;
-
-    // When wind available: decompose warp into along-wind and cross-wind,
-    // then amplify along-wind and suppress cross-wind → anisotropic stretching.
-    // wind_strength uniform controls the effect: 0 = isotropic, 1 = strong stretching.
-    var warp = warp_raw;
-    if (uniforms.cloud_advection > 0.5 && uniforms.wind_strength > 0.01) {
-        let ws = uniforms.wind_strength;
-        let wind_t = sample_wind_tangent(sphere_pos);
-        let along_wind = dot(warp_raw, wind_t) * wind_t;
-        let cross_wind = warp_raw - along_wind;
-        let stretch = mix(1.0, 2.5, ws); // 1.0 at ws=0, 2.5 at ws=2
-        let compress = mix(1.0, 0.3, ws); // 1.0 at ws=0, 0.3 at ws=2
-        warp = along_wind * stretch + cross_wind * compress;
-    }
-    // Double domain warp (warp-the-warp): first warp creates large-scale flow,
-    // second warp adds smaller organic variation.
-    let pw = p + warp;
-    let warp2 = vec3<f32>(
-        snoise(pw * 0.7 + vec3<f32>(97.1, 0.0, 0.0)),
-        snoise(pw * 0.7 + vec3<f32>(0.0, 61.3, 0.0)),
-        snoise(pw * 0.7 + vec3<f32>(0.0, 0.0, 53.7))
-    ) * 0.20;
-    let pw2 = pw + warp2;
-
-    var noise_val = 0.0;
-    var freq = 1.0;
-    var amp = 1.0;
-    var amp_sum = 0.0;
-    for (var i = 0; i < 5; i++) {
-        let n = snoise(pw2 * freq);
-        noise_val += max(n, -0.1) * amp;
-        amp_sum += amp;
-        freq *= 2.1;
-        amp *= 0.46;
-    }
-    noise_val = noise_val / amp_sum * 0.5 + 0.5;
-
-    // High-freq cellular detail: abs(noise) creates subtle cell-ridge texture.
-    // ADDITIVE (not multiplicative) — brightens ridges, can't create dark holes.
-    let cell_hi = abs(snoise(pw2 * 4.0 + seed_off * 2.0)) * 0.06
-                + abs(snoise(pw2 * 7.0 + seed_off * 3.0)) * 0.03;
-    noise_val += cell_hi;
-
-    // === Weather systems: THREE scales for natural variety ===
-    // Huge (freq 0.4): hemisphere-sized high/low pressure zones
-    // Large (freq 1.0): continent-sized clear/cloudy regions
-    // Medium (freq 2.5): individual weather fronts
-    let weather_huge = snoise(vortex_sphere * 0.4 + seed_off * 0.2 + vec3<f32>(33.0, 0.0, 0.0));
-    let weather_large = snoise(vortex_sphere * 1.0 + seed_off * 0.3 + vec3<f32>(77.0, 0.0, 0.0));
-    let weather_med = snoise(vortex_sphere * 2.5 + seed_off * 0.5 + vec3<f32>(0.0, 77.0, 0.0));
-    let weather_mod = (weather_huge * 0.35 + weather_large * 0.40 + weather_med * 0.25) * 0.5 + 0.5;
-    noise_val *= (0.35 + 0.65 * weather_mod);
-
-    // === Coverage: latitude bands + slider ===
-    let tilt_c = uniforms.axial_tilt_rad;
-    let tilted_y_c = vortex_sphere.y * cos(tilt_c) + vortex_sphere.z * sin(tilt_c);
-    let cloud_lat_deg = abs(asin(clamp(tilted_y_c, -1.0, 1.0))) * 180.0 / 3.14159;
-
-    let cl_hadley = preview_hadley_top();
-    let cl_polar = preview_subpolar_lat();
-    let itcz = exp(-cloud_lat_deg * cloud_lat_deg / 150.0) * 0.15;
-    let subtropical = smooth_step(cl_hadley - 12.0, cl_hadley, cloud_lat_deg)
-                    * smooth_step(cl_hadley + 12.0, cl_hadley, cloud_lat_deg) * -0.08;
-    let midlat = smooth_step(cl_hadley, (cl_hadley + cl_polar) * 0.5, cloud_lat_deg)
-               * smooth_step(cl_polar + 5.0, cl_polar - 5.0, cloud_lat_deg) * 0.08;
-    let polar = smooth_step(55.0, 70.0, cloud_lat_deg) * 0.05;
-
-    // Base 0.85: at slider=1.0, coverage ~75-90%. Latitude modulates gently.
-    // The slider can override moisture scaling at high values for artistic control.
-    let slider_override = cov_slider * cov_slider; // quadratic: slider=1→1, slider=0.5→0.25
-    let effective_coverage = mix(coverage, cov_slider, slider_override * 0.3); // high slider partially bypasses moisture
-    var local_coverage = (0.85 + itcz + subtropical + midlat + polar) * effective_coverage;
-
-    // === Storm boost (uses precomputed centers) ===
-    var storm_boost = 0.0;
-    if (n_storms > 0) {
-        let ss2 = max(uniforms.storm_size * uniforms.storm_size, 0.1);
-        for (var i = 0; i < 8; i++) {
-            if (i >= n_storms) { break; }
-            let d = sc_d[i];
-            let ps = sc_ps[i];
-            let falloff = exp(-d * d * (18.0 + ps * 10.0) / ss2);
-            let eye_clear = smooth_step(0.02 / max(ps, 0.3), 0.05, d);
-            local_coverage += falloff * 0.7 * eye_clear;
-            storm_boost = max(storm_boost, falloff * 0.3);
-        }
-    }
-
-    local_coverage = clamp(local_coverage, 0.0, 1.0);
-
-    // Storm detail peaks
-    let storm_peaks = max(snoise(sphere_pos * 18.0 + seed_off) * 0.5
-                        + snoise(sphere_pos * 35.0 + seed_off * 1.3) * 0.3, 0.0) * storm_boost;
-    let varied_noise = clamp(noise_val + storm_peaks, 0.0, 1.0);
-
-    // === Schneider remap with soft edge sigmoid ===
-    let threshold = 1.0 - local_coverage;
-    var density = cloud_remap(varied_noise, threshold, 1.0, 0.0, 1.0) * local_coverage;
-    // Sigmoid softening: smooth_step near the threshold creates graduated opacity
-    // at cloud edges instead of the linear remap's abrupt cutoff.
-    let edge_soft = smooth_step(threshold - 0.06, threshold + 0.03, varied_noise) * 0.15 * local_coverage;
-    density = max(density, edge_soft);
-    density = pow(density, 0.92);
-
-    // === Step 6: Carve spiral arms + eye into density (uses precomputed centers) ===
-    if (n_storms > 0) {
-        let ss2 = max(uniforms.storm_size * uniforms.storm_size, 0.1);
-        for (var i = 0; i < 8; i++) {
-            if (i >= n_storms) { break; }
-            let fi = f32(i);
-            let center = sc_center[i];
-            let d = sc_d[i];
-            let sign_y = sc_sign[i];
-            let base_sigma = 22.0 + sc_ps[i] * 8.0; // slightly different falloff for spiral detail
-            let near_storm = exp(-d * d * base_sigma / ss2);
-
-            // Tangent-plane angle for spiral
-            let up_s = select(vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0, 1.0, 0.0), abs(center.y) < 0.9);
-            let tx = normalize(cross(up_s, center));
-            let ty = cross(center, tx);
-            let to_pt = sphere_pos - center * dot(sphere_pos, center);
-            let angle = atan2(dot(to_pt, ty), dot(to_pt, tx));
-
-            // Eye: clear center with high-detail noisy edge
-            let eye_r = (0.03 + fract(sin(fi * 53.7 + s * 0.3) * 31415.9) * 0.02) * uniforms.storm_size;
-            let eye_n1 = snoise(sphere_pos * 60.0 + seed_off + vec3<f32>(fi * 11.0, 0.0, 0.0));
-            let eye_n2 = snoise(sphere_pos * 120.0 + seed_off + vec3<f32>(fi * 23.0, 0.0, 0.0));
-            let eye_noise = (eye_n1 * 0.6 + eye_n2 * 0.4) * eye_r * 0.35;
-            let eye_mask = smooth_step((eye_r + eye_noise) * 0.25, (eye_r + eye_noise) * 1.3, d);
-
-            // Dense eye wall ring — thicker, more detailed
-            let wall_dist = abs(d - eye_r * 1.4);
-            let wall_noise = snoise(sphere_pos * 50.0 + vec3<f32>(fi * 31.0)) * eye_r * 0.15;
-            let eye_wall_boost = exp(-(wall_dist + wall_noise) * (wall_dist + wall_noise) / (eye_r * eye_r * 0.6)) * near_storm * 0.45;
-            density += eye_wall_boost;
-
-            // Spiral arms with TURBULENT edges (noise-perturbed angle)
-            let arm_noise = snoise(sphere_pos * 20.0 + seed_off + vec3<f32>(fi * 17.0, 0.0, 0.0));
-            let perturbed_angle = angle + arm_noise * 0.35; // turbulent arm edges
-            let spiral_phase = perturbed_angle * sign_y - log(max(d, 0.005)) * 3.0;
-            let spiral_raw = cos(spiral_phase * 2.0);
-            let spiral_fade = smooth_step(eye_r * 1.5, eye_r * 3.5, d);
-            // Cap vortex influence at minimum distance to prevent tails
-            let storm_fade2 = near_storm * smooth_step(0.0, 0.03, d); // no influence at d=0
-
-            // Dense textured cloud along spiral arms
-            let arm_tex = snoise(sphere_pos * 15.0 + seed_off + vec3<f32>(fi * 13.0, 0.0, 0.0)) * 0.3 + 0.7;
-            let arm_strength = pow(max(spiral_raw, 0.0), 1.5) * arm_tex; // sharper arm peaks
-            let arm_boost = arm_strength * storm_fade2 * spiral_fade * 0.45;
-            density += arm_boost;
-
-            // Softer gaps between arms (reduced contrast)
-            let gap_depth = storm_fade2 * spiral_fade * 0.60; // was 0.85, less aggressive
-            let arm_shape = spiral_raw * 0.5 + 0.5;
-            let spiral_mask = 1.0 - gap_depth * (1.0 - max(arm_shape, arm_tex * 0.4));
-
-            density *= mix(1.0, spiral_mask * eye_mask, near_storm);
-        }
-    }
-
-    return max(density, 0.0);
-}
-
-// High-altitude cirrus: thin ice-crystal wisps at jet stream altitudes.
-// Separate from main cloud layer — rendered at a higher shell.
-fn compute_cirrus_density(sphere_pos: vec3<f32>) -> f32 {
-    let cov = uniforms.cloud_coverage;
-    if (cov <= 0.0) { return 0.0; }
-
-    let s = uniforms.cloud_seed;
-    let seed_off = vec3<f32>(s, fract(s * 1.618) * 89.0, fract(s * 2.618) * 83.0);
-
-    let tilt = uniforms.axial_tilt_rad;
-    let tilted_y = sphere_pos.y * cos(tilt) + sphere_pos.z * sin(tilt);
-    let ci_lat = asin(clamp(tilted_y, -1.0, 1.0));
-    let lat_deg = abs(ci_lat) * 180.0 / 3.14159;
-
-    // Wind-aligned domain warp: cirrus streaks along jet stream direction.
-    // Uses sample_wind_tangent for wind direction → fibrous, streaky appearance.
-    let wind_t = sample_wind_tangent(sphere_pos);
-    let p_base = sphere_pos * 6.0 + seed_off + vec3<f32>(50.0, 30.0, 70.0);
-    // Anisotropic warp: stretch along wind for fibrous streaks
-    let ci_warp_raw = vec3<f32>(
-        snoise(p_base * 0.4 + vec3<f32>(17.3, 0.0, 0.0)),
-        snoise(p_base * 0.4 + vec3<f32>(0.0, 23.1, 0.0)),
-        snoise(p_base * 0.4 + vec3<f32>(0.0, 0.0, 31.7))
-    ) * 0.35;
-    let along = dot(ci_warp_raw, wind_t) * wind_t;
-    let across = ci_warp_raw - along;
-    let ci_warp = along * 2.0 + across * 0.5; // strong wind-aligned stretching
-    let p = p_base + ci_warp;
-
-    // 4-octave fibrous noise: abs() creates thin wispy filaments at zero crossings
-    let ci = abs(snoise(p)) * 0.4
-           + abs(snoise(p * 2.1 + vec3<f32>(3.7, 1.1, 8.3))) * 0.3
-           + snoise(p * 4.4 + vec3<f32>(1.3, 5.9, 2.1)) * 0.2
-           + snoise(p * 8.8 + vec3<f32>(7.1, 3.3, 1.7)) * 0.1;
-    let ci_norm = ci * 0.5 + 0.4; // offset to keep some density
-
-    // Cirrus common at mid-to-high latitudes (jet stream), rare at equator and poles
-    let lat_boost = smooth_step(20.0, 45.0, lat_deg) * smooth_step(75.0, 60.0, lat_deg) * 0.18;
-
-    let cirrus_cov = cov * 0.35 + lat_boost;
-    let density = cloud_remap(ci_norm, 1.0 - cirrus_cov, 1.0, 0.0, 1.0) * cirrus_cov;
-    return max(density, 0.0);
 }
 
 // Clean grayscale elevation — pure height visualization
@@ -1102,7 +864,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let atm_h = uniforms.atmosphere_height;
     let atm_radius = 1.0 + atm_h;
     let has_atm = uniforms.atmosphere_density > 0.001 && atm_h > 0.001;
-    let outer_r = select(1.005, atm_radius + 0.015, has_atm);
+    let limb_direction = (uniforms.rotation * vec4<f32>(normalize(vec3<f32>(ndc, 0.0001)), 0.0)).xyz;
+    let limb_geometry = textureSample(weather_geometry_tex, height_sampler, limb_direction);
+    let cloud_top_radius = 1.0 + limb_geometry.a / max(uniforms.planet_radius_km, 1.0);
+    let visible_cloud_top = select(1.0, cloud_top_radius, cloud_display_scale() > 0.0);
+    let outer_r = max(select(1.005, atm_radius + 0.015, has_atm), visible_cloud_top);
 
     // ---- Ring system: flat disc intersected by view ray ----
     // Ring sits in a tilted plane through the planet center.
@@ -1175,15 +941,22 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if (!hit_planet) {
         let bg = starfield(ndc, sun_dir, s_color);
         let bg_tm = bg / (bg + vec3<f32>(1.0));
-        if (!has_atm || uniforms.show_atmosphere_layer < 0.5 || uniforms.view_mode != 0u) {
+        if (uniforms.view_mode != 0u) {
             return vec4<f32>(bg_tm, 1.0);
         }
-        let z_atm = sqrt(max(atm_radius * atm_radius - r2, 0.0));
-        let scatter = ray_march_atmosphere(ndc, z_atm, -z_atm, sun_dir);
-        var ring_color = scatter.in_scatter;
-        ring_color = ring_color / (ring_color + vec3<f32>(1.0)); // tonemap
-        let edge = 1.0 - smooth_step(atm_radius - 0.015, atm_radius, sqrt(r2));
-        return vec4<f32>(mix(bg_tm, ring_color, edge), 1.0);
+        var limb_color = bg;
+        if (r2 < visible_cloud_top * visible_cloud_top) {
+            let z_cloud = sqrt(max(visible_cloud_top * visible_cloud_top - r2, 0.0));
+            let clouds = ray_march_limb_clouds(ndc, z_cloud, -z_cloud, sun_dir);
+            limb_color = limb_color * clouds.transmittance + clouds.in_scatter;
+        }
+        if (has_atm && uniforms.show_atmosphere_layer > 0.5) {
+            let z_atm = sqrt(max(atm_radius * atm_radius - r2, 0.0));
+            let atmosphere = ray_march_atmosphere(ndc, z_atm, -z_atm, sun_dir);
+            limb_color = limb_color * atmosphere.transmittance + atmosphere.in_scatter;
+        }
+        limb_color = limb_color / (limb_color + vec3<f32>(1.0));
+        return vec4<f32>(limb_color, 1.0);
     }
 
     // Planet surface hit
@@ -1455,7 +1228,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             }
             case 9u: {
                 // Cloud density visualization
-                let cd = compute_cloud_density(rotated, height);
+                let cd = weather_column_density(rotated);
                 debug_color = vec3<f32>(cd, cd, cd);
             }
             case 10u: {
@@ -1612,11 +1385,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var lit_color = ambient + (diffuse + specular) * n_dot_l * s_color;
 
     // Cloud shadow on surface (gated by show_clouds)
-    if (uniforms.show_clouds > 0.5 && uniforms.cloud_coverage > 0.001) {
+    if (cloud_display_scale() > 0.0) {
         let shadow_sample_pos = normalize(rotated + sun_dir * 0.015);
-        let shadow_sfc_h = textureSample(height_tex, height_sampler, shadow_sample_pos).r;
-        var cloud_above = compute_cloud_density(shadow_sample_pos, shadow_sfc_h);
-        let surface_shadow = exp(-cloud_above * 3.0);
+        let cloud_above = weather_column_density(shadow_sample_pos);
+        let surface_shadow = exp(-cloud_above * 2.5);
         lit_color *= mix(1.0, surface_shadow, 0.65);
     }
 
@@ -1678,7 +1450,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                     city_col = mix(white_led, cool_blue, (hue - 0.5) * 2.0);
                 }
                 // Dim lights under cloud cover
-                let cloud_above = compute_cloud_density(rotated, height);
+                let cloud_above = weather_column_density(rotated);
                 let cloud_block = exp(-cloud_above * 4.0); // thick clouds block most light
                 lit_color += city_col * light_intensity * 1.2 * cloud_block;
                 // Save glow for scatter through clouds
@@ -1689,22 +1461,27 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     // ---- Two-layer cloud rendering (gated by show_clouds) ----
-    if (uniforms.show_clouds > 0.5 && uniforms.cloud_coverage > 0.001) {
+    if (cloud_display_scale() > 0.0
+        && textureSample(weather_mass_tex, height_sampler, rotated).a > 0.0) {
         // === Low cloud layer (cumulus / stratus / weather systems) ===
-        let low_alt = max(uniforms.cloud_altitude, 0.01);
-        let low_r = 1.0 + low_alt;
-        let z_low = sqrt(max(low_r * low_r - r2, 0.0));
-        let low_dir = normalize(vec3<f32>(ndc.x, ndc.y, z_low));
-        let low_world = (uniforms.rotation * vec4<f32>(low_dir, 0.0)).xyz;
-
-        let low_sfc_h = textureSample(height_tex, height_sampler, low_world).r;
-        // Eight bounded vertical samples turn the weather layer into a shallow volume.
-        // ponytail: radial marching is sufficient for the current orthographic preview;
-        // replace with full camera-ray intersections when perspective navigation ships.
+        let geometry = textureSample(weather_geometry_tex, height_sampler, rotated);
+        let planet_radius_km = max(uniforms.planet_radius_km, 1.0);
+        let layer_top_km = max(geometry.g, geometry.b);
+        let cloud_base = max(geometry.r / planet_radius_km, 0.0001);
+        let cloud_depth = max((layer_top_km - geometry.r) / planet_radius_km, 0.0001);
+        var low_dir = normalize(vec3<f32>(ndc, 1.0));
+        var low_world = rotated;
         var low_density = 0.0;
         for (var step = 0u; step < 8u; step++) {
-            low_density += weather_density(low_world, (f32(step) + 0.5) / 8.0) / 8.0;
+            let height_fraction = (f32(step) + 0.5) / 8.0;
+            let altitude_km = mix(geometry.r, layer_top_km, height_fraction);
+            let sample_radius = 1.0 + cloud_base + cloud_depth * height_fraction;
+            let sample_z = sqrt(max(sample_radius * sample_radius - r2, 0.0));
+            low_dir = normalize(vec3<f32>(ndc.x, ndc.y, sample_z));
+            low_world = (uniforms.rotation * vec4<f32>(low_dir, 0.0)).xyz;
+            low_density += weather_density(low_world, altitude_km) / 8.0;
         }
+        low_density *= cloud_display_scale();
 
         if (low_density > 0.005) {
             // === Density-dependent Beer-Lambert ===
@@ -1712,24 +1489,20 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             // Medium clouds (0.3-0.6): natural opacity ramp
             // Thick clouds (d>0.6): opaque with strong self-shadow contrast
             let thin = smooth_step(0.0, 0.3, low_density);
-            let thickness = mix(1.5, 4.5, thin); // thin=1.5 (translucent), thick=4.5 (opaque)
-            let low_alpha = (1.0 - exp(-low_density * thickness)) * uniforms.cloud_opacity;
+            let thickness = mix(0.9, 2.6, thin) * clamp((layer_top_km - geometry.r) / 2.0, 0.5, 1.2);
+            let low_alpha = 1.0 - exp(-low_density * thickness);
 
-            // Self-shadowing: density-dependent strength
-            // Thin clouds: weak shadow (they're translucent). Thick clouds: strong shadow contrast.
-            let sh_near = normalize(low_world + sun_dir * 0.025);
-            let sh_far = normalize(low_world + sun_dir * 0.06);
-            let sh_near_h = textureSample(height_tex, height_sampler, sh_near).r;
-            let sh_far_h = textureSample(height_tex, height_sampler, sh_far).r;
-            let sd_near = compute_cloud_density(sh_near, sh_near_h);
-            let sd_far = compute_cloud_density(sh_far, sh_far_h);
-            let shadow_strength = mix(1.0, 3.5, thin); // thin: weak, thick: strong
-            let shadow = exp(-(sd_near + sd_far) * shadow_strength);
+            let light_sample = normalize(low_world + sun_dir * 0.035);
+            let light_density = weather_density(light_sample, mix(geometry.r, layer_top_km, 0.65))
+                * cloud_display_scale();
+            let transmittance = exp(-light_density * mix(0.6, 1.4, thin));
+            let billow_light = clamp(0.55 + (low_density - light_density) * 2.2, 0.2, 1.0);
+            let shadow = transmittance * 0.55 + billow_light * 0.45;
 
             // Cloud color varies with density:
             // Thin → bright, translucent white. Thick → deeper shadow contrast.
             let lit_cloud = vec3<f32>(1.0, 1.0, 0.98) * s_color;
-            let shadow_cloud = mix(vec3<f32>(0.65, 0.67, 0.72), vec3<f32>(0.45, 0.48, 0.58), thin);
+            let shadow_cloud = mix(vec3<f32>(0.76, 0.78, 0.82), vec3<f32>(0.60, 0.64, 0.72), thin);
             var low_color = mix(shadow_cloud, lit_cloud, shadow);
             let base_darken = 1.0 - low_density * 0.18;
             low_color *= base_darken;
@@ -1757,17 +1530,19 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
 
         // === High cloud layer (cirrus — thin, icy, translucent) ===
-        let high_alt = low_alt * 3.0; // cirrus at ~3x the low cloud altitude
+        let high_base_km = max(geometry.b, geometry.a - 3.0);
+        let high_alt_km = mix(high_base_km, geometry.a, 0.6);
+        let high_alt = max(high_alt_km / planet_radius_km, 0.003);
         let high_r = 1.0 + high_alt;
         let z_high = sqrt(max(high_r * high_r - r2, 0.0));
         let high_dir = normalize(vec3<f32>(ndc.x, ndc.y, z_high));
         let high_world = (uniforms.rotation * vec4<f32>(high_dir, 0.0)).xyz;
 
-        let cirrus_density = weather_cirrus_density(high_world);
+        let cirrus_density = weather_cirrus_density(high_world, high_alt_km) * cloud_display_scale();
 
         if (cirrus_density > 0.01) {
             // Cirrus: much thinner optical depth, more translucent
-            let ci_alpha = (1.0 - exp(-cirrus_density * 2.0)) * uniforms.cloud_opacity;
+            let ci_alpha = 1.0 - exp(-cirrus_density * 2.0);
 
             // Cirrus color: ice-white, less self-shadowing (thin layer)
             let ci_sun = max(dot(high_dir, sun_dir), 0.0);
