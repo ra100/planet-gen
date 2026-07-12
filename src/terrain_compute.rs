@@ -1407,7 +1407,8 @@ impl WindFieldPipeline {
                 format: wgpu::TextureFormat::Rgba16Float,
                 usage: wgpu::TextureUsages::STORAGE_BINDING
                     | wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::COPY_SRC,
+                    | wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             })
         };
@@ -1434,6 +1435,64 @@ impl WindFieldPipeline {
             _pressure: pressure,
             resolution,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn create_test_textures(
+        &self,
+        gpu: &GpuContext,
+        resolution: u32,
+        field: impl Fn([f32; 3]) -> ([f32; 4], f32),
+    ) -> DynamicsTextures {
+        let textures = self.create_textures(gpu, resolution);
+        for face in 0..6 {
+            let mut wind = Vec::with_capacity((resolution * resolution * 4) as usize);
+            let mut pressure = Vec::with_capacity((resolution * resolution * 4) as usize);
+            for y in 0..resolution {
+                for x in 0..resolution {
+                    let pos = crate::cube_sphere::cube_to_sphere(
+                        face,
+                        x as f32 / (resolution - 1) as f32,
+                        y as f32 / (resolution - 1) as f32,
+                    );
+                    let (wind_value, pressure_value) = field(pos);
+                    wind.extend(wind_value.map(|value| half::f16::from_f32(value).to_bits()));
+                    pressure.extend(
+                        [pressure_value, 0.0, 0.0, 0.0]
+                            .map(|value| half::f16::from_f32(value).to_bits()),
+                    );
+                }
+            }
+            for (texture, data) in [
+                (&textures._wind_continentality, &wind),
+                (&textures._pressure, &pressure),
+            ] {
+                gpu.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d {
+                            x: 0,
+                            y: 0,
+                            z: face,
+                        },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    bytemuck::cast_slice(data),
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(resolution * 8),
+                        rows_per_image: Some(resolution),
+                    },
+                    wgpu::Extent3d {
+                        width: resolution,
+                        height: resolution,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
+        }
+        textures
     }
 
     fn dispatch_mode(
