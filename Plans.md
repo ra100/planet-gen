@@ -84,6 +84,28 @@ Plan: [docs/plans/2026-04-07-terrain-aware-wind.md](docs/plans/2026-04-07-terrai
 
 ---
 
+## Phase 5.23: Shallow Volumetric Clouds
+
+Plan: [docs/plans/2026-07-10-001-feat-shallow-volumetric-clouds-plan.md](docs/plans/2026-07-10-001-feat-shallow-volumetric-clouds-plan.md)
+
+| Unit | 内容 | Status |
+|------|------|--------|
+| U8 | Dependency migration baseline | cc:完了 [929bfed] |
+| U1 | Unified GPU presentation | cc:完了 [c201739] |
+| U2 | GPU-resident dynamics textures | cc:完了 [929bfed] |
+| U9 | Diagnostic cloud mass and geometry | cc:完了 [e239a13] (test support [6daff58]) |
+| U10 | Atomic expanded weather fields | cc:完了 [e239a13] (test support [6daff58]) |
+| U13 | Broad cloud-family density | cc:完了 [e239a13] (test support [6daff58]) |
+| U3 | Shared shallow-volume density and ray marching | cc:TODO |
+| U12 | Conditional moisture spin-up (only if the baseline gate fails) | cc:TODO |
+| U4 | Cloud lighting and surface shadows | cc:TODO |
+| U5 | Preview/export parity and channels | cc:TODO |
+| U6 | Visual, seam, and parity validation | cc:TODO |
+| U11 | Performance, latency, and stress validation | cc:TODO |
+| U7 | Remove superseded paths and document | cc:TODO |
+
+---
+
 ## Phase 7: Blender Importer Addon
 
 Pure-Python Blender addon that imports generated textures and sets up materials.
