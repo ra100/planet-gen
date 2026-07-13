@@ -97,7 +97,7 @@ Plan: [docs/plans/2026-07-10-001-feat-shallow-volumetric-clouds-plan.md](docs/pl
 | U10 | Atomic expanded weather fields | cc:完了 [e239a13] (test support [6daff58]) |
 | U13 | Broad existing cloud-family density | cc:完了 [e239a13] (test support [6daff58]) |
 | U12 | Activated moisture spin-up | cc:完了 [d9e9e29] (always-on bounded 128²/16-pass spin-up; transport diagnostic verified 1.6688% total drift and +0.0070 downwind condensate-centroid redistribution) |
-| U14 | Marine forcing integrated into spin-up and regime diagnosis | cc:TODO |
+| U14 | Marine forcing integrated into spin-up and regime diagnosis | cc:完了 [07f4e5d] (marine decks/trade cumulus, coast continuity, coverage response, and seams validated) |
 | U15 | Weather wind-scale and convective/anvil organization | cc:TODO |
 | U3 | Shared shallow-volume density and ray marching | cc:TODO |
 | U4 | Cloud lighting and surface shadows | cc:TODO (independent shadow toggle is partial plumbing only; one-sample 2.5 extinction/0.65 blend remains unchanged, with projected soft shadows and low-sun AE4 deferred) |
