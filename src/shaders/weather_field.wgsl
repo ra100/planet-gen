@@ -13,7 +13,7 @@ struct WeatherSnapshot {
     storm_size: f32,
     radius_km: f32,
     rotation_rate_rad_s: f32,
-    _pad0: f32,
+    wind_scale: f32,
 }
 
 @group(0) @binding(0) var<uniform> params: WeatherSnapshot;
@@ -75,6 +75,35 @@ fn temperature_at(pos: vec3<f32>) -> f32 {
         - elevation_km * 6.5 + continentality * season_shift * 5.0;
 }
 
+fn convective_catalyst(pos: vec3<f32>) -> f32 {
+    let active_count = min(params.storm_count, 8u);
+    let radius = mix(0.055, 0.16, clamp((params.storm_size - 0.3) / 2.7, 0.0, 1.0));
+    var response = 0.0;
+    for (var index = 0u; index < active_count; index++) {
+        let rank = f32(reverseBits(index) >> 29u);
+        let z = 1.0 - 2.0 * (rank + 0.5) / 8.0;
+        let phase = f32(params.seed & 0xffffu) / 65536.0 * 6.2831853;
+        let angle = rank * 2.3999632 + phase;
+        let base = vec3<f32>(sqrt(max(1.0 - z * z, 0.0)) * cos(angle), z, sqrt(max(1.0 - z * z, 0.0)) * sin(angle));
+        let basis = tangent_basis(base);
+        let jitter = (noise_seed_offset(params.seed, 201u + index).xy * 2.0 - 1.0) * 0.12;
+        let center = normalize(base + basis[0] * jitter.x + basis[1] * jitter.y);
+        let wind = textureSampleLevel(wind_tex, weather_sampler, center, 0.0).xyz;
+        let tangent_wind = wind - center * dot(wind, center);
+        let along = normalize(tangent_wind + basis[0] * 0.0001);
+        let across = normalize(cross(center, along));
+        let delta = pos - center * dot(pos, center);
+        let warp_a = snoise(pos * 19.0 + noise_seed_offset(params.seed, 301u));
+        let warp_b = snoise(pos * 37.0 + noise_seed_offset(params.seed, 302u));
+        let major = radius * 1.45 * (1.0 + warp_a * 0.13);
+        let minor = radius * 0.78 * (1.0 + warp_b * 0.13);
+        let ellipse = pow(dot(delta, along) / max(major, 0.001), 2.0)
+            + pow(dot(delta, across) / max(minor, 0.001), 2.0);
+        response = max(response, smooth_step(1.0, 0.62, ellipse));
+    }
+    return response;
+}
+
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let res = params.resolution;
@@ -84,7 +113,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let wind = textureSampleLevel(wind_tex, weather_sampler, pos, 0.0);
     let pressure = textureSampleLevel(pressure_tex, weather_sampler, pos, 0.0).r;
     let height = sample_height(pos);
-    let wind_tangent = wind.xyz - pos * dot(wind.xyz, pos);
+    let wind_tangent = (wind.xyz - pos * dot(wind.xyz, pos)) * params.wind_scale;
     let wind_speed = length(wind_tangent);
     let wind_dir = wind_tangent / max(wind_speed, 0.0001);
     let basis = tangent_basis(pos);
@@ -95,10 +124,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let west_pos = normalize(pos - east * diagnostic_step);
     let north_pos = normalize(pos + north * diagnostic_step);
     let south_pos = normalize(pos - north * diagnostic_step);
-    let east_wind = textureSampleLevel(wind_tex, weather_sampler, east_pos, 0.0).xyz;
-    let west_wind = textureSampleLevel(wind_tex, weather_sampler, west_pos, 0.0).xyz;
-    let north_wind = textureSampleLevel(wind_tex, weather_sampler, north_pos, 0.0).xyz;
-    let south_wind = textureSampleLevel(wind_tex, weather_sampler, south_pos, 0.0).xyz;
+    let east_wind = textureSampleLevel(wind_tex, weather_sampler, east_pos, 0.0).xyz * params.wind_scale;
+    let west_wind = textureSampleLevel(wind_tex, weather_sampler, west_pos, 0.0).xyz * params.wind_scale;
+    let north_wind = textureSampleLevel(wind_tex, weather_sampler, north_pos, 0.0).xyz * params.wind_scale;
+    let south_wind = textureSampleLevel(wind_tex, weather_sampler, south_pos, 0.0).xyz * params.wind_scale;
     let divergence = (dot(east_wind - west_wind, east) + dot(north_wind - south_wind, north))
         / (2.0 * diagnostic_step);
     let convergence = clamp(-divergence * 0.2, -1.0, 1.0);
@@ -112,10 +141,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         sample_height(normalize(pos + wind_dir * terrain_step))
             + sample_height(normalize(pos + wind_dir * terrain_step * 2.0))
     ) * 0.5;
-    let terrain_gradient = downwind_height - upwind_height;
-    let terrain_wind = smooth_step(0.03, 0.2, wind_speed);
-    let terrain_lift = smooth_step(0.005, 0.08, terrain_gradient) * terrain_wind;
-    let rain_shadow = smooth_step(0.005, 0.08, -terrain_gradient) * terrain_wind;
+    let terrain_response = (downwind_height - upwind_height)
+        * smooth_step(0.03, 0.2, wind_speed);
+    let terrain_lift = smooth_step(0.005, 0.08, terrain_response);
+    let rain_shadow = smooth_step(0.005, 0.08, -terrain_response);
     let latitude = physical_latitude(pos);
     let temperature = temperature_at(pos);
     let thermal = smooth_step(-25.0, 30.0, temperature);
@@ -138,7 +167,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let temperature_gradient = length(temperature_delta);
     let frontal_alignment = dot(pressure_delta, temperature_delta)
         / max(pressure_gradient * temperature_gradient, 0.0001);
-    let frontal_side = smooth_step(-0.45, 0.45, -frontal_alignment);
+    let frontal_side = smooth_step(-0.45, 0.45, frontal_alignment);
     let rotation_ratio = clamp(abs(params.rotation_rate_rad_s) / 0.00007292116, 0.1, 4.0);
     let coriolis = smooth_step(0.02, 0.35, latitude * rotation_ratio);
     let frontal = smooth_step(2.0, 12.0, pressure_gradient)
@@ -179,20 +208,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let deep_trigger = clamp(convergent_lift * 0.75 + orographic_eligibility * 0.45
         + frontal_eligibility * 0.35, 0.0, 1.0);
     let storm_potential = moisture * instability * deep_trigger;
-    let storm_radius = clamp(params.storm_size, 0.3, 3.0) * 0.16;
-    var storm_locality = 0.0;
-    for (var storm = 0u; storm < min(params.storm_count, 8u); storm++) {
-        let center = normalize(noise_seed_offset(params.seed, 100u + storm) - vec3<f32>(50.0));
-        storm_locality = max(
-            storm_locality,
-            smooth_step(cos(storm_radius), cos(storm_radius * 0.45), dot(pos, center)),
-        );
-    }
-    let deep_eligibility = clamp(
-        storm_potential * (1.0 + storm_locality * 3.0),
-        0.0,
-        1.0,
-    );
+    // U15 applies deterministic catalysts during spin-up, not in this baseline pass.
+    let deep_eligibility = storm_potential;
     let high_eligibility = moisture
         * clamp(frontal_eligibility * 0.65 + deep_eligibility * 0.7, 0.0, 1.0);
     let physical_eligibility = max(max(low_eligibility, deep_eligibility), high_eligibility);
@@ -249,21 +266,21 @@ fn diagnose(@builtin(global_invocation_id) id: vec3<u32>) {
     let wind = textureSampleLevel(wind_tex, weather_sampler, pos, 0.0);
     let continentality = clamp(wind.a, 0.0, 1.0);
     let marine_fraction = 1.0 - smooth_step(0.15, 0.85, continentality);
+    let terrain_land_boost = smooth_step(0.90, 0.99, continentality);
     let thermal = smooth_step(-25.0, 30.0, temperature_at(pos));
     let marine_stability = marine_fraction * smooth_step(0.05, 0.8, 1.0 - thermal);
     let trade_cumulus = marine_fraction * thermal * (1.0 - marine_stability);
     let state = textureSampleLevel(spinup_state, weather_sampler, pos, 0.0);
 
-    let wind_tangent = wind.xyz - pos * dot(wind.xyz, pos);
+    let wind_tangent = (wind.xyz - pos * dot(wind.xyz, pos)) * params.wind_scale;
     let wind_speed = length(wind_tangent);
     let wind_dir = wind_tangent / max(wind_speed, 0.0001);
     let terrain_step = clamp(300.0 / max(params.radius_km, 1.0), 0.02, 0.08);
-    let terrain_gradient = sample_height(normalize(pos + wind_dir * terrain_step * 1.5))
+    let terrain_response = sample_height(normalize(pos + wind_dir * terrain_step * 1.5))
         - sample_height(normalize(pos - wind_dir * terrain_step * 1.5));
-    let terrain_lift = smooth_step(0.005, 0.08, terrain_gradient)
-        * smooth_step(0.03, 0.2, wind_speed);
-    let rain_shadow = smooth_step(0.005, 0.08, -terrain_gradient)
-        * smooth_step(0.03, 0.2, wind_speed);
+    let terrain_wind = smooth_step(0.03, 0.2, wind_speed);
+    let terrain_lift = smooth_step(0.005, 0.08, terrain_response) * terrain_wind;
+    let rain_shadow = smooth_step(0.005, 0.08, -terrain_response) * terrain_wind;
 
     // Erosion shapes existing warm trade mass; it never creates an occupancy threshold.
     let trade_erosion = 0.05 + 0.95 * smooth_step(
@@ -291,12 +308,18 @@ fn diagnose(@builtin(global_invocation_id) id: vec3<u32>) {
     let trade_low_source = trade_cumulus * state.x * trade_erosion * 0.6 * warm_trade_source;
     let low = soft_bound(
         state.y * detail_erosion * seed_erosion
-            * mix(1.8 + terrain_lift * 3.0 - rain_shadow * 1.2, marine_low_factor, marine_fraction)
+            * mix(
+                1.8 + terrain_lift * (3.0 + terrain_land_boost * 1.5)
+                    - rain_shadow * (1.2 + terrain_land_boost * 0.6),
+                marine_low_factor,
+                marine_fraction,
+            )
             * mix(1.0, trade_erosion, trade_cumulus)
             + inland_low_source
             + marine_deck_source
             + trade_low_source
-            + terrain_lift * clamp(params.moisture, 0.0, 1.0) * clamp(params.coverage, 0.0, 1.0) * 1.35,
+            + terrain_lift * clamp(params.moisture, 0.0, 1.0) * clamp(params.coverage, 0.0, 1.0)
+                * (1.35 + terrain_land_boost * 0.65),
         1.0,
     );
     let deep = soft_bound(
@@ -304,8 +327,64 @@ fn diagnose(@builtin(global_invocation_id) id: vec3<u32>) {
             + marine_stability * state.x * 0.065,
         1.0 - low,
     );
-    let occupancy = clamp(low + deep, 0.0, 1.0);
-    let high = clamp(state.w * (1.0 - marine_stability * 0.4), 0.0, occupancy);
+    // This is a diagnostic down-direction from the available pressure wind,
+    // not a vertical-wind or upper-divergence model.
+    let anvil_step = params.wind_scale * clamp(600.0 / max(params.radius_km, 1.0), 0.02, 0.10);
+    let anvil_near = textureSampleLevel(
+        spinup_state,
+        weather_sampler,
+        normalize(pos - wind_dir * anvil_step),
+        0.0,
+    );
+    let anvil_far = textureSampleLevel(
+        spinup_state,
+        weather_sampler,
+        normalize(pos - wind_dir * anvil_step * 2.2),
+        0.0,
+    );
+    let lateral = normalize(cross(pos, wind_dir) + tangent_basis(pos)[0] * 0.0001);
+    let anvil_spread = anvil_step * 0.08;
+    let anvil_left = textureSampleLevel(
+        spinup_state,
+        weather_sampler,
+        normalize(pos - wind_dir * anvil_step + lateral * anvil_spread),
+        0.0,
+    );
+    let anvil_right = textureSampleLevel(
+        spinup_state,
+        weather_sampler,
+        normalize(pos - wind_dir * anvil_step - lateral * anvil_spread),
+        0.0,
+    );
+    // U14 frontal/local high remains bounded by occupied low/deep mass. Only
+    // the catalyst-supported anvil can extend beyond a deep response core.
+    let frontal_high = min(
+        clamp(state.w * (1.0 - marine_stability * 0.4), 0.0, 1.0),
+        max(low, deep),
+    );
+    let deep_support = max(
+        anvil_near.z,
+        max(anvil_far.z, max(anvil_left.z, anvil_right.z)),
+    );
+    let upstream_catalyst = max(
+        convective_catalyst(normalize(pos - wind_dir * anvil_step)),
+        max(
+            convective_catalyst(normalize(pos - wind_dir * anvil_step * 2.2)),
+            max(
+                convective_catalyst(normalize(pos - wind_dir * anvil_step + lateral * anvil_spread)),
+                convective_catalyst(normalize(pos - wind_dir * anvil_step - lateral * anvil_spread)),
+            ),
+        ),
+    );
+    let spread_high = anvil_near.w * 0.62 + anvil_far.w * 0.22
+        + (anvil_left.w + anvil_right.w) * 0.01
+        + anvil_near.z * 0.42 + anvil_far.z * 0.16
+        + (anvil_left.z + anvil_right.z) * 0.01;
+    let anvil_high = spread_high * smooth_step(0.02, 0.08, deep_support)
+        * smooth_step(0.08, 0.35, upstream_catalyst)
+        * (1.0 - marine_stability * 0.4);
+    let high = clamp(max(frontal_high, anvil_high), 0.0, 1.0);
+    let occupancy = max(low, max(deep, high));
 
     let deck_base_km = 0.35 + (1.0 - marine_stability) * 0.2;
     let deck_thickness_km = 0.3 + 0.9 * (1.0 - thermal) * marine_fraction;
@@ -316,7 +395,13 @@ fn diagnose(@builtin(global_invocation_id) id: vec3<u32>) {
         mix(base_altitude_km + deck_thickness_km, trade_top_km, trade_cumulus),
         marine_fraction,
     );
-    let deep_top_km = max(low_top_km, low_top_km + 2.0 + state.z * 8.0);
+    let storm_size_response = clamp((params.storm_size - 0.3) / 2.7, 0.0, 1.0);
+    let deep_top_km = max(
+        low_top_km,
+        low_top_km + 2.0 + state.z * 8.0
+            + smooth_step(0.15, 0.30, deep) * convective_catalyst(pos)
+                * (2.5 + storm_size_response * 2.2),
+    );
     let high_top_km = max(deep_top_km, 8.0 + thermal * 8.0);
     textureStore(mass_tex, vec2<i32>(id.xy), i32(params.face), vec4<f32>(low, deep, high, occupancy));
     textureStore(geometry_tex, vec2<i32>(id.xy), i32(params.face), vec4<f32>(base_altitude_km, low_top_km, deep_top_km, high_top_km));

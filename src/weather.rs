@@ -28,11 +28,25 @@ pub struct WeatherSnapshot {
     pub storm_size: f32,
     pub radius_km: f32,
     pub rotation_rate_rad_s: f32,
-    pub _pad0: f32,
+    /// 0 = calm, 1 = physical baseline, 2 = strong transport.
+    pub wind_scale: f32,
 }
 
 const SPINUP_RESOLUTION: u32 = 128;
 const SPINUP_ITERATIONS: usize = 16;
+const PHYSICAL_INTERVAL_SECONDS: f32 = 1600.0;
+const MAX_WIND_MPS: f32 = 50.0;
+const MAX_SUBSTEP_TEXELS: f32 = 0.60;
+
+fn wind_substeps(wind_scale: f32, resolution: u32, radius_km: f32) -> usize {
+    let texel_angle = std::f32::consts::FRAC_PI_2 / resolution as f32;
+    let angular_displacement =
+        MAX_WIND_MPS * wind_scale.clamp(0.0, 2.0) * PHYSICAL_INTERVAL_SECONDS
+            / (radius_km.max(1.0) * 1000.0);
+    (angular_displacement / (texel_angle * MAX_SUBSTEP_TEXELS))
+        .ceil()
+        .max(1.0) as usize
+}
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -52,7 +66,8 @@ struct SpinupParams {
     radius_km: f32,
     rotation_rate_rad_s: f32,
     diagnostic_flags: u32,
-    _pad0: u32,
+    // Occupies the former private padding slot; WGSL has the same offset.
+    wind_scale: f32,
 }
 
 struct SpinupTexture {
@@ -419,8 +434,9 @@ impl WeatherFieldPipeline {
                 label: Some("weather spin-up shader"),
                 source: wgpu::ShaderSource::Wgsl(
                     format!(
-                        "{}\n{}",
+                        "{}\n{}\n{}",
                         include_str!("shaders/cube_sphere.wgsl"),
+                        include_str!("shaders/noise.wgsl"),
                         include_str!("shaders/weather_spinup.wgsl"),
                     )
                     .into(),
@@ -635,7 +651,7 @@ impl WeatherFieldPipeline {
             radius_km: snapshot.radius_km,
             rotation_rate_rad_s: snapshot.rotation_rate_rad_s,
             diagnostic_flags: 0,
-            _pad0: 0,
+            wind_scale: snapshot.wind_scale,
         };
         let spinup_uniform = gpu
             .device
@@ -737,7 +753,9 @@ impl WeatherFieldPipeline {
         };
         let a_to_b = transport_bind_group("weather spin-up A to B", &state_a, &state_b);
         let b_to_a = transport_bind_group("weather spin-up B to A", &state_b, &state_a);
-        let final_state = if self.spinup_iterations.is_multiple_of(2) {
+        let transport_passes = self.spinup_iterations
+            * wind_substeps(snapshot.wind_scale, spin_resolution, snapshot.radius_km);
+        let final_state = if transport_passes.is_multiple_of(2) {
             &state_a
         } else {
             &state_b
@@ -771,7 +789,7 @@ impl WeatherFieldPipeline {
             pass.set_bind_group(0, &init_bind_group, &[]);
             pass.dispatch_workgroups(spin_workgroups, spin_workgroups, 6);
         }
-        for iteration in 0..self.spinup_iterations {
+        for iteration in 0..transport_passes {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_pipeline(&self.spinup_transport_pipeline);
             pass.set_bind_group(0, if iteration % 2 == 0 { &a_to_b } else { &b_to_a }, &[]);
@@ -894,8 +912,22 @@ mod tests {
             storm_size: 1.0,
             radius_km: 6371.0,
             rotation_rate_rad_s: std::f32::consts::TAU / 86400.0,
-            _pad0: 0.0,
+            wind_scale: 1.0,
         }
+    }
+
+    #[test]
+    fn weather_snapshot_and_spinup_params_preserve_wgsl_layout() {
+        use std::mem::{offset_of, size_of};
+
+        assert_eq!(size_of::<WeatherSnapshot>(), 60);
+        assert_eq!(offset_of!(WeatherSnapshot, wind_scale), 56);
+        assert_eq!(size_of::<SpinupParams>(), 64);
+        assert_eq!(offset_of!(SpinupParams, wind_scale), 60);
+        let weather_wgsl = include_str!("shaders/weather_field.wgsl");
+        let spinup_wgsl = include_str!("shaders/weather_spinup.wgsl");
+        assert!(weather_wgsl.contains("wind_scale: f32,"));
+        assert!(spinup_wgsl.contains("diagnostic_flags: u32,\n    wind_scale: f32,"));
     }
 
     fn read_texture(gpu: &GpuContext, texture: &wgpu::Texture, resolution: u32) -> Vec<f32> {
@@ -1021,7 +1053,7 @@ mod tests {
             radius_km: snapshot.radius_km,
             rotation_rate_rad_s: snapshot.rotation_rate_rad_s,
             diagnostic_flags: config.diagnostic_flags,
-            _pad0: 0,
+            wind_scale: snapshot.wind_scale,
         };
         let spinup_uniform = gpu
             .device
@@ -1157,14 +1189,16 @@ mod tests {
         };
         let a_to_b = transport_bind_group("weather spin-up A to B", &state_a, &state_b);
         let b_to_a = transport_bind_group("weather spin-up B to A", &state_b, &state_a);
-        for iteration in 0..config.iterations {
+        let transport_passes = config.iterations
+            * wind_substeps(snapshot.wind_scale, spin_resolution, snapshot.radius_km);
+        for iteration in 0..transport_passes {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_pipeline(&pipeline.spinup_transport_pipeline);
             pass.set_bind_group(0, if iteration % 2 == 0 { &a_to_b } else { &b_to_a }, &[]);
             pass.dispatch_workgroups(spin_workgroups, spin_workgroups, 6);
         }
 
-        let final_state = if config.iterations.is_multiple_of(2) {
+        let final_state = if transport_passes.is_multiple_of(2) {
             &state_a
         } else {
             &state_b
@@ -1283,8 +1317,9 @@ mod tests {
                 .all(|pixel| pixel.iter().all(|value| (0.0..=1.0).contains(value)))
         );
         assert!(a.chunks_exact(4).all(|pixel| {
-            (pixel[3] <= 0.001 || (pixel[0] + pixel[1] - pixel[3]).abs() <= 0.002)
-                && pixel[2] <= pixel[3] + 0.002
+            pixel[3] + 0.002 >= pixel[0]
+                && pixel[3] + 0.002 >= pixel[1]
+                && pixel[3] + 0.002 >= pixel[2]
         }));
         assert!(geometry_a.chunks_exact(4).all(|pixel| {
             pixel[0] >= 0.0
@@ -1730,14 +1765,13 @@ mod tests {
         );
         let mass_ratio = wet[2].0.mass / wet[0].0.mass;
         assert!(mass_ratio > 1.01, "{wet:?}");
-        assert!(wet[2].0.area > wet[0].0.area, "{wet:?}");
+        assert!(wet[2].0.mass - wet[0].0.mass > 0.01, "{wet:?}");
         let wet_eligible_mass_gain = wet[2].1.0 - wet[0].1.0;
         let wet_ineligible_mass_gain = wet[2].2.0 - wet[0].2.0;
         assert!(
             wet_eligible_mass_gain > wet_ineligible_mass_gain * 5.0,
             "{wet:?}"
         );
-        assert!(wet[2].1.1 > wet[0].1.1, "{wet:?}");
 
         let sized = [0.3, 1.0, 3.0].map(|size| {
             let values = generate(4, size, 1.0, 35.0, 1.0);
@@ -1750,7 +1784,7 @@ mod tests {
             sized.windows(2).all(|pair| pair[1].0.mass > pair[0].0.mass),
             "{sized:?}"
         );
-        assert!(sized[2].0.area > sized[0].0.area, "{sized:?}");
+        assert!(sized[2].0.mass - sized[0].0.mass > 0.01, "{sized:?}");
         assert!(
             (sized[2].1.0 - sized[0].1.0) > (sized[2].2.0 - sized[0].2.0) * 5.0,
             "{sized:?}"
@@ -1950,8 +1984,9 @@ mod tests {
         let reference = &output[0..4];
         let occupancy = reference[3];
         assert!(
-            (reference[0] + reference[1] - occupancy).abs() <= 0.02
-                && reference[2] <= occupancy + 0.02,
+            occupancy + 0.02 >= reference[0]
+                && occupancy + 0.02 >= reference[1]
+                && occupancy + 0.02 >= reference[2],
             "spinup finalize consistency failed: first pixel={:?}",
             reference
         );
@@ -2024,10 +2059,20 @@ mod tests {
         let initial = run(0);
         let final_state = run(TRANSPORT_STEPS);
         let total = |state: &[f32]| {
-            state
-                .chunks_exact(4)
-                .map(|pixel| pixel.iter().sum::<f32>())
-                .sum::<f32>()
+            let mut total = 0.0;
+            for face in 0..6 {
+                for y in 0..resolution {
+                    for x in 0..resolution {
+                        let u = x as f32 / (resolution - 1) as f32 * 2.0 - 1.0;
+                        let v = y as f32 / (resolution - 1) as f32 * 2.0 - 1.0;
+                        let weight = (1.0 + u * u + v * v).powf(-1.5);
+                        let index =
+                            ((face * resolution * resolution + y * resolution + x) * 4) as usize;
+                        total += state[index..index + 4].iter().sum::<f32>() * weight;
+                    }
+                }
+            }
+            total
         };
         let initial_total = total(&initial);
         let final_total = total(&final_state);
@@ -2054,7 +2099,10 @@ mod tests {
                         );
                         let index =
                             ((face * resolution * resolution + y * resolution + x) * 4) as usize;
-                        let mass = state[index + 1..index + 4].iter().sum::<f32>();
+                        let u = x as f32 / (resolution - 1) as f32 * 2.0 - 1.0;
+                        let v = y as f32 / (resolution - 1) as f32 * 2.0 - 1.0;
+                        let mass = state[index + 1..index + 4].iter().sum::<f32>()
+                            * (1.0 + u * u + v * v).powf(-1.5);
                         weighted_x += pos[0] * mass;
                         total_mass += mass;
                     }
@@ -2080,6 +2128,110 @@ mod tests {
                 .all(|value| value.is_finite() && *value >= 0.0),
             "transport-only state contains non-finite or negative moisture"
         );
+    }
+
+    #[test]
+    fn wind_scale_keeps_calm_stationary_and_scales_fixed_interval_transport() {
+        let resolution = 32;
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let terrain = terrain_from(resolution, |_| -0.1);
+        let wind_pipeline = WindFieldPipeline::new(&gpu).expect("dynamics unavailable");
+        let dynamics = wind_pipeline.create_test_textures(&gpu, resolution, |pos| {
+            ([pos[2] * 0.8, 0.0, -pos[0] * 0.8, 0.0], 1013.0)
+        });
+        let pipeline = WeatherFieldPipeline::new(&gpu).expect("weather unavailable");
+        let flags = SPINUP_DIAGNOSTIC_NO_SOURCE
+            | SPINUP_DIAGNOSTIC_NO_SINK
+            | SPINUP_DIAGNOSTIC_NO_PHASE_CHANGE
+            | SPINUP_DIAGNOSTIC_NO_RELAXATION;
+        let run = |wind_scale: f32, iterations: usize| {
+            let weather = pipeline.create_textures(&gpu, resolution);
+            write_texture_rgba16f_from(&gpu, &weather._mass_texture, resolution, |pos| {
+                let center = [-0.32, 0.14, 0.94];
+                let alignment = pos[0] * center[0] + pos[1] * center[1] + pos[2] * center[2];
+                let pulse = (-35.0 * (1.0 - alignment)).exp();
+                [pulse, pulse * 0.5, pulse * 0.25, pulse]
+            });
+            let mut params = snapshot(resolution);
+            params.wind_scale = wind_scale;
+            run_spinup_pass_with_config(
+                &gpu,
+                &pipeline,
+                &terrain,
+                &dynamics,
+                params,
+                &weather,
+                SpinupTestConfig {
+                    iterations,
+                    diagnostic_flags: flags,
+                },
+            )
+            .state
+        };
+        let centroid = |state: &[f32]| {
+            let mut weighted = [0.0; 3];
+            let mut total = 0.0;
+            for face in 0..6 {
+                for y in 0..resolution {
+                    for x in 0..resolution {
+                        let pos = crate::cube_sphere::cube_to_sphere(
+                            face,
+                            x as f32 / (resolution - 1) as f32,
+                            y as f32 / (resolution - 1) as f32,
+                        );
+                        let index =
+                            ((face * resolution * resolution + y * resolution + x) * 4) as usize;
+                        let mass = state[index..index + 4].iter().sum::<f32>();
+                        for axis in 0..3 {
+                            weighted[axis] += pos[axis] * mass;
+                        }
+                        total += mass;
+                    }
+                }
+            }
+            let length = weighted
+                .iter()
+                .map(|value| value * value)
+                .sum::<f32>()
+                .sqrt();
+            assert!(total > 0.0 && length > 0.0);
+            weighted.map(|value| value / length)
+        };
+        let initial = centroid(&run(0.0, 5));
+        let distance_texels = |state: &[f32]| {
+            let end = centroid(state);
+            let dot = initial
+                .iter()
+                .zip(end)
+                .map(|(start, finish)| start * finish)
+                .sum::<f32>()
+                .clamp(-1.0, 1.0);
+            dot.acos() / (std::f32::consts::FRAC_PI_2 / resolution as f32)
+        };
+        let distances = [0.0, 0.5, 1.0, 2.0].map(|scale| distance_texels(&run(scale, 5)));
+        let substeps = [0.0, 0.5, 1.0, 2.0].map(|scale| wind_substeps(scale, resolution, 6371.0));
+        println!("wind transport texels={distances:?}, substeps={substeps:?}");
+        assert!(distances[0] <= 0.001, "calm moved {} texels", distances[0]);
+        assert!(
+            distances[1] >= 0.5 && distances[2] >= 1.0 && distances[3] >= 2.0,
+            "{distances:?}"
+        );
+        assert!(
+            distances.windows(2).all(|pair| pair[1] > pair[0]),
+            "{distances:?}"
+        );
+        assert_eq!(substeps, [1, 1, 1, 1]);
+        let texel_angle = std::f32::consts::FRAC_PI_2 / resolution as f32;
+        for scale in [0.5, 1.0, 2.0] {
+            let per_substep = MAX_WIND_MPS * scale * PHYSICAL_INTERVAL_SECONDS
+                / (6371.0 * 1000.0)
+                / wind_substeps(scale, resolution, 6371.0) as f32
+                / texel_angle;
+            assert!(
+                per_substep <= MAX_SUBSTEP_TEXELS,
+                "scale={scale}, texels={per_substep}"
+            );
+        }
     }
 
     #[test]

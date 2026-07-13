@@ -34,7 +34,7 @@ struct Uniforms {
     cloud_advection: f32,  // 1.0 = advected cubemap modulates clouds, 0.0 = per-pixel only
     rotation_rate: f32,    // relative to Earth (1.0 = 24h day)
     atm_pressure: f32,     // atmospheric pressure in bar (1.0 = Earth)
-    wind_strength: f32,    // cloud wind stretching (0.0-1.0)
+    _pad4: f32,
     lava_glow: f32,        // tectonic emission intensity (0.0-1.0)
     ring_inner: f32,       // ring inner radius (planet radii, 0 = disabled)
     ring_outer: f32,       // ring outer radius

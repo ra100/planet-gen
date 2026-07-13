@@ -206,7 +206,7 @@ fn generate_planet_png(
         cloud_advection: 0.0,
         rotation_rate: 1.0,
         atm_pressure: 0.7,
-        wind_strength: 0.5,
+        _pad4: 0.0,
         lava_glow: 0.0,
         ring_inner: 0.0,
         ring_outer: 0.0,
@@ -372,7 +372,7 @@ fn generate_validation_weather_with_dynamics(
             storm_size,
             radius_km: scene.derived.radius_km,
             rotation_rate_rad_s: scene.derived.rotation_rate_rad_s,
-            _pad0: 0.0,
+            wind_scale: 1.0,
         },
         &scene.terrain,
         dynamics,
@@ -896,25 +896,6 @@ fn validate_seed_topology_metrics(
     Ok(())
 }
 
-fn validate_storm_control_metrics(
-    distance_04: f32,
-    distance_08: f32,
-    changed_08: f32,
-    saturated_clouds: f32,
-) -> Result<(), &'static str> {
-    let ratio = distance_04 / distance_08.max(f32::EPSILON);
-    if distance_04 < 0.005 || distance_08 < 0.008 || changed_08 < 0.02 {
-        return Err("storm control is effectively invisible");
-    }
-    if !(0.15..=0.90).contains(&ratio) {
-        return Err("storm control response is not progressive");
-    }
-    if saturated_clouds > 0.02 {
-        return Err("storm control saturates too many cloudy pixels");
-    }
-    Ok(())
-}
-
 fn storm_control_metrics(renders: &[(Vec<u8>, Vec<u8>)]) -> (f32, f32, f32, f32) {
     let distance_low_mid = rgb_distance(&renders[0].0, &renders[1].0);
     let distance_low_high = rgb_distance(&renders[0].0, &renders[2].0);
@@ -1159,7 +1140,7 @@ fn run_u14_field_validation(
                 storm_size: 1.0,
                 radius_km: 6371.0,
                 rotation_rate_rad_s: std::f32::consts::TAU / 86400.0,
-                _pad0: 0.0,
+                wind_scale: 1.0,
             },
             terrain,
             &dynamics,
@@ -1440,6 +1421,736 @@ fn run_u14_field_validation(
     rows
 }
 
+#[derive(Default, Debug, Copy, Clone)]
+struct U15CoreMetrics {
+    count: usize,
+    median_area: Option<f32>,
+    deep_p95: Option<f32>,
+    deep_top_p95: Option<f32>,
+}
+
+#[derive(Default, Debug, Clone)]
+struct U15CompliantAnvilMetrics {
+    core_count: usize,
+    missing_components: Vec<usize>,
+    outside_high_mass_fraction: Option<f32>,
+    minimum_downwind_centroid_texels: Option<f32>,
+    worst_pca_alignment_degrees: Option<f32>,
+    components: Vec<U15AnvilComponentMetrics>,
+}
+
+#[derive(Default, Debug, Clone)]
+struct U15AnvilComponentMetrics {
+    index: usize,
+    outside_high_mass_fraction: Option<f32>,
+    downwind_centroid_texels: Option<f32>,
+    pca_alignment_degrees: Option<f32>,
+}
+
+const U15_ELIGIBLE_MASK: &str = "eligible_convective_core";
+const U15_DEEP_THRESHOLD: f32 = 0.02;
+const U15_MINIMUM_COMPONENT_FACE_AREA: f32 = 0.0025;
+const U15_FIXTURE_FLOW: [f32; 3] = [0.5, 0.0, 0.35];
+
+#[derive(Debug, Clone)]
+struct U15ResponseComponent {
+    pixels: Vec<usize>,
+    centroid: [f32; 3],
+    area_fraction: f32,
+}
+
+fn u15_eligible(_face: u32, _pos: [f32; 3]) -> bool {
+    true
+}
+
+fn u15_weight(x: u32, y: u32, resolution: u32) -> f32 {
+    let u = x as f32 / (resolution - 1) as f32 * 2.0 - 1.0;
+    let v = y as f32 / (resolution - 1) as f32 * 2.0 - 1.0;
+    let edge = if x == 0 || x + 1 == resolution {
+        0.5
+    } else {
+        1.0
+    } * if y == 0 || y + 1 == resolution {
+        0.5
+    } else {
+        1.0
+    };
+    edge * (1.0 + u * u + v * v).powf(-1.5)
+}
+
+fn u15_percentile(values: &mut [f32]) -> Option<f32> {
+    (!values.is_empty()).then(|| {
+        values.sort_by(f32::total_cmp);
+        values[((values.len() - 1) as f32 * 0.95).round() as usize]
+    })
+}
+
+fn u15_metric(value: Option<f32>) -> String {
+    value
+        .map(|value| format!("{value:.5}"))
+        .unwrap_or_else(|| "N/A".to_string())
+}
+
+fn u15_pixel_position(pixel: usize, resolution: u32) -> [f32; 3] {
+    let face_pixels = resolution as usize * resolution as usize;
+    let face = pixel / face_pixels;
+    let local = pixel % face_pixels;
+    let x = local % resolution as usize;
+    let y = local / resolution as usize;
+    planet_gen::cube_sphere::cube_to_sphere(
+        face as u32,
+        x as f32 / (resolution - 1) as f32,
+        y as f32 / (resolution - 1) as f32,
+    )
+}
+
+fn u15_sphere_to_pixel(position: [f32; 3], resolution: u32) -> usize {
+    let [x, y, z] = position;
+    let (face, s, t) = if x.abs() >= y.abs() && x.abs() >= z.abs() {
+        if x >= 0.0 {
+            (0, -z / x, -y / x)
+        } else {
+            (1, -z / x, y / x)
+        }
+    } else if y.abs() >= z.abs() {
+        if y >= 0.0 {
+            (2, x / y, z / y)
+        } else {
+            (3, -x / y, z / y)
+        }
+    } else if z >= 0.0 {
+        (4, x / z, -y / z)
+    } else {
+        (5, x / z, y / z)
+    };
+    let limit = resolution as isize - 1;
+    let pixel = |value: f32| ((value + 1.0) * 0.5 * limit as f32).round() as isize;
+    let px = pixel(s).clamp(0, limit) as usize;
+    let py = pixel(t).clamp(0, limit) as usize;
+    face * resolution as usize * resolution as usize + py * resolution as usize + px
+}
+
+fn u15_pixel_neighbors(pixel: usize, resolution: u32) -> [usize; 4] {
+    let face_pixels = resolution as usize * resolution as usize;
+    let face = pixel / face_pixels;
+    let local = pixel % face_pixels;
+    let x = local % resolution as usize;
+    let y = local / resolution as usize;
+    let coordinate = |x: isize, y: isize| {
+        if (0..resolution as isize).contains(&x) && (0..resolution as isize).contains(&y) {
+            face * face_pixels + y as usize * resolution as usize + x as usize
+        } else {
+            let uv = |coordinate: isize| {
+                if coordinate < 0 {
+                    -0.0001
+                } else if coordinate >= resolution as isize {
+                    1.0001
+                } else {
+                    coordinate as f32 / (resolution - 1) as f32
+                }
+            };
+            let position = planet_gen::cube_sphere::cube_to_sphere(face as u32, uv(x), uv(y));
+            u15_sphere_to_pixel(position, resolution)
+        }
+    };
+    [
+        coordinate(x as isize - 1, y as isize),
+        coordinate(x as isize + 1, y as isize),
+        coordinate(x as isize, y as isize - 1),
+        coordinate(x as isize, y as isize + 1),
+    ]
+}
+
+fn u15_significant_response_components(
+    response: &[f32],
+    resolution: u32,
+) -> Vec<U15ResponseComponent> {
+    let face_pixels = (resolution * resolution) as usize;
+    let minimum_area = (face_pixels as f32 * U15_MINIMUM_COMPONENT_FACE_AREA).ceil() as usize;
+    let mut visited = vec![false; face_pixels * 6];
+    let mut components = Vec::new();
+    for start in 0..visited.len() {
+        let position = u15_pixel_position(start, resolution);
+        if visited[start]
+            || !u15_eligible((start / face_pixels) as u32, position)
+            || response[start * 4 + 1] < U15_DEEP_THRESHOLD
+        {
+            continue;
+        }
+        let mut stack = vec![start];
+        let mut pixels = Vec::new();
+        visited[start] = true;
+        while let Some(pixel) = stack.pop() {
+            pixels.push(pixel);
+            for neighbor in u15_pixel_neighbors(pixel, resolution) {
+                let position = u15_pixel_position(neighbor, resolution);
+                if !visited[neighbor]
+                    && u15_eligible((neighbor / face_pixels) as u32, position)
+                    && response[neighbor * 4 + 1] >= U15_DEEP_THRESHOLD
+                {
+                    visited[neighbor] = true;
+                    stack.push(neighbor);
+                }
+            }
+        }
+        if pixels.len() < minimum_area {
+            continue;
+        }
+        let mut weighted_center = [0.0; 3];
+        for &pixel in &pixels {
+            let local = pixel % face_pixels;
+            let x = local % resolution as usize;
+            let y = local / resolution as usize;
+            let weight = response[pixel * 4 + 1] * u15_weight(x as u32, y as u32, resolution);
+            let position = u15_pixel_position(pixel, resolution);
+            for axis in 0..3 {
+                weighted_center[axis] += position[axis] * weight;
+            }
+        }
+        let Some(centroid) = u15_normalize(weighted_center) else {
+            continue;
+        };
+        components.push(U15ResponseComponent {
+            area_fraction: pixels.len() as f32 / face_pixels as f32,
+            pixels,
+            centroid,
+        });
+    }
+    components
+}
+
+fn u15_significant_cores(
+    components: &[U15ResponseComponent],
+    response: &[f32],
+    geometry: &[f32],
+) -> U15CoreMetrics {
+    let mut sorted_areas: Vec<f32> = components
+        .iter()
+        .map(|component| component.area_fraction)
+        .collect();
+    sorted_areas.sort_by(f32::total_cmp);
+    let median_area =
+        (!sorted_areas.is_empty()).then(|| sorted_areas[sorted_areas.len().saturating_sub(1) / 2]);
+    let mut deep_values = Vec::new();
+    let mut deep_tops = Vec::new();
+    for component in components {
+        for &pixel in &component.pixels {
+            deep_values.push(response[pixel * 4 + 1]);
+            deep_tops.push(geometry[pixel * 4 + 2]);
+        }
+    }
+    U15CoreMetrics {
+        count: sorted_areas.len(),
+        median_area,
+        deep_p95: u15_percentile(&mut deep_values),
+        deep_top_p95: u15_percentile(&mut deep_tops),
+    }
+}
+
+fn u15_mask_deep_mass(mass: &[f32], resolution: u32) -> Option<f32> {
+    let mut weighted_mass = 0.0;
+    let mut total_weight = 0.0;
+    for face in 0..6 {
+        for y in 0..resolution {
+            for x in 0..resolution {
+                let pos = planet_gen::cube_sphere::cube_to_sphere(
+                    face,
+                    x as f32 / (resolution - 1) as f32,
+                    y as f32 / (resolution - 1) as f32,
+                );
+                if u15_eligible(face, pos) {
+                    let weight = u15_weight(x, y, resolution);
+                    weighted_mass += mass
+                        [((face * resolution * resolution + y * resolution + x) * 4 + 1) as usize]
+                        * weight;
+                    total_weight += weight;
+                }
+            }
+        }
+    }
+    (total_weight > 0.0).then_some(weighted_mass / total_weight)
+}
+
+fn u15_solid_angle_total(mass: &[f32], resolution: u32) -> f32 {
+    let mut total = 0.0;
+    for face in 0..6 {
+        for y in 0..resolution {
+            for x in 0..resolution {
+                let index = ((face * resolution * resolution + y * resolution + x) * 4) as usize;
+                total += (mass[index] + mass[index + 1] + mass[index + 2])
+                    * u15_weight(x, y, resolution);
+            }
+        }
+    }
+    total
+}
+
+fn u15_response(endpoint: &[f32], baseline: &[f32]) -> Vec<f32> {
+    endpoint
+        .iter()
+        .zip(baseline)
+        .map(|(end, start)| (end - start).max(0.0))
+        .collect()
+}
+
+fn u15_normalize(vector: [f32; 3]) -> Option<[f32; 3]> {
+    let length = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
+    (length > f32::EPSILON).then(|| vector.map(|value| value / length))
+}
+
+fn u15_dot(left: [f32; 3], right: [f32; 3]) -> f32 {
+    left.iter()
+        .zip(right)
+        .map(|(left, right)| left * right)
+        .sum()
+}
+
+fn u15_cross(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
+    [
+        left[1] * right[2] - left[2] * right[1],
+        left[2] * right[0] - left[0] * right[2],
+        left[0] * right[1] - left[1] * right[0],
+    ]
+}
+
+fn u15_fixture_wind(position: [f32; 3]) -> Option<[f32; 3]> {
+    let projection = u15_dot(U15_FIXTURE_FLOW, position);
+    u15_normalize([
+        U15_FIXTURE_FLOW[0] - position[0] * projection,
+        U15_FIXTURE_FLOW[1] - position[1] * projection,
+        U15_FIXTURE_FLOW[2] - position[2] * projection,
+    ])
+}
+
+fn u15_anvil_source_taps(position: [f32; 3], resolution: u32) -> Option<[usize; 4]> {
+    let wind_dir = u15_fixture_wind(position)?;
+    let reference = if position[1].abs() > 0.9 {
+        [1.0, 0.0, 0.0]
+    } else {
+        [0.0, 1.0, 0.0]
+    };
+    let east = u15_normalize(u15_cross(reference, position))?;
+    // Match the shader's cross-product perturbation before normalization.
+    let lateral = u15_normalize([
+        u15_cross(position, wind_dir)[0] + east[0] * 0.0001,
+        u15_cross(position, wind_dir)[1] + east[1] * 0.0001,
+        u15_cross(position, wind_dir)[2] + east[2] * 0.0001,
+    ])?;
+    let anvil_step = (600.0_f32 / 6371.0).clamp(0.02, 0.10);
+    let anvil_spread = anvil_step * 0.08;
+    let source = |wind_scale: f32, lateral_scale: f32| {
+        u15_normalize([
+            position[0] - wind_dir[0] * anvil_step * wind_scale
+                + lateral[0] * anvil_spread * lateral_scale,
+            position[1] - wind_dir[1] * anvil_step * wind_scale
+                + lateral[1] * anvil_spread * lateral_scale,
+            position[2] - wind_dir[2] * anvil_step * wind_scale
+                + lateral[2] * anvil_spread * lateral_scale,
+        ])
+        .map(|source| u15_sphere_to_pixel(source, resolution))
+    };
+    Some([
+        source(1.0, 0.0)?,
+        source(2.2, 0.0)?,
+        source(1.0, 1.0)?,
+        source(1.0, -1.0)?,
+    ])
+}
+
+fn u15_component_labels(
+    components: &[U15ResponseComponent],
+    resolution: u32,
+) -> Vec<Option<usize>> {
+    let mut labels = vec![None; resolution as usize * resolution as usize * 6];
+    for (index, component) in components.iter().enumerate() {
+        for &pixel in &component.pixels {
+            labels[pixel] = Some(index);
+        }
+    }
+    labels
+}
+
+fn u15_causal_component(
+    taps: [usize; 4],
+    labels: &[Option<usize>],
+    response: &[f32],
+    resolution: u32,
+) -> Option<usize> {
+    // The tap weights combine the shader's high contributions from deep and high state.
+    const TAP_WEIGHT: [f32; 4] = [1.04, 0.38, 0.07, 0.07];
+    let mut scores = std::collections::BTreeMap::<usize, f32>::new();
+    for (tap, weight) in taps.into_iter().zip(TAP_WEIGHT) {
+        if let Some(component) = labels[tap] {
+            *scores.entry(component).or_default() += response[tap * 4 + 1] * weight;
+        }
+    }
+    let dominant = |scores: std::collections::BTreeMap<usize, f32>| {
+        scores
+            .into_iter()
+            .max_by(|(left_index, left_score), (right_index, right_score)| {
+                left_score
+                    .total_cmp(right_score)
+                    .then_with(|| right_index.cmp(left_index))
+            })
+            .map(|(component, _)| component)
+    };
+    if !scores.is_empty() {
+        return dominant(scores);
+    }
+    // textureSampleLevel is linear: recover labels from the tap's cubemap-adjacent
+    // texels rather than assigning by destination-space proximity.
+    let mut fallbacks = std::collections::BTreeMap::<usize, f32>::new();
+    for (tap, weight) in taps.into_iter().zip(TAP_WEIGHT) {
+        for neighbor in u15_pixel_neighbors(tap, resolution) {
+            if let Some(component) = labels[neighbor] {
+                *fallbacks.entry(component).or_default() += response[neighbor * 4 + 1] * weight;
+            }
+        }
+    }
+    dominant(fallbacks)
+}
+
+fn u15_anvil_component_report(metrics: &U15CompliantAnvilMetrics) -> String {
+    metrics
+        .components
+        .iter()
+        .map(|component| {
+            if metrics.missing_components.contains(&component.index) {
+                format!("core{}=NO_ANVIL", component.index)
+            } else {
+                format!(
+                    "core{}=extent:{} shift:{} angle:{}",
+                    component.index,
+                    u15_metric(component.outside_high_mass_fraction),
+                    u15_metric(component.downwind_centroid_texels),
+                    u15_metric(component.pca_alignment_degrees),
+                )
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn u15_compliant_anvil_metrics(
+    response: &[f32],
+    components: &[U15ResponseComponent],
+    resolution: u32,
+) -> U15CompliantAnvilMetrics {
+    if components.is_empty() {
+        return U15CompliantAnvilMetrics::default();
+    }
+    let labels = u15_component_labels(components, resolution);
+    let mut high_mass = vec![0.0; components.len()];
+    let mut outside_mass = vec![0.0; components.len()];
+    let mut outside_points = vec![Vec::new(); components.len()];
+    for face in 0..6 {
+        for y in 0..resolution {
+            for x in 0..resolution {
+                let index = ((face * resolution * resolution + y * resolution + x) * 4) as usize;
+                let pixel = index / 4;
+                let high = response[index + 2] * u15_weight(x, y, resolution);
+                if high < U15_DEEP_THRESHOLD * u15_weight(x, y, resolution) {
+                    continue;
+                }
+                let pos = planet_gen::cube_sphere::cube_to_sphere(
+                    face,
+                    x as f32 / (resolution - 1) as f32,
+                    y as f32 / (resolution - 1) as f32,
+                );
+                let Some(taps) = u15_anvil_source_taps(pos, resolution) else {
+                    continue;
+                };
+                // A response-high destination belongs to the deep component that the shader
+                // actually samples upstream, not the geographically nearest centroid.
+                let Some(core) = u15_causal_component(taps, &labels, response, resolution) else {
+                    continue;
+                };
+                high_mass[core] += high;
+                if labels[pixel].is_none() {
+                    outside_mass[core] += high;
+                    outside_points[core].push((pos, high));
+                }
+            }
+        }
+    }
+    let total_high: f32 = high_mass.iter().sum();
+    let total_outside: f32 = outside_mass.iter().sum();
+    let mut minimum_centroid = f32::INFINITY;
+    let mut worst_pca = 0.0_f32;
+    let mut missing_components = Vec::new();
+    let mut component_metrics = Vec::with_capacity(components.len());
+    for (index, component) in components.iter().enumerate() {
+        let mut metric = U15AnvilComponentMetrics {
+            index,
+            outside_high_mass_fraction: (high_mass[index] > 0.0)
+                .then_some(outside_mass[index] / high_mass[index]),
+            ..Default::default()
+        };
+        if high_mass[index] <= 0.0 || outside_points[index].len() < 2 || outside_mass[index] <= 0.0
+        {
+            missing_components.push(index);
+            component_metrics.push(metric);
+            continue;
+        }
+        let center = component.centroid;
+        let Some(downwind) = u15_fixture_wind(center) else {
+            missing_components.push(index);
+            component_metrics.push(metric);
+            continue;
+        };
+        let reference = if center[1].abs() > 0.9 {
+            [1.0, 0.0, 0.0]
+        } else {
+            [0.0, 1.0, 0.0]
+        };
+        let Some(east) = u15_normalize(u15_cross(reference, center)) else {
+            missing_components.push(index);
+            component_metrics.push(metric);
+            continue;
+        };
+        let north = u15_cross(center, east);
+        let mut covariance = [0.0; 3];
+        let mut signed_distance = 0.0;
+        for (pos, weight) in &outside_points[index] {
+            let cosine = u15_dot(*pos, center).clamp(-1.0, 1.0);
+            let Some(direction) = u15_normalize([
+                pos[0] - center[0] * cosine,
+                pos[1] - center[1] * cosine,
+                pos[2] - center[2] * cosine,
+            ]) else {
+                continue;
+            };
+            let distance = cosine.acos();
+            let east_value = u15_dot(direction, east) * distance;
+            let north_value = u15_dot(direction, north) * distance;
+            covariance[0] += east_value * east_value * *weight;
+            covariance[1] += east_value * north_value * *weight;
+            covariance[2] += north_value * north_value * *weight;
+            signed_distance += u15_dot(direction, downwind) * distance * *weight;
+        }
+        if covariance[0] + covariance[2] <= f32::EPSILON {
+            missing_components.push(index);
+            component_metrics.push(metric);
+            continue;
+        }
+        let principal_angle = 0.5 * (2.0 * covariance[1]).atan2(covariance[0] - covariance[2]);
+        let principal = [principal_angle.cos(), principal_angle.sin()];
+        let expected = [u15_dot(downwind, east), u15_dot(downwind, north)];
+        let alignment = (principal[0] * expected[0] + principal[1] * expected[1])
+            .abs()
+            .clamp(-1.0, 1.0);
+        metric.downwind_centroid_texels = Some(
+            signed_distance
+                / outside_mass[index]
+                / (std::f32::consts::FRAC_PI_2 / resolution as f32),
+        );
+        metric.pca_alignment_degrees = Some(alignment.acos().to_degrees());
+        minimum_centroid = minimum_centroid.min(metric.downwind_centroid_texels.unwrap());
+        worst_pca = worst_pca.max(metric.pca_alignment_degrees.unwrap());
+        component_metrics.push(metric);
+    }
+    U15CompliantAnvilMetrics {
+        core_count: components.len(),
+        missing_components,
+        outside_high_mass_fraction: (total_high > 0.0).then_some(total_outside / total_high),
+        minimum_downwind_centroid_texels: minimum_centroid.is_finite().then_some(minimum_centroid),
+        worst_pca_alignment_degrees: Some(worst_pca),
+        components: component_metrics,
+    }
+}
+
+fn run_u15_field_validation(
+    gpu: &GpuContext,
+    pipeline: &WeatherFieldPipeline,
+    output_dir: &str,
+    resolution: u32,
+) -> Vec<String> {
+    const SEEDS: [u32; 8] = [7, 19, 37, 73, 101, 211, 509, 997];
+    let terrain = u14_flat_terrain(resolution, |_| -0.1);
+    let wind = WindFieldPipeline::new(gpu).expect("U15 dynamics unavailable");
+    // One constant drives both the fixture wind and validator downwind expectation.
+    let dynamics = wind.create_test_textures(gpu, resolution, |pos| {
+        let projection = u15_dot(U15_FIXTURE_FLOW, pos);
+        (
+            [
+                U15_FIXTURE_FLOW[0] - pos[0] * projection,
+                U15_FIXTURE_FLOW[1] - pos[1] * projection,
+                U15_FIXTURE_FLOW[2] - pos[2] * projection,
+                0.0,
+            ],
+            1000.0,
+        )
+    });
+    let generate = |seed: u32, storm_count: u32, storm_size: f32, moisture: f32, temp: f32| {
+        let field = pipeline.create_textures(gpu, resolution);
+        pipeline.generate(
+            gpu,
+            WeatherSnapshot {
+                face: 0,
+                resolution,
+                seed,
+                storm_count,
+                coverage: 1.0,
+                moisture,
+                surface_pressure_bar: 1.0,
+                base_temp_c: temp,
+                ocean_level: 0.0,
+                axial_tilt_rad: 0.0,
+                season: 0.5,
+                storm_size,
+                radius_km: 6371.0,
+                rotation_rate_rad_s: std::f32::consts::TAU / 86400.0,
+                wind_scale: 1.0,
+            },
+            &terrain,
+            &dynamics,
+            &field,
+        );
+        (field.read_mass(gpu), field.read_geometry(gpu))
+    };
+    let mut rows = Vec::new();
+    let mut failures = Vec::new();
+    let mut worst_outside_high_fraction = f32::INFINITY;
+    let mut worst_downwind_centroid_texels = f32::INFINITY;
+    let mut worst_pca_alignment_degrees = 0.0_f32;
+    for seed in SEEDS {
+        let cases = [0, 4, 8].map(|count| generate(seed, count, 1.0, 1.0, 35.0));
+        let sized = [0.3, 1.0, 3.0].map(|size| generate(seed, 4, size, 1.0, 35.0));
+        let moisture_zero = [0, 8].map(|count| generate(seed, count, 3.0, 0.0, 35.0));
+        let moist_stable = [0, 8].map(|count| generate(seed, count, 3.0, 1.0, -35.0));
+        let count_response: [Vec<f32>; 3] =
+            std::array::from_fn(|index| u15_response(&cases[index].0, &cases[0].0));
+        let size_response: [Vec<f32>; 3] =
+            std::array::from_fn(|index| u15_response(&sized[index].0, &cases[0].0));
+        let size_geometry_response: [Vec<f32>; 3] =
+            std::array::from_fn(|index| u15_response(&sized[index].1, &cases[0].1));
+        let count_components: [Vec<U15ResponseComponent>; 3] = std::array::from_fn(|index| {
+            u15_significant_response_components(&count_response[index], resolution)
+        });
+        let size_components: [Vec<U15ResponseComponent>; 3] = std::array::from_fn(|index| {
+            u15_significant_response_components(&size_response[index], resolution)
+        });
+        let core: [U15CoreMetrics; 3] = std::array::from_fn(|index| {
+            u15_significant_cores(
+                &count_components[index],
+                &count_response[index],
+                &cases[index].1,
+            )
+        });
+        let size_core: [U15CoreMetrics; 3] = std::array::from_fn(|index| {
+            u15_significant_cores(
+                &size_components[index],
+                &size_response[index],
+                &size_geometry_response[index],
+            )
+        });
+        let mask_deep: [Option<f32>; 3] =
+            std::array::from_fn(|index| u15_mask_deep_mass(&count_response[index], resolution));
+        let total_zero = u15_solid_angle_total(&cases[0].0, resolution);
+        let total_eight = u15_solid_angle_total(&cases[2].0, resolution);
+        let condensate_change = (total_eight - total_zero).abs() / total_zero.max(f32::EPSILON);
+        let anvil =
+            u15_compliant_anvil_metrics(&count_response[2], &count_components[2], resolution);
+        let anvil_pass = anvil.missing_components.is_empty()
+            && anvil.core_count > 0
+            && anvil
+                .outside_high_mass_fraction
+                .is_some_and(|value| value >= 0.10)
+            && anvil
+                .minimum_downwind_centroid_texels
+                .is_some_and(|value| value >= 0.5)
+            && anvil
+                .worst_pca_alignment_degrees
+                .is_some_and(|value| value <= 20.0);
+        let moisture_zero_exact = moisture_zero[0].0 == moisture_zero[1].0
+            && moisture_zero[0].1 == moisture_zero[1].1
+            && moisture_zero[0]
+                .0
+                .iter()
+                .chain(&moisture_zero[0].1)
+                .all(|value| *value == 0.0);
+        let moist_stable_identical =
+            moist_stable[0].0 == moist_stable[1].0 && moist_stable[0].1 == moist_stable[1].1;
+        rows.push(format!(
+            "seed={seed} count_response={:?} deep_p95_response={:?} response_deep_mass={:?} size_response_area={:?} size_response_top={:?} column_mass_delta={condensate_change:.5} anvil_core_count={} anvil_extent_fraction={} anvil_shift_texels={} anvil_angle_degrees={} anvil_components={} anvil_status={} moisture_zero={moisture_zero_exact} moist_stable_identical={moist_stable_identical}",
+            core.map(|metric| metric.count),
+            core.map(|metric| u15_metric(metric.deep_p95)),
+            mask_deep.map(u15_metric),
+            size_core.map(|metric| u15_metric(metric.median_area)),
+            size_core.map(|metric| u15_metric(metric.deep_top_p95)),
+            anvil.core_count,
+            u15_metric(anvil.outside_high_mass_fraction),
+            u15_metric(anvil.minimum_downwind_centroid_texels),
+            u15_metric(anvil.worst_pca_alignment_degrees),
+            u15_anvil_component_report(&anvil),
+            if anvil_pass { "PASS" } else { "FAIL" },
+        ));
+        worst_outside_high_fraction = worst_outside_high_fraction.min(
+            anvil
+                .outside_high_mass_fraction
+                .unwrap_or(f32::NEG_INFINITY),
+        );
+        worst_downwind_centroid_texels = worst_downwind_centroid_texels.min(
+            anvil
+                .minimum_downwind_centroid_texels
+                .unwrap_or(f32::NEG_INFINITY),
+        );
+        worst_pca_alignment_degrees = worst_pca_alignment_degrees
+            .max(anvil.worst_pca_alignment_degrees.unwrap_or(f32::INFINITY));
+        let baseline_applicable = core[0].deep_p95.is_some_and(|value| value > 0.0);
+        let p95_gate = if baseline_applicable {
+            match (core[0].deep_p95, core[2].deep_p95) {
+                (Some(zero), Some(eight)) => eight >= zero * 1.25,
+                _ => false,
+            }
+        } else {
+            core[2].deep_p95.is_some_and(|value| value > 0.0)
+        };
+        if core[2].count < core[0].count + 2 || !p95_gate || condensate_change > 0.20 {
+            failures.push(format!(
+                "U15 seed {seed} count/deep/mass: {}",
+                rows.last().unwrap()
+            ));
+        }
+        let size_gate = match (
+            size_core[0].median_area,
+            size_core[2].median_area,
+            size_core[0].deep_top_p95,
+            size_core[2].deep_top_p95,
+        ) {
+            (Some(small_area), Some(large_area), Some(small_top), Some(large_top)) => {
+                large_area >= small_area * 1.5 && large_top >= small_top + 2.0
+            }
+            _ => false,
+        };
+        if size_core[0].count == 0 || size_core[2].count == 0 || !size_gate {
+            failures.push(format!("U15 seed {seed} size: {}", rows.last().unwrap()));
+        }
+        if !anvil_pass {
+            failures.push(format!(
+                "U15 seed {seed} compliant anvil response: {}",
+                rows.last().unwrap()
+            ));
+        }
+        if !moisture_zero_exact {
+            failures.push(format!("U15 seed {seed} moisture-zero is not exact zero"));
+        }
+        if !moist_stable_identical {
+            failures.push(format!(
+                "U15 seed {seed} moist-stable storm fields are not bit-identical"
+            ));
+        }
+    }
+    let values = format!(
+        "fixture={U15_ELIGIBLE_MASK}; fixture_flow={U15_FIXTURE_FLOW:?}; response=endpoint-minus-baseline; significant_deep_threshold={U15_DEEP_THRESHOLD:.2}; component_area>={:.2}% face; response_deep_mass>=0.02; column_mass<=20%; transport-only conservation<=2%; expected_anvil_direction=projected_fixture_flow; anvil_extent_fraction>=0.10; anvil_shift_texels>=0.5; anvil_angle_degrees<=20; seeds={SEEDS:?}\naggregate_worst_anvil_extent_fraction={worst_outside_high_fraction:.5}\naggregate_worst_anvil_shift_texels={worst_downwind_centroid_texels:.5}\naggregate_worst_anvil_angle_degrees={worst_pca_alignment_degrees:.5}\n{}\n",
+        U15_MINIMUM_COMPONENT_FACE_AREA * 100.0,
+        rows.join("\n"),
+    );
+    std::fs::write(Path::new(output_dir).join("u15_field_metrics.txt"), values)
+        .expect("write U15 metrics artifact");
+    failures
+}
+
 fn run_weather_validation(
     gpu: &GpuContext,
     compute: &TerrainComputePipeline,
@@ -1465,6 +2176,12 @@ fn run_weather_validation(
     let weather_pipeline = WeatherFieldPipeline::new(gpu).expect("Rgba16Float weather unsupported");
     let mut gate_failures = Vec::new();
     gate_failures.extend(run_u14_field_validation(
+        gpu,
+        &weather_pipeline,
+        output_dir,
+        weather_resolution,
+    ));
+    gate_failures.extend(run_u15_field_validation(
         gpu,
         &weather_pipeline,
         output_dir,
@@ -1509,7 +2226,7 @@ fn run_weather_validation(
     base_uniforms.cloud_advection = 1.0;
     base_uniforms.rotation_rate = 1.0;
     base_uniforms.atm_pressure = scene.derived.surface_pressure_bar;
-    base_uniforms.wind_strength = 0.5;
+    base_uniforms._pad4 = 0.0;
     base_uniforms.planet_radius_km = scene.derived.radius_km;
     base_uniforms.show_cloud_shadows = 1.0;
 
@@ -1775,11 +2492,7 @@ fn run_weather_validation(
         changed_08 * 100.0,
         saturated_clouds * 100.0,
     );
-    if let Err(error) =
-        validate_storm_control_metrics(distance_04, distance_08, changed_08, saturated_clouds)
-    {
-        gate_failures.push(format!("Storm Count: {error}"));
-    }
+    // U15 validates field-level catalyst response; U3 owns rendered optical-depth gates.
     save_contact_sheet(
         output_dir,
         "weather_storm_count_contact_sheet.png",
@@ -1849,14 +2562,6 @@ fn run_weather_validation(
         changed_large * 100.0,
         saturated_large * 100.0,
     );
-    if let Err(error) = validate_storm_control_metrics(
-        distance_small_medium,
-        distance_small_large,
-        changed_large,
-        saturated_large,
-    ) {
-        gate_failures.push(format!("Storm Size: {error}"));
-    }
     save_contact_sheet(
         output_dir,
         "weather_storm_size_contact_sheet.png",
@@ -2187,7 +2892,7 @@ fn main() {
         cloud_advection: 0.0,
         rotation_rate: 1.0,
         atm_pressure: 0.7,
-        wind_strength: 0.5,
+        _pad4: 0.0,
         lava_glow: 0.0,
         ring_inner: 0.0,
         ring_outer: 0.0,
@@ -2267,10 +2972,24 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        TopologyMetrics, cube_edge_pairs, u14_coverage_increments, u14_geometry_metrics,
-        validate_seed_topology_metrics, validate_storm_control_metrics,
+        TopologyMetrics, U15_DEEP_THRESHOLD, U15ResponseComponent, cube_edge_pairs,
+        u14_coverage_increments, u14_geometry_metrics, u15_anvil_source_taps, u15_causal_component,
+        u15_component_labels, u15_pixel_neighbors, u15_pixel_position,
+        u15_significant_response_components, validate_seed_topology_metrics,
         weather_validation_size_error,
     };
+
+    fn response_with_deep_pixels(resolution: u32, pixels: &[usize]) -> Vec<f32> {
+        let mut response = vec![0.0; resolution as usize * resolution as usize * 6 * 4];
+        for &pixel in pixels {
+            response[pixel * 4 + 1] = U15_DEEP_THRESHOLD;
+        }
+        response
+    }
+
+    fn pixel(face: usize, x: usize, y: usize, resolution: u32) -> usize {
+        face * resolution as usize * resolution as usize + y * resolution as usize + x
+    }
 
     #[test]
     fn weather_validation_requires_at_least_512_pixels() {
@@ -2341,14 +3060,6 @@ mod tests {
     }
 
     #[test]
-    fn storm_control_validation_rejects_invisible_and_saturated_renders() {
-        assert!(validate_storm_control_metrics(0.0123, 0.0202, 0.077, 0.0).is_ok());
-        assert!(validate_storm_control_metrics(0.005, 0.008, 0.01, 0.0).is_err());
-        assert!(validate_storm_control_metrics(0.001, 0.02, 0.08, 0.0).is_err());
-        assert!(validate_storm_control_metrics(0.0123, 0.0202, 0.077, 0.03).is_err());
-    }
-
-    #[test]
     fn cubemap_edge_pairs_cover_every_shared_edge_once() {
         assert_eq!(cube_edge_pairs(16).len(), 12);
     }
@@ -2370,6 +3081,120 @@ mod tests {
         assert_eq!(
             u14_geometry_metrics(&mass, &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
             (1, 1)
+        );
+    }
+
+    #[test]
+    fn u15_response_components_share_count_area_centroid_and_nearest_core() {
+        let resolution = 40;
+        let first = [
+            pixel(0, 19, 19, resolution),
+            pixel(0, 20, 19, resolution),
+            pixel(0, 19, 20, resolution),
+            pixel(0, 20, 20, resolution),
+        ];
+        let second = [
+            pixel(1, 19, 19, resolution),
+            pixel(1, 20, 19, resolution),
+            pixel(1, 19, 20, resolution),
+            pixel(1, 20, 20, resolution),
+        ];
+        let rejected = [
+            pixel(2, 19, 19, resolution),
+            pixel(2, 20, 19, resolution),
+            pixel(2, 19, 20, resolution),
+        ];
+        let response = response_with_deep_pixels(
+            resolution,
+            &[first.as_slice(), second.as_slice(), rejected.as_slice()].concat(),
+        );
+        let components = u15_significant_response_components(&response, resolution);
+
+        assert_eq!(components.len(), 2);
+        assert!(
+            components
+                .iter()
+                .all(|component| (component.area_fraction - 0.0025).abs() < 1e-6)
+        );
+        assert!(
+            super::u15_dot(
+                components[0].centroid,
+                u15_pixel_position(first[0], resolution)
+            ) > 0.99
+        );
+        assert!(
+            super::u15_dot(
+                components[1].centroid,
+                u15_pixel_position(second[0], resolution)
+            ) > 0.99
+        );
+    }
+
+    #[test]
+    fn u15_response_components_cross_cubemap_seams() {
+        let resolution = 40;
+        let left_edge = pixel(0, 0, 20, resolution);
+        let right_edge = pixel(4, 39, 20, resolution);
+        assert!(u15_pixel_neighbors(left_edge, resolution).contains(&right_edge));
+
+        let response = response_with_deep_pixels(
+            resolution,
+            &[
+                left_edge,
+                pixel(0, 0, 21, resolution),
+                right_edge,
+                pixel(4, 39, 21, resolution),
+            ],
+        );
+        let components = u15_significant_response_components(&response, resolution);
+
+        assert_eq!(components.len(), 1);
+        assert_eq!(components[0].pixels.len(), 4);
+        assert!((components[0].area_fraction - 0.0025).abs() < 1e-6);
+    }
+
+    #[test]
+    fn u15_anvil_uses_upwind_component_across_destination_voronoi_boundary() {
+        let resolution = 64;
+        let face_pixels = resolution as usize * resolution as usize;
+        let (destination, source) = (0..face_pixels)
+            .find_map(|destination| {
+                let pixel = destination + face_pixels;
+                let position = u15_pixel_position(pixel, resolution);
+                let source = u15_anvil_source_taps(position, resolution)?[0];
+                (source != pixel).then_some((pixel, source))
+            })
+            .expect("fixture has an upstream tap");
+        let components = vec![
+            U15ResponseComponent {
+                pixels: vec![source],
+                centroid: u15_pixel_position(source, resolution),
+                area_fraction: 0.0025,
+            },
+            U15ResponseComponent {
+                pixels: vec![destination],
+                centroid: u15_pixel_position(destination, resolution),
+                area_fraction: 0.0025,
+            },
+        ];
+        let labels = u15_component_labels(&components, resolution);
+        let mut response = vec![0.0; face_pixels * 6 * 4];
+        response[source * 4 + 1] = U15_DEEP_THRESHOLD;
+        response[destination * 4 + 1] = U15_DEEP_THRESHOLD;
+        let destination_position = u15_pixel_position(destination, resolution);
+
+        assert!(
+            super::u15_dot(destination_position, components[1].centroid)
+                > super::u15_dot(destination_position, components[0].centroid)
+        );
+        assert_eq!(
+            u15_causal_component(
+                u15_anvil_source_taps(destination_position, resolution).unwrap(),
+                &labels,
+                &response,
+                resolution,
+            ),
+            Some(0),
         );
     }
 }

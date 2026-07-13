@@ -46,7 +46,7 @@ pub struct PlanetGenApp {
     show_biomes: bool,
     show_clouds: bool,
     show_cloud_shadows: bool,
-    show_wind_effects: bool, // GPU wind/continentality modulates clouds and moisture
+    show_wind_effects: bool, // false makes weather transport calm; continentality remains active
     show_cities: bool,
     show_erosion: bool,
     zoom: f32,     // viewport zoom level
@@ -63,12 +63,12 @@ pub struct PlanetGenApp {
     cloud_coverage: f32,
     cloud_seed: u32,
     cloud_opacity: f32,
-    wind_strength: f32, // cloud wind stretching strength (0.0-1.0)
-    lava_glow: f32,     // tectonic emission intensity (0.0-1.0)
-    ring_inner: f32,    // ring inner radius (planet radii)
-    ring_outer: f32,    // ring outer radius
-    ring_tilt: f32,     // ring tilt (degrees)
-    ring_opacity: f32,  // ring opacity
+    wind_scale: f32,
+    lava_glow: f32,    // tectonic emission intensity (0.0-1.0)
+    ring_inner: f32,   // ring inner radius (planet radii)
+    ring_outer: f32,   // ring outer radius
+    ring_tilt: f32,    // ring tilt (degrees)
+    ring_opacity: f32, // ring opacity
     storm_count: u32,
     storm_size: f32,
     night_lights: f32,
@@ -169,7 +169,7 @@ impl PlanetGenApp {
             cloud_coverage: 0.5,
             cloud_seed: default_cloud_seed,
             cloud_opacity: 1.0,
-            wind_strength: 0.5,
+            wind_scale: 1.0,
             lava_glow: 0.0,
             ring_inner: 0.0,
             ring_outer: 0.0,
@@ -268,14 +268,10 @@ impl PlanetGenApp {
             show_atmosphere_layer: if self.show_atmosphere { 1.0 } else { 0.0 },
             show_cities: if self.show_cities { 1.0 } else { 0.0 },
             cloud_opacity: self.cloud_opacity,
-            cloud_advection: if self.show_wind_effects { 1.0 } else { 0.0 },
+            cloud_advection: 1.0,
             rotation_rate: self.derived.rotation_rate_rad_s / (std::f32::consts::TAU / 86400.0),
             atm_pressure: self.derived.surface_pressure_bar,
-            wind_strength: if self.show_wind_effects {
-                self.wind_strength
-            } else {
-                0.0
-            },
+            _pad4: 0.0,
             lava_glow: self.lava_glow,
             ring_inner: self.ring_inner,
             ring_outer: self.ring_outer,
@@ -523,7 +519,11 @@ impl PlanetGenApp {
             storm_size: self.storm_size,
             radius_km: self.derived.radius_km,
             rotation_rate_rad_s: self.derived.rotation_rate_rad_s,
-            _pad0: 0.0,
+            wind_scale: if self.show_wind_effects {
+                self.wind_scale
+            } else {
+                0.0
+            },
         });
     }
 
@@ -893,18 +893,18 @@ impl eframe::App for PlanetGenApp {
                                 self.needs_render = true;
                             }
                             if ui.checkbox(&mut self.show_wind_effects, "Wind Effects")
-                                .on_hover_text("Use GPU-computed wind/continentality to modulate clouds and moisture")
+                                .on_hover_text("Enable weather transport and wind-organized uplift; continentality and surface moisture remain active when off")
                                 .changed()
                             {
-                                self.needs_render = true;
+                                self.invalidate_weather();
                             }
                             if self.show_wind_effects
-                                && ui.add(egui::Slider::new(&mut self.wind_strength, 0.0..=2.0)
-                                    .text("Strength"))
-                                    .on_hover_text("Wind stretching: 0 = round, 0.5 = moderate, 1.0 = strong, 2.0 = extreme (shears clouds apart)")
+                                && ui.add(egui::Slider::new(&mut self.wind_scale, 0.0..=2.0)
+                                    .text("Wind Strength"))
+                                    .on_hover_text("0 = calm, 1 = physical baseline, 2 = strong weather transport")
                                     .changed()
                             {
-                                self.needs_render = true;
+                                self.invalidate_weather();
                             }
                         });
                     }

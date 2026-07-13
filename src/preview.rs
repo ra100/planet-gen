@@ -40,7 +40,7 @@ pub struct PreviewUniforms {
     pub cloud_advection: f32, // 1.0 = advected cubemap modulates clouds, 0.0 = per-pixel only
     pub rotation_rate: f32,   // relative to Earth (1.0 = 24h day)
     pub atm_pressure: f32,    // atmospheric pressure in bar (1.0 = Earth)
-    pub wind_strength: f32,   // cloud wind stretching strength (0.0-1.0)
+    pub _pad4: f32,           // retained uniform slot after U15 removes render-only wind strength
     pub lava_glow: f32,       // tectonic emission intensity (0.0-1.0)
     pub ring_inner: f32,      // ring system inner radius (planet radii, 0 = no rings)
     pub ring_outer: f32,      // ring system outer radius
@@ -731,7 +731,7 @@ mod tests {
             cloud_advection: 0.0,
             rotation_rate: 1.0,
             atm_pressure: 0.7,
-            wind_strength: 0.5,
+            _pad4: 0.0,
             lava_glow: 0.0,
             ring_inner: 0.0,
             ring_outer: 0.0,
@@ -1124,7 +1124,7 @@ mod tests {
                     storm_size: 2.0,
                     radius_km: 6371.0,
                     rotation_rate_rad_s: std::f32::consts::TAU / 86400.0,
-                    _pad0: 0.0,
+                    wind_scale: 1.0,
                 },
                 &terrain,
                 &dynamics,
@@ -1159,7 +1159,7 @@ mod tests {
             storm_size: 2.0,
             radius_km: 500.0,
             rotation_rate_rad_s: std::f32::consts::TAU / 86400.0,
-            _pad0: 0.0,
+            wind_scale: 1.0,
         };
         let dense_weather = weather_pipeline.create_textures(&gpu, 16);
         weather_pipeline.generate(&gpu, dense_snapshot, &terrain, &dynamics, &dense_weather);

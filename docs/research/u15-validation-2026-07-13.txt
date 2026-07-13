@@ -1,0 +1,69 @@
+U15 validation evidence ledger
+ledger=docs/research/u15-validation-2026-07-13.txt
+base_sha=06dbef2125a7749fc42c29302129d2a1365f2d9f
+code_diff_sha256=39e0769e493482f596a8b915d5e19f8bc917ed9fd7d1a5cdb2f6906a0d82c86d
+code_diff_sha256_command=git diff --no-ext-diff --binary --full-index 06dbef2 -- src | sha256sum
+code_diff_sha256_scope=modified src/** files relative to base; Plans/ledger metadata and evidence docs excluded to avoid self-reference
+gpu=NVIDIA GeForce RTX 4090
+backend=Vulkan (GPU0: NVIDIA proprietary Vulkan 1.4.312, driver 580.159.03)
+
+wind_transport_command=cargo test --lib weather::tests::wind_scale_keeps_calm_stationary_and_scales_fixed_interval_transport -- --nocapture
+wind_transport_timestamp=2026-07-14T00:01:14+02:00
+wind_transport_exit_code=0
+wind_fixture=transport-only asymmetric moisture pulse; resolution=32; wind_norm=0.8
+wind_centroid_displacement_texels=[0.0,0.50634325,1.0426241,2.131656]
+wind_substeps=[1,1,1,1]
+wind_per_substep_displacement_texels=[0.50634325,0.53628085,1.08903190]
+wind_gate=PASS
+abi=WeatherSnapshot size=60 wind_scale_offset=56; SpinupParams size=64 wind_scale_offset=60
+abi_gate=PASS
+
+release_512_command=cargo run --bin sweep -- --weather-validation --size 512 --output-dir target/u15-validator-512-capture
+release_512_timestamp=2026-07-14T00:05:27+02:00
+release_512_exit_code=0
+release_512_resolution=512x512
+release_512_output=target/u15-validator-512-capture (ignored; not evidence dependency)
+u15_fixture=eligible_convective_core; fixture_flow=[0.5,0.0,0.35]; response=endpoint-minus-baseline
+u15_thresholds=significant_deep>=0.02; component_area>=0.25% face; response_deep_mass>=0.02; column_mass_delta<=20%; transport_only_conservation<=2%; anvil_extent>=0.10; anvil_shift>=0.5 texels; anvil_angle<=20 degrees
+u15_aggregate_worst_anvil_extent_fraction=0.30115
+u15_aggregate_worst_anvil_shift_texels=14.20532
+u15_aggregate_worst_anvil_angle_degrees=16.16918
+seed=7 count=[0,3,5] deep_p95=[N/A,0.17786,0.17261] response_deep_mass=[0.00000,0.00112,0.00243] size_area=[0.00668,0.01140,0.03423] size_top_p95_km=[4.80078,5.41797,6.96875] column_mass_delta=0.00785 dry_zero=true moist_stable_identical=true anvil_cores=5 anvil_extent=0.39607 anvil_shift=25.78848 anvil_angle=8.37562 anvil_gate=PASS
+seed=19 count=[0,3,4] deep_p95=[N/A,0.14832,0.15430] response_deep_mass=[0.00000,0.00102,0.00193] size_area=[0.01050,0.01797,0.06757] size_top_p95_km=[4.32422,5.23828,7.12891] column_mass_delta=0.00542 dry_zero=true moist_stable_identical=true anvil_cores=4 anvil_extent=0.30115 anvil_shift=20.69516 anvil_angle=10.44870 anvil_gate=PASS
+seed=37 count=[0,2,5] deep_p95=[N/A,0.17517,0.16785] response_deep_mass=[0.00000,0.00049,0.00152] size_area=[0.00510,0.00911,0.02792] size_top_p95_km=[4.62891,5.25781,6.97266] column_mass_delta=0.00362 dry_zero=true moist_stable_identical=true anvil_cores=5 anvil_extent=0.49333 anvil_shift=19.54393 anvil_angle=16.16918 anvil_gate=PASS
+seed=73 count=[0,2,5] deep_p95=[N/A,0.14990,0.18713] response_deep_mass=[0.00000,0.00081,0.00188] size_area=[0.00441,0.00752,0.02097] size_top_p95_km=[4.31641,5.07031,6.93359] column_mass_delta=0.00603 dry_zero=true moist_stable_identical=true anvil_cores=5 anvil_extent=0.45950 anvil_shift=14.20532 anvil_angle=13.16164 anvil_gate=PASS
+seed=101 count=[0,2,4] deep_p95=[N/A,0.15918,0.15588] response_deep_mass=[0.00000,0.00099,0.00180] size_area=[0.01393,0.02370,0.06827] size_top_p95_km=[4.78906,5.40625,6.98828] column_mass_delta=0.00674 dry_zero=true moist_stable_identical=true anvil_cores=4 anvil_extent=0.31550 anvil_shift=26.70593 anvil_angle=8.42101 anvil_gate=PASS
+seed=211 count=[0,3,4] deep_p95=[N/A,0.16187,0.16858] response_deep_mass=[0.00000,0.00101,0.00223] size_area=[0.01144,0.01961,0.05969] size_top_p95_km=[4.53125,5.20703,7.03125] column_mass_delta=0.00525 dry_zero=true moist_stable_identical=true anvil_cores=4 anvil_extent=0.35093 anvil_shift=19.97189 anvil_angle=11.04482 anvil_gate=PASS
+seed=509 count=[0,3,5] deep_p95=[N/A,0.18237,0.18115] response_deep_mass=[0.00000,0.00164,0.00211] size_area=[0.02893,0.04245,0.05223] size_top_p95_km=[4.73047,5.39453,7.20312] column_mass_delta=0.00396 dry_zero=true moist_stable_identical=true anvil_cores=5 anvil_extent=0.42553 anvil_shift=23.57061 anvil_angle=11.84926 anvil_gate=PASS
+seed=997 count=[0,3,6] deep_p95=[N/A,0.14746,0.15845] response_deep_mass=[0.00000,0.00091,0.00244] size_area=[0.01338,0.02113,0.05351] size_top_p95_km=[4.38672,5.10547,6.96094] column_mass_delta=0.00942 dry_zero=true moist_stable_identical=true anvil_cores=6 anvil_extent=0.32470 anvil_shift=18.43563 anvil_angle=11.50020 anvil_gate=PASS
+count_size_deep_p95_top_mass_dry_moist_anvil_gates=PASS (all eight frozen seeds)
+transport_only_conservation_gate=PASS (validator contract <=2%; no scalar emitted)
+
+orography=cool_ocean_inland_min=2.118; inland_low_min=0.022; cool_deep_min=0.011; low_deep_min=4.510; windward_mean_enhancement_min=0.17791; lee_mean_enhancement_max=-0.21531; gate=PASS
+topology_cloud_seed_42=occupied=73.4%; coherent=99.8%; zonal=99.1%; meridional=99.1%; ribbons=1.5%; polar=82.6%; anisotropy=0.0%; components=387; largest=96.6%; changed=baseline
+topology_cloud_seed_137=occupied=71.2%; coherent=99.8%; zonal=99.0%; meridional=99.1%; ribbons=1.5%; polar=82.4%; anisotropy=0.0%; components=361; largest=97.5%; changed=28.0%
+topology_cloud_seed_999=occupied=72.6%; coherent=99.8%; zonal=99.0%; meridional=99.0%; ribbons=1.6%; polar=83.1%; anisotropy=0.0%; components=401; largest=97.1%; changed=27.0%
+topology_cloud_seed_7777=occupied=73.0%; coherent=99.8%; zonal=99.0%; meridional=99.1%; ribbons=1.5%; polar=82.2%; anisotropy=0.0%; components=386; largest=97.1%; changed=29.4%
+topology_cloud_seed_2p24_minus_1=occupied=73.1%; coherent=99.8%; zonal=99.0%; meridional=99.0%; ribbons=1.5%; polar=84.5%; anisotropy=0.0%; components=417; largest=95.4%; changed=24.5%
+topology_cloud_seed_2p24_plus_1=occupied=72.2%; coherent=99.8%; zonal=98.9%; meridional=98.9%; ribbons=1.7%; polar=83.2%; anisotropy=0.0%; components=461; largest=97.0%; changed=29.8%
+topology_cloud_seed_714003000=occupied=73.6%; coherent=99.8%; zonal=99.0%; meridional=99.1%; ribbons=1.5%; polar=82.6%; anisotropy=0.0%; components=367; largest=97.1%; changed=28.5%
+topology_cloud_seed_u32_max=occupied=72.0%; coherent=99.8%; zonal=99.0%; meridional=99.0%; ribbons=1.5%; polar=82.2%; anisotropy=0.0%; components=407; largest=97.3%; changed=28.1%
+topology_global_seed_42=occupied=73.4%; coherent=99.8%; zonal=99.1%; meridional=99.1%; ribbons=1.5%; polar=82.6%; anisotropy=0.0%; components=387; largest=96.6%
+topology_global_seed_137=occupied=80.0%; coherent=99.8%; zonal=99.3%; meridional=99.1%; ribbons=1.3%; polar=79.9%; anisotropy=0.1%; components=394; largest=94.9%
+topology_global_seed_999=occupied=68.9%; coherent=99.8%; zonal=99.1%; meridional=98.9%; ribbons=1.7%; polar=66.3%; anisotropy=0.1%; components=382; largest=94.6%
+topology_global_seed_7777=occupied=78.2%; coherent=99.8%; zonal=99.1%; meridional=99.0%; ribbons=1.4%; polar=74.5%; anisotropy=0.1%; components=494; largest=95.9%
+topology_global_seed_2p24_minus_1=occupied=74.2%; coherent=99.8%; zonal=99.2%; meridional=99.0%; ribbons=1.4%; polar=70.2%; anisotropy=0.1%; components=401; largest=97.4%
+topology_global_seed_2p24_plus_1=occupied=76.5%; coherent=99.8%; zonal=99.4%; meridional=99.0%; ribbons=1.3%; polar=69.8%; anisotropy=0.2%; components=383; largest=96.5%
+topology_global_seed_714003000=occupied=74.2%; coherent=99.8%; zonal=99.1%; meridional=98.9%; ribbons=1.5%; polar=70.6%; anisotropy=0.1%; components=493; largest=94.5%
+topology_global_seed_u32_max=occupied=76.2%; coherent=99.8%; zonal=99.2%; meridional=98.8%; ribbons=1.6%; polar=62.1%; anisotropy=0.2%; components=510; largest=97.1%
+topology_morphology_storm_control_gate=PASS
+
+runtime_generation_ms=n=22; p95=15.591; min=10.834; max=15.925; mean=12.487; gate=PASS (<=33.3)
+runtime_preview_ms=n=33; p95=10.308; min=6.673; max=12.462; mean=8.771; gate=PASS (<=33.3)
+fixture_generation_ms=n=144; p95=221.971
+count_render_delta=0_to_4=0.0018; 0_to_8=0.0021; ratio=0.854; cloudy_pixels_changed=0.4%; saturated_at_8=0.0%
+size_render_delta=0.3_to_1.0=0.0010; 0.3_to_3.0=0.0038; ratio=0.259; cloudy_pixels_changed=0.8%; saturated_at_3.0=0.0%
+wind_reversal_rgb_distance=0.0824; gate=PASS
+reviewer_visual_outcome=PASS (validator reports independent visual review passed)
+visual_artifact=not added; frozen U15 field protocol records reviewer outcome and does not require tracked visual proof
+release_512_gate=PASS
