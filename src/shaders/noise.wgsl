@@ -2,6 +2,24 @@
 // Based on Ashima Arts / Stefan Gustavson's implementation
 // https://github.com/ashima/webgl-noise
 
+fn noise_seed_offset(seed: u32, stream: u32) -> vec3<f32> {
+    let mixed = seed ^ (stream * 2654435769u);
+    var x = mixed * 747796405u + 2891336453u;
+    x = ((x >> ((x >> 28u) + 4u)) ^ x) * 277803737u;
+    x = (x >> 22u) ^ x;
+    var y = (mixed ^ 0x68bc21ebu) * 747796405u + 2891336453u;
+    y = ((y >> ((y >> 28u) + 4u)) ^ y) * 277803737u;
+    y = (y >> 22u) ^ y;
+    var z = (mixed ^ 0x02e5be93u) * 747796405u + 2891336453u;
+    z = ((z >> ((z >> 28u) + 4u)) ^ z) * 277803737u;
+    z = (z >> 22u) ^ z;
+    return vec3<f32>(
+        f32(x & 0xffffu),
+        f32(y & 0xffffu),
+        f32(z & 0xffffu),
+    ) / 655.35;
+}
+
 fn mod289_3(x: vec3<f32>) -> vec3<f32> {
     return x - floor(x * (1.0 / 289.0)) * 289.0;
 }

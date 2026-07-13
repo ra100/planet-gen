@@ -106,10 +106,6 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let coverage = pow(cov_slider, 0.8);
 
-    // Seed offset
-    let s = f32(params.seed);
-    let seed_off = vec3<f32>(s, fract(s * 0.001618) * 89.0, fract(s * 0.002618) * 83.0);
-
     // Latitude for climate/wind
     let tilt = params.axial_tilt_rad;
     let tilted_y = sphere_pos.y * cos(tilt) + sphere_pos.z * sin(tilt);
@@ -123,8 +119,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let wind_stretch = tangent_wind * wind_speed * 0.08;
 
     // Cloud type region selector
-    let region_raw = snoise(sphere_pos * 0.6 + seed_off * 0.2 + vec3<f32>(131.0, 71.0, 0.0)) * 0.7
-                   + snoise(sphere_pos * 1.2 + seed_off * 0.3 + vec3<f32>(71.0, 131.0, 0.0)) * 0.3;
+    let region_raw = snoise(sphere_pos * 0.6 + noise_seed_offset(params.seed, 60u)) * 0.7
+                   + snoise(sphere_pos * 1.2 + noise_seed_offset(params.seed, 61u)) * 0.3;
     let itcz_factor = exp(-cloud_lat_deg * cloud_lat_deg / 150.0);
     let polar_c = smooth_step(55.0, 70.0, cloud_lat_deg);
     let lat_type_bias = itcz_factor * 0.4 - polar_c * 0.3
@@ -132,7 +128,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let region_type = clamp(region_raw * 0.4 + 0.5 + lat_type_bias + params.cloud_type * 0.2, 0.0, 1.0);
 
     // Cloud noise — stratus + cumulus + thin blend
-    let p_base = sphere_pos * 7.0 + seed_off;
+    let p_base = sphere_pos * 7.0 + noise_seed_offset(params.seed, 62u);
 
     // Stratus: flowing sheets
     let s_warp = vec3<f32>(
@@ -175,7 +171,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let noise_val = (w_stratus * stratus_val + w_cumulus * cumulus_val + thin_mix * thin_val) / w_total;
 
     // Weather regions
-    let weather_region = snoise(sphere_pos * 1.5 + seed_off * 0.3 + vec3<f32>(77.0, 0.0, 0.0));
+    let weather_region = snoise(sphere_pos * 1.5 + noise_seed_offset(params.seed, 63u));
     let noise_val_w = noise_val * (0.75 + 0.25 * (weather_region * 0.5 + 0.5));
 
     // Climate coverage threshold
@@ -205,7 +201,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     local_coverage = clamp(local_coverage + convection_boost, 0.0, 1.0);
 
     // Weather scale variation
-    let weather_scale = snoise(sphere_pos * 2.0 + seed_off * 0.2) * 0.15;
+    let weather_scale = snoise(sphere_pos * 2.0 + noise_seed_offset(params.seed, 64u)) * 0.15;
     let varied_noise = clamp(noise_val_w + weather_scale, 0.0, 1.0);
 
     // Schneider remap

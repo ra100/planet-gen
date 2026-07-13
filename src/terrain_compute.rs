@@ -196,7 +196,7 @@ impl TerrainComputePipeline {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups((tile_size + 15) / 16, (tile_size + 15) / 16, 1);
+            pass.dispatch_workgroups(tile_size.div_ceil(16), tile_size.div_ceil(16), 1);
         }
 
         encoder.copy_buffer_to_buffer(&output_buffer, 0, &staging_buffer, 0, buffer_size);
@@ -219,6 +219,7 @@ impl TerrainComputePipeline {
     }
 
     /// Generate tectonic terrain for all 6 cube faces.
+    #[allow(clippy::too_many_arguments)]
     pub fn generate(
         &self,
         gpu: &GpuContext,
@@ -331,7 +332,7 @@ impl TerrainComputePipeline {
                 });
                 pass.set_pipeline(&self.pipeline);
                 pass.set_bind_group(0, &bind_group, &[]);
-                pass.dispatch_workgroups((resolution + 15) / 16, (resolution + 15) / 16, 1);
+                pass.dispatch_workgroups(resolution.div_ceil(16), resolution.div_ceil(16), 1);
             }
 
             encoder.copy_buffer_to_buffer(&output_buffer, 0, &staging_buffer, 0, buffer_size);
@@ -548,6 +549,7 @@ impl MultiPassTerrainPipeline {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn generate(
         &self,
         gpu: &GpuContext,
@@ -614,7 +616,7 @@ impl MultiPassTerrainPipeline {
             mapped_at_creation: false,
         });
 
-        let workgroups = (resolution + 15) / 16;
+        let workgroups = resolution.div_ceil(16);
         let num_jfa_passes = (resolution as f32).log2().ceil() as u32;
         let mut faces: [Vec<f32>; 6] = Default::default();
 
@@ -1012,7 +1014,7 @@ impl ErosionPipeline {
                 usage: wgpu::BufferUsages::UNIFORM,
             });
 
-        let workgroups = (res + 15) / 16;
+        let workgroups = res.div_ceil(16);
 
         for face_idx in 0..6usize {
             // Height ping-pong buffers
@@ -1195,7 +1197,7 @@ impl ErosionPipeline {
                 }
 
                 // Phase 2: Erosion — reads final water, writes new height
-                let _final_water_in_a = flow_sub_iterations % 2 == 0;
+                let _final_water_in_a = flow_sub_iterations.is_multiple_of(2);
                 let erode_bg = if iter % 2 == 0 {
                     &erode_a_to_b
                 } else {
@@ -1220,7 +1222,7 @@ impl ErosionPipeline {
                 mapped_at_creation: false,
             });
 
-            let result_buffer = if iterations % 2 == 0 {
+            let result_buffer = if iterations.is_multiple_of(2) {
                 &buffer_a
             } else {
                 &buffer_b
@@ -1437,8 +1439,8 @@ impl WindFieldPipeline {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn create_test_textures(
+    // ponytail: narrow diagnostics path used by sweep validation and weather tests only
+    pub fn create_test_textures(
         &self,
         gpu: &GpuContext,
         resolution: u32,
@@ -1495,6 +1497,7 @@ impl WindFieldPipeline {
         textures
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn dispatch_mode(
         &self,
         gpu: &GpuContext,
@@ -1561,7 +1564,7 @@ impl WindFieldPipeline {
                 },
             ],
         });
-        let wg = (resolution + 15) / 16;
+        let wg = resolution.div_ceil(16);
         let mut enc = gpu.device.create_command_encoder(&Default::default());
         {
             let mut pass = enc.begin_compute_pass(&Default::default());
@@ -1572,6 +1575,7 @@ impl WindFieldPipeline {
         gpu.queue.submit(std::iter::once(enc.finish()));
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn generate(
         &self,
         gpu: &GpuContext,
@@ -1763,6 +1767,7 @@ impl WindFieldPipeline {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn generate_gpu(
         &self,
         gpu: &GpuContext,

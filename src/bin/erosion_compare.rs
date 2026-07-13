@@ -95,7 +95,7 @@ fn main() {
                 pan_x: 0.0,
                 pan_y: 0.0,
                 cloud_coverage: 0.0,
-                cloud_seed: 0.0,
+                cloud_seed: 0,
                 night_lights: 0.0,
                 star_color_temp: 0.5,
                 city_light_hue: 0.0,
@@ -117,7 +117,7 @@ fn main() {
                 ring_tilt: 0.0,
                 ring_opacity: 0.0,
                 planet_radius_km: derived.radius_km,
-                _pad4: 0.0,
+                show_cloud_shadows: 1.0,
                 _pad5: 0.0,
             };
 

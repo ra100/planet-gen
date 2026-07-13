@@ -8,7 +8,11 @@ struct NoiseTestParams {
     width: u32,
     height: u32,
     scale: f32,
-    _pad: u32,
+    seed: u32,
+    stream: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 @compute @workgroup_size(64)
@@ -28,5 +32,5 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         0.0
     );
 
-    output[idx] = snoise(pos);
+    output[idx] = snoise(pos + noise_seed_offset(params.seed, params.stream));
 }

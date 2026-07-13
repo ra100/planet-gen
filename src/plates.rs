@@ -159,9 +159,7 @@ fn generate_velocities(
     let mut velocities = Vec::with_capacity(n);
     let speed = tectonics_factor * 0.5;
 
-    for i in 0..n {
-        let center = centers[i];
-
+    for (i, &center) in centers.iter().take(n).enumerate() {
         // Each plate gets a unique Euler rotation pole derived from its index + seed
         let pole_seed = seed.wrapping_add(1000);
         let px = hash_f32(pole_seed, i as u32, 0);

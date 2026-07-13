@@ -18,7 +18,7 @@ struct Uniforms {
     pan_x: f32,              // viewport pan in NDC units
     pan_y: f32,
     cloud_coverage: f32,     // 0.0 = clear, 1.0 = overcast
-    cloud_seed: f32,
+    cloud_seed: u32,
     night_lights: f32,       // 0.0 = pristine, 1.0 = urbanized
     star_color_temp: f32,    // 0.0 = blue, 0.5 = sun, 1.0 = red dwarf
     city_light_hue: f32,    // 0.0 = warm amber, 0.5 = white, 1.0 = cool blue
@@ -41,7 +41,7 @@ struct Uniforms {
     ring_tilt: f32,        // ring plane tilt (radians)
     ring_opacity: f32,     // ring opacity (0-1)
     planet_radius_km: f32,
-    _pad4: f32,
+    show_cloud_shadows: f32,
     _pad5: f32,
 }
 
@@ -1384,8 +1384,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Combine — tint direct light by star color
     var lit_color = ambient + (diffuse + specular) * n_dot_l * s_color;
 
-    // Cloud shadow on surface (gated by show_clouds)
-    if (cloud_display_scale() > 0.0) {
+    // Cloud shadow on surface (independent from visible cloud self-shading)
+    if (uniforms.show_cloud_shadows > 0.5 && cloud_display_scale() > 0.0) {
         let shadow_sample_pos = normalize(rotated + sun_dir * 0.015);
         let cloud_above = weather_column_density(shadow_sample_pos);
         let surface_shadow = exp(-cloud_above * 2.5);
@@ -1510,10 +1510,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             // Internal texture: always visible, stronger for thick clouds.
             // Multiple scales prevent flat uniform areas at any zoom level.
             let tex_strength = mix(0.08, 0.16, thin);
-            let cloud_tex_n = snoise(low_world * 15.0 + vec3<f32>(uniforms.cloud_seed * 5.3)) * tex_strength
-                            + snoise(low_world * 30.0 + vec3<f32>(uniforms.cloud_seed * 9.1)) * tex_strength * 0.6
-                            + snoise(low_world * 60.0 + vec3<f32>(uniforms.cloud_seed * 2.7)) * tex_strength * 0.35
-                            + snoise(low_world * 120.0 + vec3<f32>(uniforms.cloud_seed * 7.3)) * tex_strength * 0.2;
+            let cloud_tex_n = snoise(low_world * 15.0 + noise_seed_offset(uniforms.cloud_seed, 50u)) * tex_strength
+                            + snoise(low_world * 30.0 + noise_seed_offset(uniforms.cloud_seed, 51u)) * tex_strength * 0.6
+                            + snoise(low_world * 60.0 + noise_seed_offset(uniforms.cloud_seed, 52u)) * tex_strength * 0.35
+                            + snoise(low_world * 120.0 + noise_seed_offset(uniforms.cloud_seed, 53u)) * tex_strength * 0.2;
             low_color *= 1.0 + cloud_tex_n;
 
             // Day/night terminator

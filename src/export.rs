@@ -345,7 +345,7 @@ impl MapPipeline {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups((tile_size + 15) / 16, (tile_size + 15) / 16, 1);
+            pass.dispatch_workgroups(tile_size.div_ceil(16), tile_size.div_ceil(16), 1);
         }
 
         encoder.copy_buffer_to_buffer(&output_buffer, 0, &staging_buffer, 0, output_size);
@@ -370,6 +370,7 @@ impl MapPipeline {
 
 // ============ Tiled Terrain Generation ============
 
+#[allow(clippy::too_many_arguments)]
 fn generate_terrain_tiled(
     gpu: &GpuContext,
     terrain_pipeline: &TerrainComputePipeline,
@@ -451,6 +452,7 @@ fn generate_terrain_tiled(
 
 // ============ Tiled Map Generation ============
 
+#[allow(clippy::too_many_arguments)]
 fn generate_map_tiled<P: Pod>(
     gpu: &GpuContext,
     pipeline: &MapPipeline,
@@ -681,6 +683,7 @@ fn export_equirect_exr_gray(
 
 // ============ Main Export Orchestrator ============
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_export(
     gpu: &GpuContext,
     config: &ExportConfig,

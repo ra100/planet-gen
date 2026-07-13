@@ -194,8 +194,7 @@ fn compute_pressure(pos: vec3<f32>, idx: u32) {
 
     // (a) ITCZ low — longitude-varying, follows thermal equator
     // Monsoon: ITCZ shifts 15-20° poleward over large continents in summer
-    let so = vec3<f32>(f32(params.seed), fract(f32(params.seed) * 0.001618) * 89.0, 0.0);
-    let itcz_lon_noise = snoise(pos * 1.5 + so) * 5.0;
+    let itcz_lon_noise = snoise(pos * 1.5 + noise_seed_offset(params.seed, 10u)) * 5.0;
     // Stronger continent pull: up to 15° poleward (monsoon)
     let monsoon_pull = continentality * 15.0 * season_sign;
     let itcz_base = 5.0 * season_sign * (tilt / (23.4 * DEG)); // scale with tilt
@@ -235,8 +234,8 @@ fn compute_pressure(pos: vec3<f32>, idx: u32) {
     // Low-freq noise seeded by position creates persistent cell structure.
     if (continentality < 0.15) {
         // Subtropical cell splitting: noise modulates high intensity by longitude
-        let cell_noise = snoise(pos * 2.5 + so * 0.7 + vec3<f32>(50.0, 0.0, 0.0)) * 0.5
-                       + snoise(pos * 1.2 + so * 0.4 + vec3<f32>(0.0, 70.0, 0.0)) * 0.3;
+        let cell_noise = snoise(pos * 2.5 + noise_seed_offset(params.seed, 11u)) * 0.5
+                       + snoise(pos * 1.2 + noise_seed_offset(params.seed, 12u)) * 0.3;
         let sub_belt = smooth_step(hadley_lat - 12.0, hadley_lat, abs_lat_deg)
                      * smooth_step(hadley_lat + 15.0, hadley_lat + 5.0, abs_lat_deg);
         // Cells: ±5 hPa variation within subtropical belt
@@ -245,7 +244,7 @@ fn compute_pressure(pos: vec3<f32>, idx: u32) {
         // Mid-latitude storm track undulation: subpolar lows meander
         let storm_track = smooth_step(polar_lat - 15.0, polar_lat - 5.0, abs_lat_deg)
                         * smooth_step(polar_lat + 10.0, polar_lat, abs_lat_deg);
-        let meander = snoise(pos * 3.0 + so * 1.1 + vec3<f32>(30.0, 0.0, 50.0));
+        let meander = snoise(pos * 3.0 + noise_seed_offset(params.seed, 13u));
         pressure += meander * 4.0 * storm_track;
     }
 
@@ -254,7 +253,7 @@ fn compute_pressure(pos: vec3<f32>, idx: u32) {
     pressure -= 3.0 * elev_km;
 
     // (h) Noise perturbation (±3 hPa, slightly stronger than before)
-    pressure += snoise(pos * 2.0 + so * 0.5 + vec3<f32>(100.0, 0.0, 0.0)) * 3.0;
+    pressure += snoise(pos * 2.0 + noise_seed_offset(params.seed, 14u)) * 3.0;
 
     dst[idx] = pressure;
     textureStore(output_tex, vec2<i32>(i32(idx % params.resolution), i32((idx / params.resolution) % params.resolution)), i32(params.face), vec4<f32>(pressure, 0.0, 0.0, 0.0));
@@ -299,9 +298,10 @@ fn compute_wind(pos: vec3<f32>, idx: u32) {
 
     // Cell boundary wobble: shifts effective latitude to break concentric rings.
     // Three components: noise + continental (monsoon) + elevation (orographic).
-    let so = vec3<f32>(f32(params.seed), fract(f32(params.seed) * 0.001618) * 89.0, 0.0);
     let pole_boost = 1.0 + 5.0 * abs(sin(lat));
-    let noise_wobble = snoise(tilted_pos * (2.0 * pole_boost) + so + vec3<f32>(150.0, 0.0, 0.0)) * 8.0;
+    let noise_wobble = snoise(
+        tilted_pos * (2.0 * pole_boost) + noise_seed_offset(params.seed, 15u),
+    ) * 8.0;
 
     // Continental wobble (monsoon): Hadley cell extends poleward over large continents.
     // Reads smoothed continentality (80-iteration diffusion = no coastline edges).
@@ -343,8 +343,8 @@ fn compute_wind(pos: vec3<f32>, idx: u32) {
     var wind_n = (hadley_m + ferrel_m) * hemisphere;
 
     // === Longitude variation (gentle speed noise, boundary wobble handles ring-breaking) ===
-    let lon_var = snoise(tilted_pos * 2.0 + so + vec3<f32>(100.0, 0.0, 0.0));
-    let lon_var2 = snoise(tilted_pos * 1.0 + so + vec3<f32>(0.0, 100.0, 0.0));
+    let lon_var = snoise(tilted_pos * 2.0 + noise_seed_offset(params.seed, 16u));
+    let lon_var2 = snoise(tilted_pos + noise_seed_offset(params.seed, 17u));
     wind_e += lon_var * 0.10;
     wind_n += lon_var2 * 0.08;
 

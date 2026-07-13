@@ -24,7 +24,7 @@ pub struct PreviewUniforms {
     pub pan_x: f32,              // viewport pan in NDC units
     pub pan_y: f32,
     pub cloud_coverage: f32,  // 0.0 = clear, 1.0 = overcast
-    pub cloud_seed: f32,      // noise seed for cloud pattern
+    pub cloud_seed: u32,      // noise seed for cloud pattern
     pub night_lights: f32,    // 0.0 = pristine, 1.0 = heavily urbanized
     pub star_color_temp: f32, // 0.0 = blue hot star, 0.5 = sun-like, 1.0 = red dwarf
     pub city_light_hue: f32,  // 0.0 = warm amber, 0.5 = white, 1.0 = cool blue
@@ -47,7 +47,7 @@ pub struct PreviewUniforms {
     pub ring_tilt: f32,       // ring plane tilt angle (radians)
     pub ring_opacity: f32,    // ring opacity (0-1)
     pub planet_radius_km: f32,
-    pub _pad4: f32,
+    pub show_cloud_shadows: f32,
     pub _pad5: f32,
 }
 
@@ -63,10 +63,18 @@ pub struct PreviewRenderer {
 
 impl PreviewRenderer {
     pub fn new(gpu: &GpuContext) -> Self {
+        Self::new_with_cloud_detail(gpu, 1.0)
+    }
+
+    fn new_with_cloud_detail(gpu: &GpuContext, detail_strength: f32) -> Self {
+        let cloud_density = include_str!("shaders/cloud_density.wgsl").replace(
+            "const CLOUD_DETAIL_STRENGTH: f32 = 1.0;",
+            &format!("const CLOUD_DETAIL_STRENGTH: f32 = {detail_strength};"),
+        );
         let shader_source = format!(
             "{}\n{}\n{}",
             include_str!("shaders/noise.wgsl"),
-            include_str!("shaders/cloud_density.wgsl"),
+            cloud_density,
             include_str!("shaders/preview_cubemap.wgsl"),
         );
 
@@ -275,6 +283,7 @@ impl PreviewRenderer {
         gpu.queue.submit(Some(encoder.finish()));
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn encode_render(
         &self,
         gpu: &GpuContext,
@@ -676,19 +685,10 @@ impl PreviewRenderer {
     }
 }
 
-/// Compute a deterministic seed offset using golden ratio hash.
-pub fn seed_to_offset(seed: u32) -> [f32; 3] {
-    let s = seed as f64;
-    let phi = 1.618033988749895_f64;
-    let x = ((s * phi) % 97.0) as f32;
-    let y = ((s * phi * phi) % 89.0) as f32;
-    let z = ((s * phi * phi * phi) % 83.0) as f32;
-    [x, y, z]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cube_sphere::cube_to_sphere;
     use crate::gpu::GpuContext;
     use crate::plates::{PlateGenParams, generate_plates};
     use crate::terrain_compute::{TectonicTerrain, TerrainComputePipeline, WindFieldPipeline};
@@ -716,7 +716,7 @@ mod tests {
             pan_x: 0.0,
             pan_y: 0.0,
             cloud_coverage: 0.5,
-            cloud_seed: 42.0,
+            cloud_seed: 42,
             night_lights: 0.0,
             star_color_temp: 0.5,
             city_light_hue: 0.0,
@@ -738,9 +738,287 @@ mod tests {
             ring_tilt: 0.0,
             ring_opacity: 0.0,
             planet_radius_km: 6371.0,
-            _pad4: 0.0,
+            show_cloud_shadows: 1.0,
             _pad5: 0.0,
         }
+    }
+
+    fn contour_fixture(resolution: u32) -> ([Vec<f32>; 6], [Vec<f32>; 6]) {
+        let smooth = |edge0: f32, edge1: f32, value: f32| {
+            let t = ((value - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+            t * t * (3.0 - 2.0 * t)
+        };
+        let mut mass = std::array::from_fn(|_| Vec::new());
+        let mut geometry = std::array::from_fn(|_| Vec::new());
+        for face in 0..6 {
+            for y in 0..resolution {
+                for x in 0..resolution {
+                    let p = cube_to_sphere(
+                        face,
+                        x as f32 / (resolution - 1) as f32,
+                        y as f32 / (resolution - 1) as f32,
+                    );
+                    let low_distance =
+                        ((p[0] + 0.16).powi(2) + (p[1] - 0.04).powi(2) + (p[2] - 0.98).powi(2))
+                            .sqrt();
+                    let deep_distance =
+                        ((p[0] - 0.27).powi(2) + (p[1] + 0.12).powi(2) + (p[2] - 0.95).powi(2))
+                            .sqrt();
+                    let low = smooth(0.72, 0.12, low_distance) * 0.78;
+                    let deep = smooth(0.42, 0.08, deep_distance) * 0.82;
+                    mass[face as usize].extend_from_slice(&[low, deep, 0.0, low.max(deep)]);
+                    geometry[face as usize].extend_from_slice(&[0.6, 2.2, 10.0, 12.0]);
+                }
+            }
+        }
+        (mass, geometry)
+    }
+
+    fn density_values(pixels: &[u8]) -> Vec<f32> {
+        pixels
+            .chunks_exact(4)
+            .map(|pixel| pixel[0] as f32 / 255.0)
+            .collect()
+    }
+
+    fn sphere_mask(size: usize, index: usize) -> bool {
+        let x = index % size;
+        let y = index / size;
+        let ndc_x = ((x as f32 + 0.5) / size as f32 - 0.5) * 2.0 / 0.85;
+        let ndc_y = ((y as f32 + 0.5) / size as f32 - 0.5) * 2.0 / 0.85;
+        ndc_x * ndc_x + ndc_y * ndc_y <= 1.0
+    }
+
+    fn box_blur(values: &[f32], size: usize, radius: usize) -> Vec<f32> {
+        (0..values.len())
+            .map(|index| {
+                let x = index % size;
+                let y = index / size;
+                let mut sum = 0.0;
+                let mut count = 0;
+                for sample_y in y.saturating_sub(radius)..=(y + radius).min(size - 1) {
+                    for sample_x in x.saturating_sub(radius)..=(x + radius).min(size - 1) {
+                        sum += values[sample_y * size + sample_x];
+                        count += 1;
+                    }
+                }
+                sum / count as f32
+            })
+            .collect()
+    }
+
+    fn correlation(a: &[f32], b: &[f32], size: usize) -> f32 {
+        let samples: Vec<_> = a
+            .iter()
+            .zip(b)
+            .enumerate()
+            .filter(|(index, _)| sphere_mask(size, *index))
+            .map(|(_, (&a, &b))| (a, b))
+            .collect();
+        let mean_a = samples.iter().map(|sample| sample.0).sum::<f32>() / samples.len() as f32;
+        let mean_b = samples.iter().map(|sample| sample.1).sum::<f32>() / samples.len() as f32;
+        let covariance = samples
+            .iter()
+            .map(|sample| (sample.0 - mean_a) * (sample.1 - mean_b))
+            .sum::<f32>();
+        let variance_a = samples
+            .iter()
+            .map(|sample| (sample.0 - mean_a).powi(2))
+            .sum::<f32>();
+        let variance_b = samples
+            .iter()
+            .map(|sample| (sample.1 - mean_b).powi(2))
+            .sum::<f32>();
+        covariance / (variance_a * variance_b).sqrt().max(f32::EPSILON)
+    }
+
+    fn edge_energy(values: &[f32], size: usize) -> f32 {
+        let mut energy = 0.0;
+        let mut count = 0;
+        for y in 1..size - 1 {
+            for x in 1..size - 1 {
+                let index = y * size + x;
+                if sphere_mask(size, index) {
+                    energy += (values[index + 1] - values[index - 1]).abs()
+                        + (values[index + size] - values[index - size]).abs();
+                    count += 1;
+                }
+            }
+        }
+        energy / count as f32
+    }
+
+    #[test]
+    fn cloud_detail_erodes_edges_without_replacing_weather_systems() {
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let detail_on = PreviewRenderer::new_with_cloud_detail(&gpu, 1.0);
+        let detail_off = PreviewRenderer::new_with_cloud_detail(&gpu, 0.0);
+        let resolution = 64;
+        let size = 128usize;
+        let terrain = TectonicTerrain {
+            faces: std::array::from_fn(|_| vec![0.0; (resolution * resolution) as usize]),
+            resolution,
+        };
+        let terrain_view = detail_on.upload_terrain(&gpu, &terrain);
+        let (mass, geometry) = contour_fixture(resolution);
+        let mass_view = detail_on.upload_cubemap_rgba16(&gpu, &mass, resolution);
+        let geometry_view = detail_on.upload_cubemap_rgba16(&gpu, &geometry, resolution);
+        let zero_mass = std::array::from_fn(|_| vec![0.0; (resolution * resolution * 4) as usize]);
+        let zero_mass_view = detail_on.upload_cubemap_rgba16(&gpu, &zero_mass, resolution);
+        let mut settings = uniforms();
+        settings.view_mode = 9;
+        settings.show_clouds = 1.0;
+        settings.cloud_coverage = 1.0;
+
+        let render = |renderer: &PreviewRenderer, seed, mass_view, render_size| {
+            let settings = PreviewUniforms {
+                cloud_seed: seed,
+                ..settings
+            };
+            renderer.render(
+                &gpu,
+                &settings,
+                &terrain_view,
+                None,
+                Some((mass_view, &geometry_view)),
+                render_size,
+            )
+        };
+        let leaked = render(&detail_on, u32::MAX, &zero_mass_view, size as u32);
+        assert!(
+            leaked
+                .chunks_exact(4)
+                .enumerate()
+                .all(|(index, pixel)| { !sphere_mask(size, index) || pixel[0..3] == [0, 0, 0] }),
+            "detail must not create density outside authored weather mass"
+        );
+
+        let coarse = density_values(&render(&detail_off, 42, &mass_view, size as u32));
+        let occupied = |values: &[f32]| {
+            values
+                .iter()
+                .enumerate()
+                .filter(|(index, value)| sphere_mask(size, *index) && **value > 0.03)
+                .count()
+        };
+        let coarse_energy = edge_energy(&coarse, size);
+        for seed in [42, 714_003_000] {
+            let detailed = density_values(&render(&detail_on, seed, &mass_view, size as u32));
+            let blurred_correlation = correlation(
+                &box_blur(&coarse, size, 4),
+                &box_blur(&detailed, size, 4),
+                size,
+            );
+            let occupied_ratio = occupied(&detailed) as f32 / occupied(&coarse) as f32;
+            let detailed_energy = edge_energy(&detailed, size);
+            let isolated = detailed
+                .iter()
+                .enumerate()
+                .filter(|(index, value)| {
+                    if **value <= 0.03 || !sphere_mask(size, *index) {
+                        return false;
+                    }
+                    let x = *index % size;
+                    let y = *index / size;
+                    x > 0
+                        && x + 1 < size
+                        && y > 0
+                        && y + 1 < size
+                        && (y - 1..=y + 1).all(|sample_y| {
+                            (x - 1..=x + 1).all(|sample_x| {
+                                sample_x == x && sample_y == y
+                                    || detailed[sample_y * size + sample_x] <= 0.03
+                            })
+                        })
+                })
+                .count();
+            let dense_drift = coarse
+                .iter()
+                .zip(&detailed)
+                .filter(|(coarse, _)| **coarse > 0.6)
+                .map(|(coarse, detailed)| (coarse - detailed).abs())
+                .fold(0.0, f32::max);
+            println!(
+                "cloud contour metrics seed={seed}: correlation={blurred_correlation:.4}, occupied={occupied_ratio:.4}, edge={coarse_energy:.5}->{detailed_energy:.5}, isolated={isolated}, dense_drift={dense_drift:.4}"
+            );
+            assert!(
+                blurred_correlation >= 0.95,
+                "seed={seed}: coarse systems changed"
+            );
+            assert!(
+                (0.85..=0.95).contains(&occupied_ratio),
+                "seed={seed}: occupied={occupied_ratio}"
+            );
+            assert!(
+                detailed_energy > coarse_energy * 1.04,
+                "seed={seed}: edge detail increase was too subtle"
+            );
+            assert!(
+                isolated <= 1,
+                "seed={seed}: detail created one-pixel speckle"
+            );
+            assert!(
+                dense_drift <= 0.05,
+                "seed={seed}: dense cores drifted by {dense_drift}"
+            );
+        }
+
+        if let Ok(output_dir) = std::env::var("CLOUD_CONTOUR_OUTPUT_DIR") {
+            std::fs::create_dir_all(&output_dir).expect("create contour output directory");
+            let render_size = 512;
+            for seed in [42, 714_003_000] {
+                let close_settings = PreviewUniforms {
+                    cloud_seed: seed,
+                    zoom: 1.55,
+                    ..settings
+                };
+                let render_close = |renderer: &PreviewRenderer| {
+                    renderer.render(
+                        &gpu,
+                        &close_settings,
+                        &terrain_view,
+                        None,
+                        Some((&mass_view, &geometry_view)),
+                        render_size,
+                    )
+                };
+                let before = render_close(&detail_off);
+                let after = render_close(&detail_on);
+                let mut comparison = Vec::with_capacity((render_size * render_size * 8) as usize);
+                for row in 0..render_size as usize {
+                    let start = row * render_size as usize * 4;
+                    let end = start + render_size as usize * 4;
+                    comparison.extend_from_slice(&before[start..end]);
+                    comparison.extend_from_slice(&after[start..end]);
+                }
+                image::save_buffer(
+                    std::path::Path::new(&output_dir)
+                        .join(format!("cloud_contours_seed_{seed}_before_after.png")),
+                    &comparison,
+                    render_size * 2,
+                    render_size,
+                    image::ColorType::Rgba8,
+                )
+                .expect("save contour comparison");
+            }
+        }
+
+        let high_seed_outputs: Vec<_> = [(1u32 << 24) + 1, 714_003_000, u32::MAX]
+            .map(|seed| {
+                let first = render(&detail_on, seed, &mass_view, size as u32);
+                assert_eq!(
+                    first,
+                    render(&detail_on, seed, &mass_view, size as u32),
+                    "seed={seed}"
+                );
+                first
+            })
+            .into_iter()
+            .collect();
+        assert!(
+            high_seed_outputs.windows(2).all(|pair| pair[0] != pair[1]),
+            "high cloud seeds must select distinct stable detail streams"
+        );
     }
 
     #[test]
@@ -786,7 +1064,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_producer_mass_matches_clouds_disabled() {
+    fn cloud_visibility_and_shadow_toggle_plumbing_are_independent() {
         let gpu = GpuContext::new().expect("GPU init failed");
         let terrain = TectonicTerrain {
             faces: std::array::from_fn(|_| vec![0.0; 16 * 16]),
@@ -929,34 +1207,79 @@ mod tests {
             Some((&dense_weather.mass, &dense_weather.geometry)),
             size,
         );
-        let mut cloudy_limb = limb_clear;
-        cloudy_limb.show_clouds = 1.0;
+        let mut cloudy_uniforms = limb_clear;
+        cloudy_uniforms.show_clouds = 1.0;
         let cloudy_limb = renderer.render(
             &gpu,
-            &cloudy_limb,
+            &cloudy_uniforms,
             &terrain_view,
             Some(&dynamics.wind_continentality),
             Some((&dense_weather.mass, &dense_weather.geometry)),
             size,
         );
+        let limb_radius_squared = |index: usize| {
+            let x = (index % size as usize) as f32 + 0.5;
+            let y = (index / size as usize) as f32 + 0.5;
+            let ndc = [
+                ((x / size as f32 - 0.5) * 2.0) / 0.85,
+                ((y / size as f32 - 0.5) * 2.0) / 0.85,
+            ];
+            ndc[0] * ndc[0] + ndc[1] * ndc[1]
+        };
         let changed_limb_pixels = clear_limb
             .chunks_exact(4)
             .zip(cloudy_limb.chunks_exact(4))
             .enumerate()
-            .filter(|(index, (clear, cloudy))| {
-                let x = (*index % size as usize) as f32 + 0.5;
-                let y = (*index / size as usize) as f32 + 0.5;
-                let ndc = [
-                    ((x / size as f32 - 0.5) * 2.0) / 0.85,
-                    ((y / size as f32 - 0.5) * 2.0) / 0.85,
-                ];
-                ndc[0] * ndc[0] + ndc[1] * ndc[1] > 1.0 && clear != cloudy
-            })
+            .filter(|(index, (clear, cloudy))| limb_radius_squared(*index) > 1.0 && clear != cloudy)
             .count();
         assert!(
             changed_limb_pixels > 0,
             "clouds must contribute outside the solid planet limb"
         );
+
+        cloudy_uniforms.show_cloud_shadows = 0.0;
+        let no_surface_shadows = renderer.render(
+            &gpu,
+            &cloudy_uniforms,
+            &terrain_view,
+            Some(&dynamics.wind_continentality),
+            Some((&dense_weather.mass, &dense_weather.geometry)),
+            size,
+        );
+        let surface_changes = cloudy_limb
+            .chunks_exact(4)
+            .zip(no_surface_shadows.chunks_exact(4))
+            .enumerate()
+            .filter(|(index, (with_shadows, without_shadows))| {
+                limb_radius_squared(*index) < 1.0 && with_shadows != without_shadows
+            })
+            .count();
+        let strongest_surface_shadow = cloudy_limb
+            .chunks_exact(4)
+            .zip(no_surface_shadows.chunks_exact(4))
+            .enumerate()
+            .filter(|(index, _)| limb_radius_squared(*index) < 1.0)
+            .flat_map(|(_, (with_shadows, without_shadows))| {
+                (0..3).map(move |channel| {
+                    without_shadows[channel].saturating_sub(with_shadows[channel])
+                })
+            })
+            .max()
+            .unwrap_or(0);
+        assert!(
+            surface_changes > 0 && strongest_surface_shadow >= 4,
+            "cloud shadow toggle changed {surface_changes} pixels with a peak delta of {strongest_surface_shadow}"
+        );
+
+        for (index, (with_shadows, without_shadows)) in cloudy_limb
+            .chunks_exact(4)
+            .zip(no_surface_shadows.chunks_exact(4))
+            .enumerate()
+        {
+            if limb_radius_squared(index) > 1.0 {
+                assert_eq!(with_shadows, without_shadows, "limb clouds changed");
+            }
+        }
     }
 
     #[test]
@@ -970,37 +1293,5 @@ mod tests {
 
         assert_eq!(renderer.size, 256);
         assert_eq!(rebinds, 1);
-    }
-
-    #[test]
-    fn test_seed_offset_distinct_for_different_seeds() {
-        let seeds = [0u32, 1, 42, 100_000, 999_999, u32::MAX];
-        let offsets: Vec<_> = seeds.iter().map(|&s| seed_to_offset(s)).collect();
-        for i in 0..offsets.len() {
-            for j in (i + 1)..offsets.len() {
-                let diff = (offsets[i][0] - offsets[j][0]).abs()
-                    + (offsets[i][1] - offsets[j][1]).abs()
-                    + (offsets[i][2] - offsets[j][2]).abs();
-                assert!(
-                    diff > 0.1,
-                    "seeds {} and {} too similar",
-                    seeds[i],
-                    seeds[j]
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_seed_offset_in_range() {
-        for seed in [0u32, 1, 42, 100_000, 999_999, u32::MAX] {
-            let off = seed_to_offset(seed);
-            for (i, &v) in off.iter().enumerate() {
-                assert!(
-                    v >= 0.0 && v < 100.0,
-                    "seed {seed} offset[{i}] = {v} out of range"
-                );
-            }
-        }
     }
 }

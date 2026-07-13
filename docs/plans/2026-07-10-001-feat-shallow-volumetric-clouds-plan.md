@@ -53,9 +53,9 @@ F1 regenerates weather only for density-affecting inputs. Camera and lighting ch
 - Do not add non-rocky, icy, or gas-giant cloud regimes.
 - Do not preserve the old shell renderer or duplicated cloud export algorithm as compatibility modes.
 
-### Conditional Within This Plan
+### U12 Activation Record
 
-- U12 fixed-step moisture transport and phase change activates only from the recorded diagnostic-baseline failure defined in U3. It is not default work.
+- U12 was activated because U9 repeatedly failed independent visual topology review. The bounded fixed-step moisture transport and phase change path is therefore intentionally always-on for weather generation; do not add a new runtime baseline branch solely to preserve the original conditional wording.
 
 ### Deferred to Follow-Up Work
 
@@ -94,7 +94,7 @@ Approximate heights are above local surface and vary with latitude: WMO high-clo
 | Orographic cloud / rain shadow | Windward ridge banks and caps, stationary lenticular lenses, sharp lee clearing | Base at local lifting-condensation level; shallow caps often 0.1-3 km thick, deep convection may reach tropopause | Positive cross-ridge wind/elevation gradient, humidity, stability, ridge height; precipitation removes moisture and descending lee air warms/dries | Lens count, edge detail, rotor texture, local cells |
 | High cirrus | Thin filaments, hooks, veils, jet bands, and anvil debris | WMO high-cloud ranges; often about 0.1-3 km thick | Upper-level ice saturation, frontal/jet ascent, gravity waves, or convective detrainment; upper wind and shear stretch while sedimentation/sublimation erode | Wisps, fall streaks, hooks, optical-depth variation |
 
-The scientific model identifies surface type/heating, elevation, wind, pressure/temperature gradients, humidity, convergence, stability, shear, lift, and tropopause as useful causes. The active baseline approximates these from existing wind, pressure, global climate moisture/temperature, terrain, latitude, and season instead of persisting every diagnostic. U12 transports separate vapor/condensate reservoirs only if the baseline gate proves those proxies insufficient. Neither path resolves droplets, kilometre-scale towers, or full vertical fluid dynamics.
+The scientific model identifies surface type/heating, elevation, wind, pressure/temperature gradients, humidity, convergence, stability, shear, lift, and tropopause as useful causes. The diagnostic baseline approximates these from existing wind, pressure, global climate moisture/temperature, terrain, latitude, and season instead of persisting every diagnostic. U9 repeatedly failed independent visual topology review, so U12 now always transports separate vapor/condensate reservoirs. Neither path resolves droplets, kilometre-scale towers, or full vertical fluid dynamics.
 
 ### Institutional Learnings
 
@@ -102,7 +102,7 @@ The scientific model identifies surface type/heating, elevation, wind, pressure/
 - `docs/solutions/architecture/tectonic-terrain-architecture-2026-03-30.md` establishes that sphere-space sampling and standard cubemap conventions avoid face discontinuities; custom neighbor operations still require seam-aware handling.
 - `docs/research/cloud-rendering.md` recommends cheap coverage rejection before detail work, front-to-back integration, early transmittance termination, and limited shadow samples.
 - The superseded `docs/plans/2026-03-31-003-feat-cloud-layer-v2-plan.md` remains useful failure evidence: threshold cliffs, latitude multiplication, flat alpha, and dominant procedural cyclones should not return.
-- If U12 activates, it resets from U9 diagnostics, runs at coarse resolution, and backtraces through world-space cube directions with a fixed small pass count. It must not repeat the failed per-face planar advection or use noise as its primary initial state.
+- U12's activation condition was evaluated and triggered by U9's repeated visual-topology failures. It resets from U9 diagnostics, runs at coarse resolution, and backtraces through world-space cube directions with a fixed small pass count. It must not repeat the failed per-face planar advection or use noise as its primary initial state.
 
 ### Scientific and Production Research
 
@@ -121,11 +121,11 @@ The scientific model identifies surface type/heating, elevation, wind, pressure/
 |---|---|---|---|
 | Independent procedural generators | All formations can dispatch in parallel and are cheap | Repeats stamped topology; systems disagree about moisture, wind, altitude, and overlap; this is the current failure | Reject as the primary generator |
 | Causal diagnostic mass from climate fields | One parallel pass; deterministic, inexpensive, and directly addresses stamped placement | Cannot evolve transport history or cyclone lifecycle | Chosen baseline; judge across seeds before adding iteration |
-| Fixed-flow moisture spin-up | Parallel work per texel/pass; adds transport, condensation, rainout, and broad depletion | Iterations are sequential; needs ping-pong state and cross-face sampling | Gated U12 only if the baseline fails named tests |
+| Fixed-flow moisture spin-up | Parallel work per texel/pass; adds transport, condensation, rainout, and broad depletion | Iterations are sequential; needs ping-pong state and cross-face sampling | Required active U12 after the evaluated baseline failed named tests |
 | Dynamically coupled moist shallow water | Can grow balanced vortices, fronts, and waves instead of relying on initialized pressure/wind | Larger implementation, stability, seam, tuning, and latency burden | Deferred to a separate plan |
 | Planet-wide 3D cloud solver / full NWP | Highest physical fidelity | Far beyond memory, latency, vertical-state, and authoring scope | Reject |
 
-The chosen diagnostic path runs all texels and all six faces in parallel in one bounded generation. If U12 activates, one simulation iteration cannot run concurrently with the next because each consumes the previous state, but texels/faces remain parallel within each iteration. U12 starts with 128 square per face and 16 iterations, then measures only the nearest smaller/larger variant needed to find a passing bound; this work remains asynchronous while the last-good field is visible.
+The chosen diagnostic path runs all texels and all six faces in parallel in one bounded generation. U12 is active because its condition was evaluated and triggered: one simulation iteration cannot run concurrently with the next because each consumes the previous state, but texels/faces remain parallel within each iteration. U12 starts with 128 square per face and 16 iterations, then measures only the nearest smaller/larger variant needed to find a passing bound; this work remains asynchronous while the last-good field is visible.
 
 ### Machine Learning Assessment
 
@@ -140,9 +140,9 @@ Global learned forecasters such as GraphCast, Pangu-Weather, FourCastNet, GenCas
 - **Portable half-float cubemaps:** Use `Rgba16Float` for filterable compute-written dynamics and weather fields after validating storage, sampling, filtering, six-layer array, and cube-view support. Fail clearly on unsupported adapters rather than adding speculative format fallbacks.
 - **Causal diagnostic baseline:** Generate one static weather result directly from the existing climate/dynamics snapshot. Signed convergence, broad orographic response, moisture, temperature, stability, wind, latitude, season, and rotation choose mass and geometry; no fixed inventory of cloud systems remains.
 - **Simulate correlations, synthesize texture:** Preserve causal low-frequency relationships and use procedural work only for unresolved cells, fibres, holes, and edges inside eligible mass.
-- **Spin-up only on failure:** U12 may add fixed-flow vapor/condensate transport if the diagnostic baseline fails the named multi-seed topology, directional-continuity, or rain-shadow gates. It preserves the same published field ABI so rendering/export do not branch.
+- **Activated fixed-flow spin-up:** U9 repeatedly failed independent visual topology review, activating U12. The 128-square, 16-iteration vapor/condensate transport now runs for every weather generation and preserves the same published field ABI so rendering/export do not branch.
 - **Overlapping mass fields, not one cloud character:** Replace the single mutually exclusive character channel with separate low liquid, deep convective, and high ice/stratiform contributions plus geometric/environmental diagnostics. A location may contain low deck, tower, and anvil simultaneously.
-- **World-space cubemap operations:** Sample broad gradients and, if U12 activates, backtraces by normalized sphere direction. No planar per-face offsets; any finite-difference stencil must validate edge/corner neighbors.
+- **World-space cubemap operations:** Sample broad gradients and U12 backtraces by normalized sphere direction. No planar per-face offsets; any finite-difference stencil must validate edge/corner neighbors.
 - **Coriolis at synoptic scale:** Use rotation rate and `sin(latitude)` only to orient broad storm/frontal curvature and suppress tropical-style rotation near the equator. Full pressure-gradient/geostrophic reconciliation is staged, and individual cumulus cells are never curled merely to expose Coriolis.
 - **Short physically based march:** Begin with eight view samples inside the bounded layer, front-to-back Beer-Lambert integration, world-stable start jitter, cheap occupancy rejection, and transmittance early exit.
 - **Minimal light sampling:** Start with one local sun-direction density sample plus ambient height lighting. Add a coarse long-range sample only when references prove local shadowing insufficient.
@@ -187,7 +187,7 @@ Canonical scalar inputs are resolved before U9 shader work: `planet_radius_km = 
 - **Exact sample count:** Start at eight within the allowed 6-10 range and tune only against the visual matrix and 30 FPS gate.
 - **Long-range shadow method:** Choose a second density sample or a coarse shadow field after measuring local-shadow quality and cost.
 - **Visual comparison tolerances:** Establish coverage, correlation, seam, and image-difference thresholds from the first approved baseline set rather than inventing arbitrary values.
-- **Conditional spin-up budget:** If U12 activates, start with 128 square per face and 16 fixed iterations, then test only adjacent variants needed to find a passing quality/latency bound.
+- **Active spin-up budget:** U12 was activated after the condition was evaluated and triggered; start with 128 square per face and 16 fixed iterations, then test only adjacent variants needed to find a passing quality/latency bound.
 
 ---
 
@@ -448,7 +448,7 @@ U8, U1, and U2 remain below as architectural traceability for the existing branc
 - With only two field pairs, publish every completed revision newer than the current front before reusing the old front as back, even when a newer request is pending. This keeps display revisions monotonic and preserves the newest completed result if the next request fails without claiming an unavailable third fallback pair.
 - Coverage, terrain, season, rotation, climate moisture/temperature, seed, storms, and dynamics invalidate weather; camera, light, opacity, visibility, and resize do not. Split terrain, dynamics, weather, and render revisions so season or wind changes do not regenerate unrelated geology.
 - Retain previous weather during progressive erosion and regenerate once from the final terrain revision.
-- If U12 activates, extend this same state machine with bounded 2-4-iteration chunks after preview submission; do not add chunk scheduling before it is needed.
+- U12 extends this same state machine with required bounded 2-4-iteration chunks after preview submission; do not add a separate chunk scheduler.
 
 **Test scenarios:**
 - Invalidation: density-affecting controls request weather while presentation-only controls request render only.
@@ -554,15 +554,15 @@ U8, U1, and U2 remain below as architectural traceability for the existing branc
 - Low-cloud rendering no longer samples density at one shell point.
 - The visual cloud debug view can isolate integrated density from lighting and atmosphere.
 - Eight samples meet the visual baseline before any sample-count increase is considered.
-- Before U4/U5, save an eight-seed cloud-only contact sheet plus the wind-reversal orographic case to `docs/research/shallow-volumetric-cloud-validation.md`. A reviewer marks each AE2 frame for fixed-inventory repetition, noise-only patches, and broken directional continuity. Skip U12 when all frames and the orographic reversal pass. Activate U12 only when a recorded rejection specifically identifies repeated low-frequency topology, missing directional continuity, or failed broad rain-shadow response; lighting, density detail, or cyclone anatomy failures remain in U13/U3 and cannot activate it.
+- Before U4/U5, save an eight-seed cloud-only contact sheet plus the wind-reversal orographic case to `docs/research/shallow-volumetric-cloud-validation.md`. A reviewer marks each AE2 frame for fixed-inventory repetition, noise-only patches, and broken directional continuity. U9 repeatedly failed this independent visual-topology review, activating U12. The subsequent 512px automated, independent visual, wind-reversal, and corrected queue-p95 gates passed; lighting, density detail, or cyclone anatomy failures remain in U13/U3 and cannot change U12 activation.
 
-### U12. Conditionally add a deterministic moisture spin-up
+### U12. Activated deterministic moisture spin-up
 
-**Goal:** If the diagnostic baseline fails, add the smallest fixed-flow transport and phase-change loop that corrects the measured failure while preserving the published field ABI.
+**Goal:** Keep the activated smallest fixed-flow transport and phase-change loop that corrected U9's repeated visual-topology failure while preserving the published field ABI.
 
 **Requirements:** R5-R9, R13, R15-R17, F1, AE2-AE3
 
-**Dependencies:** U3; activate only after U9/U13/U3 fail the multi-seed topology, directional-continuity, or broad rain-shadow gate
+**Dependencies:** U3; activated by U9's repeated independent visual-topology failure
 
 **Files:**
 - Modify: `src/weather.rs`
@@ -571,7 +571,7 @@ U8, U1, and U2 remain below as architectural traceability for the existing branc
 - Test: `src/weather.rs`
 
 **Approach:**
-- Record the exact failed U9/U13/U3 gate before enabling this unit. Do not use cyclone anatomy or cloud-atlas completeness as activation evidence.
+- Record the activation evidence: U9 repeatedly failed independent visual topology review. The spin-up remains always-on; do not add a runtime baseline branch. Do not use cyclone anatomy or cloud-atlas completeness as activation evidence.
 - Allocate low-resolution ping-pong `Rgba16Float` state for vapor, low condensate, upper ice, and one spare/local sink channel; depletion remains transient unless a later consumer is demonstrated.
 - Initialize from U9 diagnostics instead of white noise or zero state. Start at 128 square per face and 16 iterations; test an adjacent resolution/count only if the default misses quality or latency.
 - Each iteration performs world-space backtraced vapor/condensate transport, broad moisture recovery, saturation/condensation, a simple precipitation sink, and upper-ice detrainment. Add explicit lee drying only if condensation/rainout does not already pass the orographic gate.
@@ -601,6 +601,7 @@ U8, U1, and U2 remain below as architectural traceability for the existing branc
 - Debug captures show vapor supply, transport, condensation, rainout, and upper-ice production as separate stages of one causal result.
 - Removing phase change produces no cloud mass even though wind and noise remain present.
 - No spin-up pass runs during camera/light-only frames.
+- Status: U12 implementation complete. Repeated U9 visual topology failures activated an always-on bounded 128²/16-step spin-up; automated 512px topology, storm, wind-reversal, and seam gates, independent visual QA, corrected generation/render p95, and robust nonuniform conservation drift/redistribution testing all passed.
 
 ### U4. Add volumetric lighting and surface shadows
 
@@ -703,7 +704,7 @@ U8, U1, and U2 remain below as architectural traceability for the existing branc
 **Approach:**
 - Freeze deterministic seeds, camera poses, light directions, season, and jitter indices for the required clear, scattered, overcast, storm, backlit, limb, and polar references. Add compact targeted mass cases for low deck, shallow cells, front, orographic response, deep/storm, and cirrus without expanding the render matrix into a cloud atlas.
 - Add isolated cloud-density and cloud-lighting views so failures can be attributed without terrain, ice, atmosphere, or cities.
-- Add low/deep/high mass and geometry debug views. If U12 activates, add only the vapor/condensate view needed to explain its failed baseline case.
+- Add low/deep/high mass and geometry debug views. U12 requires only the vapor/condensate view needed to explain its failed baseline case.
 - Compare preview and export in unlit optical-depth space using coverage, directional correlation, and seam metrics before judging final color renders.
 - Establish numeric coverage, correlation, image-difference, and seam tolerances from the first approved baseline rather than hard-coding unvalidated thresholds.
 - Require the minimum causal ablations: detail-off preserves systems, mass/moisture-off clears them, and wind reversal reverses broad orographic asymmetry.
@@ -747,7 +748,7 @@ U8, U1, and U2 remain below as architectural traceability for the existing branc
 - Measure continuous orbit for ten seconds after warmup and report p95 frame time for clouds-off and clouds-on cases.
 - Treat p95 at or below 33.3 ms at a 768x768 render target as the acceptance target on the named baseline GPU. Missing it blocks U7 until optimization succeeds or the requirement is explicitly revised.
 - Measure clear, scattered, overcast, storm, grazing-limb, and backlit cases so early exits are not mistaken for worst-case feasibility.
-- Record weather-generation latency separately from clouds-on frame cost. If U12 activates, also record active-generation preview p95 and require the last-good field to remain visible.
+- Record weather-generation latency separately from clouds-on frame cost. U12 also requires active-generation preview p95 and the last-good field to remain visible.
 - Retain end-to-end frame p95 as the portable acceptance metric; add GPU timestamps only if a failed gate cannot otherwise be attributed.
 - Stress rapid edits, resize, cancellation, and generation failure while tracking revisions, allocations, and validation errors.
 
@@ -759,7 +760,7 @@ U8, U1, and U2 remain below as architectural traceability for the existing branc
 - Worst case: overcast storm, grazing limb, and backlit cases remain within the documented frame budget or fail the gate explicitly.
 - Zero coverage: cloud cost is statistically indistinguishable from clouds disabled and no cloud pass executes.
 - Sample variants: 6 and 8 samples report quality and GPU time; test 10 only if both fail.
-- Conditional spin-up: only if U12 activates, its accepted default reports generation and active-preview p95 without a full parameter matrix.
+- Active spin-up: U12's accepted default reports generation and active-preview p95 without a full parameter matrix.
 - Memory: persistent preview weather and tiled export remain bounded independently of final output resolution.
 - Stress: repeated resize and parameter edits produce no allocation growth, stale revision swaps, validation errors, or leaked egui registrations.
 - Failure: cancelling export or forcing weather generation failure preserves last-good preview and leaves no complete-looking partial export.
@@ -822,9 +823,9 @@ flowchart TB
 
 - **Interaction graph:** Coverage-, climate-, terrain-, rotation-, wind-, storm-, and season-changing controls invalidate diagnostic weather; camera, light, opacity, visibility, and resize remain render-only. Export snapshots the authored inputs and deterministically repeats the accepted generator independently.
 - **Error propagation:** GPU setup, allocation, shader, or dispatch failures retain the last-good preview and surface through the existing GPU error UI. Export cancellation or failure reports through the progress channel and does not publish complete-looking partial outputs.
-- **State lifecycle risks:** Old weather jobs must not replace newer revisions, and mass/geometry fields must publish atomically. If U12 activates, partial iterations never publish. Progressive erosion invalidates weather once at completion.
+- **State lifecycle risks:** Old weather jobs must not replace newer revisions, and mass/geometry fields must publish atomically. U12 was triggered after condition evaluation, so partial iterations never publish. Progressive erosion invalidates weather once at completion.
 - **GPU consumers:** The interactive app uses eframe-backed GPU ownership; sweeps, benchmarks, headless export, and GPU tests retain standalone contexts and must remain valid migration targets.
-- **Queue contention:** The active diagnostic pass remains bounded. If U12 activates, its chunks share the app queue and must not introduce waits that starve preview rendering.
+- **Queue contention:** The active diagnostic pass remains bounded. Active U12 chunks share the app queue and must not introduce waits that starve preview rendering.
 - **Error ownership:** Replace frame-path nested device error scopes with subsystem-labelled submission/completion results or a serialized scope coordinator. One subsystem cannot consume another's error or clear its last-good state.
 - **API surface parity:** Preview, export, debug views, sweep tooling, and Blender-facing outputs must share channel definitions and units.
 - **Integration coverage:** Unit tests cannot prove visual depth, seam continuity, device sharing, or preview/export alignment; U6 owns visual/parity validation and U11 owns performance/lifecycle validation.
@@ -841,7 +842,7 @@ flowchart TB
 - **Reuse preview-resolution weather for export:** Guarantees texel identity but caps export detail and couples offline output to UI resolution. Deterministic regeneration from shared definitions preserves formations without that ceiling.
 - **More independent formation generators:** Cheap and parallel, but repeats the current failure: stamped systems compete by maximum mask and have no shared moisture budget, layered overlap, lifecycle, depletion, or causal relationship to terrain and flow.
 - **One-pass diagnostic cloud mass:** Chosen baseline because it directly connects cloud families to existing physical fields with the smallest GPU and code cost. It must pass multi-seed structure, directionality, and rain-shadow gates before iteration is considered.
-- **Fixed-flow moisture spin-up:** Gated U12. It adds transport and phase change only when the diagnostic baseline has a measured failure.
+- **Fixed-flow moisture spin-up:** U12 was triggered when the evaluated diagnostic baseline had a measured failure. It is now required and adds transport and phase change in the active architecture.
 - **Moist shallow-water dynamics:** Scientifically stronger for emergent waves, fronts, and cyclogenesis, but materially more code and stability work. It requires a separate future plan rather than expanding this one.
 - **Weatherscapes-style 3D simulation:** Produces excellent local clouds but requires a vertically resolved planet-wide fluid and microphysics state, exceeding the memory and generation budget.
 - **Global learned weather models:** GraphCast, Pangu-Weather, FourCastNet, GenCast, and NeuralGCM forecast Earth from full reanalysis states; they do not synthesize arbitrary planets or renderable clouds and require large Earth-specific weights.
@@ -858,7 +859,7 @@ flowchart TB
 | Clouds still appear flat with short light sampling | Medium | High | Validate isolated lighting references; add one coarse long-range term only after measured failure. |
 | Weather follows coastlines or latitude bands | Medium | High | Use broad terrain/wind derivatives and multi-seed checks; do not multiply final density directly by raw geography or latitude. |
 | Preview and export drift again | Medium | High | Shared WGSL density definitions, immutable snapshots, optical-depth parity metrics, and deletion of the duplicate algorithm. |
-| GPU memory grows unexpectedly | Low | Medium | Persist only two compact published fields; allocate coarse ping-pong state only if U12 activates. |
+| GPU memory grows unexpectedly | Low | Medium | Persist only two compact published fields; allocate the coarse ping-pong state required by active U12. |
 | Family synthesis becomes another set of stamps | Medium | High | Require families to depend on U9 mass; detail removal preserves systems and mass removal clears them. |
 | Old revisions replace newer edits | Medium | Medium | Revision-key generation and atomic latest-wins swap while retaining last-good state. |
 
@@ -899,7 +900,7 @@ flowchart TB
 
 ## Documentation / Operational Notes
 
-- Record the baseline GPU, driver/backend, preview resolution, sample count, weather resolution, persistent memory, generation latency, and clouds-on/off timings. Add spin-up details only if U12 activates.
+- Record the baseline GPU, driver/backend, preview resolution, sample count, weather resolution, persistent memory, generation latency, clouds-on/off timings, and the active U12 spin-up details.
 - Document optical-depth units and every reconstruction channel for Blender and other downstream tools.
 - Keep unsupported-GPU behavior consistent with existing startup and OOM messaging.
 - Update `Plans.md` only as implementation units complete, following repository completion-marker conventions.

@@ -45,6 +45,7 @@ pub struct PlanetGenApp {
     show_ice: bool,
     show_biomes: bool,
     show_clouds: bool,
+    show_cloud_shadows: bool,
     show_wind_effects: bool, // GPU wind/continentality modulates clouds and moisture
     show_cities: bool,
     show_erosion: bool,
@@ -151,6 +152,7 @@ impl PlanetGenApp {
             show_ice: true,
             show_biomes: true,
             show_clouds: true,
+            show_cloud_shadows: true,
             show_wind_effects: true,
             show_cities: true,
             show_erosion: false,
@@ -252,11 +254,9 @@ impl PlanetGenApp {
             cloud_coverage: weather_snapshot
                 .map(|snapshot| snapshot.coverage)
                 .unwrap_or(self.cloud_coverage),
-            cloud_seed: crate::preview::seed_to_offset(
-                weather_snapshot
-                    .map(|snapshot| snapshot.seed)
-                    .unwrap_or(self.cloud_seed),
-            )[0],
+            cloud_seed: weather_snapshot
+                .map(|snapshot| snapshot.seed)
+                .unwrap_or(self.cloud_seed),
             night_lights: self.night_lights,
             star_color_temp: self.star_color_temp,
             city_light_hue: self.city_light_hue,
@@ -284,7 +284,7 @@ impl PlanetGenApp {
             planet_radius_km: weather_snapshot
                 .map(|snapshot| snapshot.radius_km)
                 .unwrap_or(self.derived.radius_km),
-            _pad4: 0.0,
+            show_cloud_shadows: if self.show_cloud_shadows { 1.0 } else { 0.0 },
             _pad5: 0.0,
         }
     }
@@ -831,21 +831,20 @@ impl eframe::App for PlanetGenApp {
                 }
                 let mut storms_i32 = self.storm_count as i32;
                 if ui.add(egui::Slider::new(&mut storms_i32, 0..=8)
-                    .text("Storm Bias"))
-                    .on_hover_text("Convective storm bias within physically eligible weather. 0 = none, 8 = strongest")
+                    .text("Storm Count"))
+                    .on_hover_text("Number of localized storm regions within physically eligible weather")
                     .changed()
                 {
                     self.storm_count = storms_i32 as u32;
                     self.invalidate_weather();
                 }
-                if self.storm_count > 0 {
-                    if ui.add(egui::Slider::new(&mut self.storm_size, 0.3..=3.0)
+                if self.storm_count > 0
+                    && ui.add(egui::Slider::new(&mut self.storm_size, 0.3..=3.0)
                         .text("Storm Size"))
                         .on_hover_text("Scale of eligible storm regions: 0.3 = compact, 3.0 = broad")
                         .changed()
-                    {
-                        self.invalidate_weather();
-                    }
+                {
+                    self.invalidate_weather();
                 }
 
                 ui.separator();
@@ -857,14 +856,13 @@ impl eframe::App for PlanetGenApp {
                 {
                     self.needs_render = true;
                 }
-                if self.night_lights > 0.0 {
-                    if ui.add(egui::Slider::new(&mut self.city_light_hue, 0.0..=1.0)
+                if self.night_lights > 0.0
+                    && ui.add(egui::Slider::new(&mut self.city_light_hue, 0.0..=1.0)
                         .text("Light Color"))
                         .on_hover_text("Night light color: 0 = warm amber (sodium), 0.5 = white (LED), 1.0 = cool blue (alien/futuristic)")
                         .changed()
-                    {
-                        self.needs_render = true;
-                    }
+                {
+                    self.needs_render = true;
                 }
 
                 ui.separator();
@@ -888,20 +886,25 @@ impl eframe::App for PlanetGenApp {
                     }
                     if self.show_clouds {
                         ui.indent("cloud_sub", |ui| {
+                            if ui.checkbox(&mut self.show_cloud_shadows, "Cloud Shadows")
+                                .on_hover_text("Cloud shadows cast on the planet surface")
+                                .changed()
+                            {
+                                self.needs_render = true;
+                            }
                             if ui.checkbox(&mut self.show_wind_effects, "Wind Effects")
                                 .on_hover_text("Use GPU-computed wind/continentality to modulate clouds and moisture")
                                 .changed()
                             {
                                 self.needs_render = true;
                             }
-                            if self.show_wind_effects {
-                                if ui.add(egui::Slider::new(&mut self.wind_strength, 0.0..=2.0)
+                            if self.show_wind_effects
+                                && ui.add(egui::Slider::new(&mut self.wind_strength, 0.0..=2.0)
                                     .text("Strength"))
                                     .on_hover_text("Wind stretching: 0 = round, 0.5 = moderate, 1.0 = strong, 2.0 = extreme (shears clouds apart)")
                                     .changed()
-                                {
-                                    self.needs_render = true;
-                                }
+                            {
+                                self.needs_render = true;
                             }
                         });
                     }
@@ -959,11 +962,11 @@ impl eframe::App for PlanetGenApp {
                     ui.horizontal(|ui| {
                         ui.label("Resolution:");
                         for (res, label) in &resolutions {
-                            if ui.selectable_label(self.preview_resolution == *res, *label).clicked() {
-                                if self.preview_resolution != *res {
-                                    self.preview_resolution = *res;
-                                    self.needs_terrain = true;
-                                }
+                            if ui.selectable_label(self.preview_resolution == *res, *label).clicked()
+                                && self.preview_resolution != *res
+                            {
+                                self.preview_resolution = *res;
+                                self.needs_terrain = true;
                             }
                         }
                     });
@@ -1162,10 +1165,10 @@ impl eframe::App for PlanetGenApp {
 
                 if is_exporting {
                     ui.add(egui::ProgressBar::new(self.export_progress).text(&self.export_status));
-                    if ui.button("Cancel").clicked() {
-                        if let Some(ref handle) = self.export_handle {
-                            handle.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-                        }
+                    if ui.button("Cancel").clicked()
+                        && let Some(ref handle) = self.export_handle
+                    {
+                        handle.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
                     }
                 } else {
                     if ui.button("Export Textures").clicked() {

@@ -54,9 +54,14 @@ fn tangent_basis(pos: vec3<f32>) -> mat2x3<f32> {
     return mat2x3<f32>(east, normalize(cross(pos, east)));
 }
 
+fn physical_latitude(pos: vec3<f32>) -> f32 {
+    let tilted_y = pos.y * cos(params.axial_tilt_rad) + pos.z * sin(params.axial_tilt_rad);
+    return abs(asin(clamp(tilted_y, -1.0, 1.0))) / 1.5707963;
+}
+
 fn temperature_at(pos: vec3<f32>) -> f32 {
     let tilted_y = pos.y * cos(params.axial_tilt_rad) + pos.z * sin(params.axial_tilt_rad);
-    let latitude = abs(asin(clamp(tilted_y, -1.0, 1.0))) / 1.5707963;
+    let latitude = physical_latitude(pos);
     let season_shift = (params.season - 0.5) * 2.0 * sin(params.axial_tilt_rad);
     let elevation_km = max(sample_height(pos) - params.ocean_level, 0.0) * 5.0;
     let continentality = textureSampleLevel(wind_tex, weather_sampler, pos, 0.0).a;
@@ -70,7 +75,6 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     if (id.x >= res || id.y >= res) { return; }
     let uv = vec2<f32>(f32(id.x) / f32(res - 1u), f32(id.y) / f32(res - 1u));
     let pos = cube_to_sphere(params.face, uv);
-    let weather_seed = vec3<f32>(f32(params.seed), fract(f32(params.seed) * 0.001618) * 89.0, 0.0);
     let wind = textureSampleLevel(wind_tex, weather_sampler, pos, 0.0);
     let pressure = textureSampleLevel(pressure_tex, weather_sampler, pos, 0.0).r;
     let height = sample_height(pos);
@@ -106,8 +110,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let terrain_wind = smooth_step(0.03, 0.2, wind_speed);
     let terrain_lift = smooth_step(0.005, 0.08, terrain_gradient) * terrain_wind;
     let rain_shadow = smooth_step(0.005, 0.08, -terrain_gradient) * terrain_wind;
-    let tilted_y = pos.y * cos(params.axial_tilt_rad) + pos.z * sin(params.axial_tilt_rad);
-    let latitude = abs(asin(clamp(tilted_y, -1.0, 1.0))) / 1.5707963;
+    let latitude = physical_latitude(pos);
     let temperature = temperature_at(pos);
     let thermal = smooth_step(-25.0, 30.0, temperature);
     let continentality = wind.a;
@@ -125,6 +128,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         temperature_at(north_pos) - temperature_at(south_pos),
     );
     let pressure_gradient = length(pressure_delta);
+    let zonal_structure = smooth_step(0.5, 3.0, abs(pressure_delta.x));
     let temperature_gradient = length(temperature_delta);
     let frontal_alignment = dot(pressure_delta, temperature_delta)
         / max(pressure_gradient * temperature_gradient, 0.0001);
@@ -146,43 +150,57 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         1.0,
     );
     let instability = clamp(thermal * (1.0 - inversion) + terrain_lift * 0.2, 0.0, 1.0);
-    let storm_strength = clamp(f32(params.storm_count) / 8.0, 0.0, 1.0);
-    let storm_control = storm_strength * smooth_step(
-        mix(0.95, 0.35, storm_strength),
-        1.0,
-        snoise(pos * (2.1 / max(params.storm_size, 0.3)) + weather_seed * 0.07) * 0.5 + 0.5,
-    );
-
-    let deck_eligibility = inversion * (1.0 - instability * 0.6);
-    let shallow_eligibility = (1.0 - inversion) * smooth_step(0.15, 0.7, instability);
-    let frontal_eligibility = frontal * mix(0.45, 1.0, convergent_lift);
+    let frontal_eligibility = frontal * mix(0.35, 1.0, convergent_lift);
     let orographic_eligibility = terrain_lift * (1.0 - rain_shadow);
-    let low_eligibility = moisture * clamp(
-        0.12 + deck_eligibility * 0.5 + shallow_eligibility * 0.35
-            + convergent_lift * 0.2 + frontal_eligibility * 0.3
-            + orographic_eligibility * 0.45 - rain_shadow * 0.55
-            - divergent_drying * 0.45,
+    let organized_lift = max(convergent_lift, max(frontal_eligibility, orographic_eligibility));
+    let condensation = moisture * clamp(
+        0.55 + inversion * 0.45 - divergent_drying * 0.4 - rain_shadow * 0.35,
         0.0,
         1.0,
     );
-    let deep_eligibility = moisture * instability
-        * clamp(convergent_lift * 0.75 + orographic_eligibility * 0.45
-            + frontal_eligibility * 0.35
-            + storm_control * convergent_lift * 0.3 - divergent_drying * 0.5, 0.0, 1.0);
+    let deck_organization = max(zonal_structure, organized_lift);
+    let deck_eligibility = condensation * inversion
+        * smooth_step(0.04, 0.5, deck_organization);
+    let shallow_eligibility = condensation * (1.0 - inversion)
+        * smooth_step(0.1, 0.7, instability)
+        * smooth_step(0.02, 0.45, organized_lift);
+    let low_eligibility = clamp(
+        deck_eligibility * 0.65 + shallow_eligibility * 0.45
+            + moisture * (frontal_eligibility * 0.3 + orographic_eligibility * 0.45),
+        0.0,
+        1.0,
+    );
+    let deep_trigger = clamp(convergent_lift * 0.75 + orographic_eligibility * 0.45
+        + frontal_eligibility * 0.35, 0.0, 1.0);
+    let storm_potential = moisture * instability * deep_trigger;
+    let storm_radius = clamp(params.storm_size, 0.3, 3.0) * 0.16;
+    var storm_locality = 0.0;
+    for (var storm = 0u; storm < min(params.storm_count, 8u); storm++) {
+        let center = normalize(noise_seed_offset(params.seed, 100u + storm) - vec3<f32>(50.0));
+        storm_locality = max(
+            storm_locality,
+            smooth_step(cos(storm_radius), cos(storm_radius * 0.45), dot(pos, center)),
+        );
+    }
+    let deep_eligibility = clamp(
+        storm_potential * (1.0 + storm_locality * 3.0),
+        0.0,
+        1.0,
+    );
     let high_eligibility = moisture
         * clamp(frontal_eligibility * 0.65 + deep_eligibility * 0.7, 0.0, 1.0);
     let physical_eligibility = max(max(low_eligibility, deep_eligibility), high_eligibility);
-    let boundary = snoise(pos * 3.0 + weather_seed * 0.11) * 0.10
-        + snoise(pos * 7.0 + weather_seed * 0.19) * 0.04;
+    let boundary = snoise(pos + noise_seed_offset(params.seed, 31u)) * 0.18
+        + snoise(pos * 4.0 + noise_seed_offset(params.seed, 32u)) * 0.04;
     let coverage = clamp(params.coverage, 0.0, 1.0);
-    let threshold = mix(0.72, 0.08, coverage);
+    let threshold = mix(0.7, 0.08, coverage) + divergent_drying * 0.14;
     let coverage_shape = smooth_step(
-        threshold - 0.12,
-        threshold + 0.12,
+        threshold - 0.18,
+        threshold + 0.18,
         physical_eligibility + boundary,
     );
-    let occupancy = coverage * smooth_step(0.0, 0.08, physical_eligibility)
-        * mix(0.05, 1.0, coverage_shape);
+    let occupancy = coverage * smooth_step(0.01, 0.2, physical_eligibility)
+        * coverage_shape;
     let low_deep_total = max(low_eligibility + deep_eligibility, 0.000001);
     let low_mass = occupancy * low_eligibility / low_deep_total;
     let deep_mass = occupancy * deep_eligibility / low_deep_total;

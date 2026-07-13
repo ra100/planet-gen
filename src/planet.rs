@@ -243,9 +243,7 @@ fn classify_atmosphere(strength: f32, planet_type: PlanetType) -> AtmosphereType
         AtmosphereType::None
     } else if strength < 0.35 {
         AtmosphereType::ThinCO2
-    } else if planet_type == PlanetType::HotRocky && strength > 0.6 {
-        AtmosphereType::ThickCO2 // Venus-like runaway
-    } else if strength > 0.95 {
+    } else if (planet_type == PlanetType::HotRocky && strength > 0.6) || strength > 0.95 {
         AtmosphereType::ThickCO2
     } else {
         AtmosphereType::Nitrogen

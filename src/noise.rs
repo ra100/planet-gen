@@ -8,12 +8,27 @@ struct NoiseTestParams {
     width: u32,
     height: u32,
     scale: f32,
-    _pad: u32,
+    seed: u32,
+    stream: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 /// Run the noise test shader, sampling a width×height grid at the given scale.
 /// Returns noise values as a Vec<f32>.
 pub fn run_noise_test(gpu: &GpuContext, width: u32, height: u32, scale: f32) -> Vec<f32> {
+    run_seeded_noise_test(gpu, width, height, scale, 0, 0)
+}
+
+fn run_seeded_noise_test(
+    gpu: &GpuContext,
+    width: u32,
+    height: u32,
+    scale: f32,
+    seed: u32,
+    stream: u32,
+) -> Vec<f32> {
     let shader_source = format!(
         "{}\n{}",
         include_str!("shaders/noise.wgsl"),
@@ -41,7 +56,11 @@ pub fn run_noise_test(gpu: &GpuContext, width: u32, height: u32, scale: f32) -> 
         width,
         height,
         scale,
-        _pad: 0,
+        seed,
+        stream,
+        _pad0: 0,
+        _pad1: 0,
+        _pad2: 0,
     };
     let uniform_buffer = gpu
         .device
@@ -133,7 +152,7 @@ pub fn run_noise_test(gpu: &GpuContext, width: u32, height: u32, scale: f32) -> 
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        pass.dispatch_workgroups((total as u32 + 63) / 64, 1, 1);
+        pass.dispatch_workgroups((total as u32).div_ceil(64), 1, 1);
     }
 
     encoder.copy_buffer_to_buffer(&output_buffer, 0, &staging_buffer, 0, buffer_size);
@@ -188,5 +207,43 @@ mod tests {
         let first = values[0];
         let all_same = values.iter().all(|v| (*v - first).abs() < 1e-6);
         assert!(!all_same, "noise should not be uniform");
+    }
+
+    #[test]
+    fn high_seed_noise_is_stable_finite_and_distinct() {
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let seeds = [
+            (1u32 << 24) - 1,
+            1u32 << 24,
+            (1u32 << 24) + 1,
+            714_002_999,
+            714_003_000,
+            714_003_001,
+            u32::MAX - 1,
+            u32::MAX,
+        ];
+        let fields: Vec<_> = seeds
+            .iter()
+            .map(|&seed| run_seeded_noise_test(&gpu, 16, 16, 4.0, seed, 17))
+            .collect();
+
+        for (&seed, values) in seeds.iter().zip(&fields) {
+            assert!(values.iter().all(|value| value.is_finite()), "seed {seed}");
+            let (min, max) = values
+                .iter()
+                .fold((f32::INFINITY, f32::NEG_INFINITY), |(min, max), &value| {
+                    (min.min(value), max.max(value))
+                });
+            assert!(max - min > 0.1, "seed {seed} spatially degenerated");
+            assert_eq!(
+                *values,
+                run_seeded_noise_test(&gpu, 16, 16, 4.0, seed, 17),
+                "seed {seed} is not deterministic"
+            );
+        }
+
+        for pair in fields.windows(2) {
+            assert_ne!(pair[0], pair[1], "adjacent high seeds aliased");
+        }
     }
 }
