@@ -263,6 +263,7 @@ impl WeatherLifecycle {
 
 pub struct WeatherFieldPipeline {
     pipeline: wgpu::ComputePipeline,
+    diagnose_pipeline: wgpu::ComputePipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     spinup_init_pipeline: wgpu::ComputePipeline,
     spinup_init_layout: wgpu::BindGroupLayout,
@@ -373,6 +374,16 @@ impl WeatherFieldPipeline {
                             },
                             count: None,
                         },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 7,
+                            visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: wgpu::BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                                view_dimension: wgpu::TextureViewDimension::Cube,
+                                multisampled: false,
+                            },
+                            count: None,
+                        },
                     ],
                 });
         let layout = gpu
@@ -392,6 +403,16 @@ impl WeatherFieldPipeline {
                 compilation_options: Default::default(),
                 cache: None,
             });
+        let diagnose_pipeline =
+            gpu.device
+                .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("weather final diagnosis pipeline"),
+                    layout: Some(&layout),
+                    module: &shader,
+                    entry_point: Some("diagnose"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                });
         let spinup_shader = gpu
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -432,6 +453,7 @@ impl WeatherFieldPipeline {
         });
         Ok(Self {
             pipeline,
+            diagnose_pipeline,
             bind_group_layout,
             spinup_init_pipeline,
             spinup_init_layout,
@@ -518,6 +540,27 @@ impl WeatherFieldPipeline {
                 contents: bytemuck::cast_slice(&heights),
                 usage: wgpu::BufferUsages::STORAGE,
             });
+        // `main` does not read the post-spin-up state, but the shared diagnosis layout
+        // requires a non-overlapping cube binding for this pre-spin-up baseline pass.
+        let diagnostic_placeholder = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("weather diagnosis placeholder"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 6,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let diagnostic_placeholder =
+            diagnostic_placeholder.create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::Cube),
+                ..Default::default()
+            });
         let workgroups = weather.resolution.div_ceil(16);
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         for face in 0..6 {
@@ -560,6 +603,10 @@ impl WeatherFieldPipeline {
                     wgpu::BindGroupEntry {
                         binding: 6,
                         resource: wgpu::BindingResource::TextureView(&weather.geometry_storage),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: wgpu::BindingResource::TextureView(&diagnostic_placeholder),
                     },
                 ],
             });
@@ -633,6 +680,10 @@ impl WeatherFieldPipeline {
                 wgpu::BindGroupEntry {
                     binding: 0,
                     resource: spinup_uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&dynamics.wind_continentality),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
@@ -735,6 +786,59 @@ impl WeatherFieldPipeline {
                 weather.resolution.div_ceil(8),
                 6,
             );
+        }
+        // The spin-up state is transient. Diagnose and pack both published cubemaps together.
+        for face in 0..6 {
+            let params = WeatherSnapshot { face, ..snapshot };
+            let uniform = gpu
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("weather final diagnosis params"),
+                    contents: bytemuck::bytes_of(&params),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
+            let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("weather final diagnosis bind group"),
+                layout: &self.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: uniform.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&dynamics.wind_continentality),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&dynamics.pressure),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: height.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::TextureView(&weather.mass_storage),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: wgpu::BindingResource::TextureView(&weather.geometry_storage),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: wgpu::BindingResource::TextureView(&final_state.sampled),
+                    },
+                ],
+            });
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&self.diagnose_pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(workgroups, workgroups, 1);
         }
         gpu.queue.submit(Some(encoder.finish()));
     }
@@ -987,6 +1091,10 @@ mod tests {
                 wgpu::BindGroupEntry {
                     binding: 0,
                     resource: spinup_uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&dynamics.wind_continentality),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
@@ -1321,6 +1429,102 @@ mod tests {
     }
 
     #[test]
+    fn marine_forcing_drives_cool_decks_warm_trades_and_continuous_coverage() {
+        let resolution = 32;
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let terrain = terrain_from(resolution, |_| -0.1);
+        let wind_pipeline = WindFieldPipeline::new(&gpu).expect("dynamics unavailable");
+        let pipeline = WeatherFieldPipeline::new(&gpu).expect("weather unavailable");
+        let generate = |continentality: f32, base_temp_c: f32, coverage: f32| {
+            let dynamics = wind_pipeline.create_test_textures(&gpu, resolution, |_| {
+                ([0.0, 0.0, 0.0, continentality], 1025.0)
+            });
+            let weather = generate_weather(
+                &gpu,
+                &pipeline,
+                &dynamics,
+                &terrain,
+                WeatherSnapshot {
+                    storm_count: 0,
+                    base_temp_c,
+                    coverage,
+                    ..snapshot(resolution)
+                },
+            );
+            (weather.read_mass(&gpu), weather.read_geometry(&gpu))
+        };
+        let mean = |values: &[f32], channel: usize| {
+            values
+                .chunks_exact(4)
+                .map(|pixel| pixel[channel])
+                .sum::<f32>()
+                / (values.len() / 4) as f32
+        };
+
+        let (cool_ocean, cool_geometry) = generate(0.0, -10.0, 0.75);
+        let (cool_inland, _) = generate(1.0, -10.0, 0.75);
+        let cool_low = mean(&cool_ocean, 0);
+        let inland_low = mean(&cool_inland, 0);
+        let cool_deep = mean(&cool_ocean, 1);
+        let deck_thickness = cool_geometry
+            .chunks_exact(4)
+            .map(|geometry| geometry[1] - geometry[0])
+            .sum::<f32>()
+            / (cool_geometry.len() / 4) as f32;
+        assert!(
+            cool_low >= inland_low * 1.5,
+            "ocean={cool_low} inland={inland_low}"
+        );
+        assert!(inland_low >= 0.02, "inland low mass={inland_low}");
+        assert!(
+            cool_low >= cool_deep * 4.0,
+            "low={cool_low} deep={cool_deep}"
+        );
+        assert!(cool_deep >= 0.005, "cool deep mass={cool_deep}");
+        assert!(
+            (0.3..=1.2).contains(&deck_thickness),
+            "deck thickness={deck_thickness}km"
+        );
+
+        let (warm_ocean, warm_geometry) = generate(0.0, 28.0, 0.75);
+        let warm_top = mean(&warm_geometry, 1);
+        let warm_low = mean(&warm_ocean, 0);
+        let clear_gaps = warm_ocean
+            .chunks_exact(4)
+            .filter(|mass| mass[0] <= 0.05)
+            .count() as f32
+            / (warm_ocean.len() / 4) as f32;
+        assert!(
+            (1.0..=3.0).contains(&warm_top),
+            "warm marine top={warm_top}km"
+        );
+        assert!(warm_low >= 0.02, "warm low mass={warm_low}");
+        assert!(
+            (0.15..=0.85).contains(&clear_gaps),
+            "warm clear gaps={clear_gaps}"
+        );
+
+        let totals: Vec<f32> = [0.0, 0.25, 0.5, 0.75, 1.0]
+            .into_iter()
+            .map(|coverage| mean(&generate(0.0, 15.0, coverage).0, 3))
+            .collect();
+        let increments: Vec<f32> = totals.windows(2).map(|pair| pair[1] - pair[0]).collect();
+        let mut sorted = increments.clone();
+        sorted.sort_by(f32::total_cmp);
+        let median_increment = sorted[sorted.len() / 2];
+        assert!(
+            totals.windows(2).all(|pair| pair[1] >= pair[0]),
+            "{totals:?}"
+        );
+        assert!(
+            increments
+                .iter()
+                .all(|increment| *increment <= median_increment * 2.0),
+            "coverage increments={increments:?}, median={median_increment}"
+        );
+    }
+
+    #[test]
     fn orography_follows_wind_and_stops_in_calm_air() {
         let resolution = 32;
         let gpu = GpuContext::new().expect("GPU init failed");
@@ -1341,7 +1545,7 @@ mod tests {
                         tangent[0] / length * speed,
                         0.0,
                         tangent[2] / length * speed,
-                        0.0,
+                        1.0,
                     ],
                     1013.0,
                 )
@@ -1377,7 +1581,15 @@ mod tests {
         let west_asymmetry = side(&westward, true) - side(&westward, false);
         let calm_asymmetry = side(&calm, true) - side(&calm, false);
         assert_eq!(calm, whisper);
-        assert!((east_asymmetry - calm_asymmetry) * (west_asymmetry - calm_asymmetry) < 0.0);
+        assert!(
+            (east_asymmetry - calm_asymmetry).abs() > 0.15,
+            "windward land enhancement={}",
+            east_asymmetry - calm_asymmetry
+        );
+        assert!(
+            (east_asymmetry - calm_asymmetry) * (west_asymmetry - calm_asymmetry) < 0.0,
+            "east={east_asymmetry}, west={west_asymmetry}, calm={calm_asymmetry}"
+        );
     }
 
     #[test]
@@ -1620,7 +1832,7 @@ mod tests {
     }
 
     #[test]
-    fn cloud_seed_varies_occupancy_boundaries_without_replacing_structure() {
+    fn cloud_seed_continuously_erodes_eligible_mass_without_replacing_structure() {
         let resolution = 32;
         let gpu = GpuContext::new().expect("GPU init failed");
         let terrain = terrain(resolution);
@@ -1649,18 +1861,18 @@ mod tests {
         let core_union = first
             .chunks_exact(4)
             .zip(second.chunks_exact(4))
-            .filter(|(a, b)| a[3] > 0.4 || b[3] > 0.4)
+            .filter(|(a, b)| a[3] > 0.15 || b[3] > 0.15)
             .count();
         let core_overlap = first
             .chunks_exact(4)
             .zip(second.chunks_exact(4))
-            .filter(|(a, b)| a[3] > 0.4 && b[3] > 0.4)
+            .filter(|(a, b)| a[3] > 0.15 && b[3] > 0.15)
             .count();
         let totals =
             [&first, &second].map(|mass| mass.chunks_exact(4).map(|pixel| pixel[3]).sum::<f32>());
         assert!(
-            changed > pixels / 10,
-            "adjacent high seeds changed only {changed}/{pixels} coarse occupancy pixels"
+            changed > pixels / 14,
+            "adjacent high seeds changed only {changed}/{pixels} eligible mass pixels"
         );
         assert!(
             core_overlap * 5 > core_union * 2,

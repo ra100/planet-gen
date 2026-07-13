@@ -23,10 +23,16 @@ struct WeatherSnapshot {
 @group(0) @binding(4) var<storage, read> height_data: array<f32>;
 @group(0) @binding(5) var mass_tex: texture_storage_2d_array<rgba16float, write>;
 @group(0) @binding(6) var geometry_tex: texture_storage_2d_array<rgba16float, write>;
+@group(0) @binding(7) var spinup_state: texture_cube<f32>;
 
 fn smooth_step(edge0: f32, edge1: f32, value: f32) -> f32 {
     let t = clamp((value - edge0) / (edge1 - edge0), 0.0, 1.0);
     return t * t * (3.0 - 2.0 * t);
+}
+
+fn soft_bound(value: f32, bound: f32) -> f32 {
+    let nonnegative = max(value, 0.0);
+    return bound * nonnegative / (bound + nonnegative);
 }
 
 fn sphere_to_face_uv(dir: vec3<f32>) -> vec3<f32> {
@@ -225,5 +231,93 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let tropopause_km = mix(8.0, 16.0, thermal) * mix(0.9, 1.05, 1.0 / sqrt(rotation_ratio));
     let high_top_km = max(deep_top_km, clamp(tropopause_km, 7.0, 18.0));
     textureStore(mass_tex, vec2<i32>(id.xy), i32(params.face), vec4<f32>(low_mass, deep_mass, high_mass, occupancy));
+    textureStore(geometry_tex, vec2<i32>(id.xy), i32(params.face), vec4<f32>(base_altitude_km, low_top_km, deep_top_km, high_top_km));
+}
+
+@compute @workgroup_size(16, 16)
+fn diagnose(@builtin(global_invocation_id) id: vec3<u32>) {
+    let res = params.resolution;
+    if (id.x >= res || id.y >= res) { return; }
+    let uv = vec2<f32>(f32(id.x) / f32(res - 1u), f32(id.y) / f32(res - 1u));
+    let pos = cube_to_sphere(params.face, uv);
+    if (params.coverage <= 0.0 || params.moisture <= 0.0) {
+        textureStore(mass_tex, vec2<i32>(id.xy), i32(params.face), vec4<f32>(0.0));
+        textureStore(geometry_tex, vec2<i32>(id.xy), i32(params.face), vec4<f32>(0.0));
+        return;
+    }
+
+    let wind = textureSampleLevel(wind_tex, weather_sampler, pos, 0.0);
+    let continentality = clamp(wind.a, 0.0, 1.0);
+    let marine_fraction = 1.0 - smooth_step(0.15, 0.85, continentality);
+    let thermal = smooth_step(-25.0, 30.0, temperature_at(pos));
+    let marine_stability = marine_fraction * smooth_step(0.05, 0.8, 1.0 - thermal);
+    let trade_cumulus = marine_fraction * thermal * (1.0 - marine_stability);
+    let state = textureSampleLevel(spinup_state, weather_sampler, pos, 0.0);
+
+    let wind_tangent = wind.xyz - pos * dot(wind.xyz, pos);
+    let wind_speed = length(wind_tangent);
+    let wind_dir = wind_tangent / max(wind_speed, 0.0001);
+    let terrain_step = clamp(300.0 / max(params.radius_km, 1.0), 0.02, 0.08);
+    let terrain_gradient = sample_height(normalize(pos + wind_dir * terrain_step * 1.5))
+        - sample_height(normalize(pos - wind_dir * terrain_step * 1.5));
+    let terrain_lift = smooth_step(0.005, 0.08, terrain_gradient)
+        * smooth_step(0.03, 0.2, wind_speed);
+    let rain_shadow = smooth_step(0.005, 0.08, -terrain_gradient)
+        * smooth_step(0.03, 0.2, wind_speed);
+
+    // Erosion shapes existing warm trade mass; it never creates an occupancy threshold.
+    let trade_erosion = 0.05 + 0.95 * smooth_step(
+        -0.5,
+        0.5,
+        snoise(pos * 5.0 + noise_seed_offset(params.seed, 61u)),
+    );
+    let detail_erosion = 0.55 + 0.45 * smooth_step(
+        -0.5,
+        0.5,
+        snoise(pos * 3.0 + noise_seed_offset(params.seed, 62u)),
+    );
+    let seed_erosion = 0.45 + 0.55 * smooth_step(
+        -0.5,
+        0.5,
+        snoise(pos + noise_seed_offset(params.seed, 31u)),
+    );
+    let marine_low_factor = 0.72 + marine_stability * 1.45 + trade_cumulus * 6.0 + terrain_lift * 0.65;
+    // The transported vapor state supplies weak land cloud mass even in calm test
+    // fixtures; this is continuous evapotranspiration, not an occupancy threshold.
+    let cool_land_source = smooth_step(0.35, 0.7, 1.0 - thermal);
+    let inland_low_source = (1.0 - marine_fraction) * state.x * 0.3 * cool_land_source;
+    let marine_deck_source = marine_stability * state.x * 0.25;
+    let warm_trade_source = smooth_step(0.75, 0.9, thermal);
+    let trade_low_source = trade_cumulus * state.x * trade_erosion * 0.6 * warm_trade_source;
+    let low = soft_bound(
+        state.y * detail_erosion * seed_erosion
+            * mix(1.8 + terrain_lift * 3.0 - rain_shadow * 1.2, marine_low_factor, marine_fraction)
+            * mix(1.0, trade_erosion, trade_cumulus)
+            + inland_low_source
+            + marine_deck_source
+            + trade_low_source
+            + terrain_lift * clamp(params.moisture, 0.0, 1.0) * clamp(params.coverage, 0.0, 1.0) * 1.35,
+        1.0,
+    );
+    let deep = soft_bound(
+        state.z * (1.0 - marine_stability * 0.78) * (1.0 + terrain_lift * 0.35)
+            + marine_stability * state.x * 0.065,
+        1.0 - low,
+    );
+    let occupancy = clamp(low + deep, 0.0, 1.0);
+    let high = clamp(state.w * (1.0 - marine_stability * 0.4), 0.0, occupancy);
+
+    let deck_base_km = 0.35 + (1.0 - marine_stability) * 0.2;
+    let deck_thickness_km = 0.3 + 0.9 * (1.0 - thermal) * marine_fraction;
+    let trade_top_km = mix(1.0, 3.0, thermal) * marine_fraction;
+    let base_altitude_km = mix(0.75, deck_base_km, marine_stability);
+    let low_top_km = mix(
+        base_altitude_km + 0.8 + terrain_lift * 0.3,
+        mix(base_altitude_km + deck_thickness_km, trade_top_km, trade_cumulus),
+        marine_fraction,
+    );
+    let deep_top_km = max(low_top_km, low_top_km + 2.0 + state.z * 8.0);
+    let high_top_km = max(deep_top_km, 8.0 + thermal * 8.0);
+    textureStore(mass_tex, vec2<i32>(id.xy), i32(params.face), vec4<f32>(low, deep, high, occupancy));
     textureStore(geometry_tex, vec2<i32>(id.xy), i32(params.face), vec4<f32>(base_altitude_km, low_top_km, deep_top_km, high_top_km));
 }

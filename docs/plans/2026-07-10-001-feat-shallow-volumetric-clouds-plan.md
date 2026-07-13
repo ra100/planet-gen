@@ -559,7 +559,7 @@ Freeze this protocol before U14 starts. `docs/research/shallow-volumetric-cloud-
 - Intersect the camera ray with inner and outer cloud radii and clamp the interval against the planet surface.
 - Express cloud altitude in physical distance converted to planet-radius units; clip density below terrain and keep thickness positive.
 - Use U9 mass/geometry through U13 family interpretation to evaluate overlapping vertical profiles: inversion-capped low decks, detached shallow cells, deep towers tapering toward tropopause, frontal multilayers, and thin high ice. Do not collapse them back into one character branch.
-- Preserve coarse condensate with continuous erosion: cell/fibre functions can redistribute density locally inside eligible mass but cannot threshold a cloudy system into perforated noise, create density in clear air, or leave mask contours.
+- Preserve coarse condensate with continuous erosion: cell/fibre functions can redistribute density locally inside eligible mass but cannot threshold a cloudy system into perforated noise, create density in clear air, or leave mask contours. Reuse existing noise calls for bounded altitude-varying meso modulation throughout interiors and fine attenuation-only fringe erosion; never add noise or use noise thresholds.
 - Shape convective towers with vertically narrowing cauliflower detail and broad one-sided upper anvils directed by U15's diagnostic anvil-advection direction. Keep high anvil mass valid beyond the low/deep footprint.
 - March front-to-back with an eight-sample baseline, world-stable start jitter, coarse occupancy rejection, Beer-Lambert segment transmittance, and early termination near opacity.
 - Treat each occupied view step plus its light lookup as a density-evaluation budget; do not run unconditional multi-octave noise in both paths.
@@ -580,6 +580,7 @@ Freeze this protocol before U14 starts. `docs/research/shallow-volumetric-cloud-
 - Tower/anvil geometry: tower width narrows 40-80% from base to upper core, tops reach 8-16 km, anvil direction is within 20 degrees of downshear, and high mass extends beyond the deep footprint.
 - Regime integrity: removing procedural detail preserves each system's coarse silhouette and occupied area within tolerance.
 - Detail ablation: disabling detail changes occupied area and centroid by less than 5% and leaves no hard contour line.
+- High-coverage density gates: exact optical depth is zero outside causal mass; blurred-system correlation is >=0.95; occupied-area and centroid drift are each <5%; dense-core mean optical-depth drift is <=5%; core residual RMS is 0.08-0.25 and >=50% of fringe residual RMS; edge energy increases by >=4%; no isolated pixels remain; and mean optical depth is monotonic across coverage with the largest increment <=2x the median.
 - Covers AE3: coverage zero produces identical pixels to clouds disabled and bypasses density marching.
 - Edge case: camera rays missing the cloud layer contribute no cloud radiance or opacity.
 - Edge case: high terrain intersecting the nominal cloud base contains no below-ground density.
@@ -593,6 +594,7 @@ Freeze this protocol before U14 starts. `docs/research/shallow-volumetric-cloud-
 - Eight samples meet the visual baseline before any sample-count increase is considered.
 - U3 clouds-on smoke p95 is <=33.3 ms at 768x768 on the named baseline GPU; record `PASS` or `FAIL` before U4 begins.
 - After U15 records its field-level Count evidence, assert that the matching rendered global mean optical depth changes <=20% for Count 0->8.
+- Freeze the high-coverage density gates above in the validation protocol and record their field-independent density measurements before U4; color is not an acceptance proxy for these gates.
 - Append an eight-seed cloud-only contact sheet, contour overlays, tower/anvil renders, and the rendered optical-depth assertion to `docs/research/shallow-volumetric-cloud-validation.md`; mark each result `PASS` or `FAIL` against the frozen component, image, and seam tolerances. U3 owns rendered contour, tower, anvil, density-image, and optical-depth quality; failures cannot redefine the U12 activation result.
 
 ### U12. Activated deterministic moisture spin-up

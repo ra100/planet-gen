@@ -90,7 +90,10 @@ fn init(@builtin(global_invocation_id) id: vec3<u32>) {
     let pos = direction(id, res);
     let baseline = textureSampleLevel(baseline_mass, spinup_sampler, pos, 0.0);
     let pressure = smooth_step(0.05, 0.3, params.surface_pressure_bar);
-    let supply = clamp(params.coverage, 0.0, 1.0) * clamp(params.moisture, 0.0, 1.0) * pressure;
+    let continentality = textureSampleLevel(wind_tex, spinup_sampler, pos, 0.0).a;
+    let marine_fraction = 1.0 - smooth_step(0.15, 0.85, continentality);
+    let supply = clamp(params.coverage, 0.0, 1.0) * clamp(params.moisture, 0.0, 1.0)
+        * pressure * mix(0.8, 1.25, marine_fraction);
     let vapor = supply * (0.12 + baseline.a * 0.5);
     let tilted_y = pos.y * cos(params.axial_tilt_rad) + pos.z * sin(params.axial_tilt_rad);
     let latitude = abs(asin(clamp(tilted_y, -1.0, 1.0))) / (PI * 0.5);
@@ -120,9 +123,10 @@ fn transport(@builtin(global_invocation_id) id: vec3<u32>) {
     let wind = textureSampleLevel(wind_tex, spinup_sampler, pos, 0.0);
     let tangent_wind = wind.xyz - pos * dot(wind.xyz, pos);
     let normalized_speed = length(tangent_wind);
+    let effective_speed = select(normalized_speed, 0.0, normalized_speed < 0.01);
     let wind_dir = tangent_wind / max(normalized_speed, 0.0001);
     let texel_angle = (PI * 0.5) / f32(res);
-    let wind_mps = normalized_speed * 50.0;
+    let wind_mps = effective_speed * 50.0;
     let angular_step = min(wind_mps * 1800.0 / max(params.radius_km * 1000.0, 1.0), texel_angle * 0.6);
     let backtrace = normalize(pos - wind_dir * angular_step);
     var state = textureSampleLevel(state_in, spinup_sampler, backtrace, 0.0);
@@ -141,19 +145,22 @@ fn transport(@builtin(global_invocation_id) id: vec3<u32>) {
     let upwind_height = sample_height(normalize(pos - wind_dir * diagnostic_step * 1.5));
     let downwind_height = sample_height(normalize(pos + wind_dir * diagnostic_step * 1.5));
     let terrain_lift = smooth_step(0.005, 0.08, downwind_height - upwind_height)
-        * smooth_step(0.03, 0.2, normalized_speed);
+        * smooth_step(0.03, 0.2, effective_speed);
     let lift = clamp(convergence * 0.7 + terrain_lift * 0.8, 0.0, 1.0);
     let thermal = smooth_step(-25.0, 30.0, temperature_at(pos));
     let pressure_factor = smooth_step(0.05, 0.3, params.surface_pressure_bar);
     let local_pressure = clamp(textureSampleLevel(pressure_tex, spinup_sampler, pos, 0.0).r / 1013.0, 0.8, 1.2);
+    let marine_fraction = 1.0 - smooth_step(0.15, 0.85, wind.a);
     if ((params.diagnostic_flags & DIAGNOSTIC_NO_SOURCE) == 0u) {
         let target_vapor = clamp(params.coverage, 0.0, 1.0) * clamp(params.moisture, 0.0, 1.0)
-            * pressure_factor * mix(0.22, 0.12, wind.a);
-        state.x += max(target_vapor - state.x, 0.0) * mix(0.025, 0.006, wind.a);
+            * pressure_factor * mix(0.18, 0.36, marine_fraction);
+        state.x += max(target_vapor - state.x, 0.008) * mix(0.006, 0.03, marine_fraction);
     }
 
     if ((params.diagnostic_flags & DIAGNOSTIC_NO_PHASE_CHANGE) == 0u) {
-        let saturation = mix(0.16, 0.68, thermal) * clamp(params.coverage, 0.0, 1.0) * pressure_factor * local_pressure;
+        let marine_trade = marine_fraction * thermal;
+        let saturation = mix(0.16, 0.68, thermal) * clamp(params.coverage, 0.0, 1.0)
+            * pressure_factor * local_pressure * mix(1.0, 0.45, marine_trade);
         let condensation = min(state.x, max(state.x - saturation, 0.0) * 0.22 + state.x * lift * 0.055);
         let deep_fraction = clamp(lift * thermal * 0.72, 0.0, 0.75);
         state.x -= condensation;

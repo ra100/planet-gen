@@ -463,9 +463,12 @@ struct MassFieldMetrics {
 
 #[derive(Clone, Copy, Debug)]
 struct SeamMetrics {
-    max_delta: f32,
-    mean_delta: f32,
-    sample_count: usize,
+    edge_max_delta: f32,
+    edge_p99_delta: f32,
+    edge_sample_count: usize,
+    corner_max_delta: f32,
+    corner_p99_delta: f32,
+    corner_sample_count: usize,
 }
 
 #[derive(Debug, Default)]
@@ -685,25 +688,89 @@ fn validate_mass_field(
 }
 
 fn validate_seam_metrics(metrics: &SeamMetrics) -> Result<(), &'static str> {
-    if metrics.sample_count == 0 {
+    if metrics.edge_sample_count == 0 || metrics.corner_sample_count == 0 {
         return Err("seam metrics had no samples");
     }
-    if metrics.max_delta > 0.30 {
+    if metrics.edge_max_delta > 0.30 || metrics.corner_max_delta > 0.30 {
         return Err("cubemap seam has a large discontinuity");
     }
-    if metrics.mean_delta > 0.12 {
+    if metrics.edge_p99_delta > 0.12 || metrics.corner_p99_delta > 0.12 {
         return Err("cubemap seam has elevated average discontinuity");
     }
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct CubeEdge {
+    face: usize,
+    edge: usize,
+}
+
+fn cube_edge_point(edge: CubeEdge, index: usize, last: usize) -> (usize, usize, usize) {
+    let (x, y) = match edge.edge {
+        0 => (0, index),
+        1 => (last, index),
+        2 => (index, 0),
+        3 => (index, last),
+        _ => unreachable!("cubemap faces have four edges"),
+    };
+    (edge.face, x, y)
+}
+
+fn cube_edge_pairs(resolution: u32) -> Vec<(CubeEdge, CubeEdge, bool)> {
+    let last = resolution as usize - 1;
+    let edges: Vec<_> = (0..6)
+        .flat_map(|face| (0..4).map(move |edge| CubeEdge { face, edge }))
+        .collect();
+    let point = |edge: CubeEdge, index| {
+        let (_, x, y) = cube_edge_point(edge, index, last);
+        planet_gen::cube_sphere::cube_to_sphere(
+            edge.face as u32,
+            x as f32 / last as f32,
+            y as f32 / last as f32,
+        )
+    };
+    let same = |a: [f32; 3], b: [f32; 3]| {
+        a.iter()
+            .zip(b)
+            .all(|(left, right)| (left - right).abs() < 1e-5)
+    };
+    let mut pairs = Vec::new();
+    for (index, left) in edges.iter().enumerate() {
+        for right in &edges[index + 1..] {
+            let forward = same(point(*left, 0), point(*right, 0))
+                && same(point(*left, last), point(*right, last));
+            let reversed = same(point(*left, 0), point(*right, last))
+                && same(point(*left, last), point(*right, 0));
+            if forward || reversed {
+                pairs.push((*left, *right, reversed));
+            }
+        }
+    }
+    pairs
+}
+
+fn percentile_99(mut values: Vec<f32>) -> f32 {
+    values.sort_by(f32::total_cmp);
+    values[((values.len() - 1) as f32 * 0.99).round() as usize]
 }
 
 fn seam_continuity_metrics(mass: &[f32], resolution: u32, channel: usize) -> SeamMetrics {
     let last = resolution as usize - 1;
     let pixel =
         |face: usize, x: usize, y: usize| sample_mass_pixel(mass, resolution, face, x, y, channel);
-    let mut max_delta = 0.0_f32;
-    let mut sum = 0.0_f32;
-    let mut sample_count = 0;
+    let mut edge_deltas = Vec::new();
+    for (left, right, reversed) in cube_edge_pairs(resolution) {
+        for index in 0..=last {
+            let (left_face, left_x, left_y) = cube_edge_point(left, index, last);
+            let right_index = if reversed { last - index } else { index };
+            let (right_face, right_x, right_y) = cube_edge_point(right, right_index, last);
+            edge_deltas.push(
+                (pixel(left_face, left_x, left_y) - pixel(right_face, right_x, right_y)).abs(),
+            );
+        }
+    }
+    let mut corner_deltas = Vec::new();
     for corners in [
         [(0, 0, 0), (2, last, last), (4, last, 0)],
         [(0, last, 0), (2, last, 0), (5, 0, 0)],
@@ -719,19 +786,16 @@ fn seam_continuity_metrics(mass: &[f32], resolution: u32, channel: usize) -> Sea
         for &(face, x, y) in &corners[1..] {
             let value = pixel(face, x, y);
             let delta = (reference - value).abs();
-            max_delta = max_delta.max(delta);
-            sum += delta;
-            sample_count += 1;
+            corner_deltas.push(delta);
         }
     }
     SeamMetrics {
-        max_delta,
-        mean_delta: if sample_count > 0 {
-            sum / sample_count as f32
-        } else {
-            0.0
-        },
-        sample_count,
+        edge_max_delta: edge_deltas.iter().copied().fold(0.0, f32::max),
+        edge_p99_delta: percentile_99(edge_deltas.clone()),
+        edge_sample_count: edge_deltas.len(),
+        corner_max_delta: corner_deltas.iter().copied().fold(0.0, f32::max),
+        corner_p99_delta: percentile_99(corner_deltas.clone()),
+        corner_sample_count: corner_deltas.len(),
     }
 }
 
@@ -881,6 +945,501 @@ fn storm_control_metrics(renders: &[(Vec<u8>, Vec<u8>)]) -> (f32, f32, f32, f32)
     )
 }
 
+fn u14_field_mean(values: &[f32], channel: usize) -> f32 {
+    values
+        .chunks_exact(4)
+        .map(|pixel| pixel[channel])
+        .sum::<f32>()
+        / (values.len() / 4) as f32
+}
+
+fn u14_geometry_metrics(mass: &[f32], geometry: &[f32]) -> (usize, usize) {
+    mass.chunks_exact(4).zip(geometry.chunks_exact(4)).fold(
+        (0, 0),
+        |(occupied, invalid), (mass, geometry)| {
+            let occupied_here = mass[3] > 1e-5;
+            let valid = mass.iter().all(|value| value.is_finite())
+                && geometry.iter().all(|value| value.is_finite())
+                // Zero geometry is valid only for a zero-mass texel.
+                && (!occupied_here
+                    || (geometry[0] >= 0.0
+                        && geometry[1] > geometry[0]
+                        && geometry[2] > geometry[1]
+                        && geometry[3] > geometry[2]));
+            (
+                occupied + usize::from(occupied_here),
+                invalid + usize::from(!valid),
+            )
+        },
+    )
+}
+
+fn u14_coverage_increments(totals: &[f32]) -> Result<Vec<f32>, &'static str> {
+    const MIN_MEANINGFUL_INCREMENT: f32 = 0.0005;
+    let increments: Vec<_> = totals.windows(2).map(|pair| pair[1] - pair[0]).collect();
+    if increments.iter().any(|increment| *increment < 0.0) {
+        return Err("coverage is not monotonic");
+    }
+    if increments
+        .iter()
+        .any(|increment| *increment < MIN_MEANINGFUL_INCREMENT)
+    {
+        return Err("coverage slider has a flat segment");
+    }
+    let mut sorted = increments.clone();
+    sorted.sort_by(f32::total_cmp);
+    if increments.iter().copied().fold(0.0, f32::max) > sorted[sorted.len() / 2] * 2.0 {
+        return Err("coverage increment exceeds twice the median");
+    }
+    Ok(increments)
+}
+
+const U14_FLAT_COOL_OCEAN_MASK: &str = "flat_cool_ocean";
+const U14_FLAT_INLAND_MASK: &str = "flat_inland";
+const U14_MOUNTAIN_WINDWARD_MASK: &str = "mountain_windward";
+const U14_MOUNTAIN_LEE_MASK: &str = "mountain_lee";
+const U14_COAST_BAND_MASK: &str = "coast_band";
+
+fn u14_coast_height(z: f32) -> f32 {
+    -0.001 + 0.002 * ((z / 0.012).clamp(-1.0, 1.0) * 0.5 + 0.5)
+}
+
+fn u14_coast_continentality(z: f32) -> f32 {
+    let t = ((z + 0.35) / 0.7).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn u14_coast_metrics(low_mass: &[f32], resolution: u32) -> (f32, f32) {
+    let resolution = resolution as usize;
+    let weather_texel = 1.0 / resolution as f32;
+    let pixel = |x: usize, y: usize| low_mass[(y * resolution + x) * 4];
+    let mut pairs = Vec::new();
+    let mut coast_energy = 0.0;
+    let mut coast_samples = 0usize;
+    let mut surrounding_energy = 0.0;
+    let mut surrounding_samples = 0usize;
+    for y in 1..resolution - 1 {
+        for x in 1..resolution - 1 {
+            let position = planet_gen::cube_sphere::cube_to_sphere(
+                0,
+                x as f32 / (resolution - 1) as f32,
+                y as f32 / (resolution - 1) as f32,
+            );
+            let z = position[2];
+            if z.abs() > weather_texel * 6.0 {
+                continue;
+            }
+            let left = planet_gen::cube_sphere::cube_to_sphere(
+                0,
+                (x - 1) as f32 / (resolution - 1) as f32,
+                y as f32 / (resolution - 1) as f32,
+            );
+            let right = planet_gen::cube_sphere::cube_to_sphere(
+                0,
+                (x + 1) as f32 / (resolution - 1) as f32,
+                y as f32 / (resolution - 1) as f32,
+            );
+            let cloud_gradient = (pixel(x + 1, y) - pixel(x - 1, y)).abs() * 0.5;
+            let coast_gradient =
+                (u14_coast_height(right[2]) - u14_coast_height(left[2])).abs() * 0.5;
+            pairs.push((cloud_gradient, coast_gradient));
+            if z.abs() <= weather_texel {
+                coast_energy += cloud_gradient;
+                coast_samples += 1;
+            } else if z.abs() >= weather_texel * 2.0 {
+                surrounding_energy += cloud_gradient;
+                surrounding_samples += 1;
+            }
+        }
+    }
+    let mean = |index: usize| {
+        pairs
+            .iter()
+            .map(|pair| if index == 0 { pair.0 } else { pair.1 })
+            .sum::<f32>()
+            / pairs.len() as f32
+    };
+    let cloud_mean = mean(0);
+    let coast_mean = mean(1);
+    let covariance = pairs
+        .iter()
+        .map(|(cloud, coast)| (cloud - cloud_mean) * (coast - coast_mean))
+        .sum::<f32>();
+    let cloud_variance = pairs
+        .iter()
+        .map(|(cloud, _)| (cloud - cloud_mean).powi(2))
+        .sum::<f32>();
+    let coast_variance = pairs
+        .iter()
+        .map(|(_, coast)| (coast - coast_mean).powi(2))
+        .sum::<f32>();
+    let correlation = covariance / (cloud_variance * coast_variance).sqrt().max(f32::EPSILON);
+    let local_energy = coast_energy / coast_samples.max(1) as f32;
+    let surrounding_energy = surrounding_energy / surrounding_samples.max(1) as f32;
+    (
+        correlation,
+        local_energy / surrounding_energy.max(f32::EPSILON),
+    )
+}
+
+fn u14_flat_terrain(resolution: u32, height: impl Fn([f32; 3]) -> f32) -> TectonicTerrain {
+    TectonicTerrain {
+        faces: std::array::from_fn(|face| {
+            (0..resolution * resolution)
+                .map(|index| {
+                    planet_gen::cube_sphere::cube_to_sphere(
+                        face as u32,
+                        (index % resolution) as f32 / (resolution - 1) as f32,
+                        (index / resolution) as f32 / (resolution - 1) as f32,
+                    )
+                })
+                .map(&height)
+                .collect()
+        }),
+        resolution,
+    }
+}
+
+fn run_u14_field_validation(
+    gpu: &GpuContext,
+    pipeline: &WeatherFieldPipeline,
+    output_dir: &str,
+    resolution: u32,
+) -> Vec<String> {
+    const SEEDS: [u32; 8] = [7, 19, 37, 73, 101, 211, 509, 997];
+    let terrain = u14_flat_terrain(resolution, |_| -0.1);
+    // The height sign change and the continentality transition share z=0, but only
+    // the latter is broad. The fixed mask catches a cloud edge tracing the coast.
+    let coast = u14_flat_terrain(resolution, |pos| u14_coast_height(pos[2]));
+    let ridge = u14_flat_terrain(resolution, |pos| {
+        -0.15 + (-((pos[2] / 0.14).powi(2))).exp() * pos[0].max(0.0).powi(8) * 0.45
+    });
+    let wind = WindFieldPipeline::new(gpu).expect("U14 dynamics unavailable");
+    let mut failures = Vec::new();
+    let mut rows = Vec::new();
+    let mut generation_samples_ms = Vec::new();
+    let mut weather = |terrain: &TectonicTerrain,
+                       continentality: fn([f32; 3]) -> f32,
+                       temp: f32,
+                       coverage: f32,
+                       moisture: f32,
+                       seed: u32,
+                       flow: f32| {
+        let dynamics = wind.create_test_textures(gpu, resolution, |pos| {
+            let tangent = [pos[2], 0.0, -pos[0]];
+            let length = (tangent[0] * tangent[0] + tangent[2] * tangent[2])
+                .sqrt()
+                .max(0.0001);
+            (
+                [
+                    tangent[0] / length * flow,
+                    0.0,
+                    tangent[2] / length * flow,
+                    continentality(pos),
+                ],
+                1025.0,
+            )
+        });
+        let field = pipeline.create_textures(gpu, resolution);
+        let start = Instant::now();
+        pipeline.generate(
+            gpu,
+            WeatherSnapshot {
+                face: 0,
+                resolution,
+                seed,
+                storm_count: 0,
+                coverage,
+                moisture,
+                surface_pressure_bar: 1.0,
+                base_temp_c: temp,
+                ocean_level: 0.0,
+                axial_tilt_rad: 0.0,
+                season: 0.5,
+                storm_size: 1.0,
+                radius_km: 6371.0,
+                rotation_rate_rad_s: std::f32::consts::TAU / 86400.0,
+                _pad0: 0.0,
+            },
+            terrain,
+            &dynamics,
+            &field,
+        );
+        let mass = field.read_mass(gpu);
+        let geometry = field.read_geometry(gpu);
+        generation_samples_ms.push(start.elapsed().as_secs_f64() * 1000.0);
+        (mass, geometry)
+    };
+
+    let mut cool_ratio = f32::INFINITY;
+    let mut low_deep = f32::INFINITY;
+    let mut cool_deep_min = f32::INFINITY;
+    let mut deck_min = f32::INFINITY;
+    let mut deck_max = 0.0_f32;
+    let mut trade_min = f32::INFINITY;
+    let mut trade_max = 0.0_f32;
+    let mut warm_low_min = f32::INFINITY;
+    let mut gaps_min = f32::INFINITY;
+    let mut gaps_max = 0.0_f32;
+    let mut inland_low_min = f32::INFINITY;
+    let mut coast_correlation_max = 0.0_f32;
+    let mut coast_energy_ratio_max = 0.0_f32;
+    let mut coverage_increment_min = [f32::INFINITY; 8];
+    let mut coverage_increment_max_by_step = [0.0_f32; 8];
+    let mut coverage_increment_max = 0.0_f32;
+    let mut coverage_increment_median_min = f32::INFINITY;
+    let mut zero_exact = true;
+    let mut windward_enhancement_min = f32::INFINITY;
+    let mut lee_enhancement_max = f32::NEG_INFINITY;
+    let mut deterministic = true;
+    let mut geometry_occupied_texels = 0usize;
+    let mut geometry_invalid_texels = 0usize;
+    let mut mass_seam_edge_max = [0.0_f32; 4];
+    let mut mass_seam_edge_p99 = [0.0_f32; 4];
+    let mut mass_seam_corner_max = [0.0_f32; 4];
+    let mut mass_seam_corner_p99 = [0.0_f32; 4];
+    let mut geometry_seam_edge_max = [0.0_f32; 4];
+    let mut geometry_seam_edge_p99 = [0.0_f32; 4];
+    let mut geometry_seam_corner_max = [0.0_f32; 4];
+    let mut geometry_seam_corner_p99 = [0.0_f32; 4];
+    let mut plateau_exact_max = [0.0_f32; 2];
+    let mut plateau_near_max = [0.0_f32; 2];
+    for seed in SEEDS {
+        let (cool_ocean, cool_geometry) = weather(&terrain, |_| 0.0, -10.0, 0.75, 1.0, seed, 0.0);
+        let (cool_inland, inland_geometry) =
+            weather(&terrain, |_| 1.0, -10.0, 0.75, 1.0, seed, 0.0);
+        let (repeat_mass, repeat_geometry) =
+            weather(&terrain, |_| 0.0, -10.0, 0.75, 1.0, seed, 0.0);
+        deterministic &= cool_ocean == repeat_mass && cool_geometry == repeat_geometry;
+        for (mass, geometry) in [
+            (&cool_ocean, &cool_geometry),
+            (&cool_inland, &inland_geometry),
+        ] {
+            let (occupied, invalid) = u14_geometry_metrics(mass, geometry);
+            geometry_occupied_texels += occupied;
+            geometry_invalid_texels += invalid;
+        }
+        for channel in 0..4 {
+            let mass_seam = seam_continuity_metrics(&cool_ocean, resolution, channel);
+            let geometry_seam = seam_continuity_metrics(&cool_geometry, resolution, channel);
+            mass_seam_edge_max[channel] = mass_seam_edge_max[channel].max(mass_seam.edge_max_delta);
+            mass_seam_edge_p99[channel] = mass_seam_edge_p99[channel].max(mass_seam.edge_p99_delta);
+            mass_seam_corner_max[channel] =
+                mass_seam_corner_max[channel].max(mass_seam.corner_max_delta);
+            mass_seam_corner_p99[channel] =
+                mass_seam_corner_p99[channel].max(mass_seam.corner_p99_delta);
+            geometry_seam_edge_max[channel] =
+                geometry_seam_edge_max[channel].max(geometry_seam.edge_max_delta);
+            geometry_seam_edge_p99[channel] =
+                geometry_seam_edge_p99[channel].max(geometry_seam.edge_p99_delta);
+            geometry_seam_corner_max[channel] =
+                geometry_seam_corner_max[channel].max(geometry_seam.corner_max_delta);
+            geometry_seam_corner_p99[channel] =
+                geometry_seam_corner_p99[channel].max(geometry_seam.corner_p99_delta);
+            if mass_seam.edge_max_delta > 0.02
+                || mass_seam.corner_max_delta > 0.02
+                || geometry_seam.edge_max_delta > 0.02
+                || geometry_seam.corner_max_delta > 0.02
+            {
+                failures.push(format!(
+                    "U14 seam seed {seed} channel {channel}: mass edge/corner={:.4}/{:.4}, geometry edge/corner={:.4}/{:.4}",
+                    mass_seam.edge_max_delta,
+                    mass_seam.corner_max_delta,
+                    geometry_seam.edge_max_delta,
+                    geometry_seam.corner_max_delta,
+                ));
+            }
+        }
+        let ocean_low = u14_field_mean(&cool_ocean, 0);
+        let inland_low = u14_field_mean(&cool_inland, 0);
+        inland_low_min = inland_low_min.min(inland_low);
+        cool_ratio = cool_ratio.min(ocean_low / inland_low.max(f32::EPSILON));
+        let ocean_deep = u14_field_mean(&cool_ocean, 1);
+        cool_deep_min = cool_deep_min.min(ocean_deep);
+        low_deep = low_deep.min(ocean_low / ocean_deep.max(f32::EPSILON));
+        let thickness = cool_geometry
+            .chunks_exact(4)
+            .map(|pixel| pixel[1] - pixel[0])
+            .sum::<f32>()
+            / (cool_geometry.len() / 4) as f32;
+        deck_min = deck_min.min(thickness);
+        deck_max = deck_max.max(thickness);
+
+        let (warm, warm_geometry) = weather(&terrain, |_| 0.0, 28.0, 0.75, 1.0, seed, 0.0);
+        let (occupied, invalid) = u14_geometry_metrics(&warm, &warm_geometry);
+        geometry_occupied_texels += occupied;
+        geometry_invalid_texels += invalid;
+        let top = u14_field_mean(&warm_geometry, 1);
+        warm_low_min = warm_low_min.min(u14_field_mean(&warm, 0));
+        trade_min = trade_min.min(top);
+        trade_max = trade_max.max(top);
+        let gaps = warm
+            .chunks_exact(4)
+            .filter(|pixel| pixel[0] <= 0.05)
+            .count() as f32
+            / (warm.len() / 4) as f32;
+        gaps_min = gaps_min.min(gaps);
+        gaps_max = gaps_max.max(gaps);
+
+        let (coast_mass, coast_geometry) = weather(
+            &coast,
+            |pos| u14_coast_continentality(pos[2]),
+            15.0,
+            0.75,
+            1.0,
+            seed,
+            0.0,
+        );
+        let (occupied, invalid) = u14_geometry_metrics(&coast_mass, &coast_geometry);
+        geometry_occupied_texels += occupied;
+        geometry_invalid_texels += invalid;
+        let (correlation, energy_ratio) = u14_coast_metrics(&coast_mass, resolution);
+        coast_correlation_max = coast_correlation_max.max(correlation.abs());
+        coast_energy_ratio_max = coast_energy_ratio_max.max(energy_ratio);
+
+        let coverage: Vec<f32> = [0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0]
+            .into_iter()
+            .map(|coverage| {
+                u14_field_mean(
+                    &weather(&terrain, |_| 0.0, 15.0, coverage, 1.0, seed, 0.0).0,
+                    3,
+                )
+            })
+            .collect();
+        match u14_coverage_increments(&coverage) {
+            Ok(increments) => {
+                let mut sorted = increments.clone();
+                sorted.sort_by(f32::total_cmp);
+                coverage_increment_median_min =
+                    coverage_increment_median_min.min(sorted[sorted.len() / 2]);
+                for (index, increment) in increments.into_iter().enumerate() {
+                    coverage_increment_min[index] = coverage_increment_min[index].min(increment);
+                    coverage_increment_max_by_step[index] =
+                        coverage_increment_max_by_step[index].max(increment);
+                    coverage_increment_max = coverage_increment_max.max(increment);
+                }
+            }
+            Err(error) => failures.push(format!(
+                "U14 coverage seed {seed}: {error}; totals={coverage:?}"
+            )),
+        }
+        let zero = weather(&terrain, |_| 0.0, 15.0, 0.75, 0.0, seed, 0.0);
+        zero_exact &= zero
+            .0
+            .iter()
+            .chain(zero.1.iter())
+            .all(|value| *value == 0.0);
+
+        let high_coverage = weather(&terrain, |_| 0.0, 15.0, 1.0, 1.0, seed, 0.0).0;
+        for channel in 0..2 {
+            let exact = high_coverage
+                .chunks_exact(4)
+                .filter(|pixel| pixel[channel] >= 1.0)
+                .count() as f32
+                / (high_coverage.len() / 4) as f32;
+            let near = high_coverage
+                .chunks_exact(4)
+                .filter(|pixel| pixel[channel] >= 0.995)
+                .count() as f32
+                / (high_coverage.len() / 4) as f32;
+            plateau_exact_max[channel] = plateau_exact_max[channel].max(exact);
+            plateau_near_max[channel] = plateau_near_max[channel].max(near);
+        }
+
+        let (forward, forward_geometry) = weather(&ridge, |_| 1.0, 5.0, 1.0, 1.0, seed, 1.0);
+        let (reverse, reverse_geometry) = weather(&ridge, |_| 1.0, 5.0, 1.0, 1.0, seed, -1.0);
+        for (mass, geometry) in [(&forward, &forward_geometry), (&reverse, &reverse_geometry)] {
+            let (occupied, invalid) = u14_geometry_metrics(mass, geometry);
+            geometry_occupied_texels += occupied;
+            geometry_invalid_texels += invalid;
+        }
+        let side = |values: &[f32], positive: bool| {
+            let mut total = 0.0;
+            let mut samples = 0usize;
+            for face in 0..6 {
+                for y in 0..resolution {
+                    for x in 0..resolution {
+                        let pos = planet_gen::cube_sphere::cube_to_sphere(
+                            face,
+                            x as f32 / (resolution - 1) as f32,
+                            y as f32 / (resolution - 1) as f32,
+                        );
+                        if pos[0] > 0.65 && (pos[2] > 0.04) == positive && pos[2].abs() < 0.45 {
+                            total += values[((face * resolution * resolution + y * resolution + x)
+                                * 4) as usize];
+                            samples += 1;
+                        }
+                    }
+                }
+            }
+            total / samples.max(1) as f32
+        };
+        let forward_asymmetry = side(&forward, true) - side(&forward, false);
+        let reverse_asymmetry = side(&reverse, true) - side(&reverse, false);
+        windward_enhancement_min = windward_enhancement_min.min(forward_asymmetry);
+        lee_enhancement_max = lee_enhancement_max.max(reverse_asymmetry);
+    }
+    let generation_stats = compute_runtime_stats(generation_samples_ms);
+    let values = format!(
+        "command=cargo run --bin sweep -- --weather-validation --size 512 --output-dir output/u14-validation\nseeds={SEEDS:?}\nmasks={U14_FLAT_COOL_OCEAN_MASK},{U14_FLAT_INLAND_MASK},{U14_MOUNTAIN_WINDWARD_MASK},{U14_MOUNTAIN_LEE_MASK},{U14_COAST_BAND_MASK}\ncool_ocean_inland_min={cool_ratio:.3}\ninland_low_min={inland_low_min:.3}\ncool_deep_min={cool_deep_min:.3}\nlow_deep_min={low_deep:.3}\ndeck_thickness=[{deck_min:.3},{deck_max:.3}] km\ntrade_low_min={warm_low_min:.3}\ntrade_top=[{trade_min:.3},{trade_max:.3}] km\ntrade_clear_gap=[{gaps_min:.3},{gaps_max:.3}]\ncoast_gradient_abs_correlation_max={coast_correlation_max:.3}\ncoast_gradient_energy_ratio_max={coast_energy_ratio_max:.3}\ncoverage_samples=[0,.125,.25,.375,.5,.625,.75,.875,1]\ncoverage_increment_min={coverage_increment_min:?}\ncoverage_increment_max_by_step={coverage_increment_max_by_step:?}\ncoverage_increment_max={coverage_increment_max:.5}\ncoverage_increment_median_min={coverage_increment_median_min:.5}\ncoverage_zero_exact={zero_exact}\ndeterministic={deterministic}\ngeometry_occupied_texels={geometry_occupied_texels}\ngeometry_invalid_texels={geometry_invalid_texels}\nmass_seam_edge_max={mass_seam_edge_max:?}\nmass_seam_edge_p99={mass_seam_edge_p99:?}\nmass_seam_corner_max={mass_seam_corner_max:?}\nmass_seam_corner_p99={mass_seam_corner_p99:?}\ngeometry_seam_edge_max={geometry_seam_edge_max:?}\ngeometry_seam_edge_p99={geometry_seam_edge_p99:?}\ngeometry_seam_corner_max={geometry_seam_corner_max:?}\ngeometry_seam_corner_p99={geometry_seam_corner_p99:?}\nlow_plateau_exact_max={:.5}\ndeep_plateau_exact_max={:.5}\nlow_plateau_near_max={:.5}\ndeep_plateau_near_max={:.5}\nfixture_generation_n={}\nfixture_generation_p95_ms={:.3}\nwindward_mean_enhancement_min={windward_enhancement_min:.5}\nlee_mean_enhancement_max={lee_enhancement_max:.5}\n",
+        plateau_exact_max[0],
+        plateau_exact_max[1],
+        plateau_near_max[0],
+        plateau_near_max[1],
+        generation_stats.count,
+        generation_stats.p95_ms,
+    );
+    let artifact = Path::new(output_dir).join("u14_field_metrics.txt");
+    std::fs::write(&artifact, values).expect("write U14 metrics artifact");
+    println!("U14 field metrics: {}", artifact.display());
+    if cool_ratio < 1.5 {
+        failures.push(format!("U14 cool ocean/inland ratio {cool_ratio:.3} < 1.5"));
+    }
+    if inland_low_min < 0.02 {
+        failures.push(format!("U14 inland low mass {inland_low_min:.3} < 0.02"));
+    }
+    if low_deep < 4.0 || cool_deep_min < 0.005 || deck_min < 0.3 || deck_max > 1.2 {
+        failures.push(format!("U14 deck mass/ratio/thickness deep={cool_deep_min:.3}, low_deep={low_deep:.3}, thickness=[{deck_min:.3},{deck_max:.3}]"));
+    }
+    if trade_min < 1.0
+        || trade_max > 3.0
+        || warm_low_min < 0.02
+        || gaps_min < 0.15
+        || gaps_max > 0.85
+    {
+        failures.push(format!(
+            "U14 trade mass/top/gaps mass={warm_low_min:.3}, top=[{trade_min:.3},{trade_max:.3}], gaps=[{gaps_min:.3},{gaps_max:.3}]"
+        ));
+    }
+    if coast_correlation_max >= 0.3 || coast_energy_ratio_max > 1.25 {
+        failures.push(format!(
+            "U14 coast gradient correlation={coast_correlation_max:.3}, energy_ratio={coast_energy_ratio_max:.3}"
+        ));
+    }
+    if !zero_exact {
+        failures.push("U14 zero moisture is not exact zero".to_string());
+    }
+    if !deterministic || geometry_invalid_texels > 0 {
+        failures.push(format!(
+            "U14 determinism={deterministic}, invalid geometry texels={geometry_invalid_texels}"
+        ));
+    }
+    if plateau_exact_max.iter().any(|fraction| *fraction > 0.001)
+        || plateau_near_max.iter().any(|fraction| *fraction > 0.02)
+    {
+        failures.push(format!(
+            "U14 high-coverage mass plateau exact={plateau_exact_max:?}, near={plateau_near_max:?}"
+        ));
+    }
+    if windward_enhancement_min <= 0.15 || lee_enhancement_max >= -0.15 {
+        failures.push(format!(
+            "U14 normalized windward/reversal windward={windward_enhancement_min:.3}, lee={lee_enhancement_max:.3}"
+        ));
+    }
+    rows.extend(failures.iter().cloned());
+    rows
+}
+
 fn run_weather_validation(
     gpu: &GpuContext,
     compute: &TerrainComputePipeline,
@@ -905,6 +1464,12 @@ fn run_weather_validation(
     let wind_pipeline = WindFieldPipeline::new(gpu).expect("Rgba16Float dynamics unsupported");
     let weather_pipeline = WeatherFieldPipeline::new(gpu).expect("Rgba16Float weather unsupported");
     let mut gate_failures = Vec::new();
+    gate_failures.extend(run_u14_field_validation(
+        gpu,
+        &weather_pipeline,
+        output_dir,
+        weather_resolution,
+    ));
     let scene = generate_weather_scene(
         gpu,
         compute,
@@ -1702,7 +2267,8 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        TopologyMetrics, validate_seed_topology_metrics, validate_storm_control_metrics,
+        TopologyMetrics, cube_edge_pairs, u14_coverage_increments, u14_geometry_metrics,
+        validate_seed_topology_metrics, validate_storm_control_metrics,
         weather_validation_size_error,
     };
 
@@ -1780,5 +2346,30 @@ mod tests {
         assert!(validate_storm_control_metrics(0.005, 0.008, 0.01, 0.0).is_err());
         assert!(validate_storm_control_metrics(0.001, 0.02, 0.08, 0.0).is_err());
         assert!(validate_storm_control_metrics(0.0123, 0.0202, 0.077, 0.03).is_err());
+    }
+
+    #[test]
+    fn cubemap_edge_pairs_cover_every_shared_edge_once() {
+        assert_eq!(cube_edge_pairs(16).len(), 12);
+    }
+
+    #[test]
+    fn u14_coverage_rejects_flat_or_disproportionate_segments() {
+        assert!(u14_coverage_increments(&[0.0, 0.01, 0.02, 0.03]).is_ok());
+        assert!(u14_coverage_increments(&[0.0, 0.01, 0.01, 0.03]).is_err());
+        assert!(u14_coverage_increments(&[0.0, 0.01, 0.02, 0.08]).is_err());
+    }
+
+    #[test]
+    fn u14_geometry_requires_positive_layers_for_occupied_texels() {
+        let mass = [0.2, 0.0, 0.0, 0.2, 0.0, 0.0, 0.0, 0.0];
+        assert_eq!(
+            u14_geometry_metrics(&mass, &[0.1, 1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 0.0]),
+            (1, 0)
+        );
+        assert_eq!(
+            u14_geometry_metrics(&mass, &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            (1, 1)
+        );
     }
 }

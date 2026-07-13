@@ -1,0 +1,38 @@
+U14 frozen validation evidence, 2026-07-13
+
+Provenance:
+- Base commit SHA: 1eae07ef19f24af1f25d33676c35ab01c9839baa
+- Current tracked uncommitted diff SHA-256: 91534f284ecba9ce162fdb638b831250682331e997d8e526d82578969a3052fd (`git diff --binary | sha256sum` before this evidence-only edit)
+- Exact validation command: `cargo run --bin sweep -- --weather-validation --size 512 --output-dir output/u14-validation`
+- Process exit code: 101
+- GPU/backend: NVIDIA GeForce RTX 4090 / Vulkan
+- Generated artifact: output/u14-validation/u14_field_metrics.txt
+
+Frozen seeds: [7, 19, 37, 73, 101, 211, 509, 997]
+
+Cool ocean/inland low-mass minimum: 3.090x; inland low mass minimum: 0.023
+Cool marine low/deep minimum: 7.530x; deck thickness: 1.167 km
+Warm trade low mass minimum: 0.029; top: 2.262 km; clear gaps: 0.787-0.796
+Coast gradient absolute correlation maximum: 0.125; local energy ratio maximum: 0.983x
+
+Coverage samples: [0, .125, .25, .375, .5, .625, .75, .875, 1]
+Coverage increments by adjacent interval, seed minima: [0.005732404, 0.005676792, 0.0056169247, 0.005580224, 0.005521847, 0.0054560862, 0.0054266527, 0.0053953156]
+Coverage increments by adjacent interval, seed maxima: [0.005779062, 0.0057219, 0.005659951, 0.00562302, 0.005562924, 0.005493587, 0.005465746, 0.0054321736]
+Coverage zero exact: true; largest increment: 0.00578; minimum per-seed median increment: 0.00558; all increments positive and below 2x their seed median.
+
+Occupied geometry texels: 18510994; invalid geometry texels: 0. Occupied texels require finite, strictly ordered positive layer thickness; zero geometry only passes when mass is zero.
+Mass seam [low, deep, high, occupancy] edge max: [0.000061035156, 0, 0, 0.000061035156]; edge p99: [0, 0, 0, 0]; corner max/p99: [0, 0, 0, 0] / [0, 0, 0, 0].
+Geometry seam [base, low top, deep top, high top] edge max/p99: [0, 0, 0, 0] / [0, 0, 0, 0]; corner max/p99: [0, 0, 0, 0] / [0, 0, 0, 0].
+High-coverage plateau fractions low/deep exact: 0.000% / 0.000%; near (>=0.995): 0.000% / 0.000%.
+
+Mask-area-normalized windward-minus-lee enhancement minimum: 0.15176; reversed-flow enhancement maximum: -0.22780. Both magnitude and sign-reversal gates pass.
+Repeat determinism: true.
+Active weather-generation p95: 12.876 ms (n=22); active-preview p95: 9.351 ms (n=33).
+The U14 fixture generation/readback p95 is 219.667 ms (n=144); it is diagnostic harness cost, not the active weather-generation latency gate.
+
+U14 gates passed before the expected downstream U15 exit. No failures other than the following two U15-only storm-control gates were reported:
+
+- Storm Count: `count RGB distance 0->4=0.0035` (threshold >=0.005; FAIL), `0->8=0.0047` (threshold >=0.008; FAIL), `ratio=0.748` (threshold 0.15-0.90; PASS), `cloudy pixels changed >0.05=1.9%` (threshold >=2.0%; FAIL), `saturated at 8=0.0%` (threshold <=2.0%; PASS). Reported failure: `Storm Count: storm control is effectively invisible`.
+- Storm Size: `size RGB distance 0.3->1.0=0.0034` (threshold >=0.005; FAIL), `0.3->3.0=0.0137` (threshold >=0.008; PASS), `ratio=0.245` (threshold 0.15-0.90; PASS), `cloudy pixels changed >0.05=10.3%` (threshold >=2.0%; PASS), `saturated at 3.0=0.0%` (threshold <=2.0%; PASS). Reported failure: `Storm Size: storm control is effectively invisible`.
+
+These are downstream U15 controls only; their frozen ledger requirements remain U15-R4-count: cores >=2, occupied-core deep-mass p95 >=25%, global mean integrated condensate/column-mass delta <=20%; and U15-R4-size: median significant-core area >=50%, deep-top p95 >=2 km. No U14 gate failure was reported.
