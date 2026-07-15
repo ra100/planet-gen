@@ -277,7 +277,9 @@ Freeze this protocol before U14 starts. `docs/research/shallow-volumetric-cloud-
 | Component and gap rules | A cloud component is significant at area >=0.25% of one cubemap face. Warm-marine clear-gap fraction is clear pixels / fixture-mask pixels and must be >=0.15. |
 | Deep-core rule | Deep-top percentiles use only significant components within `occupied_deep_core = deep_mass >=0.15`, component area >=0.25% face, and total deep mass >=0.02; otherwise report `not applicable`, not a fabricated percentile. |
 | Nonzero baseline rule | Relative effects require baseline >=0.02 normalized mass. Below that, use an absolute delta >=0.02; zero-to-nonzero claims use the absolute rule. The dry/stable storm-control fixture is stricter: all field channels are bit-identical at minimum and maximum storm control. |
-| Minimum effects | Flat cool ocean low mass >=1.5x flat inland; mountain windward land enhancement >0.15 and reverses under wind reversal; wind-scale centroid displacement from calm is >=0.5, >=1.0, and >=2.0 texels at 0.5, 1, and 2 respectively. |
+| U12 source ownership | Initialize vapor as `coverage * moisture * pressure * mix(.18, .36, marine)` and recharge it only in U12 transport at marine `0.006 -> 0.030`. U12 owns phase change and rainout; final diagnosis scales transported `state.y`/`state.z` only. No boundary threshold, vapor-derived diagnostic mass, additive regime source, condensate-survival curve, or low-bound sweep is allowed. |
+| U14 identity versus survival | Supersede the inland whole-field low-mass minimum and warm-trade whole-field mean floor. In frozen fixtures, background causal-source retention q50 must be <=60%; cool deck, warm trade, and windward-orographic causal-source retention p90 must be >=85%; the matched cool-deck and warm-trade rendered low-mass p90 floors are frozen from the approved fixture before evidence. Keep ocean/inland ratio, low/deep ratio, heights, gaps, coast, coverage, seams, determinism, and zero-moisture gates. |
+| Minimum effects | Flat cool ocean low-mass ratio to inland >=1.5; normalized mountain windward-minus-lee >0.15 plus a windward feature percentile; wind reversal changes the sign; wind-scale centroid displacement from calm is >=0.5, >=1.0, and >=2.0 texels at 0.5, 1, and 2 respectively. |
 | U15 storm minimum effects | In `eligible_convective_core`, Count 0->8 adds >=2 significant localized deep cores and raises occupied-core deep-mass p95 by >=25%, while global mean integrated condensate/column mass changes <=20%. Size 0.3->3 raises median significant-core area >=50% without mass outside eligible regions; deep-top p95 over significant cores rises >=2 km. Anvil high mass extends >=10% beyond the deep footprint, centroid shifts >=0.5 weather texel along the diagnostic anvil-advection direction, and major-axis alignment is <=20 degrees. Dry/stable candidates remain exactly zero and no circular catalyst boundary is visible or correlated. |
 | Field/parity/seam/image tolerances | Shared-ray preview/export: optical-depth MAE <=0.03, coverage delta <=0.02, directional correlation >=0.95. Every cubemap edge/corner: normalized field delta <=0.02 and no component split. Fixed-reference image: mean absolute RGB error <=0.03 and no pixel error >0.15 outside the antialiased silhouette. |
 
@@ -664,21 +666,23 @@ Freeze this protocol before U14 starts. `docs/research/shallow-volumetric-cloud-
 
 **Approach:**
 - Derive continuous `marine_fraction` from continentality and a `marine-stability proxy`; blend stronger marine moisture supply, cool stable low-cloud eligibility, and weaker land evapotranspiration. Do not claim SST, explicit surface fluxes, or a resolved inversion model.
+- U12 is the sole moisture source owner: initialize continuous vapor eligibility, recharge it in transport, and convert it through U12 phase change/rainout. Diagnosis may scale transported low/deep condensate continuously but may not create mass from vapor, terrain, marine decks, inland effects, or trade effects. Keep linear U3 weights low `.50`, deep `1.2`, high `.35`, and extinction `1.2`; do not add an optical knee or retune opacity before observing source-flow output.
 - Feed marine forcing into U12 initialization/spin-up, then apply final mass and geometry diagnosis before atomically packing both existing cubemaps. Produce cool marine decks through low mass and 0.3-1.2 km geometry, and warm trade cumulus through shallow 1-3 km geometry with gaps.
 - Remove additive-noise occupancy thresholds and isocontour formation. Detail only continuously erodes eligible mass; do not persist marine fraction or a regime ID.
 - Preserve continentality and surface moisture as active inputs for every wind setting; no wind toggle may bypass them.
 
 **Test scenarios:**
-- In matched flat fixtures, cool stable ocean low mass is >=1.5x inland low mass; this corrects underrepresentation of marine regimes without invalidating land orography.
+- In matched flat fixtures, cool stable ocean low mass is >=1.5x inland low mass; this corrects underrepresentation of marine regimes without invalidating land orography. Do not require an inland whole-field mean floor.
 - Cool marine fixtures produce low/deep ratio >=4 and 0.3-1.2 km thickness.
-- Warm marine fixtures produce 1-3 km tops with nonzero clear gaps.
+- Warm marine fixtures produce 1-3 km tops with nonzero clear gaps. Do not require a whole-field trade mean floor; gate its p90 feature mass instead.
+- Survival identity gates use frozen fixture samples: background retention q50 <=60%, while cool deck, warm trade, and windward-orographic feature retention p90 >=85%; document the absolute cool-deck and trade p90 floors selected from the frozen fixture.
 - Coast-gradient correlation is <0.3 and local gradient is <=1.25x the surrounding band.
 - Coverage is continuous and monotonic across its control range; detail-off retains broad marine coverage without a threshold line.
 - Fixed snapshots and cube edge/corner probes remain deterministic and continuous.
 - Smoke latency: U14 generation p95 and active-generation preview p95 are recorded against the named baseline GPU before U15; either result over 33.3 ms is `FAIL`.
 
 **Verification:**
-- Create the validation document with the frozen protocol, then record every R1/R2 field result as `PASS` or `FAIL` before U15. Do not include density previews or rendered contour/image assertions here; U3/U6 own those gates.
+- Correct the active validation protocol before recording corrected evidence, then record every R1/R2 field result as `PASS` or `FAIL` before U15. Do not include density previews or rendered contour/image assertions here; U3/U6 own those gates.
 
 ### U15. Add weather wind-scale and convective/anvil organization
 

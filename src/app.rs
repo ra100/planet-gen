@@ -268,7 +268,7 @@ impl PlanetGenApp {
             show_atmosphere_layer: if self.show_atmosphere { 1.0 } else { 0.0 },
             show_cities: if self.show_cities { 1.0 } else { 0.0 },
             cloud_opacity: self.cloud_opacity,
-            cloud_advection: 1.0,
+            cloud_advection: if self.show_wind_effects { 1.0 } else { 0.0 },
             rotation_rate: self.derived.rotation_rate_rad_s / (std::f32::consts::TAU / 86400.0),
             atm_pressure: self.derived.surface_pressure_bar,
             _pad4: 0.0,

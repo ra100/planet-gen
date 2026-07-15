@@ -63,19 +63,32 @@ pub struct PreviewRenderer {
 
 impl PreviewRenderer {
     pub fn new(gpu: &GpuContext) -> Self {
-        Self::new_with_cloud_detail(gpu, 1.0)
+        Self::new_with_cloud_config(gpu, 1.0, 8)
     }
 
+    #[cfg(test)]
     fn new_with_cloud_detail(gpu: &GpuContext, detail_strength: f32) -> Self {
+        Self::new_with_cloud_config(gpu, detail_strength, 8)
+    }
+
+    pub fn new_with_cloud_samples(gpu: &GpuContext, samples: u32) -> Self {
+        Self::new_with_cloud_config(gpu, 1.0, samples)
+    }
+
+    fn new_with_cloud_config(gpu: &GpuContext, detail_strength: f32, samples: u32) -> Self {
         let cloud_density = include_str!("shaders/cloud_density.wgsl").replace(
             "const CLOUD_DETAIL_STRENGTH: f32 = 1.0;",
             &format!("const CLOUD_DETAIL_STRENGTH: f32 = {detail_strength};"),
+        );
+        let preview_shader = include_str!("shaders/preview_cubemap.wgsl").replace(
+            "const CLOUD_RAY_SAMPLES: u32 = 8u;",
+            &format!("const CLOUD_RAY_SAMPLES: u32 = {samples}u;"),
         );
         let shader_source = format!(
             "{}\n{}\n{}",
             include_str!("shaders/noise.wgsl"),
             cloud_density,
-            include_str!("shaders/preview_cubemap.wgsl"),
+            preview_shader,
         );
 
         let shader = gpu
@@ -774,11 +787,43 @@ mod tests {
         (mass, geometry)
     }
 
+    fn srgb_to_linear(value: u8) -> f32 {
+        let value = value as f32 / 255.0;
+        if value <= 0.04045 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
     fn density_values(pixels: &[u8]) -> Vec<f32> {
         pixels
             .chunks_exact(4)
-            .map(|pixel| pixel[0] as f32 / 255.0)
+            .map(|pixel| srgb_to_linear(pixel[0]))
             .collect()
+    }
+
+    fn optical_depth(opacity: f32) -> f32 {
+        -(1.0 - opacity).max(f32::MIN_POSITIVE).ln()
+    }
+
+    fn percentile(mut values: Vec<f32>, percentile: f32) -> f32 {
+        values.sort_by(f32::total_cmp);
+        values[((values.len() - 1) as f32 * percentile).round() as usize]
+    }
+
+    fn mean_optical_depth_difference(a: &[u8], b: &[u8], size: usize) -> f32 {
+        let mut total = 0.0;
+        let mut count = 0usize;
+        for (index, (a, b)) in a.chunks_exact(4).zip(b.chunks_exact(4)).enumerate() {
+            if sphere_mask(size, index) {
+                total += (optical_depth(srgb_to_linear(a[0]))
+                    - optical_depth(srgb_to_linear(b[0])))
+                .abs();
+                count += 1;
+            }
+        }
+        total / count.max(1) as f32
     }
 
     fn sphere_mask(size: usize, index: usize) -> bool {
@@ -848,6 +893,24 @@ mod tests {
         energy / count as f32
     }
 
+    fn centroid(values: &[f32], size: usize) -> (f32, f32) {
+        let (weight, x_sum, y_sum) = values.iter().enumerate().fold(
+            (0.0, 0.0, 0.0),
+            |(weight, x_sum, y_sum), (index, value)| {
+                if !sphere_mask(size, index) || *value <= 0.05 {
+                    return (weight, x_sum, y_sum);
+                }
+                let x = (index % size) as f32;
+                let y = (index / size) as f32;
+                (weight + value, x_sum + x * value, y_sum + y * value)
+            },
+        );
+        (
+            x_sum / weight.max(f32::EPSILON),
+            y_sum / weight.max(f32::EPSILON),
+        )
+    }
+
     #[test]
     fn cloud_detail_erodes_edges_without_replacing_weather_systems() {
         let gpu = GpuContext::new().expect("GPU init failed");
@@ -898,11 +961,12 @@ mod tests {
             values
                 .iter()
                 .enumerate()
-                .filter(|(index, value)| sphere_mask(size, *index) && **value > 0.03)
+                .filter(|(index, value)| sphere_mask(size, *index) && **value > 0.05)
                 .count()
         };
         let coarse_energy = edge_energy(&coarse, size);
-        for seed in [42, 714_003_000] {
+        let coarse_centroid = centroid(&coarse, size);
+        for seed in [7, 19, 37, 73, 101, 211, 509, 997] {
             let detailed = density_values(&render(&detail_on, seed, &mass_view, size as u32));
             let blurred_correlation = correlation(
                 &box_blur(&coarse, size, 4),
@@ -910,12 +974,17 @@ mod tests {
                 size,
             );
             let occupied_ratio = occupied(&detailed) as f32 / occupied(&coarse) as f32;
+            let detailed_centroid = centroid(&detailed, size);
+            let centroid_drift = ((detailed_centroid.0 - coarse_centroid.0).powi(2)
+                + (detailed_centroid.1 - coarse_centroid.1).powi(2))
+            .sqrt()
+                / size as f32;
             let detailed_energy = edge_energy(&detailed, size);
             let isolated = detailed
                 .iter()
                 .enumerate()
                 .filter(|(index, value)| {
-                    if **value <= 0.03 || !sphere_mask(size, *index) {
+                    if **value <= 0.05 || !sphere_mask(size, *index) {
                         return false;
                     }
                     let x = *index % size;
@@ -927,46 +996,93 @@ mod tests {
                         && (y - 1..=y + 1).all(|sample_y| {
                             (x - 1..=x + 1).all(|sample_x| {
                                 sample_x == x && sample_y == y
-                                    || detailed[sample_y * size + sample_x] <= 0.03
+                                    || detailed[sample_y * size + sample_x] <= 0.05
                             })
                         })
                 })
                 .count();
-            let dense_drift = coarse
+            let (coarse_dense_sum, detailed_dense_sum, dense_count) = coarse
                 .iter()
                 .zip(&detailed)
-                .filter(|(coarse, _)| **coarse > 0.6)
-                .map(|(coarse, detailed)| (coarse - detailed).abs())
-                .fold(0.0, f32::max);
+                .filter(|(coarse, _)| optical_depth(**coarse) > 0.6)
+                .map(|(coarse, detailed)| (optical_depth(*coarse), optical_depth(*detailed)))
+                .fold(
+                    (0.0, 0.0, 0usize),
+                    |(coarse_sum, detailed_sum, count), (coarse, detailed)| {
+                        (coarse_sum + coarse, detailed_sum + detailed, count + 1)
+                    },
+                );
+            let dense_mean = coarse_dense_sum / dense_count.max(1) as f32;
+            let detailed_dense_mean = detailed_dense_sum / dense_count.max(1) as f32;
+            let dense_drift =
+                (dense_mean - detailed_dense_mean).abs() / dense_mean.max(f32::EPSILON);
+            let (core_residual_sq, core_count, fringe_residual_sq, fringe_count) = coarse
+                .iter()
+                .zip(&detailed)
+                .fold((0.0, 0usize, 0.0, 0usize), |metrics, (coarse, detailed)| {
+                    let residual = optical_depth(*coarse) - optical_depth(*detailed);
+                    if optical_depth(*coarse) > 0.6 {
+                        (
+                            metrics.0 + residual * residual,
+                            metrics.1 + 1,
+                            metrics.2,
+                            metrics.3,
+                        )
+                    } else if *coarse > 0.05 {
+                        (
+                            metrics.0,
+                            metrics.1,
+                            metrics.2 + residual * residual,
+                            metrics.3 + 1,
+                        )
+                    } else {
+                        metrics
+                    }
+                });
+            let core_rms = (core_residual_sq / core_count.max(1) as f32).sqrt();
+            let fringe_rms = (fringe_residual_sq / fringe_count.max(1) as f32).sqrt();
             println!(
-                "cloud contour metrics seed={seed}: correlation={blurred_correlation:.4}, occupied={occupied_ratio:.4}, edge={coarse_energy:.5}->{detailed_energy:.5}, isolated={isolated}, dense_drift={dense_drift:.4}"
+                "cloud contour metrics seed={seed}: correlation={blurred_correlation:.4}, occupied={occupied_ratio:.4}, centroid={centroid_drift:.4}, edge={coarse_energy:.5}->{detailed_energy:.5}, isolated={isolated}, dense_tau_mean={dense_mean:.4}->{detailed_dense_mean:.4}, dense_tau_drift={dense_drift:.4}, core_tau_rms={core_rms:.4}, fringe_tau_rms={fringe_rms:.4}"
             );
             assert!(
                 blurred_correlation >= 0.95,
                 "seed={seed}: coarse systems changed"
             );
             assert!(
-                (0.85..=0.95).contains(&occupied_ratio),
+                (0.95..=1.05).contains(&occupied_ratio),
                 "seed={seed}: occupied={occupied_ratio}"
             );
+            let edge_ratio = detailed_energy / coarse_energy.max(f32::EPSILON);
             assert!(
-                detailed_energy > coarse_energy * 1.04,
-                "seed={seed}: edge detail increase was too subtle"
+                (1.02..=1.25).contains(&edge_ratio),
+                "seed={seed}: edge ratio={edge_ratio}"
             );
             assert!(
-                isolated <= 1,
+                isolated == 0,
                 "seed={seed}: detail created one-pixel speckle"
             );
             assert!(
                 dense_drift <= 0.05,
                 "seed={seed}: dense cores drifted by {dense_drift}"
             );
+            assert!(
+                (0.08..=0.25).contains(&core_rms),
+                "seed={seed}: core optical-depth RMS={core_rms}"
+            );
+            assert!(
+                centroid_drift < 0.05,
+                "seed={seed}: centroid drifted by {centroid_drift}"
+            );
+            assert!(
+                core_rms >= fringe_rms * 0.5,
+                "seed={seed}: core residual RMS={core_rms}, fringe RMS={fringe_rms}"
+            );
         }
 
         if let Ok(output_dir) = std::env::var("CLOUD_CONTOUR_OUTPUT_DIR") {
             std::fs::create_dir_all(&output_dir).expect("create contour output directory");
             let render_size = 512;
-            for seed in [42, 714_003_000] {
+            for seed in [7, 19, 37, 73, 101, 211, 509, 997] {
                 let close_settings = PreviewUniforms {
                     cloud_seed: seed,
                     zoom: 1.55,
@@ -1019,6 +1135,120 @@ mod tests {
             high_seed_outputs.windows(2).all(|pair| pair[0] != pair[1]),
             "high cloud seeds must select distinct stable detail streams"
         );
+    }
+
+    #[test]
+    fn cloud_eight_samples_match_six_and_ten_sample_references() {
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let resolution = 64;
+        let size = 128;
+        let terrain = TectonicTerrain {
+            faces: std::array::from_fn(|_| vec![0.0; (resolution * resolution) as usize]),
+            resolution,
+        };
+        let reference = PreviewRenderer::new_with_cloud_samples(&gpu, 8);
+        let terrain_view = reference.upload_terrain(&gpu, &terrain);
+        let (mass, geometry) = contour_fixture(resolution);
+        let mass_view = reference.upload_cubemap_rgba16(&gpu, &mass, resolution);
+        let geometry_view = reference.upload_cubemap_rgba16(&gpu, &geometry, resolution);
+        let settings = PreviewUniforms {
+            view_mode: 9,
+            show_clouds: 1.0,
+            cloud_coverage: 1.0,
+            ..uniforms()
+        };
+        let render = |renderer: &PreviewRenderer| {
+            renderer.render(
+                &gpu,
+                &settings,
+                &terrain_view,
+                None,
+                Some((&mass_view, &geometry_view)),
+                size as u32,
+            )
+        };
+        let six = render(&PreviewRenderer::new_with_cloud_samples(&gpu, 6));
+        let eight = render(&reference);
+        let ten = render(&PreviewRenderer::new_with_cloud_samples(&gpu, 10));
+        let six_to_eight = mean_optical_depth_difference(&six, &eight, size);
+        let eight_to_ten = mean_optical_depth_difference(&eight, &ten, size);
+        println!(
+            "cloud sample metrics: 6_to_8_tau_mae={six_to_eight:.4}, 8_to_10_tau_mae={eight_to_ten:.4}"
+        );
+        assert!(
+            eight_to_ten < six_to_eight,
+            "8 samples do not converge toward the 10-sample reference: {six_to_eight} -> {eight_to_ten}"
+        );
+    }
+
+    #[test]
+    fn cloud_low_mass_optical_depth_is_near_linear_and_zero_supported() {
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let resolution = 32;
+        let size = 192usize;
+        let terrain = TectonicTerrain {
+            faces: std::array::from_fn(|_| vec![0.0; (resolution * resolution) as usize]),
+            resolution,
+        };
+        let renderer = PreviewRenderer::new(&gpu);
+        let terrain_view = renderer.upload_terrain(&gpu, &terrain);
+        let geometry = std::array::from_fn(|_| {
+            (0..resolution * resolution)
+                .flat_map(|_| [0.2, 2.2, 2.2, 2.2])
+                .collect()
+        });
+        let render = |mass: &[Vec<f32>; 6]| {
+            let mass_view = renderer.upload_cubemap_rgba16(&gpu, mass, resolution);
+            let geometry_view = renderer.upload_cubemap_rgba16(&gpu, &geometry, resolution);
+            let settings = PreviewUniforms {
+                view_mode: 9,
+                show_clouds: 1.0,
+                cloud_coverage: 1.0,
+                planet_radius_km: 500.0,
+                ..uniforms()
+            };
+            density_values(&renderer.render(
+                &gpu,
+                &settings,
+                &terrain_view,
+                None,
+                Some((&mass_view, &geometry_view)),
+                size as u32,
+            ))
+        };
+        let mean_tau = |mass: f32| {
+            let mass = std::array::from_fn(|_| {
+                (0..resolution * resolution)
+                    .flat_map(|_| [mass, 0.0, 0.0, mass])
+                    .collect()
+            });
+            let image = render(&mass);
+            let samples: Vec<_> = image
+                .into_iter()
+                .enumerate()
+                .filter(|(index, _)| sphere_mask(size, *index))
+                .map(|(_, value)| optical_depth(value))
+                .collect();
+            percentile(samples, 0.50)
+        };
+        let zero = std::array::from_fn(|_| vec![0.0; (resolution * resolution * 4) as usize]);
+        assert!(
+            render(&zero)
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| sphere_mask(size, *index))
+                .all(|(_, value)| *value == 0.0)
+        );
+        let tau_01 = mean_tau(0.01);
+        let tau_02 = mean_tau(0.02);
+        let tau_04 = mean_tau(0.04);
+        let ratio_01_02 = tau_02 / tau_01.max(f32::EPSILON);
+        let ratio_02_04 = tau_04 / tau_02.max(f32::EPSILON);
+        println!(
+            "cloud low-mass optical metrics: tau(0.01)={tau_01:.5}, tau(0.02)={tau_02:.5}, tau(0.04)={tau_04:.5}, ratios={ratio_01_02:.4}/{ratio_02_04:.4}"
+        );
+        assert!((1.8..=2.2).contains(&ratio_01_02));
+        assert!((1.8..=2.2).contains(&ratio_02_04));
     }
 
     #[test]

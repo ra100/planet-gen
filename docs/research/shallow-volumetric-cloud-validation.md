@@ -11,6 +11,12 @@ Recorded evidence must state `PASS` or `FAIL` in `Result`. Before measurement, l
 
 Frozen common inputs: seeds `7, 19, 37, 73, 101, 211, 509, 997`; named masks `flat_cool_ocean`, `flat_inland`, `mountain_windward`, `mountain_lee`, `coast_band`, `eligible_convective_core`, and `dry_stable_control`; significant component area >=0.25% of one cubemap face; occupied deep core is `deep_mass >=0.15`, significant-component area >=0.25% face, and total deep mass >=0.02. When a percentile is inapplicable, record `not applicable` as its measured value with the reason in the artifact, not a fabricated value.
 
+### U14 Condensate-Survival Amendment
+
+This amendment applies to all U14 evidence recorded after 2026-07-15. Historical rows remain immutable evidence of the prior protocol and do not approve the corrected survival path. The active field path combines all causal low sources, retains `transported_low` at `0.20`, applies `survived = x * (1 - exp(-x / t))`, then applies smooth seed/detail erosion and a final `soft_bound(..., 1)`. The only allowed sweep is `t=.16/.20/.24`; `LOW_OPTICAL_WEIGHT=.50` is fixed and no optical knee or whole-field optical suppression is allowed.
+
+The superseded inland whole-field minimum and warm-trade whole-field mean floor are not acceptance gates. Corrected evidence must instead report: background survival retention q50 <=60%; cool marine, warm trade, and windward-orographic feature survival retention p90 >=85%; frozen-fixture absolute cool-deck and warm-trade low-mass p90 floors; normalized windward-minus-lee >.15 and the windward feature percentile. Ocean/inland ratio, low/deep ratio, heights, gaps, coast, coverage, seams, determinism, zero moisture, and all U15 gates remain required.
+
 ## Required Evidence
 
 | Scenario ID | Owning U-ID | Fixture | Seeds | Mask / domain | Metric | Threshold | Measured value | Artifact path | Result | Reviewer / date |
@@ -36,5 +42,9 @@ Frozen common inputs: seeds `7, 19, 37, 73, 101, 211, 509, 997`; named masks `fl
 | U6-R4-rendered-optical-depth | U6 | Count 0->8 uniformly eligible convection, after U15-R4-count field evidence | all frozen | rendered global cloud domain | global mean optical-depth delta | <=20% |  |  |  |  |
 
 ## Later Evidence
+
+### Source-Flow Supersession
+
+The U14 condensate-survival amendment and its low-bound sweep are superseded by U12-owned source flow. `weather_field::main` now applies continuous eligibility modulation only; U12 initializes vapor from `coverage * moisture * pressure * mix(.18, .36, marine)`, recharges only through marine `0.006 -> 0.030`, and owns phase change/rainout. Diagnosis publishes transported condensate (`state.y`, `state.z`) with continuous gains only, never vapor or additive diagnostic mass. The source-ownership GPU test passed for vapor-only ocean/land/ridge, zero baseline with disabled source, disabled phase change, and zero-condensate terrain response; the frozen windward reversal test remains active.
 
 Append U4 lighting, U5 export, U6 rendered contour/parity/seam/image, U11 stress/coalescing, and U7 cleanup-regression rows using the same schema. Missing evidence blocks the owning unit; only recorded measurements receive `PASS` or `FAIL`.

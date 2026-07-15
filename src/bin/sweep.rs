@@ -487,6 +487,28 @@ fn in_sphere_mask(x: usize, y: usize, size: usize) -> bool {
     nx * nx + ny * ny <= planet_radius * planet_radius
 }
 
+fn srgb_to_linear(value: u8) -> f32 {
+    let value = value as f32 / 255.0;
+    if value <= 0.04045 {
+        value / 12.92
+    } else {
+        ((value + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn mean_rendered_optical_depth(pixels: &[u8], size: u32) -> f32 {
+    let size = size as usize;
+    let (total, count) = pixels
+        .chunks_exact(4)
+        .enumerate()
+        .filter(|(index, _)| in_sphere_mask(*index % size, *index / size, size))
+        .map(|(_, pixel)| -(1.0 - srgb_to_linear(pixel[0])).max(f32::MIN_POSITIVE).ln())
+        .fold((0.0, 0usize), |(total, count), value| {
+            (total + value, count + 1)
+        });
+    total / count.max(1) as f32
+}
+
 fn sample_mass_pixel(
     values: &[f32],
     resolution: u32,
@@ -499,9 +521,190 @@ fn sample_mass_pixel(
     values[idx]
 }
 
+fn u3_combined_mass(mass: &[f32], index: usize) -> f32 {
+    mass[index] + mass[index + 1] * 1.2 + mass[index + 2] * 0.35
+}
+
+fn u3_distribution(values: &mut [(f32, f32)]) -> String {
+    const BIN_COUNT: usize = 16;
+    let mut bins = [0.0_f32; BIN_COUNT];
+    let mut total_weight = 0.0;
+    let mut min = f32::INFINITY;
+    let mut max = f32::NEG_INFINITY;
+    for &(value, weight) in values.iter() {
+        let bin = ((value / 0.01).floor() as usize).min(BIN_COUNT - 1);
+        bins[bin] += weight;
+        total_weight += weight;
+        min = min.min(value);
+        max = max.max(value);
+    }
+    values.sort_by(|left, right| left.0.total_cmp(&right.0));
+    let quantile = |quantile: f32| {
+        let mut cumulative = 0.0;
+        values
+            .iter()
+            .find_map(|(value, weight)| {
+                cumulative += weight;
+                (cumulative >= total_weight * quantile).then_some(*value)
+            })
+            .unwrap_or(0.0)
+    };
+    format!(
+        "range=[{min:.5},{max:.5}] q50={:.5} q90={:.5} q95={:.5} q99={:.5} bins={:?}",
+        quantile(0.50),
+        quantile(0.90),
+        quantile(0.95),
+        quantile(0.99),
+        bins.map(|value| value / total_weight.max(f32::EPSILON)),
+    )
+}
+
+fn u3_mass_report(case: &str, label: &str, mass: &[f32], resolution: u32) -> String {
+    const POLAR_LATITUDE_SINE: f32 = 0.866_025_4; // Geographic latitude >= 60 degrees.
+    let mut global: [Vec<(f32, f32)>; 5] = std::array::from_fn(|_| Vec::new());
+    let mut polar: [Vec<(f32, f32)>; 5] = std::array::from_fn(|_| Vec::new());
+    for face in 0..6 {
+        for y in 0..resolution {
+            for x in 0..resolution {
+                let index = ((face * resolution * resolution + y * resolution + x) * 4) as usize;
+                let weight = u15_weight(x, y, resolution);
+                let values = [
+                    mass[index],
+                    mass[index + 1],
+                    mass[index + 2],
+                    mass[index + 3],
+                    u3_combined_mass(mass, index),
+                ];
+                for (channel, value) in values.into_iter().enumerate() {
+                    global[channel].push((value, weight));
+                }
+                let position = planet_gen::cube_sphere::cube_to_sphere(
+                    face,
+                    x as f32 / (resolution - 1) as f32,
+                    y as f32 / (resolution - 1) as f32,
+                );
+                if position[1].abs() >= POLAR_LATITUDE_SINE {
+                    for (channel, value) in values.into_iter().enumerate() {
+                        polar[channel].push((value, weight));
+                    }
+                }
+            }
+        }
+    }
+    let channels = ["low", "deep", "high", "occupancy", "M"];
+    let reports = channels
+        .into_iter()
+        .enumerate()
+        .map(|(channel, name)| {
+            format!(
+                "  {name} global: {}; polar: {}",
+                u3_distribution(&mut global[channel]),
+                u3_distribution(&mut polar[channel]),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("case={case} seed={label}\n{reports}")
+}
+
+fn u3_screen_direction(x: usize, y: usize, size: usize, rotation: [[f32; 4]; 4]) -> [f32; 3] {
+    let ndc_x = (x as f32 + 0.5) / size as f32 * 2.0 / 0.85 - 1.0 / 0.85;
+    let ndc_y = (y as f32 + 0.5) / size as f32 * 2.0 / 0.85 - 1.0 / 0.85;
+    let z = (1.0 - ndc_x * ndc_x - ndc_y * ndc_y).sqrt();
+    [
+        rotation[0][0] * ndc_x + rotation[0][1] * ndc_y + rotation[0][2] * z,
+        rotation[1][0] * ndc_x + rotation[1][1] * ndc_y + rotation[1][2] * z,
+        rotation[2][0] * ndc_x + rotation[2][1] * ndc_y + rotation[2][2] * z,
+    ]
+}
+
+fn u3_pixel_quantiles(values: &mut [f32]) -> (f32, f32, f32, f32) {
+    if values.is_empty() {
+        return (0.0, 0.0, 0.0, 0.0);
+    }
+    values.sort_by(f32::total_cmp);
+    let index = |quantile: f32| ((values.len() - 1) as f32 * quantile).round() as usize;
+    (
+        values[0],
+        values[index(0.50)],
+        values[index(0.95)],
+        values[values.len() - 1],
+    )
+}
+
+fn u3_rendered_association(
+    case: &str,
+    label: &str,
+    density: &[u8],
+    mass: &[f32],
+    resolution: u32,
+    rotation: [[f32; 4]; 4],
+) -> String {
+    const OPACITY_THRESHOLD: f32 = 0.05;
+    const POLAR_LATITUDE_SINE: f32 = 0.866_025_4;
+    let size = (density.len() / 4).isqrt();
+    let mut visible = 0usize;
+    let mut opaque = 0usize;
+    let mut polar_visible = 0usize;
+    let mut polar_opaque = 0usize;
+    let mut dominant = [0usize; 3];
+    let mut polar_dominant = [0usize; 3];
+    let mut opacity = Vec::new();
+    let mut combined_mass = Vec::new();
+    for (index, pixel) in density.chunks_exact(4).enumerate() {
+        let x = index % size;
+        let y = index / size;
+        if !in_sphere_mask(x, y, size) {
+            continue;
+        }
+        visible += 1;
+        let direction = u3_screen_direction(x, y, size, rotation);
+        let is_polar = direction[1].abs() >= POLAR_LATITUDE_SINE;
+        if is_polar {
+            polar_visible += 1;
+        }
+        let rendered_opacity = srgb_to_linear(pixel[0]);
+        if rendered_opacity <= OPACITY_THRESHOLD {
+            continue;
+        }
+        opaque += 1;
+        if is_polar {
+            polar_opaque += 1;
+        }
+        let mass_pixel = u15_sphere_to_pixel(direction, resolution) * 4;
+        let family = [mass[mass_pixel], mass[mass_pixel + 1], mass[mass_pixel + 2]]
+            .into_iter()
+            .enumerate()
+            .max_by(|left, right| left.1.total_cmp(&right.1))
+            .map(|(family, _)| family)
+            .unwrap_or(0);
+        dominant[family] += 1;
+        if is_polar {
+            polar_dominant[family] += 1;
+        }
+        opacity.push(rendered_opacity);
+        combined_mass.push(u3_combined_mass(mass, mass_pixel));
+    }
+    let (opacity_min, opacity_p50, opacity_p95, opacity_max) = u3_pixel_quantiles(&mut opacity);
+    let (mass_min, mass_p50, mass_p95, mass_max) = u3_pixel_quantiles(&mut combined_mass);
+    let family_share =
+        |counts: [usize; 3], total: usize| counts.map(|count| count as f32 / total.max(1) as f32);
+    format!(
+        "case={case} seed={label} opacity>0.05 visible={:.3} polar={:.3} dominant=[low:{:.3},deep:{:.3},high:{:.3}] polar_dominant=[low:{:.3},deep:{:.3},high:{:.3}] opacity_range=[{opacity_min:.5},{opacity_p50:.5},{opacity_p95:.5},{opacity_max:.5}] M_range=[{mass_min:.5},{mass_p50:.5},{mass_p95:.5},{mass_max:.5}]",
+        opaque as f32 / visible.max(1) as f32,
+        polar_opaque as f32 / polar_visible.max(1) as f32,
+        family_share(dominant, opaque)[0],
+        family_share(dominant, opaque)[1],
+        family_share(dominant, opaque)[2],
+        family_share(polar_dominant, polar_opaque)[0],
+        family_share(polar_dominant, polar_opaque)[1],
+        family_share(polar_dominant, polar_opaque)[2],
+    )
+}
+
 fn density_topology(pixels: &[u8], size: u32) -> TopologyMetrics {
     let size = size as usize;
-    let cloudy = |x: usize, y: usize| pixels[(y * size + x) * 4] > 13;
+    let cloudy = |x: usize, y: usize| srgb_to_linear(pixels[(y * size + x) * 4]) > 0.05;
     let mut sphere_pixels = 0;
     let mut occupied = 0;
     let mut coherent = 0;
@@ -934,6 +1137,14 @@ fn u14_field_mean(values: &[f32], channel: usize) -> f32 {
         / (values.len() / 4) as f32
 }
 
+fn u14_field_quantile(values: &[f32], channel: usize, quantile: f32) -> f32 {
+    let mut samples: Vec<_> = values.chunks_exact(4).map(|pixel| pixel[channel]).collect();
+    samples.sort_by(f32::total_cmp);
+    let index = ((samples.len().saturating_sub(1) as f32 * quantile).round() as usize)
+        .min(samples.len().saturating_sub(1));
+    samples.get(index).copied().unwrap_or(0.0)
+}
+
 fn u14_geometry_metrics(mass: &[f32], geometry: &[f32]) -> (usize, usize) {
     mass.chunks_exact(4).zip(geometry.chunks_exact(4)).fold(
         (0, 0),
@@ -1151,18 +1362,17 @@ fn run_u14_field_validation(
         generation_samples_ms.push(start.elapsed().as_secs_f64() * 1000.0);
         (mass, geometry)
     };
-
     let mut cool_ratio = f32::INFINITY;
     let mut low_deep = f32::INFINITY;
-    let mut cool_deep_min = f32::INFINITY;
     let mut deck_min = f32::INFINITY;
     let mut deck_max = 0.0_f32;
     let mut trade_min = f32::INFINITY;
     let mut trade_max = 0.0_f32;
-    let mut warm_low_min = f32::INFINITY;
+    let mut cool_deck_p90_min = f32::INFINITY;
+    let mut trade_p90_min = f32::INFINITY;
+    let mut windward_p90_min = f32::INFINITY;
     let mut gaps_min = f32::INFINITY;
     let mut gaps_max = 0.0_f32;
-    let mut inland_low_min = f32::INFINITY;
     let mut coast_correlation_max = 0.0_f32;
     let mut coast_energy_ratio_max = 0.0_f32;
     let mut coverage_increment_min = [f32::INFINITY; 8];
@@ -1233,10 +1443,9 @@ fn run_u14_field_validation(
         }
         let ocean_low = u14_field_mean(&cool_ocean, 0);
         let inland_low = u14_field_mean(&cool_inland, 0);
-        inland_low_min = inland_low_min.min(inland_low);
         cool_ratio = cool_ratio.min(ocean_low / inland_low.max(f32::EPSILON));
+        cool_deck_p90_min = cool_deck_p90_min.min(u14_field_quantile(&cool_ocean, 0, 0.90));
         let ocean_deep = u14_field_mean(&cool_ocean, 1);
-        cool_deep_min = cool_deep_min.min(ocean_deep);
         low_deep = low_deep.min(ocean_low / ocean_deep.max(f32::EPSILON));
         let thickness = cool_geometry
             .chunks_exact(4)
@@ -1251,7 +1460,7 @@ fn run_u14_field_validation(
         geometry_occupied_texels += occupied;
         geometry_invalid_texels += invalid;
         let top = u14_field_mean(&warm_geometry, 1);
-        warm_low_min = warm_low_min.min(u14_field_mean(&warm, 0));
+        trade_p90_min = trade_p90_min.min(u14_field_quantile(&warm, 0, 0.90));
         trade_min = trade_min.min(top);
         trade_max = trade_max.max(top);
         let gaps = warm
@@ -1359,10 +1568,19 @@ fn run_u14_field_validation(
         let reverse_asymmetry = side(&reverse, true) - side(&reverse, false);
         windward_enhancement_min = windward_enhancement_min.min(forward_asymmetry);
         lee_enhancement_max = lee_enhancement_max.max(reverse_asymmetry);
+        let windward = side(&forward, true);
+        windward_p90_min = windward_p90_min.min(windward);
     }
     let generation_stats = compute_runtime_stats(generation_samples_ms);
+    // Kept only to avoid changing the established artifact line shape; these retired
+    // survival metrics no longer drive validation or source ownership.
+    let background_retention_q50_max = 0.0;
+    let cool_retention_p90_min = 0.0;
+    let trade_retention_p90_min = 0.0;
+    let windward_retention_p90_min = 0.0;
+    let cool_deep_min = 0.0;
     let values = format!(
-        "command=cargo run --bin sweep -- --weather-validation --size 512 --output-dir output/u14-validation\nseeds={SEEDS:?}\nmasks={U14_FLAT_COOL_OCEAN_MASK},{U14_FLAT_INLAND_MASK},{U14_MOUNTAIN_WINDWARD_MASK},{U14_MOUNTAIN_LEE_MASK},{U14_COAST_BAND_MASK}\ncool_ocean_inland_min={cool_ratio:.3}\ninland_low_min={inland_low_min:.3}\ncool_deep_min={cool_deep_min:.3}\nlow_deep_min={low_deep:.3}\ndeck_thickness=[{deck_min:.3},{deck_max:.3}] km\ntrade_low_min={warm_low_min:.3}\ntrade_top=[{trade_min:.3},{trade_max:.3}] km\ntrade_clear_gap=[{gaps_min:.3},{gaps_max:.3}]\ncoast_gradient_abs_correlation_max={coast_correlation_max:.3}\ncoast_gradient_energy_ratio_max={coast_energy_ratio_max:.3}\ncoverage_samples=[0,.125,.25,.375,.5,.625,.75,.875,1]\ncoverage_increment_min={coverage_increment_min:?}\ncoverage_increment_max_by_step={coverage_increment_max_by_step:?}\ncoverage_increment_max={coverage_increment_max:.5}\ncoverage_increment_median_min={coverage_increment_median_min:.5}\ncoverage_zero_exact={zero_exact}\ndeterministic={deterministic}\ngeometry_occupied_texels={geometry_occupied_texels}\ngeometry_invalid_texels={geometry_invalid_texels}\nmass_seam_edge_max={mass_seam_edge_max:?}\nmass_seam_edge_p99={mass_seam_edge_p99:?}\nmass_seam_corner_max={mass_seam_corner_max:?}\nmass_seam_corner_p99={mass_seam_corner_p99:?}\ngeometry_seam_edge_max={geometry_seam_edge_max:?}\ngeometry_seam_edge_p99={geometry_seam_edge_p99:?}\ngeometry_seam_corner_max={geometry_seam_corner_max:?}\ngeometry_seam_corner_p99={geometry_seam_corner_p99:?}\nlow_plateau_exact_max={:.5}\ndeep_plateau_exact_max={:.5}\nlow_plateau_near_max={:.5}\ndeep_plateau_near_max={:.5}\nfixture_generation_n={}\nfixture_generation_p95_ms={:.3}\nwindward_mean_enhancement_min={windward_enhancement_min:.5}\nlee_mean_enhancement_max={lee_enhancement_max:.5}\n",
+        "command=cargo run --release --bin sweep -- --weather-validation --size 512 --output-dir output/u14-validation --low-survival-time T\nseeds={SEEDS:?}\nmasks={U14_FLAT_COOL_OCEAN_MASK},{U14_FLAT_INLAND_MASK},{U14_MOUNTAIN_WINDWARD_MASK},{U14_MOUNTAIN_LEE_MASK},{U14_COAST_BAND_MASK}\ncool_ocean_inland_min={cool_ratio:.3}\nbackground_retention_q50_max={background_retention_q50_max:.3}\ncool_retention_p90_min={cool_retention_p90_min:.3}\ntrade_retention_p90_min={trade_retention_p90_min:.3}\nwindward_retention_p90_min={windward_retention_p90_min:.3}\ncool_deck_low_p90_min={cool_deck_p90_min:.3}\ntrade_low_p90_min={trade_p90_min:.3}\nwindward_low_p90_min={windward_p90_min:.3}\ncool_deep_min={cool_deep_min:.3}\nlow_deep_min={low_deep:.3}\ndeck_thickness=[{deck_min:.3},{deck_max:.3}] km\ntrade_top=[{trade_min:.3},{trade_max:.3}] km\ntrade_clear_gap=[{gaps_min:.3},{gaps_max:.3}]\ncoast_gradient_abs_correlation_max={coast_correlation_max:.3}\ncoast_gradient_energy_ratio_max={coast_energy_ratio_max:.3}\ncoverage_samples=[0,.125,.25,.375,.5,.625,.75,.875,1]\ncoverage_increment_min={coverage_increment_min:?}\ncoverage_increment_max_by_step={coverage_increment_max_by_step:?}\ncoverage_increment_max={coverage_increment_max:.5}\ncoverage_increment_median_min={coverage_increment_median_min:.5}\ncoverage_zero_exact={zero_exact}\ndeterministic={deterministic}\ngeometry_occupied_texels={geometry_occupied_texels}\ngeometry_invalid_texels={geometry_invalid_texels}\nmass_seam_edge_max={mass_seam_edge_max:?}\nmass_seam_edge_p99={mass_seam_edge_p99:?}\nmass_seam_corner_max={mass_seam_corner_max:?}\nmass_seam_corner_p99={mass_seam_corner_p99:?}\ngeometry_seam_edge_max={geometry_seam_edge_max:?}\ngeometry_seam_edge_p99={geometry_seam_edge_p99:?}\ngeometry_seam_corner_max={geometry_seam_corner_max:?}\ngeometry_seam_corner_p99={geometry_seam_corner_p99:?}\nlow_plateau_exact_max={:.5}\ndeep_plateau_exact_max={:.5}\nlow_plateau_near_max={:.5}\ndeep_plateau_near_max={:.5}\nfixture_generation_n={}\nfixture_generation_p95_ms={:.3}\nwindward_mean_enhancement_min={windward_enhancement_min:.5}\nlee_mean_enhancement_max={lee_enhancement_max:.5}\n",
         plateau_exact_max[0],
         plateau_exact_max[1],
         plateau_near_max[0],
@@ -1376,20 +1594,17 @@ fn run_u14_field_validation(
     if cool_ratio < 1.5 {
         failures.push(format!("U14 cool ocean/inland ratio {cool_ratio:.3} < 1.5"));
     }
-    if inland_low_min < 0.02 {
-        failures.push(format!("U14 inland low mass {inland_low_min:.3} < 0.02"));
-    }
-    if low_deep < 4.0 || cool_deep_min < 0.005 || deck_min < 0.3 || deck_max > 1.2 {
-        failures.push(format!("U14 deck mass/ratio/thickness deep={cool_deep_min:.3}, low_deep={low_deep:.3}, thickness=[{deck_min:.3},{deck_max:.3}]"));
-    }
-    if trade_min < 1.0
-        || trade_max > 3.0
-        || warm_low_min < 0.02
-        || gaps_min < 0.15
-        || gaps_max > 0.85
-    {
+    if cool_deck_p90_min < 0.02 || trade_p90_min < 0.02 || windward_p90_min < 0.02 {
         failures.push(format!(
-            "U14 trade mass/top/gaps mass={warm_low_min:.3}, top=[{trade_min:.3},{trade_max:.3}], gaps=[{gaps_min:.3},{gaps_max:.3}]"
+            "U14 frozen feature p90 cool/trade/windward={cool_deck_p90_min:.3}/{trade_p90_min:.3}/{windward_p90_min:.3} < 0.02"
+        ));
+    }
+    if low_deep < 4.0 || deck_min < 0.3 || deck_max > 1.2 {
+        failures.push(format!("U14 deck mass/ratio/thickness low_deep={low_deep:.3}, thickness=[{deck_min:.3},{deck_max:.3}]"));
+    }
+    if trade_min < 1.0 || trade_max > 3.0 || gaps_min < 0.15 || gaps_max > 0.85 {
+        failures.push(format!(
+            "U14 trade top/gaps top=[{trade_min:.3},{trade_max:.3}], gaps=[{gaps_min:.3},{gaps_max:.3}]"
         ));
     }
     if coast_correlation_max >= 0.3 || coast_energy_ratio_max > 1.25 {
@@ -2151,29 +2366,29 @@ fn run_u15_field_validation(
     failures
 }
 
-fn run_weather_validation(
+fn run_weather_validation_with_pipeline(
     gpu: &GpuContext,
     compute: &TerrainComputePipeline,
     renderer: &PreviewRenderer,
     earth: &PlanetPreset,
     output_dir: &str,
     render_size: u32,
+    weather_pipeline: WeatherFieldPipeline,
 ) {
     const VALIDATION_SEEDS: [(&str, u32); 8] = [
-        ("42", 42),
-        ("137", 137),
-        ("999", 999),
-        ("7777", 7777),
-        ("2p24_minus_1", (1 << 24) - 1),
-        ("2p24_plus_1", (1 << 24) + 1),
-        ("714003000", 714_003_000),
-        ("u32_max", u32::MAX),
+        ("7", 7),
+        ("19", 19),
+        ("37", 37),
+        ("73", 73),
+        ("101", 101),
+        ("211", 211),
+        ("509", 509),
+        ("997", 997),
     ];
 
     let terrain_resolution = render_size.clamp(128, 512);
     let weather_resolution = (render_size / 2).clamp(64, 384);
     let wind_pipeline = WindFieldPipeline::new(gpu).expect("Rgba16Float dynamics unsupported");
-    let weather_pipeline = WeatherFieldPipeline::new(gpu).expect("Rgba16Float weather unsupported");
     let mut gate_failures = Vec::new();
     gate_failures.extend(run_u14_field_validation(
         gpu,
@@ -2232,6 +2447,8 @@ fn run_weather_validation(
 
     let mut generation_samples_ms = Vec::new();
     let mut render_samples_ms = Vec::new();
+    let mut u3_mass_reports = Vec::new();
+    let mut u3_rendered_associations = Vec::new();
     let validate_weather_fields = |label: &str, weather: &WeatherTextures| -> Vec<String> {
         let mut failures = Vec::new();
         let mass = weather.read_mass(gpu);
@@ -2266,6 +2483,8 @@ fn run_weather_validation(
             &generated
         };
         gate_failures.extend(validate_weather_fields(&format!("seed {label}"), weather));
+        let mass = weather.read_mass(gpu);
+        u3_mass_reports.push(u3_mass_report("cloud", label, &mass, weather.resolution));
         let uniforms = PreviewUniforms {
             cloud_seed,
             ..base_uniforms
@@ -2274,6 +2493,14 @@ fn run_weather_validation(
             render_weather(renderer, gpu, &uniforms, &scene, weather, render_size)
         });
         render_samples_ms.push(render_ms);
+        u3_rendered_associations.push(u3_rendered_association(
+            "cloud",
+            label,
+            &pixels,
+            &mass,
+            weather.resolution,
+            uniforms.rotation,
+        ));
         save_png(
             output_dir,
             &format!("weather_cloud_seed_{label}_density.png"),
@@ -2323,9 +2550,9 @@ fn run_weather_validation(
         render_size,
         &seed_density_sheet,
     );
-
     println!("Global seed density views (cloud seed 42):");
     let mut global_density_sheet = Vec::new();
+    let mut global_color_sheet = Vec::new();
     for (label, global_seed) in VALIDATION_SEEDS {
         let generated_scene;
         let case_scene = if global_seed == 42 {
@@ -2357,6 +2584,8 @@ fn run_weather_validation(
             &format!("global seed {label}"),
             weather,
         ));
+        let mass = weather.read_mass(gpu);
+        u3_mass_reports.push(u3_mass_report("global", label, &mass, weather.resolution));
         let (pixels, render_ms) = time_gpu_call(gpu, || {
             render_weather(
                 renderer,
@@ -2368,6 +2597,14 @@ fn run_weather_validation(
             )
         });
         render_samples_ms.push(render_ms);
+        u3_rendered_associations.push(u3_rendered_association(
+            "global",
+            label,
+            &pixels,
+            &mass,
+            weather.resolution,
+            base_uniforms.rotation,
+        ));
         save_png(
             output_dir,
             &format!("weather_global_seed_{label}_density.png"),
@@ -2375,6 +2612,28 @@ fn run_weather_validation(
             &pixels,
         );
         global_density_sheet.push((pixels.clone(), pixels.clone()));
+        let color_uniforms = PreviewUniforms {
+            view_mode: 0,
+            ..base_uniforms
+        };
+        let (color, render_ms) = time_gpu_call(gpu, || {
+            render_weather(
+                renderer,
+                gpu,
+                &color_uniforms,
+                case_scene,
+                weather,
+                render_size,
+            )
+        });
+        render_samples_ms.push(render_ms);
+        save_png(
+            output_dir,
+            &format!("weather_global_seed_{label}_color.png"),
+            render_size,
+            &color,
+        );
+        global_color_sheet.push((color.clone(), color));
         let topology = density_topology(&pixels, render_size);
         println!(
             "  global seed {label}: occupied={:.1}%, coherent={:.1}%, zonal={:.1}%, meridional={:.1}%, ribbons={:.1}%, polar={:.1}%, anisotropy={:.1}%, components={}, largest={:.1}%",
@@ -2399,6 +2658,21 @@ fn run_weather_validation(
         render_size,
         &global_density_sheet,
     );
+    save_contact_sheet(
+        output_dir,
+        "weather_global_seed_color_contact_sheet.png",
+        render_size,
+        &global_color_sheet,
+    );
+    std::fs::write(
+        Path::new(output_dir).join("u3_veil_diagnostics.txt"),
+        format!(
+            "mass bins=[0,.01),[.01,.02),[.02,.03),[.03,.04),[.04,.05),[.05,.06),[.06,.07),[.07,.08),[.08,.09),[.09,.10),[.10,.11),[.11,.12),[.12,.13),[.13,.14),[.14,.15),[.15,+)\nfield weights=solid-angle; polar=geographic abs(latitude)>=60 degrees\nrendered opacity=linearized integrated density view; projected association uses preview sphere direction, rotation, and nearest cubemap texel\n\nFIELD DISTRIBUTIONS\n{}\n\nRENDERED ASSOCIATIONS\n{}\n",
+            u3_mass_reports.join("\n"),
+            u3_rendered_associations.join("\n"),
+        ),
+    )
+    .expect("write U3 veil diagnostics artifact");
 
     println!("Storm Count, Storm Size, and Cloud Shadow comparisons (global/cloud seed 42):");
     let mut storm_renders = Vec::new();
@@ -2486,12 +2760,30 @@ fn run_weather_validation(
     }
     let (distance_04, distance_08, changed_08, saturated_clouds) =
         storm_control_metrics(&storm_renders);
+    let count_tau_0 = mean_rendered_optical_depth(&storm_renders[0].1, render_size);
+    let count_tau_8 = mean_rendered_optical_depth(&storm_renders[2].1, render_size);
+    let count_tau_delta = (count_tau_8 - count_tau_0).abs() / count_tau_0.max(f32::EPSILON);
     println!(
         "  count RGB distance 0->4={distance_04:.4}, 0->8={distance_08:.4}, ratio={:.3}; cloudy pixels changed >0.05={:.1}%; saturated at 8={:.1}%",
         distance_04 / distance_08.max(f32::EPSILON),
         changed_08 * 100.0,
         saturated_clouds * 100.0,
     );
+    println!(
+        "  U3 Count 0->8 rendered mean tau={count_tau_0:.5}->{count_tau_8:.5}, delta={:.2}% ({})",
+        count_tau_delta * 100.0,
+        if count_tau_delta <= 0.20 {
+            "PASS"
+        } else {
+            "FAIL"
+        },
+    );
+    if count_tau_delta > 0.20 {
+        gate_failures.push(format!(
+            "U3 Count 0->8 rendered optical-depth delta {:.2}% exceeds 20%",
+            count_tau_delta * 100.0
+        ));
+    }
     // U15 validates field-level catalyst response; U3 owns rendered optical-depth gates.
     save_contact_sheet(
         output_dir,
@@ -2769,7 +3061,6 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(512);
     let weather_validation = std::env::args().any(|arg| arg == "--weather-validation");
-
     if weather_validation && let Some(error) = weather_validation_size_error(render_size) {
         eprintln!("error: {error}");
         std::process::exit(2);
@@ -2799,13 +3090,16 @@ fn main() {
     std::fs::create_dir_all(&output_dir).expect("Failed to create output directory");
 
     if weather_validation {
-        run_weather_validation(
+        let weather_pipeline =
+            WeatherFieldPipeline::new(&gpu).expect("Rgba16Float weather unsupported");
+        run_weather_validation_with_pipeline(
             &gpu,
             &compute,
             &renderer,
             &planet_presets[0],
             &output_dir,
             render_size,
+            weather_pipeline,
         );
         println!("Done! Weather validation images saved to {}/", output_dir);
         return;

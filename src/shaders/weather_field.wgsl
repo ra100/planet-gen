@@ -213,17 +213,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let high_eligibility = moisture
         * clamp(frontal_eligibility * 0.65 + deep_eligibility * 0.7, 0.0, 1.0);
     let physical_eligibility = max(max(low_eligibility, deep_eligibility), high_eligibility);
-    let boundary = snoise(pos + noise_seed_offset(params.seed, 31u)) * 0.18
-        + snoise(pos * 4.0 + noise_seed_offset(params.seed, 32u)) * 0.04;
     let coverage = clamp(params.coverage, 0.0, 1.0);
-    let threshold = mix(0.7, 0.08, coverage) + divergent_drying * 0.14;
-    let coverage_shape = smooth_step(
-        threshold - 0.18,
-        threshold + 0.18,
-        physical_eligibility + boundary,
-    );
-    let occupancy = coverage * smooth_step(0.01, 0.2, physical_eligibility)
-        * coverage_shape;
+    // U12 owns final condensate. This pre-spin-up field only modulates
+    // eligibility, so coverage stays continuous rather than thresholded.
+    let occupancy = coverage * smooth_step(0.01, 0.2, physical_eligibility);
     let low_deep_total = max(low_eligibility + deep_eligibility, 0.000001);
     let low_mass = occupancy * low_eligibility / low_deep_total;
     let deep_mass = occupancy * deep_eligibility / low_deep_total;
@@ -266,7 +259,6 @@ fn diagnose(@builtin(global_invocation_id) id: vec3<u32>) {
     let wind = textureSampleLevel(wind_tex, weather_sampler, pos, 0.0);
     let continentality = clamp(wind.a, 0.0, 1.0);
     let marine_fraction = 1.0 - smooth_step(0.15, 0.85, continentality);
-    let terrain_land_boost = smooth_step(0.90, 0.99, continentality);
     let thermal = smooth_step(-25.0, 30.0, temperature_at(pos));
     let marine_stability = marine_fraction * smooth_step(0.05, 0.8, 1.0 - thermal);
     let trade_cumulus = marine_fraction * thermal * (1.0 - marine_stability);
@@ -293,38 +285,22 @@ fn diagnose(@builtin(global_invocation_id) id: vec3<u32>) {
         0.5,
         snoise(pos * 3.0 + noise_seed_offset(params.seed, 62u)),
     );
-    let seed_erosion = 0.45 + 0.55 * smooth_step(
+    let seed_erosion = 0.75 + 0.50 * smooth_step(
         -0.5,
         0.5,
         snoise(pos + noise_seed_offset(params.seed, 31u)),
     );
-    let marine_low_factor = 0.72 + marine_stability * 1.45 + trade_cumulus * 6.0 + terrain_lift * 0.65;
-    // The transported vapor state supplies weak land cloud mass even in calm test
-    // fixtures; this is continuous evapotranspiration, not an occupancy threshold.
-    let cool_land_source = smooth_step(0.35, 0.7, 1.0 - thermal);
-    let inland_low_source = (1.0 - marine_fraction) * state.x * 0.3 * cool_land_source;
-    let marine_deck_source = marine_stability * state.x * 0.25;
-    let warm_trade_source = smooth_step(0.75, 0.9, thermal);
-    let trade_low_source = trade_cumulus * state.x * trade_erosion * 0.6 * warm_trade_source;
+    // Diagnosis only scales U12's transported condensate; vapor never becomes
+    // diagnosed cloud mass outside U12 phase change.
+    let marine_low_gain = 0.65 + marine_stability * 0.74 + trade_cumulus * 5.0;
+    let terrain_low_gain = 1.0 + terrain_lift * 2.9 - rain_shadow * 1.2;
+    let transported_low = state.y * mix(terrain_low_gain, marine_low_gain, marine_fraction);
     let low = soft_bound(
-        state.y * detail_erosion * seed_erosion
-            * mix(
-                1.8 + terrain_lift * (3.0 + terrain_land_boost * 1.5)
-                    - rain_shadow * (1.2 + terrain_land_boost * 0.6),
-                marine_low_factor,
-                marine_fraction,
-            )
-            * mix(1.0, trade_erosion, trade_cumulus)
-            + inland_low_source
-            + marine_deck_source
-            + trade_low_source
-            + terrain_lift * clamp(params.moisture, 0.0, 1.0) * clamp(params.coverage, 0.0, 1.0)
-                * (1.35 + terrain_land_boost * 0.65),
+        transported_low * detail_erosion * mix(1.0, trade_erosion, trade_cumulus) * seed_erosion,
         1.0,
     );
     let deep = soft_bound(
-        state.z * (1.0 - marine_stability * 0.78) * (1.0 + terrain_lift * 0.35)
-            + marine_stability * state.x * 0.065,
+        state.z * (1.0 - marine_stability * 0.78) * (1.0 + terrain_lift * 0.35),
         1.0 - low,
     );
     // This is a diagnostic down-direction from the available pressure wind,

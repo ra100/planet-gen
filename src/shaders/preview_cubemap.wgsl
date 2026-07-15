@@ -45,6 +45,9 @@ struct Uniforms {
     _pad5: f32,
 }
 
+const CLOUD_RAY_SAMPLES: u32 = 8u;
+const CLOUD_EXTINCTION: f32 = 1.2;
+
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 @group(0) @binding(1) var height_tex: texture_cube<f32>;
 @group(0) @binding(2) var height_sampler: sampler;
@@ -226,40 +229,43 @@ fn ray_march_atmosphere(
     return result;
 }
 
-fn ray_march_limb_clouds(
+fn ray_march_clouds(
     ndc: vec2<f32>,
     z_start: f32,
     z_end: f32,
     sun_dir: vec3<f32>,
+    angular_pixel_footprint: f32,
 ) -> ScatterResult {
-    let steps = 8;
-    let step_len = (z_start - z_end) / f32(steps);
+    let step_len = (z_start - z_end) / f32(CLOUD_RAY_SAMPLES);
     let radius_km = max(uniforms.planet_radius_km, 1.0);
     let display_scale = cloud_display_scale();
+    // Ray-anchor jitter is deterministic in world space, avoiding camera-space shimmer.
+    let ray_anchor = normalize((uniforms.rotation * vec4<f32>(normalize(vec3<f32>(ndc, 0.5)), 0.0)).xyz);
+    let start_jitter = 0.5 + snoise(ray_anchor * 47.0 + noise_seed_offset(uniforms.cloud_seed, 45u)) * 0.005;
     var transmittance = 1.0;
     var in_scatter = vec3<f32>(0.0);
 
-    for (var i = 0; i < steps; i++) {
-        let z = z_start - (f32(i) + 0.5) * step_len;
+    for (var i = 0u; i < CLOUD_RAY_SAMPLES; i++) {
+        let z = z_start - (f32(i) + start_jitter) * step_len;
         let pos = vec3<f32>(ndc, z);
         let altitude_km = max((length(pos) - 1.0) * radius_km, 0.0);
         let direction = normalize(pos);
         let world = (uniforms.rotation * vec4<f32>(direction, 0.0)).xyz;
-        let density = (weather_density(world, altitude_km)
-            + weather_cirrus_density(world, altitude_km)) * display_scale;
+        let density = (weather_density(world, altitude_km, angular_pixel_footprint)
+            + weather_cirrus_density(world, altitude_km, angular_pixel_footprint)) * display_scale;
         if (density <= 0.001) { continue; }
 
         let light_world = normalize(world + sun_dir * 0.025);
-        let light_density = (weather_density(light_world, altitude_km)
-            + weather_cirrus_density(light_world, altitude_km)) * display_scale;
+        let light_density = (weather_density(light_world, altitude_km, angular_pixel_footprint)
+            + weather_cirrus_density(light_world, altitude_km, angular_pixel_footprint)) * display_scale;
         let sun_facing = smooth_step(-0.05, 0.2, dot(direction, sun_dir));
-        let light_transmittance = exp(-light_density * 1.2);
+        let light_transmittance = exp(-light_density * CLOUD_EXTINCTION);
         let cloud_color = mix(
             vec3<f32>(0.56, 0.60, 0.68),
             vec3<f32>(1.0, 1.0, 0.98) * star_color(uniforms.star_color_temp),
             light_transmittance * (sun_facing * 0.85 + 0.15),
         );
-        let segment_transmittance = exp(-density * abs(step_len) * radius_km * 0.35);
+        let segment_transmittance = exp(-density * abs(step_len) * radius_km * CLOUD_EXTINCTION);
         let segment_alpha = 1.0 - segment_transmittance;
         in_scatter += cloud_color * transmittance * segment_alpha;
         transmittance *= segment_transmittance;
@@ -856,6 +862,9 @@ fn starfield(ndc: vec2<f32>, sun_dir: vec3<f32>, sun_color: vec3<f32>) -> vec3<f
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let pan = vec2<f32>(uniforms.pan_x, uniforms.pan_y);
     let ndc = ((in.uv - 0.5) * 2.0 / 0.85 - pan) / uniforms.zoom;
+    // Compute derivatives before branch divergence; shared density receives this explicitly.
+    let pixel_ray = normalize(vec3<f32>(ndc, 0.5));
+    let angular_pixel_footprint = max(length(dpdx(pixel_ray)), length(dpdy(pixel_ray)));
     let r2 = dot(ndc, ndc);
 
     let sun_dir = normalize(uniforms.light_dir);
@@ -947,7 +956,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         var limb_color = bg;
         if (r2 < visible_cloud_top * visible_cloud_top) {
             let z_cloud = sqrt(max(visible_cloud_top * visible_cloud_top - r2, 0.0));
-            let clouds = ray_march_limb_clouds(ndc, z_cloud, -z_cloud, sun_dir);
+            let clouds = ray_march_clouds(ndc, z_cloud, -z_cloud, sun_dir, angular_pixel_footprint);
             limb_color = limb_color * clouds.transmittance + clouds.in_scatter;
         }
         if (has_atm && uniforms.show_atmosphere_layer > 0.5) {
@@ -1227,8 +1236,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 debug_color = vec3<f32>(ao_val, ao_val, ao_val);
             }
             case 9u: {
-                // Cloud density visualization
-                let cd = weather_column_density(rotated);
+                // Integrated density, so debug visualizes the same volume as preview.
+                let debug_geometry = textureSample(weather_geometry_tex, height_sampler, rotated);
+                let debug_top = 1.0 + debug_geometry.a / max(uniforms.planet_radius_km, 1.0);
+                let z_debug_top = sqrt(max(debug_top * debug_top - r2, 0.0));
+                let z_surface = sqrt(max(1.0 - r2, 0.0));
+                let clouds = ray_march_clouds(ndc, z_debug_top, z_surface, sun_dir, angular_pixel_footprint);
+                let cd = 1.0 - clouds.transmittance.x;
                 debug_color = vec3<f32>(cd, cd, cd);
             }
             case 10u: {
@@ -1387,7 +1401,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Cloud shadow on surface (independent from visible cloud self-shading)
     if (uniforms.show_cloud_shadows > 0.5 && cloud_display_scale() > 0.0) {
         let shadow_sample_pos = normalize(rotated + sun_dir * 0.015);
-        let cloud_above = weather_column_density(shadow_sample_pos);
+        let cloud_above = weather_column_density(shadow_sample_pos, angular_pixel_footprint);
         let surface_shadow = exp(-cloud_above * 2.5);
         lit_color *= mix(1.0, surface_shadow, 0.65);
     }
@@ -1450,7 +1464,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                     city_col = mix(white_led, cool_blue, (hue - 0.5) * 2.0);
                 }
                 // Dim lights under cloud cover
-                let cloud_above = weather_column_density(rotated);
+                let cloud_above = weather_column_density(rotated, angular_pixel_footprint);
                 let cloud_block = exp(-cloud_above * 4.0); // thick clouds block most light
                 lit_color += city_col * light_intensity * 1.2 * cloud_block;
                 // Save glow for scatter through clouds
@@ -1460,102 +1474,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
 
-    // ---- Two-layer cloud rendering (gated by show_clouds) ----
+    // ---- Shared bounded cloud volume (gated by show_clouds) ----
     if (cloud_display_scale() > 0.0
         && textureSample(weather_mass_tex, height_sampler, rotated).a > 0.0) {
-        // === Low cloud layer (cumulus / stratus / weather systems) ===
         let geometry = textureSample(weather_geometry_tex, height_sampler, rotated);
-        let planet_radius_km = max(uniforms.planet_radius_km, 1.0);
-        let layer_top_km = max(geometry.g, geometry.b);
-        let cloud_base = max(geometry.r / planet_radius_km, 0.0001);
-        let cloud_depth = max((layer_top_km - geometry.r) / planet_radius_km, 0.0001);
-        var low_dir = normalize(vec3<f32>(ndc, 1.0));
-        var low_world = rotated;
-        var low_density = 0.0;
-        for (var step = 0u; step < 8u; step++) {
-            let height_fraction = (f32(step) + 0.5) / 8.0;
-            let altitude_km = mix(geometry.r, layer_top_km, height_fraction);
-            let sample_radius = 1.0 + cloud_base + cloud_depth * height_fraction;
-            let sample_z = sqrt(max(sample_radius * sample_radius - r2, 0.0));
-            low_dir = normalize(vec3<f32>(ndc.x, ndc.y, sample_z));
-            low_world = (uniforms.rotation * vec4<f32>(low_dir, 0.0)).xyz;
-            low_density += weather_density(low_world, altitude_km) / 8.0;
-        }
-        low_density *= cloud_display_scale();
-
-        if (low_density > 0.005) {
-            // === Density-dependent Beer-Lambert ===
-            // Thin clouds (d<0.3): very translucent, wispy appearance
-            // Medium clouds (0.3-0.6): natural opacity ramp
-            // Thick clouds (d>0.6): opaque with strong self-shadow contrast
-            let thin = smooth_step(0.0, 0.3, low_density);
-            let thickness = mix(0.9, 2.6, thin) * clamp((layer_top_km - geometry.r) / 2.0, 0.5, 1.2);
-            let low_alpha = 1.0 - exp(-low_density * thickness);
-
-            let light_sample = normalize(low_world + sun_dir * 0.035);
-            let light_density = weather_density(light_sample, mix(geometry.r, layer_top_km, 0.65))
-                * cloud_display_scale();
-            let transmittance = exp(-light_density * mix(0.6, 1.4, thin));
-            let billow_light = clamp(0.55 + (low_density - light_density) * 2.2, 0.2, 1.0);
-            let shadow = transmittance * 0.55 + billow_light * 0.45;
-
-            // Cloud color varies with density:
-            // Thin → bright, translucent white. Thick → deeper shadow contrast.
-            let lit_cloud = vec3<f32>(1.0, 1.0, 0.98) * s_color;
-            let shadow_cloud = mix(vec3<f32>(0.76, 0.78, 0.82), vec3<f32>(0.60, 0.64, 0.72), thin);
-            var low_color = mix(shadow_cloud, lit_cloud, shadow);
-            let base_darken = 1.0 - low_density * 0.18;
-            low_color *= base_darken;
-
-            // Internal texture: always visible, stronger for thick clouds.
-            // Multiple scales prevent flat uniform areas at any zoom level.
-            let tex_strength = mix(0.08, 0.16, thin);
-            let cloud_tex_n = snoise(low_world * 15.0 + noise_seed_offset(uniforms.cloud_seed, 50u)) * tex_strength
-                            + snoise(low_world * 30.0 + noise_seed_offset(uniforms.cloud_seed, 51u)) * tex_strength * 0.6
-                            + snoise(low_world * 60.0 + noise_seed_offset(uniforms.cloud_seed, 52u)) * tex_strength * 0.35
-                            + snoise(low_world * 120.0 + noise_seed_offset(uniforms.cloud_seed, 53u)) * tex_strength * 0.2;
-            low_color *= 1.0 + cloud_tex_n;
-
-            // Day/night terminator
-            let sun_facing = max(dot(low_dir, sun_dir), 0.0);
-            let day_factor = smooth_step(-0.05, 0.2, sun_facing);
-            low_color *= day_factor * 0.85 + 0.12;
-
-            // Silver lining
-            let cos_theta = dot(normalize(low_world), sun_dir);
-            let hg = henyey_greenstein(cos_theta, 0.7);
-            low_color += vec3<f32>(hg * low_density * 0.12);
-
-            lit_color = mix(lit_color, low_color, low_alpha);
-        }
-
-        // === High cloud layer (cirrus — thin, icy, translucent) ===
-        let high_base_km = max(geometry.b, geometry.a - 3.0);
-        let high_alt_km = mix(high_base_km, geometry.a, 0.6);
-        let high_alt = max(high_alt_km / planet_radius_km, 0.003);
-        let high_r = 1.0 + high_alt;
-        let z_high = sqrt(max(high_r * high_r - r2, 0.0));
-        let high_dir = normalize(vec3<f32>(ndc.x, ndc.y, z_high));
-        let high_world = (uniforms.rotation * vec4<f32>(high_dir, 0.0)).xyz;
-
-        let cirrus_density = weather_cirrus_density(high_world, high_alt_km) * cloud_display_scale();
-
-        if (cirrus_density > 0.01) {
-            // Cirrus: much thinner optical depth, more translucent
-            let ci_alpha = 1.0 - exp(-cirrus_density * 2.0);
-
-            // Cirrus color: ice-white, less self-shadowing (thin layer)
-            let ci_sun = max(dot(high_dir, sun_dir), 0.0);
-            let ci_day = smooth_step(-0.05, 0.2, ci_sun);
-            var ci_color = vec3<f32>(0.92, 0.93, 0.96) * s_color * (ci_day * 0.8 + 0.15);
-
-            // Forward scattering stronger for thin ice crystals
-            let ci_cos = dot(normalize(high_world), sun_dir);
-            let ci_hg = henyey_greenstein(ci_cos, 0.8);
-            ci_color += vec3<f32>(ci_hg * cirrus_density * 0.18);
-
-            lit_color = mix(lit_color, ci_color, ci_alpha * 0.7);
-        }
+        let top_radius = 1.0 + geometry.a / max(uniforms.planet_radius_km, 1.0);
+        let z_cloud = sqrt(max(top_radius * top_radius - r2, 0.0));
+        let z_surface = sqrt(max(1.0 - r2, 0.0));
+        let clouds = ray_march_clouds(ndc, z_cloud, z_surface, sun_dir, angular_pixel_footprint);
+        lit_color = lit_color * clouds.transmittance + clouds.in_scatter;
     }
 
     // City light scatter through clouds (needs both cities and clouds)

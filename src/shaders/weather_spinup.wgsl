@@ -127,25 +127,20 @@ fn init(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 
     let pos = direction(id, res);
-    let baseline = textureSampleLevel(baseline_mass, spinup_sampler, pos, 0.0);
     let pressure = smooth_step(0.05, 0.3, params.surface_pressure_bar);
     let continentality = textureSampleLevel(wind_tex, spinup_sampler, pos, 0.0).a;
     let marine_fraction = 1.0 - smooth_step(0.15, 0.85, continentality);
-    let supply = clamp(params.coverage, 0.0, 1.0) * clamp(params.moisture, 0.0, 1.0)
-        * pressure * mix(0.8, 1.25, marine_fraction);
-    let vapor = supply * (0.12 + baseline.a * 0.5);
-    let tilted_y = pos.y * cos(params.axial_tilt_rad) + pos.z * sin(params.axial_tilt_rad);
-    let latitude = abs(asin(clamp(tilted_y, -1.0, 1.0))) / (PI * 0.5);
-    let cold_air_capacity = mix(
-        1.0,
-        mix(1.0, 0.4, smooth_step(0.45, 0.9, latitude)),
-        smooth_step(0.01, 0.05, baseline.a),
+    let vapor = select(
+        clamp(params.coverage, 0.0, 1.0) * clamp(params.moisture, 0.0, 1.0)
+            * pressure * mix(0.18, 0.36, marine_fraction),
+        0.0,
+        (params.diagnostic_flags & DIAGNOSTIC_NO_SOURCE) != 0u,
     );
     textureStore(
         state_out,
         vec2<i32>(id.xy),
         i32(id.z),
-        vec4<f32>(vapor, baseline.r * cold_air_capacity, baseline.g * cold_air_capacity, baseline.b * 0.75 * cold_air_capacity),
+        vec4<f32>(vapor, 0.0, 0.0, 0.0),
     );
 }
 
@@ -215,55 +210,84 @@ fn transport(@builtin(global_invocation_id) id: vec3<u32>) {
         * smooth_step(0.03, 0.2, effective_speed);
     let terrain_lift = smooth_step(0.005, 0.08, terrain_response);
     let rain_shadow = smooth_step(0.005, 0.08, -terrain_response);
-    let lift = clamp(convergence * 0.7 + terrain_lift * 0.8 - rain_shadow * 0.1, 0.0, 1.0);
     let thermal = smooth_step(-25.0, 30.0, temperature_at(pos));
     let pressure_factor = smooth_step(0.05, 0.3, params.surface_pressure_bar);
     let local_pressure = clamp(textureSampleLevel(pressure_tex, spinup_sampler, pos, 0.0).r / 1013.0, 0.8, 1.2);
     let marine_fraction = 1.0 - smooth_step(0.15, 0.85, wind.a);
+    let cold = 1.0 - thermal;
+    let q_sat = mix(0.16, 0.68, thermal) * pressure_factor * local_pressure;
+    let relative_humidity_target = clamp(
+        mix(0.45, 0.72, marine_fraction) + marine_fraction * cold * 0.18,
+        0.0,
+        0.92,
+    );
+    let q_target = q_sat * clamp(params.coverage, 0.0, 1.0)
+        * clamp(params.moisture, 0.0, 1.0) * relative_humidity_target;
     if ((params.diagnostic_flags & DIAGNOSTIC_NO_SOURCE) == 0u) {
-        let target_vapor = clamp(params.coverage, 0.0, 1.0) * clamp(params.moisture, 0.0, 1.0)
-            * pressure_factor * mix(0.18, 0.36, marine_fraction);
-        state.x += max(target_vapor - state.x, 0.008) * mix(0.006, 0.03, marine_fraction) * step_fraction;
+        let recharge = max(q_target - state.x, 0.0)
+            * mix(0.006, 0.030, marine_fraction) * step_fraction;
+        state.x += recharge;
     }
 
     if ((params.diagnostic_flags & DIAGNOSTIC_NO_PHASE_CHANGE) == 0u) {
-        let marine_trade = marine_fraction * thermal;
-        let saturation = mix(0.16, 0.68, thermal) * clamp(params.coverage, 0.0, 1.0)
-            * pressure_factor * local_pressure * mix(1.0, 0.45, marine_trade);
         let catalyst = convective_catalyst(pos);
-        // Moist, warm air is required everywhere; resolved convergence increases,
-        // but does not manufacture, the catalyst response.
-        let convective_eligibility = smooth_step(0.08, 0.55, state.x) * thermal
-            * mix(0.20, 1.0, smooth_step(0.004, 0.20, lift));
-        let catalytic_response = catalyst * convective_eligibility;
-        let condensation = min(state.x, (max(state.x - saturation, 0.0) * 0.22
-            + state.x * lift * 0.055) * step_fraction);
-        let deep_fraction = clamp(lift * thermal * 0.72, 0.0, 0.75);
+        let marine_lift = marine_fraction * (0.12 + cold * 0.28);
+        let lcl_lift = clamp(
+            convergence * 0.70 + terrain_lift * 0.80 + marine_lift - rain_shadow * 0.10,
+            0.0,
+            1.0,
+        );
+        let humidity_gate = smooth_step(0.45, 0.95, state.x / max(q_sat, 0.0001));
+        let warm_gate = thermal * smooth_step(0.10, 0.20, lcl_lift);
+        let convective_lift = clamp(
+            lcl_lift + catalyst * humidity_gate * warm_gate * 0.35,
+            0.0,
+            1.0,
+        );
+        // Lift cools an air parcel to its LCL; only vapor above that capacity changes phase.
+        let q_lcl = min(
+            q_sat * (1.0 - mix(0.08, 0.42, convective_lift)),
+            q_target * 0.70,
+        );
+        let condensation = min(
+            state.x,
+            max(state.x - q_lcl, 0.0) * mix(0.16, 0.56, convective_lift) * step_fraction,
+        );
+        let convective_eligibility = warm_gate * smooth_step(0.12, 0.75, convective_lift)
+            * humidity_gate;
+        let deep_fraction = clamp(convective_eligibility * (0.30 + catalyst * 0.45), 0.0, 0.75);
         state.x -= condensation;
         state.y += condensation * (1.0 - deep_fraction);
         state.z += condensation * deep_fraction;
 
-        // Catalysts redistribute existing condensate only in physically eligible air.
-        let promoted = min(state.y, 0.18 * catalytic_response * step_fraction);
+        // Catalysts promote the existing low reservoir; they do not create condensate.
+        let promoted = min(
+            state.y,
+            state.y * catalyst * convective_eligibility * 0.28 * step_fraction,
+        );
         state.y -= promoted;
         state.z += promoted;
 
-        let evaporation = min(state.y, max(saturation - state.x, 0.0) * 0.012 * step_fraction);
+        let evaporation = min(state.y, max(q_target - state.x, 0.0) * 0.012 * step_fraction);
         state.x += evaporation;
         state.y -= evaporation;
-        // Detrain only this pass's baseline deep production and catalyst promotion.
-        let new_deep = condensation * deep_fraction + promoted;
+        // The deep reservoir detrainment is conservative and supplies the high reservoir.
         let detrainment = min(
             state.z,
-            new_deep * mix(0.03, 0.18, thermal) * (lift + catalytic_response) * step_fraction,
+            state.z * (0.02 + 0.16 * convective_eligibility) * step_fraction,
         );
         state.z -= detrainment;
         state.w += detrainment;
     }
 
     if ((params.diagnostic_flags & DIAGNOSTIC_NO_SINK) == 0u) {
-        let rainout = (max(state.y + state.z - 0.4, 0.0) * 0.1 + state.z * 0.013) * step_fraction;
-        let rainout_scale = min(rainout / max(state.y + state.z, 0.0001), 1.0);
+        let condensate = state.y + state.z;
+        let rainout = min(
+            condensate,
+            (max(condensate - q_sat * relative_humidity_target, 0.0) * 0.22
+                + state.z * (0.01 + 0.08 * thermal)) * step_fraction,
+        );
+        let rainout_scale = rainout / max(condensate, 0.0001);
         state.y *= 1.0 - rainout_scale;
         state.z *= 1.0 - rainout_scale;
     }
