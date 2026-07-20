@@ -603,7 +603,7 @@ Freeze this protocol before U14 starts. `docs/research/shallow-volumetric-cloud-
 - After U15 records its field-level Count evidence, assert that the matching rendered global mean optical depth changes <=20% for Count 0->8.
 - Freeze the high-coverage density gates above in the validation protocol and record their field-independent density measurements before U4; color is not an acceptance proxy for these gates.
 - Append an eight-seed cloud-only contact sheet, contour overlays, tower/anvil renders, and the rendered optical-depth assertion to `docs/research/shallow-volumetric-cloud-validation.md`; mark each result `PASS` or `FAIL` against the frozen component, image, and seam tolerances. U3 owns rendered contour, tower, anvil, density-image, and optical-depth quality; failures cannot redefine the U12 activation result.
-- Status: release-518 validated; commit pending. The authoritative 512px local jitter run passed the active low/deep identity and high-only local wind-detail gates; see `docs/research/artifacts/release-518-u3-u15-jitter-2026-07-20/u3_local_metrics.txt`.
+- Status: completed and committed in `e1b260d`. The authoritative release-518 512px local jitter run passed the active low/deep identity and high-only local wind-detail gates; see `docs/research/artifacts/release-518-u3-u15-jitter-2026-07-20/u3_local_metrics.txt`.
 
 ### U12. Activated deterministic moisture spin-up
 
@@ -732,7 +732,7 @@ Freeze this protocol before U14 starts. `docs/research/shallow-volumetric-cloud-
 **Verification:**
 - Append R3/R4 field-level centroid, asymmetry, Count, Size, eligible-response, dry/stable, ABI-layout, and latency evidence as explicit `PASS` or `FAIL` in `docs/research/shallow-volumetric-cloud-validation.md`. Missing required evidence blocks U15 completion. U15 does not own rendered contour, tower, anvil, or image-quality approval.
 - No shader path uses storm control as a direct opacity, analytic cyclone-shape multiplier, or dead render-only wind-strength multiplier.
-- Status: release-518 validated; commit pending. The authoritative 512px focused run passed the active shear `.10` production source-to-trail Wind 1/2 ownership gates for all frozen seeds; normal production catalysts retain the actual GPU source-ineligible guard and recorded Count/deep, Size, thermal, Wind 2, anvil, dry/stable, and deterministic-repeat passes. Release-514 remains superseded historical failure evidence. See `docs/research/artifacts/release-518-u3-u15-jitter-2026-07-20/u15_field_metrics.txt`.
+- Status: completed and committed in `e1b260d`. The authoritative release-518 512px focused run passed the active shear `.10` production source-to-trail Wind 1/2 ownership gates for all frozen seeds; normal production catalysts retain the actual GPU source-ineligible guard and recorded Count/deep, Size, thermal, Wind 2, anvil, dry/stable, and deterministic-repeat passes. Release-514 remains superseded historical failure evidence. See `docs/research/artifacts/release-518-u3-u15-jitter-2026-07-20/u15_field_metrics.txt`.
 
 ### U4. Add volumetric lighting and surface shadows
 

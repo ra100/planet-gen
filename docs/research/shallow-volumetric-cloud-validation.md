@@ -102,7 +102,7 @@ Size uses the unmodified production seeded catalyst centers in both weather shad
 
 ### Release 515 Final Review Evidence — 2026-07-19
 
-Release-514 remains historical failure evidence. The final release-515 sweep uses the actual GPU weather pipeline for the source-disabled diagnostic and dry control; the CPU Size precondition helper is supplementary fixture diagnostics only. Commit remains pending.
+Release-514 remains historical failure evidence. The final release-515 sweep uses the actual GPU weather pipeline for the source-disabled diagnostic and dry control; the CPU Size precondition helper is supplementary fixture diagnostics only. Its completion tracking is superseded by the release-518 evidence committed in `e1b260d`.
 
 | Scenario ID | Owning U-ID | Fixture | Seeds | Mask / domain | Metric | Threshold | Measured value | Artifact path | Result | Reviewer / date |
 |---|---|---|---|---|---|---|---|---|---|---|

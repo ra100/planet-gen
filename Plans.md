@@ -98,8 +98,8 @@ Plan: [docs/plans/2026-07-10-001-feat-shallow-volumetric-clouds-plan.md](docs/pl
 | U13 | Broad existing cloud-family density | cc:完了 [e239a13] (test support [6daff58]) |
 | U12 | Activated moisture spin-up | cc:完了 [d9e9e29] (always-on bounded 128²/16-pass spin-up; transport diagnostic verified 1.6688% total drift and +0.0070 downwind condensate-centroid redistribution) |
 | U14 | Marine forcing integrated into spin-up and regime diagnosis | cc:完了 [07f4e5d] (marine decks/trade cumulus, coast continuity, coverage response, and seams validated) |
-| U15 | Weather wind-scale and convective/anvil organization | cc:TODO (validated; commit pending: release-518 authoritative 512px shear `.10` production plume run passed all frozen Wind 1/2 ownership gates; L2/L1 `1.70325..2.36816`, B2/B1 `1.02871..1.06631`, S2/S1 `.84076..1.06981`.) |
-| U3 | Shared shallow-volume density and ray marching | cc:TODO (validated; commit pending: release-518 authoritative 512px local jitter run passed the low/deep isotropic identity and high-only local symmetric dominant-octave gates.) |
+| U15 | Weather wind-scale and convective/anvil organization | cc:完了 [e1b260d] (release-518 authoritative 512px shear `.10` production plume run passed all frozen Wind 1/2 ownership gates; L2/L1 `1.70325..2.36816`, B2/B1 `1.02871..1.06631`, S2/S1 `.84076..1.06981`.) |
+| U3 | Shared shallow-volume density and ray marching | cc:完了 [e1b260d] (release-518 authoritative 512px local jitter run passed the low/deep isotropic identity and high-only local symmetric dominant-octave gates.) |
 | U4 | Cloud lighting and surface shadows | cc:TODO (independent shadow toggle is partial plumbing only; one-sample 2.5 extinction/0.65 blend remains unchanged, with projected soft shadows and low-sun AE4 deferred) |
 | U5 | Preview/export parity and channels | cc:TODO |
 | U6 | Visual, seam, and parity validation | cc:TODO |
