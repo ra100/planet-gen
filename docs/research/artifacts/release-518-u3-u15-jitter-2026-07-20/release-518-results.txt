@@ -1,0 +1,17 @@
+Release 518 authoritative 512px validation
+Date: 2026-07-20
+GPU: NVIDIA GeForce RTX 4090
+
+Commands:
+- cargo run --release --bin sweep -- --u3-validation --size 512 --output-dir docs/research/artifacts/release-518-u3-u15-jitter-2026-07-20
+- cargo run --release --bin sweep -- --u15-validation --size 512 --output-dir docs/research/artifacts/release-518-u3-u15-jitter-2026-07-20
+
+Results:
+- U3 focused local validation: PASS.
+- U15 focused fixture: PASS.
+- The U3 run generated `u3_local_metrics.txt`, `u3_local_contact_sheet.png`, and six Wind `.2`/`1`/`2` detail on/off PNGs.
+- The U15 run generated `u15_field_metrics.txt`.
+
+Metric artifact digests:
+- u3_local_metrics.txt: sha256:9f5975030cc5e852524b587831c034aab78ded9542bad909247e7a04e6ab8cbe
+- u15_field_metrics.txt: sha256:1246ee01789f6a01ff1ec0d67715571390b3dc80172dc6c4713e42cbe4453b13

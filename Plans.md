@@ -98,8 +98,8 @@ Plan: [docs/plans/2026-07-10-001-feat-shallow-volumetric-clouds-plan.md](docs/pl
 | U13 | Broad existing cloud-family density | cc:完了 [e239a13] (test support [6daff58]) |
 | U12 | Activated moisture spin-up | cc:完了 [d9e9e29] (always-on bounded 128²/16-pass spin-up; transport diagnostic verified 1.6688% total drift and +0.0070 downwind condensate-centroid redistribution) |
 | U14 | Marine forcing integrated into spin-up and regime diagnosis | cc:完了 [07f4e5d] (marine decks/trade cumulus, coast continuity, coverage response, and seams validated) |
-| U15 | Weather wind-scale and convective/anvil organization | cc:完了 [3ad21d7] (validated wind 0.50634325/1.0426241/2.131656 texels; catalyst/dry controls PASS; anvil extent 0.30115, shift 14.20532 texels, alignment 16.16918 degrees) |
-| U3 | Shared shallow-volume density and ray marching | cc:TODO |
+| U15 | Weather wind-scale and convective/anvil organization | cc:TODO (validated; commit pending: release-518 authoritative 512px shear `.10` production plume run passed all frozen Wind 1/2 ownership gates; L2/L1 `1.70325..2.36816`, B2/B1 `1.02871..1.06631`, S2/S1 `.84076..1.06981`.) |
+| U3 | Shared shallow-volume density and ray marching | cc:TODO (validated; commit pending: release-518 authoritative 512px local jitter run passed the low/deep isotropic identity and high-only local symmetric dominant-octave gates.) |
 | U4 | Cloud lighting and surface shadows | cc:TODO (independent shadow toggle is partial plumbing only; one-sample 2.5 extinction/0.65 blend remains unchanged, with projected soft shadows and low-sun AE4 deferred) |
 | U5 | Preview/export parity and channels | cc:TODO |
 | U6 | Visual, seam, and parity validation | cc:TODO |
@@ -176,3 +176,9 @@ Three-tier tectonic simulation with UI toggle between modes.
 | 10.2 | Cross-platform CI: GitHub Actions for Linux, macOS, Windows | CI green on all 3 | Phase 5 | cc:完了 [155a63f] |
 | 10.3 | README: install, usage guide, parameter reference, example renders | Full documentation | 10.2 | cc:完了 [155a63f] |
 | 10.4 | Blender addon packaging: zip + install instructions | Install via Preferences | Phase 7 | cc:完了 [155a63f] |
+
+---
+
+## Recorded Amendments
+
+- 2026-07-19: U14's historical `-10°C` cool-marine dominance fixture is superseded because it represents pack ice under the Earth model. The `+5°C` matched ocean/inland fixture tests open-water stratocumulus; the geographic polar/pack-ice gate and production persistent-ice settings (`-15..-6°C`, supply suppression `.25`, phase penalty `.15`) remain unchanged.

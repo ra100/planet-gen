@@ -65,29 +65,47 @@ fn sample_wind_field(dir: vec3<f32>) -> vec3<f32> {
     return textureSample(cloud_tex, height_sampler, dir).xyz;
 }
 
-// Unified wind accessor: returns normalized tangent-plane wind direction.
-// Uses GPU-computed pressure wind (cubemap) when available, falls back to analytical.
-// Cubemap wind is 3-tap blurred to soften sharp cell boundary transitions.
-fn sample_wind_tangent(sphere_pos: vec3<f32>) -> vec3<f32> {
+struct WindTangent {
+    direction: vec3<f32>,
+    magnitude: f32,
+}
+
+fn tangent_basis(direction: vec3<f32>) -> mat2x3<f32> {
+    let reference = select(
+        vec3<f32>(0.0, 1.0, 0.0),
+        vec3<f32>(1.0, 0.0, 0.0),
+        abs(direction.y) > 0.9,
+    );
+    let first = cross(reference, direction);
+    let first_length = max(length(first), 1.0e-6);
+    let tangent_x = first / first_length;
+    return mat2x3<f32>(tangent_x, cross(direction, tangent_x));
+}
+
+// Uses GPU-computed pressure wind when available, falling back to analytical flow.
+// The magnitude is preserved for cloud-detail filtering; callers needing only direction
+// should use sample_wind_tangent.
+fn sample_wind_tangent_data(sphere_pos: vec3<f32>) -> WindTangent {
     if (uniforms.cloud_advection > 0.5) {
-        // 3-tap blur: center + 2 diagonal offsets to smooth cell boundaries
-        let pc_w = abs(sphere_pos.y);
-        let ub_w = smooth_step(0.80, 0.98, pc_w);
-        let up_ref = normalize(mix(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), ub_w));
-        let t1 = normalize(cross(up_ref, sphere_pos));
-        let t2 = normalize(cross(sphere_pos, t1));
+        let basis = tangent_basis(sphere_pos);
+        let t1 = basis[0];
+        let t2 = basis[1];
         let r = 0.05; // ~320km blur radius
         let w = sample_wind_field(sphere_pos) * 2.0
               + sample_wind_field(normalize(sphere_pos + (t1 + t2) * r))
               + sample_wind_field(normalize(sphere_pos - (t1 + t2) * r));
         let tangent = w - sphere_pos * dot(w, sphere_pos);
         let speed = length(tangent);
-        if (speed > 0.003) { return tangent / speed; }
+        if (speed > 0.003) { return WindTangent(tangent / speed, speed * 0.25); }
     }
     let tilt = uniforms.axial_tilt_rad;
     let tilted_y = sphere_pos.y * cos(tilt) + sphere_pos.z * sin(tilt);
     let lat = asin(clamp(tilted_y, -1.0, 1.0));
-    return wind_direction_at(sphere_pos, lat);
+    return WindTangent(wind_direction_at(sphere_pos, lat), 0.0);
+}
+
+fn sample_wind_tangent(sphere_pos: vec3<f32>) -> vec3<f32> {
+    return sample_wind_tangent_data(sphere_pos).direction;
 }
 
 // Sample continentality (0=coast, 1=deep interior) from cubemap alpha
@@ -251,21 +269,24 @@ fn ray_march_clouds(
         let altitude_km = max((length(pos) - 1.0) * radius_km, 0.0);
         let direction = normalize(pos);
         let world = (uniforms.rotation * vec4<f32>(direction, 0.0)).xyz;
-        let density = (weather_density(world, altitude_km, angular_pixel_footprint)
-            + weather_cirrus_density(world, altitude_km, angular_pixel_footprint)) * display_scale;
-        if (density <= 0.001) { continue; }
+        let layers = weather_cloud_layers(world, altitude_km, angular_pixel_footprint);
+        let extinction = (layers.low * 0.90 + layers.deep * 1.65 + layers.high * 0.32) * display_scale;
+        if (extinction <= 0.001) { continue; }
 
         let light_world = normalize(world + sun_dir * 0.025);
-        let light_density = (weather_density(light_world, altitude_km, angular_pixel_footprint)
-            + weather_cirrus_density(light_world, altitude_km, angular_pixel_footprint)) * display_scale;
+        let light_layers = weather_cloud_layers(light_world, altitude_km, angular_pixel_footprint);
         let sun_facing = smooth_step(-0.05, 0.2, dot(direction, sun_dir));
-        let light_transmittance = exp(-light_density * CLOUD_EXTINCTION);
-        let cloud_color = mix(
-            vec3<f32>(0.56, 0.60, 0.68),
-            vec3<f32>(1.0, 1.0, 0.98) * star_color(uniforms.star_color_temp),
-            light_transmittance * (sun_facing * 0.85 + 0.15),
-        );
-        let segment_transmittance = exp(-density * abs(step_len) * radius_km * CLOUD_EXTINCTION);
+        let star = star_color(uniforms.star_color_temp);
+        let low_color = mix(vec3<f32>(0.58, 0.62, 0.70), vec3<f32>(1.0, 1.0, 0.98) * star,
+            exp(-light_layers.low * 0.90) * (sun_facing * 0.85 + 0.15));
+        let deep_color = mix(vec3<f32>(0.31, 0.35, 0.43), vec3<f32>(0.92, 0.94, 0.96) * star,
+            exp(-light_layers.deep * 1.65) * (sun_facing * 0.78 + 0.08));
+        let high_color = mix(vec3<f32>(0.62, 0.69, 0.82), vec3<f32>(0.88, 0.94, 1.0) * star,
+            exp(-light_layers.high * 0.32) * (sun_facing * 0.92 + 0.18));
+        let cloud_color = (low_color * layers.low * 0.90
+            + deep_color * layers.deep * 1.65
+            + high_color * layers.high * 0.32) / max(extinction / display_scale, 0.0001);
+        let segment_transmittance = exp(-extinction * abs(step_len) * radius_km * CLOUD_EXTINCTION);
         let segment_alpha = 1.0 - segment_transmittance;
         in_scatter += cloud_color * transmittance * segment_alpha;
         transmittance *= segment_transmittance;
@@ -1475,8 +1496,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     // ---- Shared bounded cloud volume (gated by show_clouds) ----
+    let visible_cloud_mass = textureSample(weather_mass_tex, height_sampler, rotated);
     if (cloud_display_scale() > 0.0
-        && textureSample(weather_mass_tex, height_sampler, rotated).a > 0.0) {
+        && max(max(visible_cloud_mass.r, visible_cloud_mass.g), visible_cloud_mass.b) > 0.0) {
         let geometry = textureSample(weather_geometry_tex, height_sampler, rotated);
         let top_radius = 1.0 + geometry.a / max(uniforms.planet_radius_km, 1.0);
         let z_cloud = sqrt(max(top_radius * top_radius - r2, 0.0));

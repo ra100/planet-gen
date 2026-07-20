@@ -1,0 +1,65 @@
+command=cargo run --release --bin sweep -- --weather-validation --size 512 --output-dir docs/research/artifacts/release-513-2026-07-19
+seeds=[7, 19, 37, 73, 101, 211, 509, 997]
+masks=flat_cool_ocean,flat_inland,mountain_windward,mountain_lee,coast_band
+cool_ocean_inland_min=2.451
+background_retention_q50_max=0.000
+cool_retention_p90_min=0.000
+trade_retention_p90_min=0.000
+windward_retention_p90_min=0.000
+cool_deck_low_p90_min=0.101
+trade_low_p90_min=0.104
+windward_low_p90_min=0.223
+cool_deep_min=0.000
+low_deep_min=37563.844
+deck_thickness=[1.167,1.167] km
+trade_top=[2.262,2.262] km
+trade_clear_gap=[0.353,0.379]
+coast_gradient_abs_correlation_max=0.086
+coast_gradient_energy_ratio_max=1.105
+coverage_samples=[0,.125,.25,.375,.5,.625,.75,.875,1]
+coverage_increment_min=[8.578161e-5, 0.0013313504, 0.0076049967, 0.022559572, 0.027886063, 0.012163516, 0.0023411512, 0.00042030215]
+coverage_increment_max_by_step=[9.27625e-5, 0.0014385587, 0.008092689, 0.02347809, 0.02943112, 0.013167828, 0.0025524348, 0.00045207143]
+coverage_increment_max=0.02943
+coverage_increment_median_min=0.00760
+coverage_zero_exact=true
+deterministic=true
+geometry_occupied_texels=24510320
+geometry_invalid_texels=0
+mass_seam_edge_max=[6.1035156e-5, 0.0, 0.0, 6.1035156e-5]
+mass_seam_edge_p99=[0.0, 0.0, 0.0, 0.0]
+mass_seam_corner_max=[0.0, 0.0, 0.0, 0.0]
+mass_seam_corner_p99=[0.0, 0.0, 0.0, 0.0]
+geometry_seam_edge_max=[0.0, 0.0, 0.0, 0.0]
+geometry_seam_edge_p99=[0.0, 0.0, 0.0, 0.0]
+geometry_seam_corner_max=[0.0, 0.0, 0.0, 0.0]
+geometry_seam_corner_p99=[0.0, 0.0, 0.0, 0.0]
+low_plateau_exact_max=0.00000
+deep_plateau_exact_max=0.00000
+low_plateau_near_max=0.00000
+deep_plateau_near_max=0.00000
+fixture_generation_n=160
+fixture_generation_p95_ms=26.598
+
+feedback_u14_coverage_threshold=tau>=.01; tau=1.2*(.5*low+1.2*deep+.35*high)
+feedback_u14_significant_component_area>=0.25% face
+feedback_u14_coverage_seed_tuples=
+seed=7 coverage=[(occupied=0.36625,clear=0.63375,component_p75=2.19753,clear_gap_radius=1.09881),(occupied=0.79458,clear=0.20542,component_p75=4.76634,clear_gap_radius=0.62394),(occupied=0.99687,clear=0.00313,component_p75=5.98125,clear_gap_radius=0.03140)] fixed_mask=.25 fixed_p90_tau=[0.06619707, 0.06958438, 0.070015766] status=PASS
+seed=19 coverage=[(occupied=0.36688,clear=0.63312,component_p75=2.20128,clear_gap_radius=1.09856),(occupied=0.78293,clear=0.21707,component_p75=4.69759,clear_gap_radius=0.63947),(occupied=0.99622,clear=0.00378,component_p75=5.97731,clear_gap_radius=0.04424)] fixed_mask=.25 fixed_p90_tau=[0.06475475, 0.071291, 0.07190074] status=PASS
+seed=37 coverage=[(occupied=0.36504,clear=0.63496,component_p75=2.19026,clear_gap_radius=1.09834),(occupied=0.79420,clear=0.20580,component_p75=4.76523,clear_gap_radius=0.62193),(occupied=0.99418,clear=0.00582,component_p75=5.96509,clear_gap_radius=0.04397)] fixed_mask=.25 fixed_p90_tau=[0.063652545, 0.069948, 0.07039922] status=PASS
+seed=73 coverage=[(occupied=0.36879,clear=0.63121,component_p75=2.21274,clear_gap_radius=1.09581),(occupied=0.77878,clear=0.22122,component_p75=4.67160,clear_gap_radius=0.64594),(occupied=0.99614,clear=0.00386,component_p75=5.97684,clear_gap_radius=0.05461)] fixed_mask=.25 fixed_p90_tau=[0.06779137, 0.072277434, 0.072776206] status=PASS
+seed=101 coverage=[(occupied=0.36612,clear=0.63388,component_p75=2.19672,clear_gap_radius=1.09729),(occupied=0.78683,clear=0.21317,component_p75=4.71861,clear_gap_radius=0.63088),(occupied=0.99530,clear=0.00470,component_p75=5.97179,clear_gap_radius=0.05739)] fixed_mask=.25 fixed_p90_tau=[0.067891784, 0.07204569, 0.07224861] status=PASS
+seed=211 coverage=[(occupied=0.36390,clear=0.63610,component_p75=2.18340,clear_gap_radius=1.09944),(occupied=0.78561,clear=0.21439,component_p75=4.71368,clear_gap_radius=0.63312),(occupied=0.99426,clear=0.00574,component_p75=5.96556,clear_gap_radius=0.04397)] fixed_mask=.25 fixed_p90_tau=[0.07062889, 0.07485352, 0.07523175] status=PASS
+seed=509 coverage=[(occupied=0.36947,clear=0.63053,component_p75=2.21681,clear_gap_radius=1.09491),(occupied=0.79548,clear=0.20452,component_p75=0.01060,clear_gap_radius=0.61678),(occupied=0.99682,clear=0.00318,component_p75=5.98094,clear_gap_radius=0.03930)] fixed_mask=.25 fixed_p90_tau=[0.06917015, 0.075294, 0.07623781] status=PASS
+seed=997 coverage=[(occupied=0.36540,clear=0.63460,component_p75=0.00365,clear_gap_radius=1.10023),(occupied=0.78724,clear=0.21276,component_p75=0.01006,clear_gap_radius=0.63181),(occupied=0.99728,clear=0.00272,component_p75=5.98367,clear_gap_radius=0.03386)] fixed_mask=.25 fixed_p90_tau=[0.069283575, 0.073745504, 0.07427153] status=PASS
+feedback_u14_land_occupied_min=1.000
+feedback_u14_land_low_p90_min=0.043
+orography_masks=frozen_projected_world_space
+orography_metrics=
+seed=7 A_calm=-0.00018 A_whisper=-0.00025 A_forward=0.19317 A_reverse=-0.19109 Df=0.19335 Dr=-0.19091 span=0.38426 whisper_delta=0.00007 tau_windward_p75_delta=0.13293 tau_lee_p25_delta=-0.09705
+seed=19 A_calm=0.00126 A_whisper=0.00120 A_forward=0.18250 A_reverse=-0.17291 Df=0.18124 Dr=-0.17417 span=0.35541 whisper_delta=0.00006 tau_windward_p75_delta=0.13330 tau_lee_p25_delta=-0.09053
+seed=37 A_calm=-0.00468 A_whisper=-0.00476 A_forward=0.19945 A_reverse=-0.22988 Df=0.20414 Dr=-0.22519 span=0.42933 whisper_delta=0.00008 tau_windward_p75_delta=0.13557 tau_lee_p25_delta=-0.12231
+seed=73 A_calm=0.00434 A_whisper=0.00426 A_forward=0.23707 A_reverse=-0.20652 Df=0.23273 Dr=-0.21086 span=0.44359 whisper_delta=0.00009 tau_windward_p75_delta=0.15967 tau_lee_p25_delta=-0.10833
+seed=101 A_calm=-0.00091 A_whisper=-0.00098 A_forward=0.19402 A_reverse=-0.19404 Df=0.19493 Dr=-0.19313 span=0.38806 whisper_delta=0.00007 tau_windward_p75_delta=0.14172 tau_lee_p25_delta=-0.08906
+seed=211 A_calm=-0.00145 A_whisper=-0.00151 A_forward=0.17501 A_reverse=-0.18170 Df=0.17646 Dr=-0.18025 span=0.35671 whisper_delta=0.00006 tau_windward_p75_delta=0.12004 tau_lee_p25_delta=-0.08972
+seed=509 A_calm=-0.00182 A_whisper=-0.00190 A_forward=0.20978 A_reverse=-0.21936 Df=0.21159 Dr=-0.21754 span=0.42914 whisper_delta=0.00008 tau_windward_p75_delta=0.14524 tau_lee_p25_delta=-0.10327
+seed=997 A_calm=0.00177 A_whisper=0.00169 A_forward=0.21078 A_reverse=-0.19988 Df=0.20901 Dr=-0.20165 span=0.41066 whisper_delta=0.00008 tau_windward_p75_delta=0.13894 tau_lee_p25_delta=-0.10042

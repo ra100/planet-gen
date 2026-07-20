@@ -25,6 +25,10 @@ struct WeatherSnapshot {
 @group(0) @binding(6) var geometry_tex: texture_storage_2d_array<rgba16float, write>;
 @group(0) @binding(7) var spinup_state: texture_cube<f32>;
 
+fn weather_face() -> u32 {
+    return params.face & 0xffu;
+}
+
 fn smooth_step(edge0: f32, edge1: f32, value: f32) -> f32 {
     let t = clamp((value - edge0) / (edge1 - edge0), 0.0, 1.0);
     return t * t * (3.0 - 2.0 * t);
@@ -60,6 +64,17 @@ fn tangent_basis(pos: vec3<f32>) -> mat2x3<f32> {
     return mat2x3<f32>(east, normalize(cross(pos, east)));
 }
 
+fn catalyst_center(index: u32) -> vec3<f32> {
+    let rank = f32(reverseBits(index) >> 29u);
+    let z = 1.0 - 2.0 * (rank + 0.5) / 8.0;
+    let phase = f32(params.seed & 0xffffu) / 65536.0 * 6.2831853;
+    let angle = rank * 2.3999632 + phase;
+    let base = vec3<f32>(sqrt(max(1.0 - z * z, 0.0)) * cos(angle), z, sqrt(max(1.0 - z * z, 0.0)) * sin(angle));
+    let basis = tangent_basis(base);
+    let jitter = (noise_seed_offset(params.seed, 201u + index).xy * 2.0 - 1.0) * 0.12;
+    return normalize(base + basis[0] * jitter.x + basis[1] * jitter.y);
+}
+
 fn physical_latitude(pos: vec3<f32>) -> f32 {
     let tilted_y = pos.y * cos(params.axial_tilt_rad) + pos.z * sin(params.axial_tilt_rad);
     return abs(asin(clamp(tilted_y, -1.0, 1.0))) / 1.5707963;
@@ -77,17 +92,12 @@ fn temperature_at(pos: vec3<f32>) -> f32 {
 
 fn convective_catalyst(pos: vec3<f32>) -> f32 {
     let active_count = min(params.storm_count, 8u);
-    let radius = mix(0.055, 0.16, clamp((params.storm_size - 0.3) / 2.7, 0.0, 1.0));
+    let size_t = clamp((params.storm_size - 0.3) / 2.7, 0.0, 1.0);
+    let radius = 0.085 + (0.20 - 0.085) * pow(size_t, 2.0135171);
     var response = 0.0;
     for (var index = 0u; index < active_count; index++) {
-        let rank = f32(reverseBits(index) >> 29u);
-        let z = 1.0 - 2.0 * (rank + 0.5) / 8.0;
-        let phase = f32(params.seed & 0xffffu) / 65536.0 * 6.2831853;
-        let angle = rank * 2.3999632 + phase;
-        let base = vec3<f32>(sqrt(max(1.0 - z * z, 0.0)) * cos(angle), z, sqrt(max(1.0 - z * z, 0.0)) * sin(angle));
-        let basis = tangent_basis(base);
-        let jitter = (noise_seed_offset(params.seed, 201u + index).xy * 2.0 - 1.0) * 0.12;
-        let center = normalize(base + basis[0] * jitter.x + basis[1] * jitter.y);
+        let center = catalyst_center(index);
+        let basis = tangent_basis(center);
         let wind = textureSampleLevel(wind_tex, weather_sampler, center, 0.0).xyz;
         let tangent_wind = wind - center * dot(wind, center);
         let along = normalize(tangent_wind + basis[0] * 0.0001);
@@ -99,7 +109,7 @@ fn convective_catalyst(pos: vec3<f32>) -> f32 {
         let minor = radius * 0.78 * (1.0 + warp_b * 0.13);
         let ellipse = pow(dot(delta, along) / max(major, 0.001), 2.0)
             + pow(dot(delta, across) / max(minor, 0.001), 2.0);
-        response = max(response, smooth_step(1.0, 0.62, ellipse));
+        response = max(response, smooth_step(1.0, 0.72, ellipse));
     }
     return response;
 }
@@ -109,7 +119,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let res = params.resolution;
     if (id.x >= res || id.y >= res) { return; }
     let uv = vec2<f32>(f32(id.x) / f32(res - 1u), f32(id.y) / f32(res - 1u));
-    let pos = cube_to_sphere(params.face, uv);
+    let pos = cube_to_sphere(weather_face(), uv);
     let wind = textureSampleLevel(wind_tex, weather_sampler, pos, 0.0);
     let pressure = textureSampleLevel(pressure_tex, weather_sampler, pos, 0.0).r;
     let height = sample_height(pos);
@@ -240,8 +250,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let deep_top_km = max(low_top_km, base_altitude_km + mix(1.0, 12.0, deep_eligibility * thermal));
     let tropopause_km = mix(8.0, 16.0, thermal) * mix(0.9, 1.05, 1.0 / sqrt(rotation_ratio));
     let high_top_km = max(deep_top_km, clamp(tropopause_km, 7.0, 18.0));
-    textureStore(mass_tex, vec2<i32>(id.xy), i32(params.face), vec4<f32>(low_mass, deep_mass, high_mass, occupancy));
-    textureStore(geometry_tex, vec2<i32>(id.xy), i32(params.face), vec4<f32>(base_altitude_km, low_top_km, deep_top_km, high_top_km));
+    textureStore(mass_tex, vec2<i32>(id.xy), i32(weather_face()), vec4<f32>(low_mass, deep_mass, high_mass, occupancy));
+    textureStore(geometry_tex, vec2<i32>(id.xy), i32(weather_face()), vec4<f32>(base_altitude_km, low_top_km, deep_top_km, high_top_km));
 }
 
 @compute @workgroup_size(16, 16)
@@ -249,10 +259,10 @@ fn diagnose(@builtin(global_invocation_id) id: vec3<u32>) {
     let res = params.resolution;
     if (id.x >= res || id.y >= res) { return; }
     let uv = vec2<f32>(f32(id.x) / f32(res - 1u), f32(id.y) / f32(res - 1u));
-    let pos = cube_to_sphere(params.face, uv);
+    let pos = cube_to_sphere(weather_face(), uv);
     if (params.coverage <= 0.0 || params.moisture <= 0.0) {
-        textureStore(mass_tex, vec2<i32>(id.xy), i32(params.face), vec4<f32>(0.0));
-        textureStore(geometry_tex, vec2<i32>(id.xy), i32(params.face), vec4<f32>(0.0));
+        textureStore(mass_tex, vec2<i32>(id.xy), i32(weather_face()), vec4<f32>(0.0));
+        textureStore(geometry_tex, vec2<i32>(id.xy), i32(weather_face()), vec4<f32>(0.0));
         return;
     }
 
@@ -375,10 +385,12 @@ fn diagnose(@builtin(global_invocation_id) id: vec3<u32>) {
     let deep_top_km = max(
         low_top_km,
         low_top_km + 2.0 + state.z * 8.0
-            + smooth_step(0.15, 0.30, deep) * convective_catalyst(pos)
-                * (2.5 + storm_size_response * 2.2),
+            + convective_catalyst(pos) * (
+                smooth_step(0.15, 0.30, deep) * 2.5
+                    + smooth_step(0.02, 0.08, deep) * storm_size_response * 5.828
+            ),
     );
     let high_top_km = max(deep_top_km, 8.0 + thermal * 8.0);
-    textureStore(mass_tex, vec2<i32>(id.xy), i32(params.face), vec4<f32>(low, deep, high, occupancy));
-    textureStore(geometry_tex, vec2<i32>(id.xy), i32(params.face), vec4<f32>(base_altitude_km, low_top_km, deep_top_km, high_top_km));
+    textureStore(mass_tex, vec2<i32>(id.xy), i32(weather_face()), vec4<f32>(low, deep, high, occupancy));
+    textureStore(geometry_tex, vec2<i32>(id.xy), i32(weather_face()), vec4<f32>(base_altitude_km, low_top_km, deep_top_km, high_top_km));
 }

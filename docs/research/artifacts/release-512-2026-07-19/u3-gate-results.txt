@@ -1,0 +1,28 @@
+U3 release 512 gate evidence
+Date: 2026-07-19
+
+Commands:
+- cargo test --lib preview::tests::cloud_layers_keep_high_mass_visible_and_materially_distinct -- --nocapture
+- cargo test --lib preview::tests::u3_wind_detail_rotation_and_wind2_preserve_each_family -- --nocapture
+- cargo test --lib preview::tests::cloud_sparse_partial_mass_has_exactly_zero_density_without_causal_support -- --nocapture
+- cargo run --release --bin sweep -- --weather-validation --size 512 --output-dir docs/research/artifacts/release-512-2026-07-19
+
+Result: PASS
+
+Screen-space layers / high-only: PASS
+high_tau=0.00701
+separation low/deep=0.2324 low/high=0.2081 deep/high=0.2088
+material low/deep/high=0.00524/0.02516/0.00685
+
+Low detail: rotation=83.812 degrees; MAE=0.03334; Wind2 MAE=0.03407; Wind2 edge ratio=1.09993; anisotropy Wind1/Wind90=0.20226/0.30726; centroid drift=0.00452.
+Deep detail: rotation=85.210 degrees; MAE=0.19165; Wind2 MAE=0.18690; Wind2 edge ratio=1.08655; anisotropy Wind1/Wind90=0.35793/0.16704; centroid drift=0.00389.
+High detail: rotation=70.772 degrees; MAE=0.05770; Wind2 MAE=0.05976; Wind2 edge ratio=1.06725; anisotropy Wind1/Wind90=0.12692/0.28061; centroid drift=0.00640.
+
+Causal support: PASS; zero density outside unsupported sparse mass.
+
+High-coverage density/detail: PASS
+Command: CLOUD_CONTOUR_OUTPUT_DIR=docs/research/artifacts/release-512-2026-07-19 cargo test --lib preview::tests::cloud_detail_erodes_edges_without_replacing_weather_systems -- --nocapture
+All frozen seeds passed correlation >=.95, occupied-area/centroid drift <5%, dense-core optical-depth drift <=5%, core residual RMS .08-.25, edge-energy increase >=4%, and no isolated pixels. Per-seed before/after images: cloud_contours_seed_{7,19,37,73,101,211,509,997}_before_after.png.
+
+Rendered Count 0->8 optical depth: PASS; 0.20462 -> 0.20457, delta=0.03% (<=20%).
+Topology / cloud p95: PASS in release 512 weather validation. U3 cloud-enabled render p95=13.477 ms (<33.3 ms); all eight frozen cloud/global seed topology gates passed.

@@ -1,0 +1,48 @@
+U3 release 515 executable gate evidence
+Date: 2026-07-19
+
+Commands:
+- cargo test --lib preview::tests::cloud_layers_keep_high_mass_visible_and_materially_distinct -- --nocapture
+- cargo test --lib preview::tests::u3_wind_detail_rotation_and_wind2_preserve_each_family -- --nocapture
+- cargo test --lib preview::tests::cloud_sparse_partial_mass_has_exactly_zero_density_without_causal_support -- --nocapture
+- CLOUD_CONTOUR_OUTPUT_DIR=docs/research/artifacts/release-515-2026-07-19 cargo test --lib preview::tests::cloud_detail_erodes_edges_without_replacing_weather_systems -- --nocapture
+- cargo run --release --bin sweep -- --weather-validation --size 512 --output-dir docs/research/artifacts/release-515-2026-07-19
+
+Result: PASS. This file records executable assertion results only; visual review remains separate.
+
+Screen-space layer assertions: PASS
+high-only visible: high_tau=0.00701 (>0.001)
+centroid separation low/deep=0.2324, low/high=0.2081, deep/high=0.2088 (each >0.10)
+material delta from clear low/deep/high=0.00524/0.02516/0.00685 (each >0.001; low/deep and high/deep differences >0.0005)
+
+Wind-detail assertions: PASS
+family | rotation degrees >=60 | rendered MAE >=.03 | Wind2 MAE >=.01 | Wind2 edge ratio >=.75 | anisotropy Wind1/Wind90 (frozen band) | supported/rendered Wind1/Wind90 | centroid drift <.01
+low  | 83.812 | 0.03334 | 0.03407 | 1.09993 | 0.20226/0.30726 ([.15,.45]) | 8554/6072/6018 | 0.00452
+deep | 85.210 | 0.19165 | 0.18690 | 1.08655 | 0.35793/0.16704 ([.10,.50]) | 5521/5279/5321 | 0.00389
+high | 70.772 | 0.05770 | 0.05976 | 1.06725 | 0.12692/0.28061 ([.10,.40]) | 6194/4729/4622 | 0.00640
+
+Causal-density support assertion: PASS
+sparse partial mass renders exactly zero density outside source support.
+
+High-coverage detail assertions: PASS
+seed | blurred correlation >=.95 | occupied ratio [.95,1.05] | edge energy coarse->detailed (ratio [1.02,1.25]) | isolated=0 | dense tau drift <=.05 | core RMS [.08,.25] | fringe RMS | centroid drift <.05
+7   | .9997 | .9992 | .02093->.02195 (1.0487) | 0 | .0092 | .0989 | .0241 | .0007
+19  | .9998 | 1.0008 | .02093->.02182 (1.0425) | 0 | .0223 | .1023 | .0247 | .0003
+37  | .9999 | .9952 | .02093->.02199 (1.0506) | 0 | .0137 | .0823 | .0248 | .0002
+73  | .9999 | .9968 | .02093->.02183 (1.0430) | 0 | .0054 | .0864 | .0217 | .0004
+101 | .9999 | .9952 | .02093->.02209 (1.0554) | 0 | .0268 | .0981 | .0239 | .0004
+211 | 1.0001 | .9968 | .02093->.02224 (1.0626) | 0 | .0208 | .1011 | .0243 | .0002
+509 | .9996 | 1.0000 | .02093->.02220 (1.0607) | 0 | .0138 | .1166 | .0276 | .0007
+997 | .9999 | .9976 | .02093->.02183 (1.0430) | 0 | .0064 | .0982 | .0220 | .0001
+The executable test also asserts core RMS >=50% of fringe RMS for every row.
+
+Weather-sweep topology and rendered-support assertions: PASS
+Cloud-seed topology (8 seeds): occupied .393-.406; coherent .980-.983; zonal .928-.932; meridional .924-.931; ribbons .102-.108; polar .595-.617; anisotropy .000-.003; components 1865-2056; largest .172-.388; changed vs seed 7 .559-.566 for seeds 19-997.
+Global-seed topology (8 seeds): occupied .412-.540; coherent .984-.988; zonal .934-.950; meridional .932-.944; ribbons .083-.102; polar .488-.668; anisotropy .000-.003; components 1400-1975; largest .606-.827.
+Rendered mass association >=.900: cloud seeds .924/.925/.926/.927/.924/.929/.927/.925; global seeds .935/.922/.951/.907/.943/.920/.954/.947. Full per-seed distributions and associations: u3_veil_diagnostics.txt.
+
+Rendered Count optical-depth assertion: PASS
+Count 0->8: 0.20462 -> 0.20457; delta=0.03% (<=20%).
+
+Cloud-enabled render p95 assertion: PASS
+n=8; p95=14.463 ms (<=33.3 ms); min=11.849 ms; max=14.463 ms; mean=13.402 ms.

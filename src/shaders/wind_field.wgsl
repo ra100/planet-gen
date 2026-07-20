@@ -284,7 +284,6 @@ fn compute_wind(pos: vec3<f32>, idx: u32) {
     // Latitude in tilted frame
     let tilted_y = pos.y * ct + pos.z * st;
     let lat = asin(clamp(tilted_y, -1.0, 1.0));
-    let hemisphere = sign(lat + 0.0001);
     // Position rotated into tilted frame for noise alignment
     let tilted_pos = vec3<f32>(pos.x, pos.y * ct + pos.z * st, -pos.y * st + pos.z * ct);
 
@@ -334,13 +333,15 @@ fn compute_wind(pos: vec3<f32>, idx: u32) {
     let polar_east = smooth_step(polar_start, polar_start + 15.0, lat_deg) * -0.45;
     var wind_e = trade + westerly + polar_east;
 
-    // Meridional component (also widened)
-    let hadley_m = -smooth_step(5.0, hadley * 0.6, lat_deg)
-                  * (1.0 - smooth_step(hadley * 0.8, hadley * 1.3, lat_deg)) * 0.35;
+    // Surface trades converge smoothly on the shifted thermal equator. Using
+    // shifted_lat on both sides avoids a fixed geographic-equator seam.
+    let thermal_lat_deg = shifted_lat / DEG;
+    let hadley_m = -thermal_lat_deg / max(hadley, 1.0)
+        * exp(-pow(abs(thermal_lat_deg) / max(hadley * 0.72, 1.0), 2.0)) * 0.62;
     let ferrel_center = (hadley + polar) * 0.5;
     let ferrel_m = smooth_step(ferrel_center - 15.0, ferrel_center, lat_deg)
-                  * (1.0 - smooth_step(ferrel_center, ferrel_center + 15.0, lat_deg)) * 0.25;
-    var wind_n = (hadley_m + ferrel_m) * hemisphere;
+                   * (1.0 - smooth_step(ferrel_center, ferrel_center + 15.0, lat_deg)) * 0.25;
+    var wind_n = hadley_m + ferrel_m * sign(thermal_lat_deg + 0.0001);
 
     // === Longitude variation (gentle speed noise, boundary wobble handles ring-breaking) ===
     let lon_var = snoise(tilted_pos * 2.0 + noise_seed_offset(params.seed, 16u));
