@@ -811,6 +811,13 @@ impl eframe::App for PlanetGenApp {
                 {
                     self.invalidate_weather();
                 }
+                if ui.add(egui::Slider::new(&mut self.wind_scale, 0.0..=2.0)
+                    .text("Cloud Wind Force"))
+                    .on_hover_text("0 = calm, 1 = physical baseline, 2 = strong cloud transport")
+                    .changed()
+                {
+                    self.invalidate_weather();
+                }
                 ui.horizontal(|ui| {
                     if ui.small_button("🎲").on_hover_text("Randomize cloud pattern").clicked() {
                         self.cloud_seed = rand_seed();
@@ -895,14 +902,6 @@ impl eframe::App for PlanetGenApp {
                             if ui.checkbox(&mut self.show_wind_effects, "Wind Effects")
                                 .on_hover_text("Enable weather transport and wind-organized uplift; continentality and surface moisture remain active when off")
                                 .changed()
-                            {
-                                self.invalidate_weather();
-                            }
-                            if self.show_wind_effects
-                                && ui.add(egui::Slider::new(&mut self.wind_scale, 0.0..=2.0)
-                                    .text("Wind Strength"))
-                                    .on_hover_text("0 = calm, 1 = physical baseline, 2 = strong weather transport")
-                                    .changed()
                             {
                                 self.invalidate_weather();
                             }

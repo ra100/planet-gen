@@ -7,7 +7,7 @@ use planet_gen::planet::{DerivedProperties, PlanetParams};
 use planet_gen::plates::{PlateGenParams, generate_plates};
 use planet_gen::preview::{PreviewRenderer, PreviewUniforms};
 use planet_gen::terrain_compute::{
-    DynamicsTextures, TectonicTerrain, TerrainComputePipeline, WindFieldPipeline,
+    DynamicsTextures, TectonicTerrain, TerrainComputePipeline, WindField, WindFieldPipeline,
 };
 use planet_gen::weather::{
     WEATHER_DIAGNOSTIC_NO_SOURCE, WeatherFieldPipeline, WeatherSnapshot, WeatherTextures,
@@ -300,6 +300,73 @@ fn generate_weather_scene(
     }
 }
 
+fn generate_native_default_scene(
+    gpu: &GpuContext,
+    compute: &TerrainComputePipeline,
+    renderer: &PreviewRenderer,
+    wind_pipeline: &WindFieldPipeline,
+    render_size: u32,
+) -> WeatherScene {
+    let params = PlanetParams::default();
+    let derived = DerivedProperties::from_params(&params);
+    let effective_ocean = derived.ocean_fraction * 0.5;
+    let ocean_level = -0.5 + 1.7 * effective_ocean;
+    let plates = generate_plates(&PlateGenParams {
+        seed: params.seed,
+        mass_earth: params.mass_earth,
+        ocean_fraction: effective_ocean,
+        tectonics_factor: derived.tectonics_factor,
+        continental_scale: 1.0,
+        num_plates_override: 0,
+        num_continents: 4,
+        continent_size_variety: 0.35,
+    });
+    let dist_factor = (params.star_distance_au.ln() / 3.0_f32.ln()).clamp(0.0, 1.0);
+    let beta = (1.47 + 0.91 * dist_factor + 0.3 * params.metallicity).clamp(1.2, 3.0);
+    let gain = 2.0_f32.powf(-(beta - 1.0) / 2.0);
+    let terrain = compute.generate(
+        gpu,
+        &plates,
+        render_size,
+        params.seed,
+        0.6 + 0.6 * params.mass_earth.powf(0.3).min(2.0),
+        1.0 + 0.5 * params.mass_earth.powf(0.2),
+        (8.0 + 4.0 * (params.axial_tilt_deg / 90.0) * derived.tectonics_factor) as u32,
+        gain,
+        1.9 + 0.2 * (24.0 / params.rotation_period_h).clamp(0.5, 2.0),
+        1.0,
+        0.10,
+        1.0,
+        1.0,
+        derived.surface_gravity,
+        derived.tectonics_factor,
+        derived.surface_age,
+        1.0,
+    );
+    let cubemap = renderer.upload_terrain(gpu, &terrain);
+    let dynamics = wind_pipeline.create_textures(gpu, (render_size / 2).max(192));
+    wind_pipeline.generate_gpu(
+        gpu,
+        &terrain,
+        &dynamics,
+        params.seed,
+        ocean_level,
+        params.axial_tilt_deg.to_radians(),
+        0.5,
+        24.0 / params.rotation_period_h,
+        derived.base_temperature_c,
+        derived.atmosphere_strength,
+    );
+    WeatherScene {
+        terrain,
+        cubemap,
+        dynamics,
+        derived,
+        tilt_rad: params.axial_tilt_deg.to_radians(),
+        ocean_level,
+    }
+}
+
 fn save_png(output_dir: &str, name: &str, size: u32, pixels: &[u8]) {
     let path = Path::new(output_dir).join(name);
     image::save_buffer(path, pixels, size, size, image::ColorType::Rgba8)
@@ -429,6 +496,550 @@ fn rgb_distance(a: &[u8], b: &[u8]) -> f32 {
         })
         .sum::<f32>();
     (squared / (a.len() / 4 * 3) as f32).sqrt() / 255.0
+}
+
+fn native_default_land_masks(
+    scene: &WeatherScene,
+    uniforms: &PreviewUniforms,
+    size: u32,
+) -> (Vec<bool>, Vec<bool>) {
+    let size_usize = size as usize;
+    let mut land = vec![false; size_usize * size_usize];
+    let mut lowland = vec![false; size_usize * size_usize];
+    for y in 0..size_usize {
+        for x in 0..size_usize {
+            if !in_sphere_mask(x, y, size_usize) {
+                continue;
+            }
+            let direction = u3_screen_direction(x, y, size_usize, uniforms.rotation);
+            let (face, sample_x, sample_y) =
+                u3_cube_coordinates(direction, scene.terrain.resolution);
+            let resolution = scene.terrain.resolution as usize;
+            let height =
+                scene.terrain.faces[face][sample_y.round().clamp(0.0, (resolution - 1) as f32)
+                    as usize
+                    * resolution
+                    + sample_x.round().clamp(0.0, (resolution - 1) as f32) as usize];
+            let land_height = height - uniforms.ocean_level;
+            let index = y * size_usize + x;
+            land[index] = land_height > 0.0;
+            lowland[index] = land_height > 0.01 && land_height <= 0.36;
+        }
+    }
+    (land, lowland)
+}
+
+fn native_default_mask_png(mask: &[bool]) -> Vec<u8> {
+    mask.iter()
+        .flat_map(|&land| {
+            let value = u8::from(land) * 255;
+            [value, value, value, 255]
+        })
+        .collect()
+}
+
+fn native_default_delta_png(on: &[u8], off: &[u8], land: &[bool]) -> Vec<u8> {
+    on.chunks_exact(4)
+        .zip(off.chunks_exact(4))
+        .zip(land)
+        .flat_map(|((on, off), &land)| {
+            let delta = if land {
+                ((0..3)
+                    .map(|channel| (on[channel] as f32 - off[channel] as f32).powi(2))
+                    .sum::<f32>()
+                    .sqrt()
+                    / 3.0_f32.sqrt()
+                    * 255.0)
+                    .round()
+                    .clamp(0.0, 255.0) as u8
+            } else {
+                0
+            };
+            [delta, delta, delta, 255]
+        })
+        .collect()
+}
+
+fn native_default_quantile(values: &mut [f32], quantile: f32) -> f32 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    values.sort_by(f32::total_cmp);
+    values[((values.len() - 1) as f32 * quantile).round() as usize]
+}
+
+fn native_default_metrics(
+    density: &[u8],
+    on: &[u8],
+    off: &[u8],
+    lowland: &[bool],
+    land: &[bool],
+    size: u32,
+) -> String {
+    let size = size as usize;
+    let mut opacity = Vec::new();
+    let mut land_delta = Vec::new();
+    let mut ocean_delta = Vec::new();
+    let mut land_occupied = 0usize;
+    let mut ocean_occupied = 0usize;
+    let mut land_count = 0usize;
+    let mut ocean_count = 0usize;
+    for index in 0..land.len() {
+        let delta = (0..3)
+            .map(|channel| {
+                (on[index * 4 + channel] as f32 - off[index * 4 + channel] as f32).powi(2)
+            })
+            .sum::<f32>()
+            .sqrt()
+            / (255.0 * 3.0_f32.sqrt());
+        if lowland[index] {
+            let alpha = srgb_to_linear(density[index * 4]);
+            opacity.push(alpha);
+            land_occupied += usize::from(alpha > 0.05);
+            land_count += 1;
+        }
+        if land[index] {
+            land_delta.push(delta);
+        } else if in_sphere_mask(index % size, index / size, size) {
+            ocean_delta.push(delta);
+            ocean_occupied += usize::from(delta > 0.05);
+            ocean_count += 1;
+        }
+    }
+    let mut visited = vec![false; size * size];
+    let mut components = 0usize;
+    let mut largest = 0usize;
+    for y in 0..size {
+        for x in 0..size {
+            let start = y * size + x;
+            if visited[start] || !lowland[start] || srgb_to_linear(density[start * 4]) <= 0.05 {
+                continue;
+            }
+            components += 1;
+            visited[start] = true;
+            let mut stack = vec![(x, y)];
+            let mut area = 0usize;
+            while let Some((x, y)) = stack.pop() {
+                area += 1;
+                for (next_x, next_y) in [
+                    (x.wrapping_sub(1), y),
+                    (x + 1, y),
+                    (x, y.wrapping_sub(1)),
+                    (x, y + 1),
+                ] {
+                    if next_x >= size || next_y >= size {
+                        continue;
+                    }
+                    let next = next_y * size + next_x;
+                    if !visited[next] && lowland[next] && srgb_to_linear(density[next * 4]) > 0.05 {
+                        visited[next] = true;
+                        stack.push((next_x, next_y));
+                    }
+                }
+            }
+            largest = largest.max(area);
+        }
+    }
+    let land_delta_mean = land_delta.iter().sum::<f32>() / land_delta.len().max(1) as f32;
+    let ocean_delta_mean = ocean_delta.iter().sum::<f32>() / ocean_delta.len().max(1) as f32;
+    format!(
+        "lowland_pixels={land_count}\nintegrated_opacity_p75={:.5}\noccupancy_gt_0_05={:.3}\ncomponents={components}\nlargest_component_share={:.3}\nland_rgb_delta_p75={:.5}\nland_rgb_delta_mean={land_delta_mean:.5}\nocean_rgb_delta_mean={ocean_delta_mean:.5}\nocean_rgb_delta_occupancy_gt_0_05={:.3}\n",
+        native_default_quantile(&mut opacity, 0.75),
+        land_occupied as f32 / land_count.max(1) as f32,
+        largest as f32 / land_occupied.max(1) as f32,
+        native_default_quantile(&mut land_delta, 0.75),
+        ocean_occupied as f32 / ocean_count.max(1) as f32,
+    )
+}
+
+fn native_default_source_report(
+    gpu: &GpuContext,
+    wind_pipeline: &WindFieldPipeline,
+    scene: &WeatherScene,
+    weather: &WeatherTextures,
+    uniforms: &PreviewUniforms,
+    size: u32,
+) -> String {
+    let params = PlanetParams::default();
+    let wind = wind_pipeline.generate(
+        gpu,
+        &scene.terrain,
+        scene.dynamics.resolution,
+        params.seed,
+        scene.ocean_level,
+        scene.tilt_rad,
+        0.5,
+        24.0 / params.rotation_period_h,
+        scene.derived.base_temperature_c,
+        scene.derived.atmosphere_strength,
+    );
+    let wind_data = native_default_wind_data(&wind);
+    let height_data = native_default_height_data(&scene.terrain);
+    let weather_mass = weather.read_mass(gpu);
+    let size = size as usize;
+    let mut visible = 0usize;
+    let mut land = vec![false; size * size];
+    let mut stages = vec![[0.0; 5]; size * size];
+    let mut elevation_km = vec![0.0; size * size];
+    let mut rain_shadow = vec![0.0; size * size];
+    let mut temperature_c = vec![0.0; size * size];
+    let mut broad_noise = vec![0.0; size * size];
+    let mut lowland_factor = vec![0.0; size * size];
+    let mut relative_humidity = vec![0.0; size * size];
+    let mut highland_source = vec![0.0; size * size];
+    let broad_offset = u3_noise_seed_offset(1042, 403);
+
+    for y in 0..size {
+        for x in 0..size {
+            if !in_sphere_mask(x, y, size) {
+                continue;
+            }
+            visible += 1;
+            let pos = u3_screen_direction(x, y, size, uniforms.rotation);
+            let height = u3_linear_cube_sample(&height_data, scene.terrain.resolution, pos, 0);
+            let land_height = height - scene.ocean_level;
+            let index = y * size + x;
+            if land_height <= 0.0 {
+                continue;
+            }
+            land[index] = true;
+            let wind_vector = [
+                u3_linear_cube_sample(&wind_data, wind.resolution, pos, 0),
+                u3_linear_cube_sample(&wind_data, wind.resolution, pos, 1),
+                u3_linear_cube_sample(&wind_data, wind.resolution, pos, 2),
+            ];
+            let continentality = u3_linear_cube_sample(&wind_data, wind.resolution, pos, 3);
+            let tangent_wind = [
+                wind_vector[0] - pos[0] * native_default_dot(wind_vector, pos),
+                wind_vector[1] - pos[1] * native_default_dot(wind_vector, pos),
+                wind_vector[2] - pos[2] * native_default_dot(wind_vector, pos),
+            ];
+            let normalized_speed = native_default_dot(tangent_wind, tangent_wind).sqrt();
+            let wind_scale: f32 = 1.0;
+            let forcing_scale = wind_scale.max(0.0).powf(0.3);
+            let effective_speed = normalized_speed * forcing_scale;
+            let effective_speed = if effective_speed >= 0.01 {
+                effective_speed
+            } else {
+                0.0
+            };
+            let wind_dir = [
+                tangent_wind[0] / normalized_speed.max(0.0001),
+                tangent_wind[1] / normalized_speed.max(0.0001),
+                tangent_wind[2] / normalized_speed.max(0.0001),
+            ];
+            let terrain_lookahead =
+                1.5 * (300.0 / scene.derived.radius_km.max(1.0)).clamp(0.02, 0.08);
+            let upwind = native_default_normalize([
+                pos[0] - wind_dir[0] * terrain_lookahead,
+                pos[1] - wind_dir[1] * terrain_lookahead,
+                pos[2] - wind_dir[2] * terrain_lookahead,
+            ]);
+            let downwind = native_default_normalize([
+                pos[0] + wind_dir[0] * terrain_lookahead,
+                pos[1] + wind_dir[1] * terrain_lookahead,
+                pos[2] + wind_dir[2] * terrain_lookahead,
+            ]);
+            let terrain_response =
+                (u3_linear_cube_sample(&height_data, scene.terrain.resolution, downwind, 0)
+                    - u3_linear_cube_sample(&height_data, scene.terrain.resolution, upwind, 0))
+                    * native_default_smooth_step(0.03, 0.2, effective_speed);
+            let terrain_lift = native_default_smooth_step(0.005, 0.08, terrain_response);
+            let local_rain_shadow = native_default_smooth_step(0.005, 0.08, -terrain_response);
+            let tilted_y = pos[1] * scene.tilt_rad.cos() + pos[2] * scene.tilt_rad.sin();
+            let latitude = tilted_y.clamp(-1.0, 1.0).asin().abs() / std::f32::consts::FRAC_PI_2;
+            let season = 0.5;
+            let season_shift = (season - 0.5) * 2.0 * scene.tilt_rad.sin();
+            let local_elevation_km = land_height.max(0.0) * 5.0;
+            let local_temperature_c = scene.derived.base_temperature_c - latitude * 35.0
+                + season_shift * tilted_y * 16.0
+                - local_elevation_km * 6.5
+                + continentality * season_shift * 5.0;
+            let thermal = native_default_smooth_step(-25.0, 30.0, local_temperature_c);
+            let q_sat = (0.16 + (0.68 - 0.16) * thermal)
+                * native_default_smooth_step(0.05, 0.3, scene.derived.surface_pressure_bar);
+            let vapor = u3_linear_cube_sample(&weather_mass, weather.resolution, pos, 0);
+            let local_relative_humidity = (vapor / q_sat.max(0.0001)).clamp(0.0, 1.0);
+            let seeded_broad = u3_snoise([
+                pos[0] * 1.9 + broad_offset[0],
+                pos[1] * 1.9 + broad_offset[1],
+                pos[2] * 1.9 + broad_offset[2],
+            ]) * 0.5
+                + 0.5;
+            let broad = if effective_speed > 0.0 {
+                seeded_broad
+            } else {
+                0.5
+            };
+            let exposed_land = native_default_smooth_step(0.0, 0.01, land_height);
+            let production_continentality = native_default_smooth_step(0.15, 0.85, continentality);
+            let lowland = 1.0 - native_default_smooth_step(0.35, 1.8, local_elevation_km);
+            let climate = native_default_smooth_step(
+                0.46,
+                0.70,
+                broad * 0.45 + thermal * 0.28 + lowland * 0.17 + production_continentality * 0.15
+                    - local_rain_shadow * 0.35,
+            );
+            let stratiform_wind = 1.0 - native_default_smooth_step(0.35, 0.70, effective_speed);
+            let highland = 1.0 - lowland;
+            let non_glacial = native_default_smooth_step(0.015, 0.10, thermal);
+            let humid_air = native_default_smooth_step(0.25, 0.50, local_relative_humidity);
+            let climate_wet =
+                native_default_smooth_step(0.34, 0.56, seeded_broad - 0.35 * local_rain_shadow);
+            let upslope = native_default_smooth_step(0.05, 0.35, terrain_lift);
+            stages[index][0] = exposed_land;
+            stages[index][1] = stages[index][0] * production_continentality;
+            stages[index][2] = stages[index][1] * lowland;
+            stages[index][3] = stages[index][2] * climate;
+            stages[index][4] = stages[index][3] * stratiform_wind;
+            elevation_km[index] = local_elevation_km;
+            rain_shadow[index] = local_rain_shadow;
+            temperature_c[index] = local_temperature_c;
+            broad_noise[index] = broad;
+            lowland_factor[index] = lowland;
+            relative_humidity[index] = local_relative_humidity;
+            highland_source[index] =
+                highland * non_glacial * humid_air * climate_wet * (0.65 + 0.35 * upslope);
+        }
+    }
+
+    let mut component = vec![false; size * size];
+    let center = (size / 2) * size + size / 2;
+    if land[center] {
+        component[center] = true;
+        let mut stack = vec![(size / 2, size / 2)];
+        while let Some((x, y)) = stack.pop() {
+            for (next_x, next_y) in [
+                (x.wrapping_sub(1), y),
+                (x + 1, y),
+                (x, y.wrapping_sub(1)),
+                (x, y + 1),
+            ] {
+                if next_x >= size || next_y >= size {
+                    continue;
+                }
+                let next = next_y * size + next_x;
+                if land[next] && !component[next] {
+                    component[next] = true;
+                    stack.push((next_x, next_y));
+                }
+            }
+        }
+    }
+
+    let summarize = |mask: &[bool]| {
+        let indices: Vec<_> = mask
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &included)| included.then_some(index))
+            .collect::<Vec<_>>();
+        let count = indices.len();
+        let shares: [f32; 5] = std::array::from_fn(|stage| {
+            indices
+                .iter()
+                .filter(|&&index| stages[index][stage] > 0.25)
+                .count() as f32
+                / count.max(1) as f32
+        });
+        let dry_or_high = indices
+            .iter()
+            .filter(|&&index| elevation_km[index] >= 1.8 || rain_shadow[index] >= 0.5)
+            .count() as f32
+            / count.max(1) as f32;
+        let median = |values: &[f32]| {
+            native_default_quantile(
+                &mut indices
+                    .iter()
+                    .map(|&index| values[index])
+                    .collect::<Vec<_>>(),
+                0.5,
+            )
+        };
+        (
+            count,
+            shares,
+            dry_or_high,
+            median(&elevation_km),
+            median(&rain_shadow),
+            median(&temperature_c),
+            median(&broad_noise),
+        )
+    };
+    let visible_summary = summarize(&land);
+    let center_summary = summarize(&component);
+    let visible_land_count = visible_summary.0.max(1);
+    let cold_humid_highland: Vec<_> = land
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &is_land)| {
+            (is_land
+                && lowland_factor[index] < 0.25
+                && (-21.0..=5.0).contains(&temperature_c[index])
+                && relative_humidity[index] >= 0.40
+                && rain_shadow[index] < 0.25)
+                .then_some(index)
+        })
+        .collect();
+    let dry_high: Vec<_> = land
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &is_land)| {
+            (is_land
+                && lowland_factor[index] < 0.25
+                && (relative_humidity[index] <= 0.25 || rain_shadow[index] >= 0.50))
+                .then_some(index)
+        })
+        .collect();
+    let eligible_fraction = |cohort: &[usize]| {
+        cohort
+            .iter()
+            .filter(|&&index| highland_source[index] > 0.25)
+            .count() as f32
+            / cohort.len().max(1) as f32
+    };
+    let cold_humid_highland_fraction = cold_humid_highland.len() as f32 / visible_land_count as f32;
+    let cold_humid_eligible_fraction = eligible_fraction(&cold_humid_highland);
+    let dry_high_eligible_fraction = eligible_fraction(&dry_high);
+    let highland_recovery_separation = cold_humid_eligible_fraction - dry_high_eligible_fraction;
+    let highland_decision = native_default_highland_decision(
+        highland_recovery_separation,
+        cold_humid_highland_fraction,
+    );
+    let drops = [
+        center_summary.1[0] - center_summary.1[1],
+        center_summary.1[1] - center_summary.1[2],
+        center_summary.1[2] - center_summary.1[3],
+        center_summary.1[3] - center_summary.1[4],
+    ];
+    let stage_names = [
+        "S1_CONTINENTALITY",
+        "S2_LOWLAND",
+        "S3_CLIMATE_RAIN_SHADOW",
+        "S4_STRATIFORM_WIND",
+    ];
+    let bottleneck = (0..drops.len())
+        .max_by(|&a, &b| drops[a].total_cmp(&drops[b]))
+        .unwrap_or(0);
+    let mut sorted_drops = drops;
+    sorted_drops.sort_by(f32::total_cmp);
+    let next_largest_drop = sorted_drops[2];
+    let pre_wind = (0..3)
+        .max_by(|&a, &b| drops[a].total_cmp(&drops[b]))
+        .unwrap_or(0);
+    let other_pre_wind = drops
+        .iter()
+        .enumerate()
+        .filter(|&(index, _)| index != pre_wind)
+        .map(|(_, &drop)| drop)
+        .fold(0.0_f32, f32::max);
+    let decision = if !land[center] || center_summary.0 == 0 {
+        "REJECT_NO_CENTER_COMPONENT".to_string()
+    } else if center_summary.2 >= 0.50 {
+        "REJECT_LEGITIMATE_ARID_HIGH".to_string()
+    } else if center_summary.1[4] < 0.25
+        && drops[pre_wind] > 0.0
+        && drops[pre_wind] >= 2.0 * other_pre_wind
+    {
+        format!("SELECT_{}_CORRECTION", stage_names[pre_wind])
+    } else if drops[3] > 0.0 && drops[3] >= drops[..3].iter().copied().fold(0.0_f32, f32::max) {
+        "REJECT_WIND_ALREADY_EXCLUDED".to_string()
+    } else {
+        "REJECT_AMBIGUOUS_OR_NOT_SOURCE_MASK".to_string()
+    };
+    let bottleneck_stage = if center_summary.0 > 0 {
+        stage_names[bottleneck]
+    } else {
+        "NONE"
+    };
+
+    format!(
+        "source_visible_land_pixels={}\nsource_visible_land_fraction_disk={:.5}\nsource_visible_land_s0_exposed_share_gt_025={:.5}\nsource_visible_land_s1_continentality_share_gt_025={:.5}\nsource_visible_land_s2_lowland_share_gt_025={:.5}\nsource_visible_land_s3_climate_rain_shadow_share_gt_025={:.5}\nsource_visible_land_s4_stratiform_wind_share_gt_025={:.5}\nsource_visible_land_dry_or_high_share={:.5}\nsource_visible_land_elevation_km_median={:.5}\nsource_visible_land_rain_shadow_median={:.5}\nsource_visible_land_temperature_c_median={:.5}\nsource_visible_land_broad_noise_median={:.5}\nsource_cold_humid_highland_fraction={:.5}\nsource_cold_humid_highland_highland_source_gt_025_fraction={:.5}\nsource_dry_high_fraction={:.5}\nsource_dry_high_highland_source_gt_025_fraction={:.5}\nsource_highland_recovery_separation={:.5}\nsource_highland_decision={}\nsource_center_component_pixels={}\nsource_center_component_fraction_disk={:.5}\nsource_center_component_s0_exposed_share_gt_025={:.5}\nsource_center_component_s1_continentality_share_gt_025={:.5}\nsource_center_component_s2_lowland_share_gt_025={:.5}\nsource_center_component_s3_climate_rain_shadow_share_gt_025={:.5}\nsource_center_component_s4_stratiform_wind_share_gt_025={:.5}\nsource_center_component_dry_or_high_share={:.5}\nsource_center_component_elevation_km_median={:.5}\nsource_center_component_rain_shadow_median={:.5}\nsource_center_component_temperature_c_median={:.5}\nsource_center_component_broad_noise_median={:.5}\nsource_center_bottleneck_stage={}\nsource_center_bottleneck_drop={:.5}\nsource_center_next_largest_drop={:.5}\nsource_decision={}\n",
+        visible_summary.0,
+        visible_summary.0 as f32 / visible.max(1) as f32,
+        visible_summary.1[0],
+        visible_summary.1[1],
+        visible_summary.1[2],
+        visible_summary.1[3],
+        visible_summary.1[4],
+        visible_summary.2,
+        visible_summary.3,
+        visible_summary.4,
+        visible_summary.5,
+        visible_summary.6,
+        cold_humid_highland_fraction,
+        cold_humid_eligible_fraction,
+        dry_high.len() as f32 / visible_land_count as f32,
+        dry_high_eligible_fraction,
+        highland_recovery_separation,
+        highland_decision,
+        center_summary.0,
+        center_summary.0 as f32 / visible.max(1) as f32,
+        center_summary.1[0],
+        center_summary.1[1],
+        center_summary.1[2],
+        center_summary.1[3],
+        center_summary.1[4],
+        center_summary.2,
+        center_summary.3,
+        center_summary.4,
+        center_summary.5,
+        center_summary.6,
+        bottleneck_stage,
+        drops[bottleneck],
+        next_largest_drop,
+        decision,
+    )
+}
+
+fn native_default_highland_decision(
+    highland_recovery_separation: f32,
+    cold_humid_highland_fraction: f32,
+) -> &'static str {
+    if highland_recovery_separation >= 0.35 && cold_humid_highland_fraction >= 0.10 {
+        "SELECT_HUMID_HIGHLAND_SOURCE"
+    } else {
+        "REJECT_HUMID_HIGHLAND_SOURCE"
+    }
+}
+
+fn native_default_wind_data(wind: &WindField) -> Vec<f32> {
+    (0..6)
+        .flat_map(|face| {
+            wind.continentality[face].iter().enumerate().flat_map(
+                move |(index, &continentality)| {
+                    let base = (face * wind.continentality[face].len() + index) * 3;
+                    [
+                        wind.wind[base],
+                        wind.wind[base + 1],
+                        wind.wind[base + 2],
+                        continentality,
+                    ]
+                },
+            )
+        })
+        .collect()
+}
+
+fn native_default_height_data(terrain: &TectonicTerrain) -> Vec<f32> {
+    terrain
+        .faces
+        .iter()
+        .flat_map(|face| face.iter().flat_map(|&height| [height, 0.0, 0.0, 0.0]))
+        .collect()
+}
+
+fn native_default_dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn native_default_normalize(vector: [f32; 3]) -> [f32; 3] {
+    let length = native_default_dot(vector, vector).sqrt().max(f32::EPSILON);
+    [vector[0] / length, vector[1] / length, vector[2] / length]
+}
+
+fn native_default_smooth_step(edge0: f32, edge1: f32, value: f32) -> f32 {
+    let t = ((value - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 fn cloudy_change_fraction(a: &[u8], b: &[u8], density_a: &[u8], density_b: &[u8]) -> f32 {
@@ -1459,6 +2070,15 @@ fn time_gpu_call<T>(gpu: &GpuContext, f: impl FnOnce() -> T) -> (T, f64) {
 fn weather_validation_size_error(render_size: u32) -> Option<String> {
     (render_size < 512)
         .then(|| format!("--weather-validation requires --size >= 512 (got {render_size})"))
+}
+
+fn requires_weather_validation_size(
+    weather_validation: bool,
+    u15_validation: bool,
+    u3_validation: bool,
+    native_default_cloud_validation: bool,
+) -> bool {
+    weather_validation || u15_validation || u3_validation || native_default_cloud_validation
 }
 
 fn seed_change_fraction(a: &[u8], b: &[u8], size: u32) -> f32 {
@@ -5908,6 +6528,123 @@ fn run_weather_validation_with_pipeline(
     );
 }
 
+fn run_native_default_cloud_validation(
+    gpu: &GpuContext,
+    compute: &TerrainComputePipeline,
+    renderer: &PreviewRenderer,
+    output_dir: &str,
+    render_size: u32,
+) {
+    let wind_pipeline = WindFieldPipeline::new(gpu).expect("Rgba16Float dynamics unsupported");
+    let weather_pipeline = WeatherFieldPipeline::new(gpu).expect("Rgba16Float weather unsupported");
+    let scene = generate_native_default_scene(gpu, compute, renderer, &wind_pipeline, render_size);
+    let weather = generate_validation_weather(&weather_pipeline, gpu, &scene, 1042, 2, 1.0);
+    let params = PlanetParams::default();
+    let mut uniforms = PreviewUniforms::zeroed();
+    uniforms.rotation = [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ];
+    uniforms.light_dir = [
+        (-0.5_f32).cos() * 0.3_f32.cos(),
+        0.3_f32.sin(),
+        (-0.5_f32).sin() * 0.3_f32.cos(),
+    ];
+    uniforms.ocean_level = scene.ocean_level;
+    uniforms.base_temp_c = scene.derived.base_temperature_c;
+    uniforms.ocean_fraction = scene.derived.ocean_fraction;
+    uniforms.axial_tilt_rad = params.axial_tilt_deg.to_radians();
+    uniforms.season = 0.5;
+    uniforms.atmosphere_density = scene.derived.atmosphere_strength;
+    uniforms.atmosphere_height = 0.02 + 0.02 * scene.derived.atmosphere_strength;
+    uniforms.height_scale = 3.0;
+    uniforms.zoom = 1.0;
+    uniforms.cloud_coverage = 0.5;
+    uniforms.cloud_seed = 1042;
+    uniforms.star_color_temp = 0.5;
+    uniforms.show_ao = 1.0;
+    uniforms.show_water = 1.0;
+    uniforms.show_ice = 1.0;
+    uniforms.show_biomes = 1.0;
+    uniforms.show_clouds = 1.0;
+    uniforms.show_atmosphere_layer = 1.0;
+    uniforms.show_cities = 1.0;
+    uniforms.cloud_opacity = 1.0;
+    uniforms.cloud_advection = 1.0;
+    uniforms.rotation_rate = scene.derived.rotation_rate_rad_s / (std::f32::consts::TAU / 86400.0);
+    uniforms.atm_pressure = scene.derived.surface_pressure_bar;
+    uniforms.planet_radius_km = scene.derived.radius_km;
+    uniforms.show_cloud_shadows = 1.0;
+
+    let clouds_off = PreviewUniforms {
+        show_clouds: 0.0,
+        ..uniforms
+    };
+    let color_off = render_weather(renderer, gpu, &clouds_off, &scene, &weather, render_size);
+    let color_on = render_weather(renderer, gpu, &uniforms, &scene, &weather, render_size);
+    let density = render_weather(
+        renderer,
+        gpu,
+        &PreviewUniforms {
+            view_mode: 9,
+            ..uniforms
+        },
+        &scene,
+        &weather,
+        render_size,
+    );
+    let (land, lowland) = native_default_land_masks(&scene, &uniforms, render_size);
+    save_png(
+        output_dir,
+        "native_default_clouds_off.png",
+        render_size,
+        &color_off,
+    );
+    save_png(
+        output_dir,
+        "native_default_clouds_on.png",
+        render_size,
+        &color_on,
+    );
+    save_png(
+        output_dir,
+        "native_default_density.png",
+        render_size,
+        &density,
+    );
+    save_png(
+        output_dir,
+        "native_default_land_mask.png",
+        render_size,
+        &native_default_mask_png(&land),
+    );
+    save_png(
+        output_dir,
+        "native_default_land_delta.png",
+        render_size,
+        &native_default_delta_png(&color_on, &color_off, &land),
+    );
+    std::fs::write(
+        Path::new(output_dir).join("native_default_metrics.txt"),
+        format!(
+            "command=cargo run --release --bin sweep -- --native-default-cloud-validation --size {render_size} --output-dir {output_dir}\nseed=42\ncloud_seed=1042\ncoverage=0.5\nmoisture=1\nstorm_count=2\nstorm_size=1\nwind_scale=1\nwater_loss=0.5\ncontinental_scale=1\nnum_continents=4\ncontinent_size_variety=0.35\nocean_level_formula=-0.5+1.7*(derived.ocean_fraction*(1-water_loss))\nocean_level={:.5}\n\n{}\n{}",
+            scene.ocean_level,
+            native_default_metrics(&density, &color_on, &color_off, &lowland, &land, render_size),
+            native_default_source_report(
+                gpu,
+                &wind_pipeline,
+                &scene,
+                &weather,
+                &uniforms,
+                render_size,
+            ),
+        ),
+    )
+    .expect("write native default metrics artifact");
+}
+
 fn main() {
     env_logger::init();
 
@@ -5924,8 +6661,14 @@ fn main() {
     let weather_validation = std::env::args().any(|arg| arg == "--weather-validation");
     let u15_validation = std::env::args().any(|arg| arg == "--u15-validation");
     let u3_validation = std::env::args().any(|arg| arg == "--u3-validation");
-    if (weather_validation || u15_validation || u3_validation)
-        && let Some(error) = weather_validation_size_error(render_size)
+    let native_default_cloud_validation =
+        std::env::args().any(|arg| arg == "--native-default-cloud-validation");
+    if requires_weather_validation_size(
+        weather_validation,
+        u15_validation,
+        u3_validation,
+        native_default_cloud_validation,
+    ) && let Some(error) = weather_validation_size_error(render_size)
     {
         eprintln!("error: {error}");
         std::process::exit(2);
@@ -5934,7 +6677,7 @@ fn main() {
     let seeds = [42, 137, 256, 999, 7777];
     let planet_presets = presets();
 
-    if weather_validation || u15_validation {
+    if weather_validation || u15_validation || native_default_cloud_validation {
         println!("Weather Validation");
         println!("  Resolution: {}x{}", render_size, render_size);
         println!("  Output: {}/", output_dir);
@@ -5953,6 +6696,12 @@ fn main() {
     let compute = TerrainComputePipeline::new(&gpu);
     let renderer = PreviewRenderer::new(&gpu);
     std::fs::create_dir_all(&output_dir).expect("Failed to create output directory");
+
+    if native_default_cloud_validation {
+        run_native_default_cloud_validation(&gpu, &compute, &renderer, &output_dir, render_size);
+        println!("Native-default cloud evidence saved to {output_dir}/");
+        return;
+    }
 
     if u15_validation {
         let weather_pipeline =
@@ -6209,16 +6958,17 @@ mod tests {
     use super::{
         TopologyMetrics, U14CoverageComponent, U15_DEEP_THRESHOLD, U15_SIZE_FULL_SUPPORT_RADIUS,
         U15_SIZE_SEEDS, U15_SIZE_SUPPORT_RADIUS, U15ResponseComponent, cube_edge_pairs,
-        polar_metrics, u3_cube_coordinates, u3_feature_axis, u3_linear_cube_sample,
-        u3_mass_association, u3_ray_ndc, u3_screen_direction, u14_coverage_growth,
-        u14_coverage_support_metrics, u14_fixed_core_p90, u14_geometry_metrics,
-        u14_significant_occupied_components, u15_anvil_source_taps, u15_causal_component,
-        u15_component_labels, u15_fixture_centers, u15_owner_size_metrics, u15_paired_size_tops,
-        u15_pixel_neighbors, u15_pixel_position, u15_significant_response_components,
-        u15_significant_size_components, u15_size_association, u15_size_fixture_support,
-        u15_size_frozen_candidates, u15_size_minimum_physical_eligibility,
-        u15_size_precondition_diagnostics, u15_size_seed_criterion, u15_size_weather_snapshot,
-        validate_seed_topology_metrics, weather_validation_size_error,
+        native_default_highland_decision, polar_metrics, requires_weather_validation_size,
+        u3_cube_coordinates, u3_feature_axis, u3_linear_cube_sample, u3_mass_association,
+        u3_ray_ndc, u3_screen_direction, u14_coverage_growth, u14_coverage_support_metrics,
+        u14_fixed_core_p90, u14_geometry_metrics, u14_significant_occupied_components,
+        u15_anvil_source_taps, u15_causal_component, u15_component_labels, u15_fixture_centers,
+        u15_owner_size_metrics, u15_paired_size_tops, u15_pixel_neighbors, u15_pixel_position,
+        u15_significant_response_components, u15_significant_size_components, u15_size_association,
+        u15_size_fixture_support, u15_size_frozen_candidates,
+        u15_size_minimum_physical_eligibility, u15_size_precondition_diagnostics,
+        u15_size_seed_criterion, u15_size_weather_snapshot, validate_seed_topology_metrics,
+        weather_validation_size_error,
     };
 
     fn response_with_deep_pixels(resolution: u32, pixels: &[usize]) -> Vec<f32> {
@@ -6240,6 +6990,27 @@ mod tests {
             Some("--weather-validation requires --size >= 512 (got 511)")
         );
         assert!(weather_validation_size_error(512).is_none());
+    }
+
+    #[test]
+    fn native_default_cloud_validation_requires_weather_validation_size() {
+        assert!(requires_weather_validation_size(false, false, false, true));
+    }
+
+    #[test]
+    fn native_default_highland_decision_requires_both_thresholds() {
+        assert_eq!(
+            native_default_highland_decision(0.35, 0.10),
+            "SELECT_HUMID_HIGHLAND_SOURCE"
+        );
+        assert_eq!(
+            native_default_highland_decision(0.34, 0.10),
+            "REJECT_HUMID_HIGHLAND_SOURCE"
+        );
+        assert_eq!(
+            native_default_highland_decision(0.35, 0.09),
+            "REJECT_HUMID_HIGHLAND_SOURCE"
+        );
     }
 
     #[test]

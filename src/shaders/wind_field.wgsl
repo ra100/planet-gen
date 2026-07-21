@@ -103,6 +103,21 @@ fn sample_height(dir: vec3<f32>) -> f32 {
     return mix(mix(v00, v10, tx), mix(v01, v11, tx), ty);
 }
 
+// A seeded streamfunction yields a bounded, seam-free curl in the local tangent plane.
+fn streamfunction(pos: vec3<f32>) -> f32 {
+    return snoise(pos * 3.2 + noise_seed_offset(params.seed, 18u)) * 0.65
+        + snoise(pos * 6.7 + noise_seed_offset(params.seed, 19u)) * 0.35;
+}
+
+fn stream_curl(pos: vec3<f32>, east: vec3<f32>, north: vec3<f32>) -> vec3<f32> {
+    let step = 0.028;
+    let d_east = (streamfunction(normalize(pos + east * step))
+        - streamfunction(normalize(pos - east * step))) / (2.0 * step);
+    let d_north = (streamfunction(normalize(pos + north * step))
+        - streamfunction(normalize(pos - north * step))) / (2.0 * step);
+    return east * d_north - north * d_east;
+}
+
 // === Mode 0: Initialize continentality ===
 
 fn init_continentality(pos: vec3<f32>, idx: u32) {
@@ -356,8 +371,17 @@ fn compute_wind(pos: vec3<f32>, idx: u32) {
     let p = max(params.atm_pressure, 0.05);
     let speed_scale = pow(1.0 / p, 0.15) * mountain_speed;
 
-    // Convert to 3D tangent vector
-    let wind_3d = (east * wind_e + north * wind_n) * speed_scale;
+    // Bend the transported flow with a deterministic tangent-space curl while
+    // retaining the analytical field's speed for the existing CFL bound.
+    let base_wind = (east * wind_e + north * wind_n) * speed_scale;
+    let base_speed = length(base_wind);
+    let curl = stream_curl(pos, east, north);
+    let curl_dir = curl / max(length(curl), 0.0001);
+    let wind_3d = select(
+        vec3<f32>(0.0),
+        normalize(base_wind + curl_dir * base_speed * 0.28) * base_speed,
+        base_speed > 0.0001,
+    );
 
     let base = idx * 3u;
     dst[base] = wind_3d.x;

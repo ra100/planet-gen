@@ -1,16 +1,56 @@
 use std::sync::Arc;
 
+#[cfg(test)]
+use std::sync::{Condvar, Mutex};
+
+#[cfg(test)]
+static GPU_TEST_GATE: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
+
+#[cfg(test)]
+struct GpuTestPermit;
+
+#[cfg(test)]
+impl GpuTestPermit {
+    fn acquire() -> Self {
+        let (lock, available) = &GPU_TEST_GATE;
+        let mut in_use = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        while *in_use {
+            in_use = available
+                .wait(in_use)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        *in_use = true;
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for GpuTestPermit {
+    fn drop(&mut self) {
+        let (lock, available) = &GPU_TEST_GATE;
+        let mut in_use = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        *in_use = false;
+        available.notify_one();
+    }
+}
+
 /// Holds the wgpu device, queue, and adapter info for the application lifetime.
 pub struct GpuContext {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub adapter_info: wgpu::AdapterInfo,
     pub rgba16float_features: wgpu::TextureFormatFeatures,
+    // Test-only: Vulkan is not reliable when independent test contexts overlap.
+    #[cfg(test)]
+    _test_permit: GpuTestPermit,
 }
 
 impl GpuContext {
     /// Initialize the GPU context. Call once at app startup.
     pub fn new() -> Result<Self, GpuError> {
+        #[cfg(test)]
+        let test_permit = GpuTestPermit::acquire();
+
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..Default::default()
@@ -47,11 +87,16 @@ impl GpuContext {
             queue,
             adapter_info,
             rgba16float_features,
+            #[cfg(test)]
+            _test_permit: test_permit,
         })
     }
 
     /// Borrow eframe's GPU allocation for the interactive application.
     pub fn from_eframe(render_state: &eframe::egui_wgpu::RenderState) -> Self {
+        #[cfg(test)]
+        let test_permit = GpuTestPermit::acquire();
+
         Self {
             device: render_state.device.clone(),
             queue: render_state.queue.clone(),
@@ -59,6 +104,8 @@ impl GpuContext {
             rgba16float_features: render_state
                 .adapter
                 .get_texture_format_features(wgpu::TextureFormat::Rgba16Float),
+            #[cfg(test)]
+            _test_permit: test_permit,
         }
     }
 

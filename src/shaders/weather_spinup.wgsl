@@ -143,6 +143,31 @@ fn temperature_at(pos: vec3<f32>) -> f32 {
         - elevation_km * 6.5 + continentality * season_shift * 5.0;
 }
 
+// A local, deterministic wet-land mask for calm stratiform clouds only.
+fn calm_wet_land_mask(
+    pos: vec3<f32>,
+    marine_fraction: f32,
+    thermal_stability: f32,
+    rain_shadow: f32,
+    effective_speed: f32,
+) -> f32 {
+    let seeded_broad = snoise(pos * 1.9 + noise_seed_offset(params.seed, 403u)) * 0.5 + 0.5;
+    let broad = select(0.5, seeded_broad, effective_speed > 0.0);
+    let height = sample_height(pos);
+    let land_height = height - params.ocean_level;
+    let exposed_land = select(
+        0.0,
+        smooth_step(0.0, 0.01, land_height),
+        land_height > 0.0,
+    );
+    let elevation_km = max(height - params.ocean_level, 0.0) * 5.0;
+    let lowland = 1.0 - smooth_step(0.35, 1.8, elevation_km);
+    let continentality = 1.0 - marine_fraction;
+    let climate_rank = broad * 0.45 + thermal_stability * 0.28 + lowland * 0.17
+        + continentality * 0.15 - rain_shadow * 0.35;
+    return exposed_land * continentality * lowland * smooth_step(0.46, 0.70, climate_rank);
+}
+
 fn source_potential(
     marine_fraction: f32,
     convergence: f32,
@@ -454,7 +479,17 @@ fn transport(@builtin(global_invocation_id) id: vec3<u32>) {
         state.x += recharge;
     }
 
-    let storm_catalyst = convective_catalyst(pos);
+    let calm_wet_land = calm_wet_land_mask(
+        pos,
+        marine_fraction,
+        thermal,
+        rain_shadow,
+        effective_speed,
+    );
+    let stratiform_wind = 1.0 - smooth_step(0.35, 0.70, effective_speed);
+    let stratiform_regime = calm_wet_land * stratiform_wind;
+    let calm_land_source = min(0.60, 0.20 + calm_wet_land * 0.40);
+    let storm_catalyst = convective_catalyst(pos) * (1.0 - stratiform_regime);
     if ((params.diagnostic_flags & DIAGNOSTIC_NO_SOURCE) == 0u
         && storm_catalyst > 0.0
         && budgets.source_envelope > 0.0
@@ -542,6 +577,19 @@ fn transport(@builtin(global_invocation_id) id: vec3<u32>) {
         state.y += condensation * (1.0 - deep_fraction);
         state.z += condensation * deep_fraction;
 
+        if (stratiform_regime > 0.0) {
+            let low_target = min(0.12, q_sat * 0.24 * calm_wet_land);
+            let approach = 1.0 - exp(
+                -0.75 * calm_land_source * stratiform_wind * step_fraction,
+            );
+            let calm_stratiform = min(
+                state.x,
+                max(low_target - state.y, 0.0) * approach,
+            );
+            state.x -= calm_stratiform;
+            state.y += calm_stratiform;
+        }
+
         let terrain_wind_support = smooth_step(0.03, 0.20, effective_speed);
         let orographic_condensation = min(
             state.x,
@@ -584,6 +632,7 @@ fn transport(@builtin(global_invocation_id) id: vec3<u32>) {
         state.x -= vapor_transfer;
         state.y -= low_transfer;
         state.z += transfer;
+
         // The deep reservoir detrainment is conservative and supplies the high reservoir.
         let detrainment = min(
             state.z,
