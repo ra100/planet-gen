@@ -1577,6 +1577,173 @@ mod tests {
         assert!((1.8..=2.2).contains(&ratio_02_04));
     }
 
+    fn layer_profile_oracle(gpu: &GpuContext) -> Vec<f32> {
+        let shader_source = format!(
+            "{}\n{}\n{}\n{}",
+            include_str!("shaders/noise.wgsl"),
+            include_str!("shaders/cloud_density.wgsl"),
+            include_str!("shaders/preview_cubemap.wgsl"),
+            r#"
+@group(1) @binding(0) var<storage, read_write> output: array<f32, 7>;
+
+@compute @workgroup_size(1)
+fn layer_profile_oracle() {
+    output[0] = layer_profile_segment_mean(vec3<f32>(2.0, 0.0, 0.0), vec3<f32>(3.0, 0.0, 0.0), 1.0, 2.0, 1.0);
+    output[1] = layer_profile_segment_mean(vec3<f32>(2.0, 0.0, 0.0), vec3<f32>(2.09, 0.0, 0.0), 1.0, 2.0, 1.0);
+    output[2] = layer_profile_segment_mean(vec3<f32>(2.18, 0.0, 0.0), vec3<f32>(2.78, 0.0, 0.0), 1.0, 2.0, 1.0);
+    output[3] = layer_profile_segment_mean(vec3<f32>(2.89, 0.0, 0.0), vec3<f32>(3.0, 0.0, 0.0), 1.0, 2.0, 1.0);
+    output[4] = layer_profile_segment_mean(vec3<f32>(3.0, 0.0, 0.0), vec3<f32>(2.0, 0.0, 0.0), 1.0, 2.0, 1.0);
+    output[5] = layer_profile_segment_mean(vec3<f32>(2.5, 0.0, -1.9974984), vec3<f32>(2.5, 0.0, 1.9974984), 1.0, 2.0, 1.0);
+    output[6] = layer_profile_segment_mean(vec3<f32>(2.5, 0.0, 0.0), vec3<f32>(2.5, 0.0, 0.0), 1.0, 2.0, 1.0);
+}
+"#,
+        );
+        let shader = gpu
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("layer profile oracle shader"),
+                source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+            });
+        let pipeline = gpu
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("layer profile oracle pipeline"),
+                layout: None,
+                module: &shader,
+                entry_point: Some("layer_profile_oracle"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        let output = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("layer profile oracle output"),
+            size: 7 * std::mem::size_of::<f32>() as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("layer profile oracle readback"),
+            size: 7 * std::mem::size_of::<f32>() as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let preview_bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("layer profile oracle preview bind group"),
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[],
+        });
+        let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("layer profile oracle bind group"),
+            layout: &pipeline.get_bind_group_layout(1),
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: output.as_entire_binding(),
+            }],
+        });
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("layer profile oracle encoder"),
+            });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("layer profile oracle pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &preview_bind_group, &[]);
+            pass.set_bind_group(1, &bind_group, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
+        encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, readback.size());
+        gpu.queue.submit(Some(encoder.finish()));
+        readback.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        let _ = gpu.device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+        let values = readback
+            .slice(..)
+            .get_mapped_range()
+            .chunks_exact(4)
+            .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+            .collect();
+        readback.unmap();
+        values
+    }
+
+    #[test]
+    fn cloud_layer_profile_gpu_oracle_matches_analytic_primitives() {
+        let values = layer_profile_oracle(&GpuContext::new().expect("GPU init failed"));
+        let expected = [1.0, 0.234_375, 1.25, 0.234_375, 1.0, 39.0 / 56.0, 0.0];
+
+        assert_eq!(values.len(), expected.len());
+        for (actual, expected) in values.into_iter().zip(expected) {
+            assert!(
+                (actual - expected).abs() <= 2.0e-4,
+                "{actual} != {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn cloud_land_segment_profile_preserves_ocean_and_repairs_tall_low_shells() {
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let resolution = 32;
+        let size = 192usize;
+        let renderer = PreviewRenderer::new(&gpu);
+        let render = |height: f32, geometry: [f32; 4]| {
+            let terrain = TectonicTerrain {
+                faces: std::array::from_fn(|_| vec![height; (resolution * resolution) as usize]),
+                resolution,
+            };
+            let terrain_view = renderer.upload_terrain(&gpu, &terrain);
+            let mass = std::array::from_fn(|_| {
+                (0..resolution * resolution)
+                    .flat_map(|_| [0.05, 0.0, 0.0, 0.05])
+                    .collect()
+            });
+            let geometry = std::array::from_fn(|_| {
+                (0..resolution * resolution)
+                    .flat_map(|_| geometry)
+                    .collect()
+            });
+            let mass_view = renderer.upload_cubemap_rgba16(&gpu, &mass, resolution);
+            let geometry_view = renderer.upload_cubemap_rgba16(&gpu, &geometry, resolution);
+            let settings = PreviewUniforms {
+                view_mode: 9,
+                show_clouds: 1.0,
+                cloud_coverage: 1.0,
+                planet_radius_km: 6371.0,
+                ocean_level: 0.0,
+                ..uniforms()
+            };
+            density_values(&renderer.render(
+                &gpu,
+                &settings,
+                &terrain_view,
+                None,
+                Some((&mass_view, &geometry_view)),
+                size as u32,
+            ))[size / 2 * size + size / 2]
+        };
+        let compact = optical_depth(render(0.10, [0.80, 1.50, 1.50, 1.50]));
+        let tall = optical_depth(render(0.10, [0.80, 1.50, 2.00, 12.00]));
+        let translated = optical_depth(render(0.10, [2.00, 2.70, 3.00, 12.00]));
+        let ocean_tall = optical_depth(render(-0.10, [0.80, 1.50, 2.00, 12.00]));
+        let coast = [0.01, 0.03, 0.05]
+            .map(|height| optical_depth(render(height, [0.80, 1.50, 2.00, 12.00])));
+        assert!((compact - 0.02681).abs() / 0.02681 <= 0.01);
+        assert!((0.98..=1.02).contains(&(tall / compact.max(f32::EPSILON))));
+        assert!((translated - tall).abs() / tall.max(f32::EPSILON) <= 0.02);
+        assert_eq!(ocean_tall, 0.0);
+        assert!(coast.windows(2).all(|values| values[0] <= values[1]));
+        assert!(
+            coast
+                .iter()
+                .all(|value| value.is_finite() && *value <= tall)
+        );
+    }
+
     #[test]
     fn cloud_sparse_partial_mass_has_exactly_zero_density_without_causal_support() {
         let gpu = GpuContext::new().expect("GPU init failed");

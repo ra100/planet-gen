@@ -19,6 +19,71 @@ fn layer_profile(altitude_km: f32, base_km: f32, top_km: f32) -> f32 {
     return profile / max(0.8 * thickness, 0.05);
 }
 
+fn layer_profile_cdf(altitude_km: f32, base_km: f32, top_km: f32) -> f32 {
+    let h = max(top_km - base_km, 0.05);
+    let n = max(0.8 * h, 0.05);
+    let scale = h / n;
+    let t = (altitude_km - base_km) / h;
+    if (t <= 0.0) { return 0.0; }
+    if (t < 0.18) {
+        return scale * (t * t * t / (0.18 * 0.18) - t * t * t * t / (2.0 * 0.18 * 0.18 * 0.18));
+    }
+    if (t < 0.78) { return scale * (0.09 + t - 0.18); }
+    if (t >= 1.0) { return scale * 0.8; }
+    let u = (t - 0.78) / 0.22;
+    return scale * (0.69 + 0.22 * (u - u * u * u + 0.5 * u * u * u * u));
+}
+
+fn layer_profile_monotonic_segment_mean(
+    p0: vec3<f32>,
+    p1: vec3<f32>,
+    base_km: f32,
+    top_km: f32,
+    radius_km: f32,
+) -> f32 {
+    let spatial_length = length(p1 - p0);
+    if (spatial_length <= 1.0e-6) { return 0.0; }
+    let altitude_start_km = max((length(p0) - 1.0) * radius_km, 0.0);
+    let altitude_end_km = max((length(p1) - 1.0) * radius_km, 0.0);
+    let altitude_span = abs(altitude_end_km - altitude_start_km);
+    if (altitude_span <= 1.0e-6) {
+        let midpoint_altitude_km = max((length((p0 + p1) * 0.5) - 1.0) * radius_km, 0.0);
+        return layer_profile(midpoint_altitude_km, base_km, top_km);
+    }
+    return abs(
+        layer_profile_cdf(altitude_end_km, base_km, top_km)
+            - layer_profile_cdf(altitude_start_km, base_km, top_km)
+    ) / altitude_span;
+}
+
+fn layer_profile_segment_mean(
+    p0: vec3<f32>,
+    p1: vec3<f32>,
+    base_km: f32,
+    top_km: f32,
+    radius_km: f32,
+) -> f32 {
+    let v = p1 - p0;
+    let length_squared = dot(v, v);
+    if (length_squared <= 1.0e-12) { return 0.0; }
+    let t_min = clamp(-dot(p0, v) / length_squared, 0.0, 1.0);
+    let closest = p0 + v * t_min;
+    let closest_altitude_km = max((length(closest) - 1.0) * radius_km, 0.0);
+    let start_altitude_km = max((length(p0) - 1.0) * radius_km, 0.0);
+    let end_altitude_km = max((length(p1) - 1.0) * radius_km, 0.0);
+    if (t_min > 0.0 && t_min < 1.0
+        && closest_altitude_km < start_altitude_km && closest_altitude_km < end_altitude_km) {
+        let first_length = length(closest - p0);
+        let second_length = length(p1 - closest);
+        let total_length = first_length + second_length;
+        return (
+            layer_profile_monotonic_segment_mean(p0, closest, base_km, top_km, radius_km) * first_length
+                + layer_profile_monotonic_segment_mean(closest, p1, base_km, top_km, radius_km) * second_length
+        ) / total_length;
+    }
+    return layer_profile_monotonic_segment_mean(p0, p1, base_km, top_km, radius_km);
+}
+
 fn cloud_display_scale() -> f32 {
     if (uniforms.show_clouds < 0.5 || uniforms.cloud_coverage <= 0.001) { return 0.0; }
     return clamp(uniforms.cloud_opacity, 0.0, 1.0);
@@ -176,6 +241,50 @@ fn weather_cloud_layers(dir: vec3<f32>, altitude_km: f32, angular_pixel_footprin
         1.22,
     );
     layers.high = max(mass.b * layer_profile(altitude_km, high_base, geometry.a) * high_modulation * 0.28, 0.0);
+    return layers;
+}
+
+fn weather_cloud_layers_land_segment(
+    dir: vec3<f32>,
+    altitude_km: f32,
+    segment_start: vec3<f32>,
+    segment_end: vec3<f32>,
+    radius_km: f32,
+    angular_pixel_footprint: f32,
+) -> CloudLayers {
+    let direction = normalize(dir);
+    let height = textureSample(height_tex, height_sampler, direction).r;
+    let land_factor = smooth_step(0.01, 0.05, height - uniforms.ocean_level);
+    var layers = weather_cloud_layers(direction, altitude_km, angular_pixel_footprint);
+    if (land_factor <= 0.0) { return layers; }
+
+    let mass = textureSample(weather_mass_tex, height_sampler, direction);
+    if (mass.r <= 0.0) { return layers; }
+    let geometry = textureSample(weather_geometry_tex, height_sampler, direction);
+    let detail_weight = clamp(uniforms.cloud_advection, 0.0, 1.0);
+    let low_detail = isotropic_noise(
+        direction, vec3<f32>(6.0, 12.0, 24.0),
+        vec3<f32>(0.50, 0.32, 0.18), angular_pixel_footprint, 40u,
+    );
+    let low_multiplier = clamp(
+        1.0 + LOW_DETAIL_STRENGTH * detail_weight * (0.15 * low_detail.x + 0.13 * low_detail.y),
+        0.72,
+        1.22,
+    );
+    let low_depth = geometry.g - geometry.r;
+    let shallow_family = smooth_step(0.7, 1.8, low_depth);
+    let terrain_family = smooth_step(0.05, 0.22, height)
+        * (1.0 - smooth_step(0.05, 0.35, mass.g));
+    let detached_base = mix(geometry.r, mix(geometry.r, geometry.g, 0.16), shallow_family);
+    let low_profile = layer_profile_segment_mean(
+        segment_start, segment_end, detached_base, geometry.g, radius_km,
+    );
+    let terrain_cap = layer_profile_segment_mean(
+        segment_start, segment_end, mix(geometry.r, geometry.g, 0.15), mix(geometry.r, geometry.g, 0.8), radius_km,
+    );
+    let exact_low = mass.r * low_multiplier * LOW_OPTICAL_WEIGHT
+        * mix(low_profile, terrain_cap, terrain_family * 0.45);
+    layers.low = mix(layers.low, exact_low, land_factor);
     return layers;
 }
 

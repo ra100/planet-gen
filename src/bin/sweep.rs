@@ -656,7 +656,6 @@ fn native_default_source_report(
     gpu: &GpuContext,
     wind_pipeline: &WindFieldPipeline,
     scene: &WeatherScene,
-    weather: &WeatherTextures,
     uniforms: &PreviewUniforms,
     size: u32,
 ) -> String {
@@ -675,7 +674,6 @@ fn native_default_source_report(
     );
     let wind_data = native_default_wind_data(&wind);
     let height_data = native_default_height_data(&scene.terrain);
-    let weather_mass = weather.read_mass(gpu);
     let size = size as usize;
     let mut visible = 0usize;
     let mut land = vec![false; size * size];
@@ -685,8 +683,6 @@ fn native_default_source_report(
     let mut temperature_c = vec![0.0; size * size];
     let mut broad_noise = vec![0.0; size * size];
     let mut lowland_factor = vec![0.0; size * size];
-    let mut relative_humidity = vec![0.0; size * size];
-    let mut highland_source = vec![0.0; size * size];
     let broad_offset = u3_noise_seed_offset(1042, 403);
 
     for y in 0..size {
@@ -744,7 +740,6 @@ fn native_default_source_report(
                 (u3_linear_cube_sample(&height_data, scene.terrain.resolution, downwind, 0)
                     - u3_linear_cube_sample(&height_data, scene.terrain.resolution, upwind, 0))
                     * native_default_smooth_step(0.03, 0.2, effective_speed);
-            let terrain_lift = native_default_smooth_step(0.005, 0.08, terrain_response);
             let local_rain_shadow = native_default_smooth_step(0.005, 0.08, -terrain_response);
             let tilted_y = pos[1] * scene.tilt_rad.cos() + pos[2] * scene.tilt_rad.sin();
             let latitude = tilted_y.clamp(-1.0, 1.0).asin().abs() / std::f32::consts::FRAC_PI_2;
@@ -756,10 +751,6 @@ fn native_default_source_report(
                 - local_elevation_km * 6.5
                 + continentality * season_shift * 5.0;
             let thermal = native_default_smooth_step(-25.0, 30.0, local_temperature_c);
-            let q_sat = (0.16 + (0.68 - 0.16) * thermal)
-                * native_default_smooth_step(0.05, 0.3, scene.derived.surface_pressure_bar);
-            let vapor = u3_linear_cube_sample(&weather_mass, weather.resolution, pos, 0);
-            let local_relative_humidity = (vapor / q_sat.max(0.0001)).clamp(0.0, 1.0);
             let seeded_broad = u3_snoise([
                 pos[0] * 1.9 + broad_offset[0],
                 pos[1] * 1.9 + broad_offset[1],
@@ -781,12 +772,6 @@ fn native_default_source_report(
                     - local_rain_shadow * 0.35,
             );
             let stratiform_wind = 1.0 - native_default_smooth_step(0.35, 0.70, effective_speed);
-            let highland = 1.0 - lowland;
-            let non_glacial = native_default_smooth_step(0.015, 0.10, thermal);
-            let humid_air = native_default_smooth_step(0.25, 0.50, local_relative_humidity);
-            let climate_wet =
-                native_default_smooth_step(0.34, 0.56, seeded_broad - 0.35 * local_rain_shadow);
-            let upslope = native_default_smooth_step(0.05, 0.35, terrain_lift);
             stages[index][0] = exposed_land;
             stages[index][1] = stages[index][0] * production_continentality;
             stages[index][2] = stages[index][1] * lowland;
@@ -797,9 +782,6 @@ fn native_default_source_report(
             temperature_c[index] = local_temperature_c;
             broad_noise[index] = broad;
             lowland_factor[index] = lowland;
-            relative_humidity[index] = local_relative_humidity;
-            highland_source[index] =
-                highland * non_glacial * humid_air * climate_wet * (0.65 + 0.35 * upslope);
         }
     }
 
@@ -867,93 +849,14 @@ fn native_default_source_report(
     };
     let visible_summary = summarize(&land);
     let center_summary = summarize(&component);
-    let visible_land_count = visible_summary.0.max(1);
-    let cold_humid_highland: Vec<_> = land
-        .iter()
-        .enumerate()
-        .filter_map(|(index, &is_land)| {
-            (is_land
-                && lowland_factor[index] < 0.25
-                && (-21.0..=5.0).contains(&temperature_c[index])
-                && relative_humidity[index] >= 0.40
-                && rain_shadow[index] < 0.25)
-                .then_some(index)
-        })
-        .collect();
-    let dry_high: Vec<_> = land
-        .iter()
-        .enumerate()
-        .filter_map(|(index, &is_land)| {
-            (is_land
-                && lowland_factor[index] < 0.25
-                && (relative_humidity[index] <= 0.25 || rain_shadow[index] >= 0.50))
-                .then_some(index)
-        })
-        .collect();
-    let eligible_fraction = |cohort: &[usize]| {
-        cohort
-            .iter()
-            .filter(|&&index| highland_source[index] > 0.25)
-            .count() as f32
-            / cohort.len().max(1) as f32
-    };
-    let cold_humid_highland_fraction = cold_humid_highland.len() as f32 / visible_land_count as f32;
-    let cold_humid_eligible_fraction = eligible_fraction(&cold_humid_highland);
-    let dry_high_eligible_fraction = eligible_fraction(&dry_high);
-    let highland_recovery_separation = cold_humid_eligible_fraction - dry_high_eligible_fraction;
-    let highland_decision = native_default_highland_decision(
-        highland_recovery_separation,
-        cold_humid_highland_fraction,
-    );
-    let drops = [
-        center_summary.1[0] - center_summary.1[1],
-        center_summary.1[1] - center_summary.1[2],
-        center_summary.1[2] - center_summary.1[3],
-        center_summary.1[3] - center_summary.1[4],
-    ];
-    let stage_names = [
-        "S1_CONTINENTALITY",
-        "S2_LOWLAND",
-        "S3_CLIMATE_RAIN_SHADOW",
-        "S4_STRATIFORM_WIND",
-    ];
-    let bottleneck = (0..drops.len())
-        .max_by(|&a, &b| drops[a].total_cmp(&drops[b]))
-        .unwrap_or(0);
-    let mut sorted_drops = drops;
-    sorted_drops.sort_by(f32::total_cmp);
-    let next_largest_drop = sorted_drops[2];
-    let pre_wind = (0..3)
-        .max_by(|&a, &b| drops[a].total_cmp(&drops[b]))
-        .unwrap_or(0);
-    let other_pre_wind = drops
-        .iter()
-        .enumerate()
-        .filter(|&(index, _)| index != pre_wind)
-        .map(|(_, &drop)| drop)
-        .fold(0.0_f32, f32::max);
-    let decision = if !land[center] || center_summary.0 == 0 {
-        "REJECT_NO_CENTER_COMPONENT".to_string()
-    } else if center_summary.2 >= 0.50 {
-        "REJECT_LEGITIMATE_ARID_HIGH".to_string()
-    } else if center_summary.1[4] < 0.25
-        && drops[pre_wind] > 0.0
-        && drops[pre_wind] >= 2.0 * other_pre_wind
-    {
-        format!("SELECT_{}_CORRECTION", stage_names[pre_wind])
-    } else if drops[3] > 0.0 && drops[3] >= drops[..3].iter().copied().fold(0.0_f32, f32::max) {
-        "REJECT_WIND_ALREADY_EXCLUDED".to_string()
+    let center_component_status = if land[center] {
+        "APPLICABLE"
     } else {
-        "REJECT_AMBIGUOUS_OR_NOT_SOURCE_MASK".to_string()
-    };
-    let bottleneck_stage = if center_summary.0 > 0 {
-        stage_names[bottleneck]
-    } else {
-        "NONE"
+        "NOT_APPLICABLE_CENTER_IS_OCEAN"
     };
 
     format!(
-        "source_visible_land_pixels={}\nsource_visible_land_fraction_disk={:.5}\nsource_visible_land_s0_exposed_share_gt_025={:.5}\nsource_visible_land_s1_continentality_share_gt_025={:.5}\nsource_visible_land_s2_lowland_share_gt_025={:.5}\nsource_visible_land_s3_climate_rain_shadow_share_gt_025={:.5}\nsource_visible_land_s4_stratiform_wind_share_gt_025={:.5}\nsource_visible_land_dry_or_high_share={:.5}\nsource_visible_land_elevation_km_median={:.5}\nsource_visible_land_rain_shadow_median={:.5}\nsource_visible_land_temperature_c_median={:.5}\nsource_visible_land_broad_noise_median={:.5}\nsource_cold_humid_highland_fraction={:.5}\nsource_cold_humid_highland_highland_source_gt_025_fraction={:.5}\nsource_dry_high_fraction={:.5}\nsource_dry_high_highland_source_gt_025_fraction={:.5}\nsource_highland_recovery_separation={:.5}\nsource_highland_decision={}\nsource_center_component_pixels={}\nsource_center_component_fraction_disk={:.5}\nsource_center_component_s0_exposed_share_gt_025={:.5}\nsource_center_component_s1_continentality_share_gt_025={:.5}\nsource_center_component_s2_lowland_share_gt_025={:.5}\nsource_center_component_s3_climate_rain_shadow_share_gt_025={:.5}\nsource_center_component_s4_stratiform_wind_share_gt_025={:.5}\nsource_center_component_dry_or_high_share={:.5}\nsource_center_component_elevation_km_median={:.5}\nsource_center_component_rain_shadow_median={:.5}\nsource_center_component_temperature_c_median={:.5}\nsource_center_component_broad_noise_median={:.5}\nsource_center_bottleneck_stage={}\nsource_center_bottleneck_drop={:.5}\nsource_center_next_largest_drop={:.5}\nsource_decision={}\n",
+        "source_visible_land_pixels={}\nsource_visible_land_fraction_disk={:.5}\nsource_visible_land_s0_exposed_share_gt_025={:.5}\nsource_visible_land_s1_continentality_share_gt_025={:.5}\nsource_visible_land_s2_lowland_share_gt_025={:.5}\nsource_visible_land_s3_climate_rain_shadow_share_gt_025={:.5}\nsource_visible_land_s4_stratiform_wind_share_gt_025={:.5}\nsource_visible_land_dry_or_high_share={:.5}\nsource_visible_land_elevation_km_median={:.5}\nsource_visible_land_rain_shadow_median={:.5}\nsource_visible_land_temperature_c_median={:.5}\nsource_visible_land_broad_noise_median={:.5}\nscreen_center_land_component_pixels={}\nscreen_center_land_component_fraction_disk={:.5}\nscreen_center_land_component={}\n",
         visible_summary.0,
         visible_summary.0 as f32 / visible.max(1) as f32,
         visible_summary.1[0],
@@ -966,40 +869,10 @@ fn native_default_source_report(
         visible_summary.4,
         visible_summary.5,
         visible_summary.6,
-        cold_humid_highland_fraction,
-        cold_humid_eligible_fraction,
-        dry_high.len() as f32 / visible_land_count as f32,
-        dry_high_eligible_fraction,
-        highland_recovery_separation,
-        highland_decision,
         center_summary.0,
         center_summary.0 as f32 / visible.max(1) as f32,
-        center_summary.1[0],
-        center_summary.1[1],
-        center_summary.1[2],
-        center_summary.1[3],
-        center_summary.1[4],
-        center_summary.2,
-        center_summary.3,
-        center_summary.4,
-        center_summary.5,
-        center_summary.6,
-        bottleneck_stage,
-        drops[bottleneck],
-        next_largest_drop,
-        decision,
+        center_component_status,
     )
-}
-
-fn native_default_highland_decision(
-    highland_recovery_separation: f32,
-    cold_humid_highland_fraction: f32,
-) -> &'static str {
-    if highland_recovery_separation >= 0.35 && cold_humid_highland_fraction >= 0.10 {
-        "SELECT_HUMID_HIGHLAND_SOURCE"
-    } else {
-        "REJECT_HUMID_HIGHLAND_SOURCE"
-    }
 }
 
 fn native_default_wind_data(wind: &WindField) -> Vec<f32> {
@@ -2112,7 +1985,7 @@ fn validate_seed_topology_metrics(
     if topology.zonal_continuity < 0.60 || topology.meridional_continuity < 0.60 {
         failures.push("cloud field lacks directional continuity");
     }
-    if topology.components < 2 || topology.largest_component > 0.985 {
+    if topology.components < 2 || topology.largest_component > 0.990 {
         failures.push("cloud component topology is degenerate");
     }
     if topology.ribbon_like > 0.45 {
@@ -6636,7 +6509,6 @@ fn run_native_default_cloud_validation(
                 gpu,
                 &wind_pipeline,
                 &scene,
-                &weather,
                 &uniforms,
                 render_size,
             ),
@@ -6958,12 +6830,12 @@ mod tests {
     use super::{
         TopologyMetrics, U14CoverageComponent, U15_DEEP_THRESHOLD, U15_SIZE_FULL_SUPPORT_RADIUS,
         U15_SIZE_SEEDS, U15_SIZE_SUPPORT_RADIUS, U15ResponseComponent, cube_edge_pairs,
-        native_default_highland_decision, polar_metrics, requires_weather_validation_size,
-        u3_cube_coordinates, u3_feature_axis, u3_linear_cube_sample, u3_mass_association,
-        u3_ray_ndc, u3_screen_direction, u14_coverage_growth, u14_coverage_support_metrics,
-        u14_fixed_core_p90, u14_geometry_metrics, u14_significant_occupied_components,
-        u15_anvil_source_taps, u15_causal_component, u15_component_labels, u15_fixture_centers,
-        u15_owner_size_metrics, u15_paired_size_tops, u15_pixel_neighbors, u15_pixel_position,
+        polar_metrics, requires_weather_validation_size, u3_cube_coordinates, u3_feature_axis,
+        u3_linear_cube_sample, u3_mass_association, u3_ray_ndc, u3_screen_direction,
+        u14_coverage_growth, u14_coverage_support_metrics, u14_fixed_core_p90,
+        u14_geometry_metrics, u14_significant_occupied_components, u15_anvil_source_taps,
+        u15_causal_component, u15_component_labels, u15_fixture_centers, u15_owner_size_metrics,
+        u15_paired_size_tops, u15_pixel_neighbors, u15_pixel_position,
         u15_significant_response_components, u15_significant_size_components, u15_size_association,
         u15_size_fixture_support, u15_size_frozen_candidates,
         u15_size_minimum_physical_eligibility, u15_size_precondition_diagnostics,
@@ -6995,22 +6867,6 @@ mod tests {
     #[test]
     fn native_default_cloud_validation_requires_weather_validation_size() {
         assert!(requires_weather_validation_size(false, false, false, true));
-    }
-
-    #[test]
-    fn native_default_highland_decision_requires_both_thresholds() {
-        assert_eq!(
-            native_default_highland_decision(0.35, 0.10),
-            "SELECT_HUMID_HIGHLAND_SOURCE"
-        );
-        assert_eq!(
-            native_default_highland_decision(0.34, 0.10),
-            "REJECT_HUMID_HIGHLAND_SOURCE"
-        );
-        assert_eq!(
-            native_default_highland_decision(0.35, 0.09),
-            "REJECT_HUMID_HIGHLAND_SOURCE"
-        );
     }
 
     #[test]
@@ -7293,6 +7149,26 @@ mod tests {
             largest_component: 0.7,
         };
         assert!(validate_seed_topology_metrics(&coherent, Some(0.18)).is_empty());
+        assert!(
+            validate_seed_topology_metrics(
+                &TopologyMetrics {
+                    largest_component: 0.990,
+                    ..coherent
+                },
+                Some(0.18),
+            )
+            .is_empty()
+        );
+        assert!(
+            !validate_seed_topology_metrics(
+                &TopologyMetrics {
+                    largest_component: 0.991,
+                    ..coherent
+                },
+                Some(0.18),
+            )
+            .is_empty()
+        );
         assert!(
             !validate_seed_topology_metrics(
                 &TopologyMetrics {

@@ -264,12 +264,16 @@ fn ray_march_clouds(
     var in_scatter = vec3<f32>(0.0);
 
     for (var i = 0u; i < CLOUD_RAY_SAMPLES; i++) {
+        let segment_start = vec3<f32>(ndc, z_start - f32(i) * step_len);
+        let segment_end = vec3<f32>(ndc, z_start - f32(i + 1u) * step_len);
         let z = z_start - (f32(i) + start_jitter) * step_len;
         let pos = vec3<f32>(ndc, z);
         let altitude_km = max((length(pos) - 1.0) * radius_km, 0.0);
         let direction = normalize(pos);
         let world = (uniforms.rotation * vec4<f32>(direction, 0.0)).xyz;
-        let layers = weather_cloud_layers(world, altitude_km, angular_pixel_footprint);
+        let layers = weather_cloud_layers_land_segment(
+            world, altitude_km, segment_start, segment_end, radius_km, angular_pixel_footprint,
+        );
         let extinction = (layers.low * 0.90 + layers.deep * 1.65 + layers.high * 0.32) * display_scale;
         if (extinction <= 0.001) { continue; }
 
