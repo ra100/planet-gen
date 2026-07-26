@@ -46,7 +46,6 @@ struct Uniforms {
 }
 
 const CLOUD_RAY_SAMPLES: u32 = 8u;
-const CLOUD_EXTINCTION: f32 = 1.2;
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 @group(0) @binding(1) var height_tex: texture_cube<f32>;
@@ -260,6 +259,7 @@ fn ray_march_clouds(
     // Ray-anchor jitter is deterministic in world space, avoiding camera-space shimmer.
     let ray_anchor = normalize((uniforms.rotation * vec4<f32>(normalize(vec3<f32>(ndc, 0.5)), 0.0)).xyz);
     let start_jitter = 0.5 + snoise(ray_anchor * 47.0 + noise_seed_offset(uniforms.cloud_seed, 45u)) * 0.005;
+    let sun_world = normalize((uniforms.rotation * vec4<f32>(sun_dir, 0.0)).xyz);
     var transmittance = 1.0;
     var in_scatter = vec3<f32>(0.0);
 
@@ -271,26 +271,34 @@ fn ray_march_clouds(
         let altitude_km = max((length(pos) - 1.0) * radius_km, 0.0);
         let direction = normalize(pos);
         let world = (uniforms.rotation * vec4<f32>(direction, 0.0)).xyz;
-        let layers = weather_cloud_layers_land_segment(
+        let sample = weather_cloud_layers_land_segment(
             world, altitude_km, segment_start, segment_end, radius_km, angular_pixel_footprint,
         );
+        let layers = sample.layers;
         let extinction = (layers.low * 0.90 + layers.deep * 1.65 + layers.high * 0.32) * display_scale;
         if (extinction <= 0.001) { continue; }
 
-        let light_world = normalize(world + sun_dir * 0.025);
-        let light_layers = weather_cloud_layers(light_world, altitude_km, angular_pixel_footprint);
+        let world_pos = world * (1.0 + altitude_km / radius_km);
+        let light_transmittance = cloud_sun_path_transmittance(world_pos, sun_world, radius_km, layers, sample.geometry);
         let sun_facing = smooth_step(-0.05, 0.2, dot(direction, sun_dir));
         let star = star_color(uniforms.star_color_temp);
+        let phase = cloud_phase(dot(sun_dir, normalize(-pos))) * (4.0 * 3.14159);
+        let illumination = clamp(
+            0.055 + 0.10 * clamp(altitude_km / 12.0, 0.0, 1.0)
+                + sun_facing * light_transmittance * min(phase, 2.5),
+            0.0,
+            1.0,
+        );
         let low_color = mix(vec3<f32>(0.58, 0.62, 0.70), vec3<f32>(1.0, 1.0, 0.98) * star,
-            exp(-light_layers.low * 0.90) * (sun_facing * 0.85 + 0.15));
+            illumination * 0.72);
         let deep_color = mix(vec3<f32>(0.31, 0.35, 0.43), vec3<f32>(0.92, 0.94, 0.96) * star,
-            exp(-light_layers.deep * 1.65) * (sun_facing * 0.78 + 0.08));
+            illumination * 0.48);
         let high_color = mix(vec3<f32>(0.62, 0.69, 0.82), vec3<f32>(0.88, 0.94, 1.0) * star,
-            exp(-light_layers.high * 0.32) * (sun_facing * 0.92 + 0.18));
+            illumination * 0.78);
         let cloud_color = (low_color * layers.low * 0.90
             + deep_color * layers.deep * 1.65
             + high_color * layers.high * 0.32) / max(extinction / display_scale, 0.0001);
-        let segment_transmittance = exp(-extinction * abs(step_len) * radius_km * CLOUD_EXTINCTION);
+        let segment_transmittance = exp(-extinction * abs(step_len) * radius_km * CLOUD_LIGHT_EXTINCTION);
         let segment_alpha = 1.0 - segment_transmittance;
         in_scatter += cloud_color * transmittance * segment_alpha;
         transmittance *= segment_transmittance;
@@ -1424,11 +1432,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var lit_color = ambient + (diffuse + specular) * n_dot_l * s_color;
 
     // Cloud shadow on surface (independent from visible cloud self-shading)
-    if (uniforms.show_cloud_shadows > 0.5 && cloud_display_scale() > 0.0) {
-        let shadow_sample_pos = normalize(rotated + sun_dir * 0.015);
-        let cloud_above = weather_column_density(shadow_sample_pos, angular_pixel_footprint);
-        let surface_shadow = exp(-cloud_above * 2.5);
-        lit_color *= mix(1.0, surface_shadow, 0.65);
+    if (uniforms.show_cloud_shadows > 0.5) {
+        let sun_world = normalize((uniforms.rotation * vec4<f32>(sun_dir, 0.0)).xyz);
+        let surface_shadow = cloud_surface_shadow(rotated, sun_world, max(uniforms.planet_radius_km, 1.0), angular_pixel_footprint);
+        lit_color *= mix(1.0, surface_shadow, 0.85);
     }
 
     // ---- Lava glow at tectonic boundaries ----

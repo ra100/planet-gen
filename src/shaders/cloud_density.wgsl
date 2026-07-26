@@ -3,11 +3,22 @@ const LOW_DETAIL_STRENGTH: f32 = 1.0;
 const DEEP_DETAIL_STRENGTH: f32 = 1.0;
 const HIGH_DETAIL_STRENGTH: f32 = 1.0;
 const LOW_OPTICAL_WEIGHT: f32 = 0.50;
+const CLOUD_PHASE_G: f32 = 0.55;
+const CLOUD_PHASE_MAX: f32 = 0.62;
+const CLOUD_LIGHT_EXTINCTION: f32 = 1.2;
 
 struct CloudLayers {
     low: f32,
     deep: f32,
     high: f32,
+}
+
+struct WeatherCloudSample {
+    layers: CloudLayers,
+    mass: vec4<f32>,
+    geometry: vec4<f32>,
+    height: f32,
+    low_multiplier: f32,
 }
 
 fn layer_profile(altitude_km: f32, base_km: f32, top_km: f32) -> f32 {
@@ -87,6 +98,12 @@ fn layer_profile_segment_mean(
 fn cloud_display_scale() -> f32 {
     if (uniforms.show_clouds < 0.5 || uniforms.cloud_coverage <= 0.001) { return 0.0; }
     return clamp(uniforms.cloud_opacity, 0.0, 1.0);
+}
+
+fn cloud_phase(cos_theta: f32) -> f32 {
+    let g2 = CLOUD_PHASE_G * CLOUD_PHASE_G;
+    let denominator = max(1.0 + g2 - 2.0 * CLOUD_PHASE_G * clamp(cos_theta, -1.0, 1.0), 1.0e-4);
+    return min((1.0 - g2) / (4.0 * 3.14159 * pow(denominator, 1.5)), CLOUD_PHASE_MAX);
 }
 
 fn wind_filtered_dominant_noise(
@@ -174,12 +191,13 @@ fn isotropic_noise(
     );
 }
 
-fn weather_cloud_layers(dir: vec3<f32>, altitude_km: f32, angular_pixel_footprint: f32) -> CloudLayers {
+fn weather_cloud_sample(dir: vec3<f32>, altitude_km: f32, angular_pixel_footprint: f32) -> WeatherCloudSample {
     let direction = normalize(dir);
     let mass = textureSample(weather_mass_tex, height_sampler, direction);
-    var layers = CloudLayers(0.0, 0.0, 0.0);
-    if (max(max(mass.r, mass.g), mass.b) <= 0.0) { return layers; }
     let geometry = textureSample(weather_geometry_tex, height_sampler, direction);
+    let height = textureSample(height_tex, height_sampler, direction).r;
+    var sample = WeatherCloudSample(CloudLayers(0.0, 0.0, 0.0), mass, geometry, height, 1.0);
+    if (max(max(mass.r, mass.g), mass.b) <= 0.0) { return sample; }
 
     let deep_base = mix(geometry.r, geometry.g, 0.28);
     let deep_top = max(geometry.b, deep_base + 0.5);
@@ -197,7 +215,7 @@ fn weather_cloud_layers(dir: vec3<f32>, altitude_km: f32, angular_pixel_footprin
         direction, vec3<f32>(7.0, 14.0, 24.0),
         vec3<f32>(0.52, 0.30, 0.18), angular_pixel_footprint, 60u,
     );
-    let low_multiplier = clamp(
+    sample.low_multiplier = clamp(
         1.0 + LOW_DETAIL_STRENGTH * detail_weight * (0.15 * low_detail.x + 0.13 * low_detail.y),
         0.72,
         1.22,
@@ -210,7 +228,7 @@ fn weather_cloud_layers(dir: vec3<f32>, altitude_km: f32, angular_pixel_footprin
     );
     let low_depth_km = geometry.g - geometry.r;
     let shallow_family = smooth_step(0.7, 1.8, low_depth_km);
-    let terrain_family = smooth_step(0.05, 0.22, textureSample(height_tex, height_sampler, direction).r)
+    let terrain_family = smooth_step(0.05, 0.22, height)
         * (1.0 - smooth_step(0.05, 0.35, mass.g));
     let detached_base = mix(geometry.r, mix(geometry.r, geometry.g, 0.16), shallow_family);
     let low_profile = layer_profile(altitude_km, detached_base, geometry.g);
@@ -219,12 +237,12 @@ fn weather_cloud_layers(dir: vec3<f32>, altitude_km: f32, angular_pixel_footprin
         mix(geometry.r, geometry.g, 0.15),
         mix(geometry.r, geometry.g, 0.8),
     );
-    layers.low = max(
-        mass.r * low_multiplier * LOW_OPTICAL_WEIGHT
+    sample.layers.low = max(
+        mass.r * sample.low_multiplier * LOW_OPTICAL_WEIGHT
             * mix(low_profile, terrain_cap, terrain_family * 0.45),
         0.0,
     );
-    layers.deep = max(
+    sample.layers.deep = max(
         mass.g * deep_multiplier * layer_profile(altitude_km, deep_base, deep_top)
             * mix(1.18, 0.68, deep_height_fraction),
         0.0,
@@ -240,8 +258,12 @@ fn weather_cloud_layers(dir: vec3<f32>, altitude_km: f32, angular_pixel_footprin
         0.72,
         1.22,
     );
-    layers.high = max(mass.b * layer_profile(altitude_km, high_base, geometry.a) * high_modulation * 0.28, 0.0);
-    return layers;
+    sample.layers.high = max(mass.b * layer_profile(altitude_km, high_base, geometry.a) * high_modulation * 0.28, 0.0);
+    return sample;
+}
+
+fn weather_cloud_layers(dir: vec3<f32>, altitude_km: f32, angular_pixel_footprint: f32) -> CloudLayers {
+    return weather_cloud_sample(dir, altitude_km, angular_pixel_footprint).layers;
 }
 
 fn weather_cloud_layers_land_segment(
@@ -251,44 +273,31 @@ fn weather_cloud_layers_land_segment(
     segment_end: vec3<f32>,
     radius_km: f32,
     angular_pixel_footprint: f32,
-) -> CloudLayers {
+) -> WeatherCloudSample {
     let direction = normalize(dir);
-    let height = textureSample(height_tex, height_sampler, direction).r;
-    let land_factor = smooth_step(0.01, 0.05, height - uniforms.ocean_level);
-    var layers = weather_cloud_layers(direction, altitude_km, angular_pixel_footprint);
-    if (land_factor <= 0.0) { return layers; }
+    var sample = weather_cloud_sample(direction, altitude_km, angular_pixel_footprint);
+    let land_factor = smooth_step(0.01, 0.05, sample.height - uniforms.ocean_level);
+    if (land_factor <= 0.0) { return sample; }
 
-    let mass = textureSample(weather_mass_tex, height_sampler, direction);
-    if (mass.r <= 0.0) { return layers; }
-    let geometry = textureSample(weather_geometry_tex, height_sampler, direction);
-    let detail_weight = clamp(uniforms.cloud_advection, 0.0, 1.0);
-    let low_detail = isotropic_noise(
-        direction, vec3<f32>(6.0, 12.0, 24.0),
-        vec3<f32>(0.50, 0.32, 0.18), angular_pixel_footprint, 40u,
-    );
-    let low_multiplier = clamp(
-        1.0 + LOW_DETAIL_STRENGTH * detail_weight * (0.15 * low_detail.x + 0.13 * low_detail.y),
-        0.72,
-        1.22,
-    );
-    let low_depth = geometry.g - geometry.r;
+    if (sample.mass.r <= 0.0) { return sample; }
+    let low_depth = sample.geometry.g - sample.geometry.r;
     let shallow_family = smooth_step(0.7, 1.8, low_depth);
-    let terrain_family = smooth_step(0.05, 0.22, height)
-        * (1.0 - smooth_step(0.05, 0.35, mass.g));
-    let detached_base = mix(geometry.r, mix(geometry.r, geometry.g, 0.16), shallow_family);
+    let terrain_family = smooth_step(0.05, 0.22, sample.height)
+        * (1.0 - smooth_step(0.05, 0.35, sample.mass.g));
+    let detached_base = mix(sample.geometry.r, mix(sample.geometry.r, sample.geometry.g, 0.16), shallow_family);
     let low_profile = layer_profile_segment_mean(
-        segment_start, segment_end, detached_base, geometry.g, radius_km,
+        segment_start, segment_end, detached_base, sample.geometry.g, radius_km,
     );
     let terrain_cap = layer_profile_segment_mean(
-        segment_start, segment_end, mix(geometry.r, geometry.g, 0.15), mix(geometry.r, geometry.g, 0.8), radius_km,
+        segment_start, segment_end, mix(sample.geometry.r, sample.geometry.g, 0.15), mix(sample.geometry.r, sample.geometry.g, 0.8), radius_km,
     );
-    let exact_low = mass.r * low_multiplier * LOW_OPTICAL_WEIGHT
+    let exact_low = sample.mass.r * sample.low_multiplier * LOW_OPTICAL_WEIGHT
         * mix(low_profile, terrain_cap, terrain_family * 0.45);
-    layers.low = mix(layers.low, exact_low, land_factor);
-    return layers;
+    sample.layers.low = mix(sample.layers.low, exact_low, land_factor);
+    return sample;
 }
 
-fn weather_column_density(dir: vec3<f32>, angular_pixel_footprint: f32) -> f32 {
+fn weather_column_density_raw(dir: vec3<f32>, angular_pixel_footprint: f32) -> f32 {
     let direction = normalize(dir);
     let mass = textureSample(weather_mass_tex, height_sampler, direction);
     if (max(max(mass.r, mass.g), mass.b) <= 0.0) { return 0.0; }
@@ -300,5 +309,79 @@ fn weather_column_density(dir: vec3<f32>, angular_pixel_footprint: f32) -> f32 {
     let low = weather_cloud_layers(direction, low_mid, angular_pixel_footprint).low;
     let deep = weather_cloud_layers(direction, deep_mid, angular_pixel_footprint).deep;
     let high = weather_cloud_layers(direction, high_mid, angular_pixel_footprint).high;
-    return clamp(low * 0.9 + deep * 1.65 + high * 0.32, 0.0, 1.0) * cloud_display_scale();
+    return clamp(low * 0.9 + deep * 1.65 + high * 0.32, 0.0, 1.0);
+}
+
+fn weather_column_density(dir: vec3<f32>, angular_pixel_footprint: f32) -> f32 {
+    return weather_column_density_raw(dir, angular_pixel_footprint) * cloud_display_scale();
+}
+
+fn ray_sphere_positive_intersection(origin: vec3<f32>, direction: vec3<f32>, radius: f32) -> f32 {
+    let projection = dot(origin, direction);
+    let discriminant = projection * projection + radius * radius - dot(origin, origin);
+    if (discriminant <= 1.0e-6) { return -1.0; }
+    let root = sqrt(discriminant);
+    let near = -projection - root;
+    if (near > 1.0e-6) { return near; }
+    let far = -projection + root;
+    return select(-1.0, far, far > 1.0e-6);
+}
+
+fn cloud_beer_lambert(optical_depth: f32) -> f32 {
+    return exp(-max(optical_depth, 0.0) * CLOUD_LIGHT_EXTINCTION);
+}
+
+fn cloud_surface_shadow_offset(height_km: f32, radius_km: f32) -> f32 {
+    return max(height_km, 0.0) / max(radius_km, 1.0);
+}
+
+fn cloud_surface_shadow_spread(thickness_km: f32, radius_km: f32) -> f32 {
+    return min(max(thickness_km, 0.0) * 0.5 / max(radius_km, 1.0), 0.04);
+}
+
+fn cloud_sun_path_transmittance(
+    world_pos: vec3<f32>, sun_dir: vec3<f32>, radius_km: f32, layers: CloudLayers, geometry: vec4<f32>,
+) -> f32 {
+    let deep_base = mix(geometry.r, geometry.g, 0.28);
+    let deep_top = max(geometry.b, deep_base + 0.5);
+    let high_base = max(geometry.b, geometry.a - 3.0);
+    let planet_hit = ray_sphere_positive_intersection(world_pos, sun_dir, 1.0);
+    if (planet_hit >= 0.0) { return 0.0; }
+    let weighted_layers = vec3<f32>(layers.low * 0.90, layers.deep * 1.65, layers.high * 0.32);
+    let weight = dot(weighted_layers, vec3<f32>(1.0));
+    if (weight <= 1.0e-6) { return 1.0; }
+    let base_km = dot(weighted_layers, vec3<f32>(geometry.r, deep_base, high_base)) / weight;
+    let top_km = dot(weighted_layers, vec3<f32>(geometry.g, deep_top, geometry.a)) / weight;
+    let inner_radius = 1.0 + max(base_km, 0.0) / radius_km;
+    let outer_radius = 1.0 + max(top_km, base_km) / radius_km;
+    let projection = dot(world_pos, sun_dir);
+    let exit_distance = max(-projection + sqrt(max(projection * projection + outer_radius * outer_radius - dot(world_pos, world_pos), 0.0)), 0.0);
+    let inner_hit = ray_sphere_positive_intersection(world_pos, sun_dir, inner_radius);
+    let path_km = min(exit_distance, select(exit_distance, inner_hit, inner_hit >= 0.0)) * radius_km;
+    let tau = min(cloud_display_scale() * weight * max(path_km, 0.0), 20.0);
+    return clamp(cloud_beer_lambert(tau), 0.0, 1.0);
+}
+
+fn cloud_surface_shadow(
+    world_direction: vec3<f32>, sun_dir: vec3<f32>, radius_km: f32, angular_pixel_footprint: f32,
+) -> f32 {
+    let direction = normalize(world_direction);
+    let mass = textureSample(weather_mass_tex, height_sampler, direction);
+    let weight = mass.r + mass.g + mass.b;
+    if (weight <= 0.0) { return 1.0; }
+    let geometry = textureSample(weather_geometry_tex, height_sampler, direction);
+    let deep_base = mix(geometry.r, geometry.g, 0.28);
+    let deep_top = max(geometry.b, deep_base + 0.5);
+    let high_base = max(geometry.b, geometry.a - 3.0);
+    let height_km = (mass.r * (geometry.r + geometry.g) * 0.5
+        + mass.g * (deep_base + deep_top) * 0.5 + mass.b * (high_base + geometry.a) * 0.5) / weight;
+    let thickness_km = (mass.r * (geometry.g - geometry.r) + mass.g * (deep_top - deep_base)
+        + mass.b * (geometry.a - high_base)) / weight;
+    let center = normalize(direction + sun_dir * cloud_surface_shadow_offset(height_km, radius_km));
+    let spread = sun_dir * cloud_surface_shadow_spread(thickness_km, radius_km);
+    let density = (weather_column_density_raw(normalize(center - spread), angular_pixel_footprint)
+        + weather_column_density_raw(center, angular_pixel_footprint)
+        + weather_column_density_raw(normalize(center + spread), angular_pixel_footprint)) / 3.0;
+    let shadow_scale = clamp(uniforms.cloud_coverage, 0.0, 1.0) * clamp(uniforms.cloud_opacity, 0.0, 1.0);
+    return exp(-density * shadow_scale * 3.5);
 }

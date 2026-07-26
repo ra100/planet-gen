@@ -101,7 +101,7 @@ Plan: [docs/plans/2026-07-10-001-feat-shallow-volumetric-clouds-plan.md](docs/pl
 | U15 | Weather wind-scale and convective/anvil organization | cc:完了 [e1b260d] (release-518 authoritative 512px shear `.10` production plume run passed all frozen Wind 1/2 ownership gates; L2/L1 `1.70325..2.36816`, B2/B1 `1.02871..1.06631`, S2/S1 `.84076..1.06981`.) |
 | U3 | Shared shallow-volume density and ray marching | cc:完了 [e1b260d] (release-518 authoritative 512px local jitter run passed the low/deep isotropic identity and high-only local symmetric dominant-octave gates.) |
 | U16 | Land-profile segment integration and approved `.990` topology bound | cc:完了 [d8c7de5] (QA-020 implemented and validated: GPU oracle, native, U3/U14/U15, lib, sweep, fmt, clippy, and build passed. `.990` is user-approved; all other gates are unchanged.) |
-| U4 | Cloud lighting and surface shadows | cc:TODO (independent shadow toggle is partial plumbing only; one-sample 2.5 extinction/0.65 blend remains unchanged, with projected soft shadows and low-sun AE4 deferred) |
+| U4 | Cloud lighting and surface shadows | cc:TODO (QA-036 final validation complete, pending commit: exact fingerprint and outside-sphere equality; candidate on/off `83.836/10.379 ms` against committed U16 `86.829/10.536 ms`, ratios `.9655/.9851`; visual criteria PASS. U14 `277.062/42.354 ms` and U15 seed-997 frozen fragmentation exact-match candidate vs detached HEAD, so they remain baseline blockers, not U4 regressions. See `docs/research/shallow-volumetric-cloud-validation.md`.) |
 | U5 | Preview/export parity and channels | cc:TODO |
 | U6 | Visual, seam, and parity validation | cc:TODO |
 | U11 | Performance, latency, and stress validation | cc:TODO |

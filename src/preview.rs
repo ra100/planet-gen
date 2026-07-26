@@ -884,6 +884,30 @@ mod tests {
         values[((values.len() - 1) as f32 * percentile).round() as usize]
     }
 
+    fn parse_u4_positive_p95(name: &str, value: &str) -> Result<f32, String> {
+        let value = value
+            .parse::<f32>()
+            .map_err(|_| format!("{name} must be an f32"))?;
+        if !value.is_finite() || value <= 0.0 {
+            return Err(format!("{name} must be finite and > 0"));
+        }
+        Ok(value)
+    }
+
+    fn parse_u4_lower_hex_id(name: &str, value: &str) -> Result<u32, String> {
+        let Some(digits) = value.strip_prefix("0x") else {
+            return Err(format!("{name} must use lowercase 0x hexadecimal syntax"));
+        };
+        if digits.is_empty()
+            || !digits
+                .chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+        {
+            return Err(format!("{name} must use lowercase 0x hexadecimal syntax"));
+        }
+        u32::from_str_radix(digits, 16).map_err(|_| format!("{name} must fit in a u32"))
+    }
+
     fn mean_optical_depth_difference(a: &[u8], b: &[u8], size: usize) -> f32 {
         let mut total = 0.0;
         let mut count = 0usize;
@@ -1584,7 +1608,7 @@ mod tests {
             include_str!("shaders/cloud_density.wgsl"),
             include_str!("shaders/preview_cubemap.wgsl"),
             r#"
-@group(1) @binding(0) var<storage, read_write> output: array<f32, 7>;
+@group(1) @binding(0) var<storage, read_write> output: array<f32, 80>;
 
 @compute @workgroup_size(1)
 fn layer_profile_oracle() {
@@ -1616,13 +1640,13 @@ fn layer_profile_oracle() {
             });
         let output = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("layer profile oracle output"),
-            size: 7 * std::mem::size_of::<f32>() as u64,
+            size: 80 * std::mem::size_of::<f32>() as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
         let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("layer profile oracle readback"),
-            size: 7 * std::mem::size_of::<f32>() as u64,
+            size: 80 * std::mem::size_of::<f32>() as u64,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -1666,9 +1690,318 @@ fn layer_profile_oracle() {
             .get_mapped_range()
             .chunks_exact(4)
             .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+            .take(7)
             .collect();
         readback.unmap();
         values
+    }
+
+    fn cloud_sun_path_fragment_oracle(
+        gpu: &GpuContext,
+        renderer: &PreviewRenderer,
+        terrain_view: &wgpu::TextureView,
+        cloud_view: &wgpu::TextureView,
+        mass: &[Vec<f32>; 6],
+        geometry: &[Vec<f32>; 6],
+        resolution: u32,
+    ) -> Vec<f32> {
+        let shader_source = format!(
+            "{}\n{}\n{}\n{}",
+            include_str!("shaders/noise.wgsl"),
+            include_str!("shaders/cloud_density.wgsl"),
+            include_str!("shaders/preview_cubemap.wgsl"),
+            r#"
+@fragment fn cloud_sun_path_oracle(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let index = u32(position.x);
+    let geometry = textureSample(weather_geometry_tex, height_sampler, vec3<f32>(0.0, 0.0, 1.0));
+    var world_pos = vec3<f32>(0.0, 0.0, 1.04);
+    var sun_dir = vec3<f32>(0.0, 0.0, 1.0);
+    if (index == 3u) {
+        world_pos = vec3<f32>(0.0, 0.0, 1.0); sun_dir = vec3<f32>(0.0, 0.0, -1.0);
+    } else if (index == 4u) {
+        world_pos = vec3<f32>(0.0, 0.0, 1.03); sun_dir = vec3<f32>(1.0, 0.0, 0.0);
+    } else if (index == 5u) {
+        world_pos = vec3<f32>(0.0, 0.0, 1.06); sun_dir = vec3<f32>(1.0, 0.0, 0.0);
+    } else if (index == 6u) {
+        sun_dir = vec3<f32>(1.0, 0.0, 0.0);
+    } else if (index == 8u) {
+        world_pos = vec3<f32>(0.0, 0.0, 1.0 + geometry.g * 0.5 / 100.0);
+    }
+    let altitude_km = (length(world_pos) - 1.0) * 100.0;
+    let layers = weather_cloud_layers(vec3<f32>(0.0, 0.0, 1.0), altitude_km, 0.0);
+    let transmittance = cloud_sun_path_transmittance(world_pos, sun_dir, 100.0, layers, geometry);
+    return vec4<f32>(transmittance, 0.0, 0.0, 1.0);
+}"#,
+        );
+        let shader = gpu
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("cloud sun path fragment oracle shader"),
+                source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+            });
+        let pipeline = gpu
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("cloud sun path fragment oracle pipeline"),
+                layout: None,
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("cloud_sun_path_oracle"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
+        let uniform_buffer = gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("cloud sun path fragment oracle uniforms"),
+                contents: bytemuck::bytes_of(&PreviewUniforms {
+                    show_clouds: 1.0,
+                    cloud_coverage: 1.0,
+                    cloud_opacity: 1.0,
+                    planet_radius_km: 100.0,
+                    ..uniforms()
+                }),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let mass_view = renderer.upload_cubemap_rgba16(gpu, mass, resolution);
+        let geometry_view = renderer.upload_cubemap_rgba16(gpu, geometry, resolution);
+        let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("cloud sun path fragment oracle target"),
+            size: wgpu::Extent3d {
+                width: 9,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let target_view = target.create_view(&Default::default());
+        let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cloud sun path fragment oracle readback"),
+            size: 256,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("cloud sun path fragment oracle bind group"),
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(terrain_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&renderer.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(cloud_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&mass_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&geometry_view),
+                },
+            ],
+        });
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("cloud sun path fragment oracle pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &target_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &target,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: Some(1),
+                },
+            },
+            wgpu::Extent3d {
+                width: 9,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+        gpu.queue.submit(Some(encoder.finish()));
+        readback.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        let _ = gpu.device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+        let values = readback
+            .slice(..)
+            .get_mapped_range()
+            .chunks_exact(8)
+            .take(9)
+            .map(|pixel| half::f16::from_bits(u16::from_le_bytes([pixel[0], pixel[1]])).to_f32())
+            .collect();
+        readback.unmap();
+        values
+    }
+
+    #[test]
+    fn u4_benchmark_baseline_parsers_reject_invalid_values() {
+        assert_eq!(parse_u4_positive_p95("p95", "1.5"), Ok(1.5));
+        for value in ["NaN", "inf", "-inf", "0", "-1"] {
+            assert!(parse_u4_positive_p95("p95", value).is_err(), "{value}");
+        }
+        assert_eq!(parse_u4_lower_hex_id("id", "0x1002"), Ok(0x1002));
+        for value in ["1002", "0X1002", "0x", "0x100G", "0xABCD"] {
+            assert!(parse_u4_lower_hex_id("id", value).is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn u4_cloud_phase_is_normalized_bounded_and_forward_weighted() {
+        let shader_source = format!(
+            "{}\n{}\n{}\n{}",
+            include_str!("shaders/noise.wgsl"),
+            include_str!("shaders/cloud_density.wgsl"),
+            include_str!("shaders/preview_cubemap.wgsl"),
+            r#"@group(1) @binding(0) var<storage, read_write> output: array<f32, 80>;
+@compute @workgroup_size(1) fn u4_phase_oracle() {
+    output[0] = cloud_phase(-1.0); output[1] = cloud_phase(0.0); output[2] = cloud_phase(1.0);
+    for (var i = 0u; i <= 64u; i++) { output[i + 3u] = cloud_phase(-1.0 + f32(i) / 32.0); }
+    output[68] = cloud_beer_lambert(0.0); output[69] = cloud_beer_lambert(0.5); output[70] = cloud_beer_lambert(1.0);
+    output[71] = ray_sphere_positive_intersection(vec3<f32>(0.0, 0.0, 1.2), vec3<f32>(0.0, 0.0, -1.0), 1.0);
+    output[72] = ray_sphere_positive_intersection(vec3<f32>(0.0, 0.0, 1.2), vec3<f32>(0.0, 0.0, 1.0), 1.0);
+    output[73] = ray_sphere_positive_intersection(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), 1.0);
+    output[74] = cloud_surface_shadow_offset(2.0, 500.0); output[75] = cloud_surface_shadow_offset(8.0, 500.0);
+    output[76] = cloud_surface_shadow_spread(1.0, 500.0); output[77] = cloud_surface_shadow_spread(5.0, 500.0);
+    var integral = 0.0;
+    for (var i = 0u; i < 512u; i++) { integral += cloud_phase(-1.0 + (f32(i) + 0.5) / 256.0); }
+    output[78] = 2.0 * 3.14159 * integral / 256.0;
+}"#,
+        );
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let shader = gpu
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("u4 phase oracle"),
+                source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+            });
+        let pipeline = gpu
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("u4 phase oracle"),
+                layout: None,
+                module: &shader,
+                entry_point: Some("u4_phase_oracle"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        let output = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("u4 phase output"),
+            size: 80 * 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("u4 phase readback"),
+            size: output.size(),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let empty = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[],
+        });
+        let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &pipeline.get_bind_group_layout(1),
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: output.as_entire_binding(),
+            }],
+        });
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &empty, &[]);
+            pass.set_bind_group(1, &bind_group, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
+        encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, readback.size());
+        gpu.queue.submit(Some(encoder.finish()));
+        readback.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        let _ = gpu.device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+        let values: Vec<f32> = readback
+            .slice(..)
+            .get_mapped_range()
+            .chunks_exact(4)
+            .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+            .collect();
+        readback.unmap();
+        assert!(
+            values[..68]
+                .iter()
+                .all(|value| value.is_finite() && *value >= 0.0 && *value <= 0.62)
+        );
+        assert!(values[2] > values[1] && values[1] > values[0]);
+        let integral = values[78];
+        assert!((integral - 1.0).abs() <= 0.02, "integral={integral}");
+        assert_eq!(values[68], 1.0);
+        assert!(values[68] > values[69] && values[69] > values[70] && values[70].is_finite());
+        assert!(values[71] > 0.0 && values[72] < 0.0);
+        assert!(values[73].is_finite() && values[73] <= 0.0);
+        assert!(values[75] > values[74] && values[77] > values[76] && values[77] <= 0.04);
     }
 
     #[test]
@@ -1683,6 +2016,287 @@ fn layer_profile_oracle() {
                 "{actual} != {expected}"
             );
         }
+    }
+
+    #[test]
+    fn cloud_sun_path_fragment_oracle_uses_local_shell_columns() {
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let renderer = PreviewRenderer::new(&gpu);
+        let resolution = 2;
+        let terrain = TectonicTerrain {
+            faces: std::array::from_fn(|_| vec![0.0; (resolution * resolution) as usize]),
+            resolution,
+        };
+        let terrain_view = renderer.upload_terrain(&gpu, &terrain);
+        let cloud = std::array::from_fn(|_| vec![0.0; (resolution * resolution) as usize]);
+        let cloud_view = renderer.upload_cubemap_r16(&gpu, &cloud, resolution);
+        let mass = |density| {
+            std::array::from_fn(|_| {
+                (0..resolution * resolution)
+                    .flat_map(|_| [density, 0.0, 0.0, density])
+                    .collect()
+            })
+        };
+        let geometry = |base, top| {
+            std::array::from_fn(|_| {
+                (0..resolution * resolution)
+                    .flat_map(|_| [base, top, top, top])
+                    .collect()
+            })
+        };
+        let clear = cloud_sun_path_fragment_oracle(
+            &gpu,
+            &renderer,
+            &terrain_view,
+            &cloud_view,
+            &mass(0.0),
+            &geometry(0.0, 8.0),
+            resolution,
+        );
+        let sparse = cloud_sun_path_fragment_oracle(
+            &gpu,
+            &renderer,
+            &terrain_view,
+            &cloud_view,
+            &mass(0.05),
+            &geometry(0.0, 8.0),
+            resolution,
+        );
+        let dense = cloud_sun_path_fragment_oracle(
+            &gpu,
+            &renderer,
+            &terrain_view,
+            &cloud_view,
+            &mass(0.20),
+            &geometry(0.0, 8.0),
+            resolution,
+        );
+        let thin_shell = cloud_sun_path_fragment_oracle(
+            &gpu,
+            &renderer,
+            &terrain_view,
+            &cloud_view,
+            &mass(0.20),
+            &geometry(0.0, 4.0),
+            resolution,
+        );
+        let thick_shell = cloud_sun_path_fragment_oracle(
+            &gpu,
+            &renderer,
+            &terrain_view,
+            &cloud_view,
+            &mass(0.20),
+            &geometry(0.0, 12.0),
+            resolution,
+        );
+        println!(
+            "U4 local shell-column metrics: clear={clear:?}, sparse={sparse:?}, dense={dense:?}, thin={thin_shell:?}, thick={thick_shell:?}"
+        );
+        assert!(
+            clear[..3]
+                .iter()
+                .chain(clear[4..].iter())
+                .all(|value| *value == 1.0),
+            "clear={clear:?}"
+        );
+        assert_eq!(clear[3], 0.0);
+        assert!(dense[1] < sparse[1] && sparse[1] < 1.0);
+        assert_eq!(dense[3], 0.0);
+        assert!(dense[4] < dense[5] && dense[5] < 1.0);
+        assert!(dense[6].is_finite() && dense[6] > 0.0 && dense[6] <= dense[7]);
+        assert!(
+            (thin_shell[8] - thick_shell[8]).abs() <= 0.02,
+            "thickness changed optical mass: thin={} thick={}",
+            thin_shell[8],
+            thick_shell[8]
+        );
+    }
+
+    #[test]
+    fn cloud_surface_shadows_follow_low_cloud_height_and_thickness() {
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let renderer = PreviewRenderer::new(&gpu);
+        let resolution = 64;
+        let size = 192usize;
+        let terrain = TectonicTerrain {
+            faces: std::array::from_fn(|_| vec![0.0; (resolution * resolution) as usize]),
+            resolution,
+        };
+        let terrain_view = renderer.upload_terrain(&gpu, &terrain);
+        let mass = std::array::from_fn(|face| {
+            (0..resolution)
+                .flat_map(|y| {
+                    (0..resolution).flat_map(move |x| {
+                        let point = cube_to_sphere(
+                            face as u32,
+                            x as f32 / (resolution - 1) as f32,
+                            y as f32 / (resolution - 1) as f32,
+                        );
+                        let distance =
+                            (point[0] * point[0] + point[1] * point[1] + (point[2] - 1.0).powi(2))
+                                .sqrt();
+                        let t = ((0.30 - distance) / 0.18).clamp(0.0, 1.0);
+                        let density = t * t * (3.0 - 2.0 * t) * 0.8;
+                        [density, 0.0, 0.0, density]
+                    })
+                })
+                .collect()
+        });
+        let geometry = |base, top| {
+            std::array::from_fn(|_| {
+                (0..resolution * resolution)
+                    .flat_map(|_| [base, top, top, top])
+                    .collect()
+            })
+        };
+        let render = |mass: &[Vec<f32>; 6], geometry: &[Vec<f32>; 6], shadows| {
+            let mass_view = renderer.upload_cubemap_rgba16(&gpu, mass, resolution);
+            let geometry_view = renderer.upload_cubemap_rgba16(&gpu, geometry, resolution);
+            renderer.render(
+                &gpu,
+                &PreviewUniforms {
+                    light_dir: [0.7, 0.15, 1.0],
+                    cloud_coverage: 1.0,
+                    cloud_opacity: 1.0,
+                    show_clouds: 0.0,
+                    show_cloud_shadows: shadows,
+                    planet_radius_km: 50.0,
+                    ..uniforms()
+                },
+                &terrain_view,
+                None,
+                Some((&mass_view, &geometry_view)),
+                size as u32,
+            )
+        };
+        let metrics = |clear: &[u8], shadowed: &[u8]| {
+            let values: Vec<_> = clear
+                .chunks_exact(4)
+                .zip(shadowed.chunks_exact(4))
+                .map(|(clear, shadowed)| {
+                    (0..3)
+                        .map(|channel| {
+                            srgb_to_linear(clear[channel]) - srgb_to_linear(shadowed[channel])
+                        })
+                        .sum::<f32>()
+                        .max(0.0)
+                        / 3.0
+                })
+                .collect();
+            let maximum = values.iter().copied().fold(0.0f32, f32::max);
+            let cutoff = maximum * 0.1;
+            let transition = values
+                .iter()
+                .filter(|value| **value >= cutoff && **value <= maximum * 0.9)
+                .count();
+            let softness = edge_energy(&values, size).recip();
+            let (weight, x_sum, y_sum) = values.iter().enumerate().fold(
+                (0.0, 0.0, 0.0),
+                |(weight, x_sum, y_sum), (index, value)| {
+                    if !sphere_mask(size, index) || *value < cutoff {
+                        return (weight, x_sum, y_sum);
+                    }
+                    (
+                        weight + value,
+                        x_sum + (index % size) as f32 * value,
+                        y_sum + (index / size) as f32 * value,
+                    )
+                },
+            );
+            let centroid = (
+                x_sum / weight.max(f32::EPSILON),
+                y_sum / weight.max(f32::EPSILON),
+            );
+            let spread = (values.iter().enumerate().fold(0.0, |sum, (index, value)| {
+                if !sphere_mask(size, index) || *value < cutoff {
+                    return sum;
+                }
+                let dx = (index % size) as f32 - centroid.0;
+                let dy = (index / size) as f32 - centroid.1;
+                sum + value * (dx * dx + dy * dy)
+            }) / weight.max(f32::EPSILON))
+            .sqrt();
+            let mut seen = vec![false; values.len()];
+            let mut components = 0;
+            for index in 0..values.len() {
+                if seen[index] || !sphere_mask(size, index) || values[index] < maximum * 0.75 {
+                    continue;
+                }
+                let mut stack = vec![index];
+                let mut component_weight = 0.0;
+                seen[index] = true;
+                while let Some(current) = stack.pop() {
+                    component_weight += values[current];
+                    let x = current % size;
+                    let y = current / size;
+                    for neighbor in [
+                        x.checked_sub(1).map(|x| y * size + x),
+                        (x + 1 < size).then_some(y * size + x + 1),
+                        y.checked_sub(1).map(|y| y * size + x),
+                        (y + 1 < size).then_some((y + 1) * size + x),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
+                        if !seen[neighbor]
+                            && sphere_mask(size, neighbor)
+                            && values[neighbor] >= maximum * 0.75
+                        {
+                            seen[neighbor] = true;
+                            stack.push(neighbor);
+                        }
+                    }
+                }
+                if component_weight >= weight * 0.02 {
+                    components += 1;
+                }
+            }
+            (centroid, spread, transition, components, maximum, softness)
+        };
+        let low = geometry(1.0, 3.0);
+        let high = geometry(7.0, 9.0);
+        let thin = geometry(4.0, 6.0);
+        let thick = geometry(1.0, 9.0);
+        let clear = render(&mass, &low, 0.0);
+        let low_shadow = render(&mass, &low, 1.0);
+        let high_shadow = render(&mass, &high, 1.0);
+        let thin_shadow = render(&mass, &thin, 1.0);
+        let thick_shadow = render(&mass, &thick, 1.0);
+        let zero = std::array::from_fn(|_| vec![0.0; (resolution * resolution * 4) as usize]);
+        let zero_shadow = render(&zero, &low, 1.0);
+        let low_metrics = metrics(&clear, &low_shadow);
+        let high_metrics = metrics(&clear, &high_shadow);
+        let thin_metrics = metrics(&clear, &thin_shadow);
+        let thick_metrics = metrics(&clear, &thick_shadow);
+        println!(
+            "U4 shadow metrics: low centroid={:?} spread={:.4} components={} peak={:.5}; high centroid={:?} spread={:.4} components={} peak={:.5}; thin softness={:.2} components={}; thick softness={:.2} components={}",
+            low_metrics.0,
+            low_metrics.1,
+            low_metrics.3,
+            low_metrics.4,
+            high_metrics.0,
+            high_metrics.1,
+            high_metrics.3,
+            high_metrics.4,
+            thin_metrics.5,
+            thin_metrics.3,
+            thick_metrics.5,
+            thick_metrics.3,
+        );
+        assert!(low_metrics.4 > 0.0);
+        assert!(high_metrics.0.0 < low_metrics.0.0);
+        assert!(thick_metrics.5 > thin_metrics.5);
+        assert_eq!(thick_metrics.3, 1);
+        assert_eq!(zero_shadow, clear);
+        assert!(
+            clear
+                .chunks_exact(4)
+                .zip(low_shadow.chunks_exact(4))
+                .enumerate()
+                .all(|(index, (clear, shadowed))| {
+                    sphere_mask(size, index) || clear == shadowed
+                })
+        );
     }
 
     #[test]
@@ -2201,6 +2815,7 @@ fn layer_profile_oracle() {
         cloud_off.show_cities = 1.0;
         cloud_off.night_lights = 1.0;
         cloud_off.light_dir = [-1.0, 0.0, -0.2];
+        cloud_off.show_cloud_shadows = 0.0;
         let expected = renderer.render(
             &gpu,
             &cloud_off,
@@ -2283,6 +2898,31 @@ fn layer_profile_oracle() {
         let dense_weather = weather_pipeline.create_textures(&gpu, 16);
         weather_pipeline.generate(&gpu, dense_snapshot, &terrain, &dynamics, &dense_weather);
 
+        let mut hidden_cloud_shadows = cloud_off;
+        hidden_cloud_shadows.show_cloud_shadows = 1.0;
+        let hidden_shadow = renderer.render(
+            &gpu,
+            &hidden_cloud_shadows,
+            &terrain_view,
+            Some(&dynamics.wind_continentality),
+            Some((&dense_weather.mass, &dense_weather.geometry)),
+            64,
+        );
+        assert!(
+            hidden_shadow
+                .chunks_exact(4)
+                .zip(expected.chunks_exact(4))
+                .enumerate()
+                .any(|(index, (shadowed, clear))| sphere_mask(64, index) && shadowed != clear)
+        );
+        assert!(
+            hidden_shadow
+                .chunks_exact(4)
+                .zip(expected.chunks_exact(4))
+                .enumerate()
+                .all(|(index, (shadowed, clear))| sphere_mask(64, index) || shadowed == clear)
+        );
+
         assert_eq!(
             renderer.render(
                 &gpu,
@@ -2328,6 +2968,7 @@ fn layer_profile_oracle() {
         );
         let mut cloudy_uniforms = limb_clear;
         cloudy_uniforms.show_clouds = 1.0;
+        cloudy_uniforms.show_cloud_shadows = 1.0;
         let cloudy_limb = renderer.render(
             &gpu,
             &cloudy_uniforms,
@@ -2387,6 +3028,353 @@ fn layer_profile_oracle() {
                 assert_eq!(with_shadows, without_shadows, "limb clouds changed");
             }
         }
+    }
+
+    #[test]
+    #[ignore]
+    fn u4_visual_and_perf_evidence_768() {
+        use std::time::Instant;
+
+        const SIZE: u32 = 768;
+        const WEATHER_RESOLUTION: u32 = 64;
+        const FRAME_COUNT: usize = 20;
+
+        let gpu = GpuContext::new().expect("GPU init failed");
+        println!(
+            "U4 visual/perf adapter={} backend={:?} vendor={:#06x} device={:#06x} type={:?} driver={} driver_info={}",
+            gpu.adapter_info.name,
+            gpu.adapter_info.backend,
+            gpu.adapter_info.vendor,
+            gpu.adapter_info.device,
+            gpu.adapter_info.device_type,
+            gpu.adapter_info.driver,
+            gpu.adapter_info.driver_info,
+        );
+        let normalize_fingerprint = |value: &str| {
+            value
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_ascii_lowercase()
+        };
+        let required_env =
+            |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("{name} is required"));
+        for (name, current) in [
+            ("PLANET_GEN_U16_ADAPTER_NAME", gpu.adapter_info.name.clone()),
+            (
+                "PLANET_GEN_U16_ADAPTER_BACKEND",
+                format!("{:?}", gpu.adapter_info.backend),
+            ),
+            (
+                "PLANET_GEN_U16_ADAPTER_DEVICE_TYPE",
+                format!("{:?}", gpu.adapter_info.device_type),
+            ),
+            (
+                "PLANET_GEN_U16_ADAPTER_DRIVER",
+                gpu.adapter_info.driver.clone(),
+            ),
+            (
+                "PLANET_GEN_U16_ADAPTER_DRIVER_INFO",
+                gpu.adapter_info.driver_info.clone(),
+            ),
+        ] {
+            let expected = required_env(name);
+            assert_eq!(
+                normalize_fingerprint(&expected),
+                normalize_fingerprint(&current),
+                "U16 baseline fingerprint mismatch for {name}: expected={expected:?} current={current:?}",
+            );
+        }
+        for (name, current) in [
+            ("PLANET_GEN_U16_ADAPTER_VENDOR_ID", gpu.adapter_info.vendor),
+            ("PLANET_GEN_U16_ADAPTER_DEVICE_ID", gpu.adapter_info.device),
+        ] {
+            let expected = required_env(name);
+            assert_eq!(
+                parse_u4_lower_hex_id(name, &expected).unwrap_or_else(|error| panic!("{error}")),
+                current,
+                "U16 baseline fingerprint mismatch for {name}: expected={expected:?} current={current:#06x}",
+            );
+        }
+
+        let plates = generate_plates(&PlateGenParams {
+            seed: 42,
+            mass_earth: 1.0,
+            ocean_fraction: 0.7,
+            tectonics_factor: 0.85,
+            continental_scale: 1.0,
+            num_plates_override: 0,
+            num_continents: 0,
+            continent_size_variety: 0.0,
+        });
+        let terrain = TerrainComputePipeline::new(&gpu).generate(
+            &gpu,
+            &plates,
+            WEATHER_RESOLUTION,
+            42,
+            1.0,
+            1.2,
+            8,
+            0.5,
+            2.0,
+            1.0,
+            0.10,
+            1.0,
+            1.0,
+            9.81,
+            0.85,
+            0.2,
+            1.0,
+        );
+        let mut renderer = PreviewRenderer::new(&gpu);
+        renderer.resize_target(&gpu, SIZE, |_| {});
+        let terrain_view = renderer.upload_terrain(&gpu, &terrain);
+        let wind = WindFieldPipeline::new(&gpu).expect("wind init failed");
+        let dynamics = wind.create_textures(&gpu, WEATHER_RESOLUTION);
+        wind.generate_gpu(
+            &gpu,
+            &terrain,
+            &dynamics,
+            42,
+            -0.1,
+            0.41,
+            0.5,
+            std::f32::consts::TAU / 86_400.0,
+            15.0,
+            0.7,
+        );
+        let weather_pipeline = WeatherFieldPipeline::new(&gpu).expect("weather init failed");
+        let weather = weather_pipeline.create_textures(&gpu, WEATHER_RESOLUTION);
+        weather_pipeline.generate(
+            &gpu,
+            WeatherSnapshot {
+                face: 0,
+                resolution: WEATHER_RESOLUTION,
+                seed: 42,
+                storm_count: 8,
+                coverage: 0.8,
+                moisture: 0.8,
+                surface_pressure_bar: 0.7,
+                base_temp_c: 15.0,
+                ocean_level: -0.1,
+                axial_tilt_rad: 0.41,
+                season: 0.5,
+                storm_size: 2.0,
+                radius_km: 6371.0,
+                rotation_rate_rad_s: std::f32::consts::TAU / 86_400.0,
+                wind_scale: 1.0,
+            },
+            &terrain,
+            &dynamics,
+            &weather,
+        );
+        let mass = weather.read_mass(&gpu);
+        let geometry = weather.read_geometry(&gpu);
+        assert!(!mass.is_empty() && !geometry.is_empty());
+        assert!(mass.iter().chain(&geometry).all(|value| value.is_finite()));
+        assert!(mass.iter().any(|value| *value > 0.0));
+
+        let clouds_on = PreviewUniforms {
+            cloud_coverage: 0.8,
+            cloud_opacity: 1.0,
+            show_clouds: 1.0,
+            show_cloud_shadows: 1.0,
+            atmosphere_density: 1.0,
+            atmosphere_height: 0.05,
+            show_atmosphere_layer: 1.0,
+            show_cities: 1.0,
+            night_lights: 1.0,
+            planet_radius_km: 6371.0,
+            ..uniforms()
+        };
+        let render = |settings: PreviewUniforms| {
+            renderer.render(
+                &gpu,
+                &settings,
+                &terrain_view,
+                Some(&dynamics.wind_continentality),
+                Some((&weather.mass, &weather.geometry)),
+                SIZE,
+            )
+        };
+        let low_sun = PreviewUniforms {
+            light_dir: [1.0, 0.08, 0.25],
+            ..clouds_on
+        };
+        let backlit = PreviewUniforms {
+            light_dir: [0.7, 0.1, -1.0],
+            ..clouds_on
+        };
+        let night_side = PreviewUniforms {
+            light_dir: [-0.8, 0.0, -1.0],
+            ..clouds_on
+        };
+        let shadow_off = PreviewUniforms {
+            show_cloud_shadows: 0.0,
+            ..low_sun
+        };
+        let atmosphere_off = PreviewUniforms {
+            show_atmosphere_layer: 0.0,
+            ..low_sun
+        };
+        let clouds_off = PreviewUniforms {
+            show_clouds: 0.0,
+            show_cloud_shadows: 0.0,
+            ..low_sun
+        };
+        let baseline_p95 = |name: &str| {
+            parse_u4_positive_p95(name, &required_env(name))
+                .unwrap_or_else(|error| panic!("{error}"))
+        };
+        let baseline_on = baseline_p95("PLANET_GEN_U16_CLOUDS_ON_P95_MS");
+        let baseline_off = baseline_p95("PLANET_GEN_U16_CLOUDS_OFF_P95_MS");
+        assert!(baseline_on.is_finite() && baseline_on > 0.0);
+        assert!(baseline_off.is_finite() && baseline_off > 0.0);
+        let measure_p95 = |settings: PreviewUniforms| {
+            for _ in 0..3 {
+                renderer.render_interactive(
+                    &gpu,
+                    &settings,
+                    &terrain_view,
+                    Some(&dynamics.wind_continentality),
+                    Some((&weather.mass, &weather.geometry)),
+                );
+                let _ = gpu.device.poll(wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: None,
+                });
+            }
+            let mut timings_ms = Vec::with_capacity(FRAME_COUNT);
+            for _ in 0..FRAME_COUNT {
+                let start = Instant::now();
+                renderer.render_interactive(
+                    &gpu,
+                    &settings,
+                    &terrain_view,
+                    Some(&dynamics.wind_continentality),
+                    Some((&weather.mass, &weather.geometry)),
+                );
+                let _ = gpu.device.poll(wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: None,
+                });
+                timings_ms.push(start.elapsed().as_secs_f32() * 1000.0);
+            }
+            (timings_ms.clone(), percentile(timings_ms, 0.95))
+        };
+
+        let (on_timings_ms, on_p95_ms) = measure_p95(low_sun);
+        let (off_timings_ms, off_p95_ms) = measure_p95(clouds_off);
+        let on_ratio = on_p95_ms / baseline_on;
+        let off_ratio = off_p95_ms / baseline_off;
+        println!(
+            "U4 768 p95_ms on={on_p95_ms:.3} off={off_p95_ms:.3}; baseline_ms on={baseline_on:.3} off={baseline_off:.3}; ratios on={on_ratio:.4} off={off_ratio:.4}; on_timings={on_timings_ms:?}; off_timings={off_timings_ms:?}"
+        );
+        assert!(on_ratio <= 1.05, "U4 clouds-on ratio={on_ratio:.4}");
+        assert!(off_ratio <= 1.05, "U4 clouds-off ratio={off_ratio:.4}");
+        if baseline_on <= 33.3 {
+            assert!(on_p95_ms <= 33.3, "U4 clouds-on p95={on_p95_ms:.3}ms");
+        }
+
+        let low_sun_pixels = render(low_sun);
+        let backlit_pixels = render(backlit);
+        let night_side_pixels = render(night_side);
+        let shadow_on_pixels = low_sun_pixels.clone();
+        let shadow_off_pixels = render(shadow_off);
+        let atmosphere_on_pixels = low_sun_pixels.clone();
+        let atmosphere_off_pixels = render(atmosphere_off);
+        let size = SIZE as usize;
+        let expected_len = size * size * 4;
+        let non_empty = |pixels: &[u8]| {
+            assert_eq!(pixels.len(), expected_len);
+            pixels
+                .chunks_exact(4)
+                .enumerate()
+                .filter(|(index, pixel)| {
+                    sphere_mask(size, *index) && (pixel[0] > 0 || pixel[1] > 0 || pixel[2] > 0)
+                })
+                .count()
+        };
+        for pixels in [
+            &low_sun_pixels,
+            &backlit_pixels,
+            &night_side_pixels,
+            &shadow_on_pixels,
+            &shadow_off_pixels,
+            &atmosphere_on_pixels,
+            &atmosphere_off_pixels,
+        ] {
+            assert!(non_empty(pixels) > size * size / 16);
+        }
+
+        let low_backlit_difference = mean_color_difference(&low_sun_pixels, &backlit_pixels, size);
+        let backlit_night_difference =
+            mean_color_difference(&backlit_pixels, &night_side_pixels, size);
+        let shadow_differences = shadow_on_pixels
+            .chunks_exact(4)
+            .zip(shadow_off_pixels.chunks_exact(4))
+            .enumerate()
+            .filter(|(index, _)| sphere_mask(size, *index))
+            .map(|(_, (on, off))| {
+                (0..3)
+                    .map(|channel| {
+                        (srgb_to_linear(on[channel]) - srgb_to_linear(off[channel])).abs()
+                    })
+                    .sum::<f32>()
+                    / 3.0
+            })
+            .collect::<Vec<_>>();
+        let shadow_difference =
+            shadow_differences.iter().sum::<f32>() / shadow_differences.len().max(1) as f32;
+        let shadow_p95_difference = percentile(shadow_differences, 0.95);
+        let atmosphere_difference =
+            mean_color_difference(&atmosphere_on_pixels, &atmosphere_off_pixels, size);
+        println!(
+            "U4 768 image differences: low_backlit={low_backlit_difference:.6} backlit_night={backlit_night_difference:.6} shadow_mean={shadow_difference:.6} shadow_p95={shadow_p95_difference:.6} atmosphere={atmosphere_difference:.6}"
+        );
+        assert!(low_backlit_difference > 0.001);
+        assert!(backlit_night_difference > 0.001);
+        assert!(
+            (0.0025..=0.008).contains(&shadow_difference),
+            "U4 shadow mean difference={shadow_difference:.6}"
+        );
+        assert!(
+            (0.010..=0.040).contains(&shadow_p95_difference),
+            "U4 shadow p95 difference={shadow_p95_difference:.6}"
+        );
+        assert!(atmosphere_difference > 0.000_01);
+        assert!(
+            shadow_on_pixels
+                .chunks_exact(4)
+                .zip(shadow_off_pixels.chunks_exact(4))
+                .enumerate()
+                .all(|(index, (on, off))| sphere_mask(size, index) || on == off)
+        );
+
+        let artifact_dir = std::path::Path::new("/tmp/planet-gen-u4-corrected-768");
+        let _ = std::fs::remove_dir_all(artifact_dir);
+        std::fs::create_dir_all(artifact_dir).expect("create U4 artifact directory");
+        let write = |name: &str, pixels: &[u8]| {
+            let path = artifact_dir.join(name);
+            image::RgbaImage::from_raw(SIZE, SIZE, pixels.to_vec())
+                .expect("valid U4 image")
+                .save(&path)
+                .expect("write U4 image");
+            path
+        };
+        let artifacts = [
+            write("low-sun.png", &low_sun_pixels),
+            write("backlit.png", &backlit_pixels),
+            write("night-side.png", &night_side_pixels),
+            write("shadow-on.png", &shadow_on_pixels),
+            write("shadow-off.png", &shadow_off_pixels),
+            write("atmosphere-on.png", &atmosphere_on_pixels),
+            write("atmosphere-off.png", &atmosphere_off_pixels),
+        ];
+        for artifact in &artifacts {
+            assert!(artifact.is_file());
+        }
+        println!("U4 768 artifacts={artifacts:?}");
     }
 
     #[test]

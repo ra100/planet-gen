@@ -773,6 +773,7 @@ Freeze this protocol before U14 starts. `docs/research/shallow-volumetric-cloud-
 - Visible clouds and surface shadows move consistently with sun direction.
 - Lighting adds depth in isolated cloud debug renders before terrain and atmosphere are re-enabled.
 - U4 clouds-on lighting smoke p95 is <=33.3 ms at 768x768 on the named baseline GPU; record `PASS` or `FAIL`. U11 retains the full orbit, worst-case, lifecycle, and coalescing gate.
+- GEN-049/QA-032/QA-033 user-approved hardware-aware branch: benchmark synchronized clouds-on and clouds-off runs with three warmups and twenty queue-complete samples each. Require each candidate p95 to be <=1.05 times `PLANET_GEN_U16_CLOUDS_ON_P95_MS` or `PLANET_GEN_U16_CLOUDS_OFF_P95_MS`; both baseline values must parse as finite values >0. Require the exact matched baseline fingerprint through `PLANET_GEN_U16_ADAPTER_NAME`, `_BACKEND`, `_VENDOR_ID`, `_DEVICE_ID`, `_DEVICE_TYPE`, `_DRIVER`, and `_DRIVER_INFO`. Strings compare after whitespace collapse and ASCII case folding; IDs parse only from lowercase `0x` hexadecimal syntax and compare numerically. Require the absolute 33.3 ms clouds-on target only when its supplied U16 baseline is <=33.3 ms. U11/U7 retain the unconditional absolute gate for qualifying hardware.
 
 ### U5. Unify export and add reconstruction channels
 
