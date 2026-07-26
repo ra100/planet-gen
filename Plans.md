@@ -109,6 +109,21 @@ Plan: [docs/plans/2026-07-10-001-feat-shallow-volumetric-clouds-plan.md](docs/pl
 
 ---
 
+## Phase 5.24: Terrain Diffusion Artifact-Harness Evaluation
+
+Evaluation-only canonical cubemap harness; upstream inference, projection, product integration, and human review remain `NOT RUN`.
+
+Plan: [docs/plans/2026-07-12-001-feat-terrain-diffusion-evaluation-plan.md](docs/plans/2026-07-12-001-feat-terrain-diffusion-evaluation-plan.md)
+
+| Unit | 内容 | Status |
+|------|------|--------|
+| U1 | Evaluation-only canonical artifact loader | cc:TODO |
+| U2 | Procedural controls and deterministic CPU gates | cc:TODO |
+| U3 | Invalid-artifact rejection and exact repeatability | cc:TODO |
+| U4 | Isolated preview render and evidence labeling | cc:TODO |
+
+---
+
 ## Phase 7: Blender Importer Addon
 
 Pure-Python Blender addon that imports generated textures and sets up materials.
