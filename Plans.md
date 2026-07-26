@@ -130,10 +130,10 @@ Plan: [docs/plans/2026-07-26-001-feat-approved-terrain-artifact-import-plan.md](
 
 | Unit | 内容 | Status |
 |------|------|--------|
-| U1 | Canonical loader and strict approval gate | Implemented but dormant; approved candidate NOT AVAILABLE; product activation and readiness NOT RUN. |
-| U2 | Fail-closed paired CLI import mode | Implemented but dormant; approved candidate NOT AVAILABLE; product activation and readiness NOT RUN. |
-| U3 | Shared imported terrain lifecycle in app | Implemented but dormant; approved candidate NOT AVAILABLE; product activation and readiness NOT RUN. |
-| U4 | Export refusal and CPU-only regression tests | Implemented but dormant; approved candidate NOT AVAILABLE; product activation and readiness NOT RUN. |
+| U1 | Canonical loader and strict approval gate | cc:完了 [a1fcf3f7e60a097a83d241fd7b9a9c46e99aa7ac]; implemented but dormant; approved candidate NOT AVAILABLE; product activation and readiness NOT RUN. |
+| U2 | Fail-closed paired CLI import mode | cc:完了 [a1fcf3f7e60a097a83d241fd7b9a9c46e99aa7ac]; implemented but dormant; approved candidate NOT AVAILABLE; product activation and readiness NOT RUN. |
+| U3 | Shared imported terrain lifecycle in app | cc:完了 [a1fcf3f7e60a097a83d241fd7b9a9c46e99aa7ac]; implemented but dormant; approved candidate NOT AVAILABLE; product activation and readiness NOT RUN. |
+| U4 | Export refusal and CPU-only regression tests | cc:完了 [a1fcf3f7e60a097a83d241fd7b9a9c46e99aa7ac]; implemented but dormant; approved candidate NOT AVAILABLE; product activation and readiness NOT RUN. |
 | U5 | Real candidate activation evidence | BLOCKED / NOT RUN |
 
 ---
