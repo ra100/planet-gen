@@ -122,6 +122,20 @@ Plan: [docs/plans/2026-07-12-001-feat-terrain-diffusion-evaluation-plan.md](docs
 | U3 | Invalid-artifact rejection and exact repeatability | cc:TODO |
 | U4 | Isolated preview render and evidence labeling | cc:TODO |
 
+## Phase 5.25 — Approved Terrain Artifact Import (Dormant)
+
+Depends on Phase 5.24 evidence. Required U1–U4 code-complete wording (not a current completion marker): Import infrastructure implemented but dormant; approved candidate NOT AVAILABLE; product activation and readiness NOT RUN. Approval rejects `KNOWN_NO_GO_CONTROL_FNV=243e1887675e77a8` and `KNOWN_NO_GO_VALIDATOR_COMMIT=0cba9579e68f0fc72a75d21db2d655496ef76d09`.
+
+Plan: [docs/plans/2026-07-26-001-feat-approved-terrain-artifact-import-plan.md](docs/plans/2026-07-26-001-feat-approved-terrain-artifact-import-plan.md)
+
+| Unit | 内容 | Status |
+|------|------|--------|
+| U1 | Canonical loader and strict approval gate | Implemented but dormant; approved candidate NOT AVAILABLE; product activation and readiness NOT RUN. |
+| U2 | Fail-closed paired CLI import mode | Implemented but dormant; approved candidate NOT AVAILABLE; product activation and readiness NOT RUN. |
+| U3 | Shared imported terrain lifecycle in app | Implemented but dormant; approved candidate NOT AVAILABLE; product activation and readiness NOT RUN. |
+| U4 | Export refusal and CPU-only regression tests | Implemented but dormant; approved candidate NOT AVAILABLE; product activation and readiness NOT RUN. |
+| U5 | Real candidate activation evidence | BLOCKED / NOT RUN |
+
 ---
 
 ## Phase 7: Blender Importer Addon

@@ -6,5 +6,6 @@ pub mod noise;
 pub mod planet;
 pub mod plates;
 pub mod preview;
+pub mod terrain_artifact;
 pub mod terrain_compute;
 pub mod weather;

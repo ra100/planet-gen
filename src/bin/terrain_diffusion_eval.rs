@@ -4,6 +4,10 @@ use planet_gen::{
     planet::{DerivedProperties, PlanetParams},
     plates::{PlateGenParams, generate_plates},
     preview::{PreviewRenderer, PreviewUniforms},
+    terrain_artifact::{
+        CANONICAL_FACE_NAMES as NAMES, fnv1a64 as fnv, infer_canonical_resolution,
+        load_canonical_terrain,
+    },
     terrain_compute::{TectonicTerrain, TerrainComputePipeline},
 };
 use std::{
@@ -15,14 +19,6 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-const NAMES: [&str; 6] = [
-    "posx.f32le",
-    "negx.f32le",
-    "posy.f32le",
-    "negy.f32le",
-    "posz.f32le",
-    "negz.f32le",
-];
 const NOT_RUN: [&str; 5] = [
     "external_model",
     "projection",
@@ -288,42 +284,14 @@ fn source_resolution(n: u32) -> Result<u32> {
 }
 
 fn infer_resolution(dir: &Path) -> Result<u32> {
-    if dir.join(".incomplete").exists() {
-        return Err("artifact is incomplete".into());
-    }
-    let mut length = None;
-    for name in NAMES {
-        let current = fs::metadata(dir.join(name))
-            .map_err(|e| format!("cannot read {name}: {e}"))?
-            .len();
-        if current == 0 || current % 4 != 0 {
-            return Err(format!("invalid byte length for {name}"));
-        }
-        if length
-            .replace(current)
-            .is_some_and(|previous| previous != current)
-        {
-            return Err("artifact face lengths differ".into());
-        }
-    }
-    let samples = length.ok_or_else(|| "artifact has no faces".to_owned())? / 4;
-    let n = (samples as f64).sqrt() as u64;
-    if n.checked_mul(n) != Some(samples) {
-        return Err("artifact samples are not square".into());
-    }
-    let n = u32::try_from(n).map_err(|_| "artifact resolution is unsupported".to_owned())?;
+    let n = infer_canonical_resolution(dir, MAX_SOURCE_RESOLUTION)
+        .map_err(|error| error.to_string())?;
     checked_resolution(n)?;
     Ok(n)
 }
 
 fn status(value: bool) -> &'static str {
     if value { "PASS" } else { "FAIL" }
-}
-
-fn fnv(bytes: &[u8]) -> u64 {
-    bytes.iter().fold(14695981039346656037, |hash, byte| {
-        (hash ^ u64::from(*byte)).wrapping_mul(1099511628211)
-    })
 }
 
 fn artifact_bytes(dir: &Path, n: u32) -> Result<Vec<u8>> {
@@ -350,23 +318,8 @@ fn artifact_bytes(dir: &Path, n: u32) -> Result<Vec<u8>> {
 }
 
 fn load(dir: &Path, n: u32) -> Result<TectonicTerrain> {
-    if dir.join(".incomplete").exists() {
-        return Err("artifact is incomplete".into());
-    }
-    let count = checked_resolution(n)?;
-    let bytes = artifact_bytes(dir, n)?;
-    let mut faces: [Vec<f32>; 6] = std::array::from_fn(|_| Vec::with_capacity(count));
-    for (face, chunk) in faces.iter_mut().zip(bytes.chunks_exact(count * 4)) {
-        face.extend(
-            chunk
-                .chunks_exact(4)
-                .map(|value| f32::from_le_bytes(value.try_into().expect("four bytes"))),
-        );
-    }
-    Ok(TectonicTerrain {
-        faces,
-        resolution: n,
-    })
+    checked_resolution(n)?;
+    load_canonical_terrain(dir, n, MAX_SOURCE_RESOLUTION).map_err(|error| error.to_string())
 }
 
 fn write(dir: &Path, terrain: &TectonicTerrain) -> Result<()> {
