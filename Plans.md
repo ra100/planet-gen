@@ -84,6 +84,25 @@ Plan: [docs/plans/2026-04-07-terrain-aware-wind.md](docs/plans/2026-04-07-terrai
 
 ---
 
+## Phase 5.23: Terrain Diffusion Evaluation Spike
+
+Time-boxed research evaluation for optional offline Terrain Diffusion artifacts. The procedural terrain path remains the default; this phase adds no runtime inference, cloud path, redistributed weights, or product source selection.
+
+Plan: [docs/plans/2026-07-12-001-feat-terrain-diffusion-evaluation-plan.md](docs/plans/2026-07-12-001-feat-terrain-diffusion-evaluation-plan.md)
+
+Requirements: [docs/brainstorms/terrain-diffusion-integration-requirements.md](docs/brainstorms/terrain-diffusion-integration-requirements.md)
+Research: [docs/research/terrain-diffusion-integration.md](docs/research/terrain-diffusion-integration.md)
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 5.23.1 | Define rights, reproducibility, and provenance boundary | Evaluation manifest and blocker record complete | - | cc:TODO |
+| 5.23.2 | Reproduce bounded upstream planar evaluation | Pinned local evaluation recorded or stopped with evidence | 5.23.1 | cc:TODO |
+| 5.23.3 | Evaluate projection, cubemap seams, corners, and poles | Continuity result table and validation decision | 5.23.2 | cc:TODO |
+| 5.23.4 | Preview-only imported-artifact comparison | Cached artifact preview compared against procedural baseline | 5.23.3 | cc:TODO |
+| 5.23.5 | Resource measurement and go/no-go artifact | Separate product plan explicitly authorized or rejected/deferred | 5.23.4 | cc:TODO |
+
+---
+
 ## Phase 7: Blender Importer Addon
 
 Pure-Python Blender addon that imports generated textures and sets up materials.
