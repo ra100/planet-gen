@@ -6,7 +6,6 @@ use crate::gpu::GpuContext;
 use crate::planet::{DerivedProperties, PlanetParams};
 use crate::plates::{PlateGenParams, generate_plates};
 use crate::preview::{PreviewRenderer, PreviewUniforms};
-use crate::terrain_artifact::{TerrainSource, export_refusal};
 use crate::terrain_compute::{
     DynamicsTextures, ErosionPipeline, TerrainComputePipeline, WindFieldPipeline,
 };
@@ -15,7 +14,6 @@ use crate::weather::{
 };
 
 pub struct PlanetGenApp {
-    source: TerrainSource,
     gpu: Arc<GpuContext>,
     preview_renderer: PreviewRenderer,
     terrain_compute: TerrainComputePipeline,
@@ -105,7 +103,7 @@ pub struct PlanetGenApp {
 }
 
 impl PlanetGenApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, source: TerrainSource) -> Result<Self, String> {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Result<Self, String> {
         let render_state = cc
             .wgpu_render_state
             .as_ref()
@@ -118,15 +116,13 @@ impl PlanetGenApp {
             wgpu::FilterMode::Linear,
         );
         let terrain_compute = TerrainComputePipeline::new(&gpu);
-        let erosion_pipeline =
-            matches!(&source, TerrainSource::Procedural).then(|| ErosionPipeline::new(&gpu));
+        let erosion_pipeline = Some(ErosionPipeline::new(&gpu));
         let wind_pipeline = WindFieldPipeline::new(&gpu)?;
         let weather_pipeline = WeatherFieldPipeline::new(&gpu)?;
         let params = PlanetParams::default();
         let derived = DerivedProperties::from_params(&params);
         let default_cloud_seed = params.seed.wrapping_add(1000);
         Ok(Self {
-            source,
             gpu,
             preview_renderer,
             terrain_compute,
@@ -319,41 +315,6 @@ impl PlanetGenApp {
 
         use std::time::Instant;
         let t0 = Instant::now();
-
-        if let TerrainSource::Imported {
-            terrain,
-            control_ocean_level,
-        } = &self.source
-        {
-            let terrain = Arc::clone(terrain);
-            let ocean_level = *control_ocean_level;
-            self.cached_cubemap_view =
-                Some(self.preview_renderer.upload_terrain(&self.gpu, &terrain));
-            let cloud_res = (self.preview_resolution / 2).max(192);
-            if self.dynamics.as_ref().map(|textures| textures.resolution) != Some(cloud_res) {
-                self.dynamics = Some(self.wind_pipeline.create_textures(&self.gpu, cloud_res));
-            }
-            self.wind_pipeline.generate_gpu(
-                &self.gpu,
-                &terrain,
-                self.dynamics.as_ref().expect("wind textures are installed"),
-                self.params.seed,
-                ocean_level,
-                self.params.axial_tilt_deg.to_radians(),
-                self.season,
-                24.0 / self.params.rotation_period_h,
-                self.derived.base_temperature_c,
-                self.derived.atmosphere_strength,
-            );
-            self.erosion_terrain = None;
-            self.erosion_remaining = 0;
-            self.request_weather(ocean_level);
-            self.dispatch_weather();
-            self.needs_terrain = false;
-            self.needs_render = true;
-            self.terrain_start = None;
-            return;
-        }
 
         let plates = generate_plates(&PlateGenParams {
             seed: self.params.seed,
@@ -572,14 +533,8 @@ impl PlanetGenApp {
     }
 
     fn dispatch_weather(&mut self) {
-        let terrain = match &self.source {
-            TerrainSource::Imported { terrain, .. } => terrain.as_ref(),
-            TerrainSource::Procedural => {
-                let Some(terrain) = self.weather_terrain.as_ref() else {
-                    return;
-                };
-                terrain
-            }
+        let Some(terrain) = self.weather_terrain.as_ref() else {
+            return;
         };
         let Some(dynamics) = self.dynamics.as_ref() else {
             return;
@@ -609,22 +564,10 @@ impl PlanetGenApp {
     }
 
     fn ocean_level(&self) -> f32 {
-        match &self.source {
-            TerrainSource::Procedural => {
-                -0.5 + 1.7 * self.derived.ocean_fraction * (1.0 - self.water_loss)
-            }
-            TerrainSource::Imported {
-                control_ocean_level,
-                ..
-            } => *control_ocean_level,
-        }
+        -0.5 + 1.7 * self.derived.ocean_fraction * (1.0 - self.water_loss)
     }
 
     fn start_export(&mut self) {
-        if let Some(message) = export_refusal(&self.source) {
-            self.export_status = message.into();
-            return;
-        }
         let config = ExportConfig {
             face_resolution: self.export_resolution,
             tile_size: export::TILE_SIZE,
@@ -698,7 +641,6 @@ impl eframe::App for PlanetGenApp {
             self.poll_export();
             ctx.request_repaint();
         }
-
         // GPU error banner
         let mut dismiss_error = false;
         if let Some(ref err) = self.gpu_error {
@@ -720,14 +662,9 @@ impl eframe::App for PlanetGenApp {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.heading("Planet Parameters");
                 ui.separator();
-                let imported = matches!(&self.source, TerrainSource::Imported { .. });
-                if imported {
-                    ui.small("Imported terrain preserves its approved provenance.");
-                }
-
                 let mut changed = false;
 
-                ui.add_enabled_ui(!imported, |ui| {
+                ui.scope(|ui| {
 
                 changed |= ui
                     .add(egui::Slider::new(&mut self.params.star_distance_au, 0.1..=50.0)
@@ -782,7 +719,7 @@ impl eframe::App for PlanetGenApp {
                 ui.heading("Visual Overrides");
                 ui.separator();
 
-                ui.add_enabled_ui(!imported, |ui| {
+                ui.scope(|ui| {
 
                 if ui.add(egui::Slider::new(&mut self.continental_scale, 0.5..=4.0)
                     .text("Continent Scale"))
@@ -827,14 +764,14 @@ impl eframe::App for PlanetGenApp {
                 }
 
                 let mut erosion_i32 = self.erosion_iterations as i32;
-                ui.add_enabled_ui(!imported, |ui| if ui.add(egui::Slider::new(&mut erosion_i32, 0..=50)
+                if ui.add(egui::Slider::new(&mut erosion_i32, 0..=50)
                     .text("Erosion"))
                     .on_hover_text("Hydraulic erosion iterations. 0 = none, 25 = default, 50 = heavily eroded")
                     .changed()
                 {
                     self.erosion_iterations = erosion_i32 as u32;
                     self.needs_terrain = true;
-                });
+                }
 
                 if ui.add(egui::Slider::new(&mut self.season, 0.0..=1.0)
                     .text("Season"))
@@ -985,7 +922,7 @@ impl eframe::App for PlanetGenApp {
                             self.needs_render = true;
                         }
                     }
-                    if ui.add_enabled(!imported, egui::Checkbox::new(&mut self.show_erosion, "Erosion"))
+                    if ui.add(egui::Checkbox::new(&mut self.show_erosion, "Erosion"))
                         .on_hover_text("Hydraulic erosion carving rivers and valleys")
                         .changed()
                     {
@@ -1051,7 +988,7 @@ impl eframe::App for PlanetGenApp {
                 egui::CollapsingHeader::new("Advanced Tweaks")
                     .default_open(false)
                     .show(ui, |ui| {
-                        ui.add_enabled_ui(!imported, |ui| {
+                        ui.scope(|ui| {
                         let mut plates_i32 = self.num_plates_override as i32;
                         if ui.add(egui::Slider::new(&mut plates_i32, 0..=30)
                             .text("Plates"))

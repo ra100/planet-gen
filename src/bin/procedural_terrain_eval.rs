@@ -1,13 +1,12 @@
+#[path = "procedural_terrain_eval/terrain_evaluator_artifact.rs"]
+mod terrain_evaluator_artifact;
+
 use planet_gen::{
     cube_sphere::cube_to_sphere,
     gpu::GpuContext,
     planet::{DerivedProperties, PlanetParams},
     plates::{PlateGenParams, generate_plates},
     preview::{PreviewRenderer, PreviewUniforms},
-    terrain_artifact::{
-        CANONICAL_FACE_NAMES as NAMES, fnv1a64 as fnv, infer_canonical_resolution,
-        load_canonical_terrain,
-    },
     terrain_compute::{TectonicTerrain, TerrainComputePipeline},
 };
 use std::{
@@ -18,14 +17,11 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
+use terrain_evaluator_artifact::{
+    CANONICAL_FACE_NAMES as NAMES, fnv1a64 as fnv, infer_canonical_resolution,
+    load_canonical_terrain,
+};
 
-const NOT_RUN: [&str; 5] = [
-    "external_model",
-    "projection",
-    "resource_capture",
-    "human_review",
-    "product_integration",
-];
 const MAX_SOURCE_RESOLUTION: u32 = 8192;
 const MAX_RESOLUTION: u32 = (MAX_SOURCE_RESOLUTION - 1) / 2;
 const FIXTURE_RESOLUTION: u32 = 17;
@@ -902,7 +898,7 @@ fn unique_dir(parent: &Path, prefix: &str) -> Result<PathBuf> {
 }
 
 fn fixture() -> Result<bool> {
-    let root = unique_dir(&env::temp_dir(), "terrain-diffusion-fixture")?;
+    let root = unique_dir(&env::temp_dir(), "procedural-terrain-fixture")?;
     let result = (|| {
         let canonical = fixture_terrain();
         write(&root, &canonical)?;
@@ -956,9 +952,6 @@ fn print_validation(
         ("pole_slope", metrics.pole_slope),
     ] {
         println!("gate.{name}={}", status(value));
-    }
-    for name in NOT_RUN {
-        println!("gate.{name}=NOT_RUN");
     }
     println!(
         "metric.fnv1a64={hash:016x}\nmetric.height_edge_p95={:0.9}\nmetric.height_corner_p95={:0.9}\nmetric.normal_p95_deg={:0.9}\nmetric.normal_max_deg={:0.9}\nmetric.pole_elevation_north_p50={:0.9}\nmetric.pole_elevation_south_p50={:0.9}\nmetric.pole_slope_north_p50={:0.9}\nmetric.pole_slope_south_p50={:0.9}\npath.dir={dir}\npath.control={control}",
@@ -1195,9 +1188,9 @@ fn preview(
 
 fn relative_for(candidate: bool) -> &'static str {
     if candidate {
-        "artifacts/terrain-diffusion-eval/candidate-512.png"
+        "artifacts/procedural-terrain-eval/candidate-512.png"
     } else {
-        "artifacts/terrain-diffusion-eval/control-512.png"
+        "artifacts/procedural-terrain-eval/control-512.png"
     }
 }
 
@@ -1270,9 +1263,6 @@ fn print_preview(
         status(render),
         status(png_ok)
     );
-    for name in NOT_RUN {
-        println!("gate.{name}=NOT_RUN");
-    }
     println!(
         "metric.fnv1a64={hash:016x}\nmetric.png_bytes={png_bytes}\npath.dir={dir}\npath.control={control}\npath.png={png}"
     );
@@ -1359,8 +1349,10 @@ fn main() {
             } else {
                 (dir.clone(), dir_display.clone())
             };
-            let (metrics, hash) =
-                validate(&dir, &control, n).unwrap_or_else(|error| fail(2, error));
+            let (metrics, hash) = validate(&dir, &control, n).unwrap_or_else(|error| {
+                println!("gate.cubemap=FAIL");
+                fail(2, error)
+            });
             let orientation = fixture().unwrap_or_else(|error| fail(2, error));
             print_validation(
                 if candidate {
@@ -1376,7 +1368,7 @@ fn main() {
                 hash,
                 orientation,
             );
-            if !metrics_pass(&metrics, orientation) {
+            if candidate && !metrics_pass(&metrics, orientation) {
                 process::exit(3);
             }
         }

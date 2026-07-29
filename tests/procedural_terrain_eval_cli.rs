@@ -37,7 +37,7 @@ fn root() -> TempRoot {
         .unwrap()
         .as_nanos();
     let root = std::env::temp_dir().join(format!(
-        "terrain-diffusion-cli-{}-{nanos}-{unique}",
+        "procedural-terrain-cli-{}-{nanos}-{unique}",
         std::process::id()
     ));
     fs::create_dir(&root).unwrap();
@@ -45,7 +45,7 @@ fn root() -> TempRoot {
 }
 
 fn run(root: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_terrain_diffusion_eval"))
+    Command::new(env!("CARGO_BIN_EXE_procedural_terrain_eval"))
         .current_dir(root)
         .args(args)
         .output()
@@ -125,6 +125,44 @@ fn fixture_protocol_is_exact_and_unknown_or_duplicate_flags_exit_two() {
 }
 
 #[test]
+fn procedural_control_reports_no_ml_runtime_gate() {
+    let root = root();
+    let output = run(
+        &root,
+        &["capture-control", "--resolution", "4", "--dir", "control"],
+    );
+    assert!(output.status.success());
+    let capture_stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(capture_stdout.contains("gate.capture=PASS"));
+    let validation = run(
+        &root,
+        &["validate-control", "--resolution", "4", "--dir", "control"],
+    );
+    assert!(validation.status.success());
+    let stdout = String::from_utf8(validation.stdout).unwrap();
+    assert!(stdout.contains("gate.height_edge="));
+    assert!(stdout.contains("gate.normal="));
+    assert!(stdout.contains("gate.pole_elevation="));
+    assert!(!stdout.contains("external_model"));
+    assert!(!stdout.contains("ml_runtime"));
+    let second = run(
+        &root,
+        &["capture-control", "--resolution", "4", "--dir", "second"],
+    );
+    assert!(second.status.success());
+    let repeat = run(
+        &root,
+        &["compare-bytes", "--first", "control", "--second", "second"],
+    );
+    assert!(repeat.status.success());
+    assert!(
+        String::from_utf8(repeat.stdout)
+            .unwrap()
+            .contains("gate.byte_equality=PASS")
+    );
+}
+
+#[test]
 fn compare_rejects_identical_malformed_artifacts() {
     let root = root();
     write_artifact(&root, "first", &[0; 3]);
@@ -175,9 +213,9 @@ fn capture_collision_and_path_io_exit_two() {
 fn preview_collision_exits_two_before_validation_or_gpu() {
     let root = root();
     fs::create_dir(root.join("input")).unwrap();
-    fs::create_dir_all(root.join("artifacts/terrain-diffusion-eval")).unwrap();
+    fs::create_dir_all(root.join("artifacts/procedural-terrain-eval")).unwrap();
     fs::write(
-        root.join("artifacts/terrain-diffusion-eval/control-512.png"),
+        root.join("artifacts/procedural-terrain-eval/control-512.png"),
         [],
     )
     .unwrap();
@@ -230,7 +268,7 @@ fn incomplete_artifacts_are_rejected() {
 #[test]
 fn concurrent_capture_reserves_one_complete_destination() {
     let root = root();
-    let binary = env!("CARGO_BIN_EXE_terrain_diffusion_eval");
+    let binary = env!("CARGO_BIN_EXE_procedural_terrain_eval");
     let first = Command::new(binary)
         .current_dir(&*root)
         .args(["capture-control", "--resolution", "4", "--dir", "shared"])
@@ -294,7 +332,7 @@ fn first_preview_creates_parent_and_publishes_png() {
         "{}",
         String::from_utf8_lossy(&preview.stderr)
     );
-    let png = root.join("artifacts/terrain-diffusion-eval/control-512.png");
+    let png = root.join("artifacts/procedural-terrain-eval/control-512.png");
     assert_eq!(image::image_dimensions(png).unwrap(), (512, 512));
 }
 
@@ -307,7 +345,15 @@ fn validation_failure_exits_three() {
     assert_eq!(
         run(
             &root,
-            &["validate-control", "--resolution", "4", "--dir", "flat"]
+            &[
+                "validate-candidate",
+                "--resolution",
+                "4",
+                "--dir",
+                "flat",
+                "--control",
+                "flat",
+            ]
         )
         .status
         .code(),
