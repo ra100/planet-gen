@@ -16,7 +16,7 @@ struct CloudMapParams {
     tile_offset_x: u32,
     tile_offset_y: u32,
     full_resolution: u32,
-    _pad0: u32,
+    local_height: u32,
     _pad1: u32,
     _pad2: u32,
 }
@@ -84,13 +84,12 @@ fn hadley_moisture(latitude_rad: f32) -> f32 {
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let res = params.resolution;
-    if (id.x >= res || id.y >= res) { return; }
+    if (id.x >= res || id.y >= params.local_height) { return; }
 
     let full_res = params.full_resolution;
     let global_x = params.tile_offset_x + id.x;
     let global_y = params.tile_offset_y + id.y;
-    let height_idx = global_y * full_res + global_x;
-    let height = heightmap[height_idx];
+    let height = heightmap[id.y * res + id.x];
     let is_ocean = height < params.ocean_level;
 
     let uv = vec2<f32>(

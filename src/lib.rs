@@ -1,10 +1,14 @@
 pub mod app;
 pub mod cube_sphere;
 pub mod export;
+pub mod export_staging;
 pub mod gpu;
 pub mod noise;
+pub mod openexr_writer;
+pub mod perf_evidence;
 pub mod planet;
 pub mod plates;
+pub mod png_writer;
 pub mod preview;
 pub mod terrain_compute;
 pub mod weather;

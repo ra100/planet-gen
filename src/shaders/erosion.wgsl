@@ -7,7 +7,10 @@
 //   erode: channel carving where drainage concentrates, gentle weathering elsewhere.
 
 struct ErosionParams {
-    resolution: u32,
+    width: u32,
+    height: u32,
+    full_resolution: u32,
+    row_offset: u32,
     erosion_rate: f32,
     deposition_rate: f32,
     min_slope: f32,
@@ -24,17 +27,19 @@ struct ErosionParams {
 @group(0) @binding(4) var<storage, read_write> water_out: array<f32>;
 
 fn get_h(x: i32, y: i32) -> f32 {
-    let res = i32(params.resolution);
-    let cx = clamp(x, 0, res - 1);
-    let cy = clamp(y, 0, res - 1);
-    return input_height[u32(cy) * params.resolution + u32(cx)];
+    let cx = clamp(x, 0, i32(params.width) - 1);
+    var cy = clamp(y, 0, i32(params.height) - 1);
+    if (y <= 0 && params.row_offset == 0u) { cy = 1; }
+    if (y >= i32(params.height) - 1 && params.row_offset + params.height - 2u == params.full_resolution) { cy = i32(params.height) - 2; }
+    return input_height[u32(cy) * params.width + u32(cx)];
 }
 
 fn get_water_in(x: i32, y: i32) -> f32 {
-    let res = i32(params.resolution);
-    let cx = clamp(x, 0, res - 1);
-    let cy = clamp(y, 0, res - 1);
-    return water_in[u32(cy) * params.resolution + u32(cx)];
+    let cx = clamp(x, 0, i32(params.width) - 1);
+    var cy = clamp(y, 0, i32(params.height) - 1);
+    if (y <= 0 && params.row_offset == 0u) { cy = 1; }
+    if (y >= i32(params.height) - 1 && params.row_offset + params.height - 2u == params.full_resolution) { cy = i32(params.height) - 2; }
+    return water_in[u32(cy) * params.width + u32(cx)];
 }
 
 // Find the steepest-descent neighbor (D8) using slope, not raw height.
@@ -120,22 +125,22 @@ fn flow_fraction(nx: i32, ny: i32, tx: i32, ty: i32) -> f32 {
 // Run 64+ times to propagate water from ridgelines to valleys.
 @compute @workgroup_size(16, 16)
 fn accumulate_flow(@builtin(global_invocation_id) id: vec3<u32>) {
-    let res = params.resolution;
-    if (id.x >= res || id.y >= res) { return; }
+    if (id.x >= params.width || id.y >= params.height || id.y == 0u || id.y + 1u >= params.height) { return; }
 
     let x = i32(id.x);
     let y = i32(id.y);
-    let idx = id.y * res + id.x;
+    let idx = id.y * params.width + id.x;
     let h = input_height[idx];
+    let global_y = f32(id.y - 1u + params.row_offset);
 
     // Moisture-weighted rainfall: varies with position to create
     // wet (tropical) vs dry (desert) erosion patterns.
     // Use noise-based spatial variation — correlates roughly with latitude
     // but works across all cubemap faces without needing face ID.
-    let moisture_pos = vec3<f32>(f32(x) * 0.02, f32(y) * 0.02, f32(params.seed) * 0.001);
+    let moisture_pos = vec3<f32>(f32(x) * 0.02, global_y * 0.02, f32(params.seed) * 0.001);
     let moisture_noise = snoise(moisture_pos * 1.5) * 0.3 + snoise(moisture_pos * 3.0) * 0.2;
     // Latitude proxy: y/resolution maps roughly to latitude on most faces
-    let lat_proxy = abs(f32(y) / f32(res) - 0.5) * 2.0; // 0 at equator, 1 at poles
+    let lat_proxy = abs(global_y / f32(params.full_resolution) - 0.5) * 2.0; // 0 at equator, 1 at poles
     // Hadley-like moisture: wet equator, dry subtropics (~0.5), wet mid-lat, dry poles
     let subtropical_dry = exp(-((lat_proxy - 0.35) * (lat_proxy - 0.35)) / 0.03) * 0.6;
     let base_moisture = 1.0 - subtropical_dry + moisture_noise;
@@ -165,13 +170,13 @@ fn accumulate_flow(@builtin(global_invocation_id) id: vec3<u32>) {
 // Pass 2: Channel carving + detail-preserving weathering
 @compute @workgroup_size(16, 16)
 fn erode(@builtin(global_invocation_id) id: vec3<u32>) {
-    let res = params.resolution;
-    if (id.x >= res || id.y >= res) { return; }
+    if (id.x >= params.width || id.y >= params.height || id.y == 0u || id.y + 1u >= params.height) { return; }
 
     let x = i32(id.x);
     let y = i32(id.y);
-    let idx = id.y * res + id.x;
+    let idx = id.y * params.width + id.x;
     let h = input_height[idx];
+    let global_y = f32(id.y - 1u + params.row_offset);
 
     // Skip deep ocean
     if (h < params.ocean_level - 0.05) {
@@ -201,9 +206,9 @@ fn erode(@builtin(global_invocation_id) id: vec3<u32>) {
     var new_h = h;
 
     // Moisture factor for erosion strength: wet areas erode more, dry areas stay sharp
-    let moist_pos = vec3<f32>(f32(x) * 0.02, f32(y) * 0.02, f32(params.seed) * 0.001);
+    let moist_pos = vec3<f32>(f32(x) * 0.02, global_y * 0.02, f32(params.seed) * 0.001);
     let moist_n = snoise(moist_pos * 1.5) * 0.3 + snoise(moist_pos * 3.0) * 0.2;
-    let lat_p = abs(f32(y) / f32(res) - 0.5) * 2.0;
+    let lat_p = abs(global_y / f32(params.full_resolution) - 0.5) * 2.0;
     let sub_dry = exp(-((lat_p - 0.35) * (lat_p - 0.35)) / 0.03) * 0.6;
     let moist_factor = clamp(1.0 - sub_dry + moist_n, 0.3, 1.3);
 
@@ -239,7 +244,7 @@ fn erode(@builtin(global_invocation_id) id: vec3<u32>) {
         let coast_fade = smoothstep(0.05, 0.10, land_height); // no noise at coastline
         let erosion_factor = drainage / max(params.channel_threshold, 1.0);
         let rough_amount = min(erosion_factor, 1.0) * 0.005 * coast_fade;
-        let pos = vec3<f32>(f32(x) * 0.1 + f32(params.seed) * 0.01, f32(y) * 0.1, 0.0);
+        let pos = vec3<f32>(f32(x) * 0.1 + f32(params.seed) * 0.01, global_y * 0.1, 0.0);
         let roughness = snoise(pos * 2.0);
         new_h += roughness * rough_amount;
     }

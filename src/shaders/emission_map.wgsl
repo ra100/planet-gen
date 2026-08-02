@@ -13,7 +13,7 @@ struct EmissionMapParams {
     tile_offset_x: u32,
     tile_offset_y: u32,
     full_resolution: u32,
-    _pad0: u32,
+    local_height: u32,
     _pad1: u32,
 }
 
@@ -28,9 +28,9 @@ fn smooth_step(edge0: f32, edge1: f32, x: f32) -> f32 {
 
 fn sample_height(gx: i32, gy: i32) -> f32 {
     let full = i32(params.full_resolution);
-    let cx = clamp(gx, 0, full - 1);
-    let cy = clamp(gy, 0, full - 1);
-    return heightmap[u32(cy) * params.full_resolution + u32(cx)];
+    let cx = clamp(clamp(gx, 0, full - 1) - i32(params.tile_offset_x), 0, i32(params.resolution) - 1);
+    let cy = clamp(clamp(gy, 0, full - 1) - i32(params.tile_offset_y), 0, i32(params.local_height) - 1);
+    return heightmap[u32(cy) * params.resolution + u32(cx)];
 }
 
 // Simplified temperature from latitude + altitude
@@ -50,13 +50,12 @@ fn compute_temp(sphere_pos: vec3<f32>, height: f32) -> f32 {
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let res = params.resolution;
-    if (id.x >= res || id.y >= res) { return; }
+    if (id.x >= res || id.y >= params.local_height) { return; }
 
     let full_res = params.full_resolution;
     let global_x = params.tile_offset_x + id.x;
     let global_y = params.tile_offset_y + id.y;
-    let height_idx = global_y * full_res + global_x;
-    let height = heightmap[height_idx];
+    let height = heightmap[id.y * res + id.x];
 
     let dev = params.night_lights;
     if (dev <= 0.0 || height <= params.ocean_level) {

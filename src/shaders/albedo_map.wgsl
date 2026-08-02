@@ -14,7 +14,7 @@ struct AlbedoParams {
     tile_offset_x: u32,
     tile_offset_y: u32,
     full_resolution: u32,
-    _pad0: u32,
+    local_height: u32,
 }
 
 @group(0) @binding(0) var<storage, read> heightmap: array<f32>;
@@ -140,7 +140,7 @@ fn gradient_color(temp_c: f32, moisture_cm: f32, variation: f32) -> vec3<f32> {
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let res = params.resolution;
-    if (id.x >= res || id.y >= res) {
+    if (id.x >= res || id.y >= params.local_height) {
         return;
     }
 
@@ -156,10 +156,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     );
     let sphere_pos = cube_to_sphere(params.face, uv);
 
-    // Read height from the full-resolution heightmap
-    // The heightmap index uses full_resolution stride
-    let height_idx = global_y * full_res + global_x;
-    let height = heightmap[height_idx];
+    let height = heightmap[idx];
     let is_ocean = height < params.ocean_level;
 
     let color_var = snoise(sphere_pos * 8.0);

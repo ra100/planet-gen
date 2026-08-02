@@ -28,7 +28,64 @@ pub struct TerrainGenParams {
     pub continental_scale: f32, // noise frequency multiplier for continent size (1.0 = default)
 }
 
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct TerrainGenerationParams {
+    pub seed: u32,
+    pub amplitude: f32,
+    pub frequency: f32,
+    pub octaves: u32,
+    pub gain: f32,
+    pub lacunarity: f32,
+    pub mountain_scale: f32,
+    pub boundary_width: f32,
+    pub warp_strength: f32,
+    pub detail_scale: f32,
+    pub surface_gravity: f32,
+    pub tectonics_factor: f32,
+    pub surface_age: f32,
+    pub continental_scale: f32,
+    pub num_plates_override: u32,
+    pub num_continents: u32,
+    pub continent_size_variety: f32,
+}
+
+impl TerrainGenParams {
+    pub fn for_tile(
+        terrain: &TerrainGenerationParams,
+        face: u32,
+        resolution: u32,
+        num_plates: u32,
+        tile_offset_x: u32,
+        tile_offset_y: u32,
+        full_resolution: u32,
+    ) -> Self {
+        Self {
+            face,
+            resolution,
+            num_plates,
+            seed: terrain.seed,
+            amplitude: terrain.amplitude,
+            frequency: terrain.frequency,
+            octaves: terrain.octaves,
+            gain: terrain.gain,
+            lacunarity: terrain.lacunarity,
+            tile_offset_x,
+            tile_offset_y,
+            full_resolution,
+            mountain_scale: terrain.mountain_scale,
+            boundary_width: terrain.boundary_width,
+            warp_strength: terrain.warp_strength,
+            detail_scale: terrain.detail_scale,
+            surface_gravity: terrain.surface_gravity,
+            tectonics_factor: terrain.tectonics_factor,
+            surface_age: terrain.surface_age,
+            continental_scale: terrain.continental_scale,
+        }
+    }
+}
+
 /// Generated tectonic heightmap for all 6 cube faces.
+#[derive(Clone)]
 pub struct TectonicTerrain {
     pub faces: [Vec<f32>; 6],
     pub resolution: u32,
@@ -137,7 +194,8 @@ impl TerrainComputePipeline {
         gpu: &GpuContext,
         plates_buffer: &wgpu::Buffer,
         params: &TerrainGenParams,
-    ) -> Vec<f32> {
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<Vec<f32>, String> {
         let tile_size = params.resolution;
         let total_pixels = (tile_size * tile_size) as usize;
         let buffer_size = (total_pixels * std::mem::size_of::<f32>()) as u64;
@@ -202,20 +260,37 @@ impl TerrainComputePipeline {
         encoder.copy_buffer_to_buffer(&output_buffer, 0, &staging_buffer, 0, buffer_size);
         gpu.queue.submit(Some(encoder.finish()));
 
-        staging_buffer
-            .slice(..)
-            .map_async(wgpu::MapMode::Read, |_| {});
-        let _ = gpu.device.poll(wgpu::PollType::Wait {
-            submission_index: None,
-            timeout: None,
+        let slice = staging_buffer.slice(..);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result.map_err(|error| error.to_string()));
         });
+        loop {
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err("Cancelled while waiting for terrain readback".into());
+            }
+            match receiver.try_recv() {
+                Ok(result) => {
+                    result.map_err(|error| format!("terrain readback failed: {error}"))?
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    return Err("terrain readback callback disconnected".into());
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    let _ = gpu.device.poll(wgpu::PollType::Poll);
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    continue;
+                }
+            }
+            break;
+        }
 
         let mapped = staging_buffer.slice(..).get_mapped_range();
         let result: Vec<f32> = bytemuck::cast_slice(&mapped).to_vec();
         drop(mapped);
         staging_buffer.unmap();
 
-        result
+        Ok(result)
     }
 
     /// Generate tectonic terrain for all 6 cube faces.
@@ -845,7 +920,10 @@ impl MultiPassTerrainPipeline {
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct ErosionParams {
-    pub resolution: u32,
+    pub width: u32,
+    pub height: u32,
+    pub full_resolution: u32,
+    pub row_offset: u32,
     pub erosion_rate: f32,
     pub deposition_rate: f32,
     pub min_slope: f32,
@@ -855,6 +933,71 @@ pub struct ErosionParams {
     pub _pad0: u32,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct ErosionTile {
+    row_offset: u32,
+    interior_rows: u32,
+}
+
+struct ErosionTileBuffers {
+    tile: ErosionTile,
+    height_a: wgpu::Buffer,
+    height_b: wgpu::Buffer,
+    water_a: wgpu::Buffer,
+    water_b: wgpu::Buffer,
+    params: wgpu::Buffer,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ErosionError {
+    #[error(
+        "erosion at {resolution}px requires a storage binding larger than the device limit of {max_binding_bytes} bytes"
+    )]
+    InsufficientStorageBinding {
+        resolution: u32,
+        max_binding_bytes: u64,
+    },
+    #[error("erosion readback cancelled")]
+    ReadbackCancelled,
+    #[error("erosion readback failed: {0}")]
+    ReadbackFailed(String),
+    #[error("erosion memory estimate overflowed")]
+    MemoryEstimateOverflow,
+}
+
+fn erosion_tiles(
+    resolution: u32,
+    max_binding_bytes: u64,
+) -> Result<Vec<ErosionTile>, ErosionError> {
+    let row_bytes = u64::from(resolution)
+        .checked_mul(std::mem::size_of::<f32>() as u64)
+        .ok_or(ErosionError::MemoryEstimateOverflow)?;
+    let rows_with_halo = max_binding_bytes / row_bytes;
+    let max_interior_rows =
+        rows_with_halo
+            .checked_sub(2)
+            .ok_or(ErosionError::InsufficientStorageBinding {
+                resolution,
+                max_binding_bytes,
+            })? as u32;
+    if max_interior_rows == 0 {
+        return Err(ErosionError::InsufficientStorageBinding {
+            resolution,
+            max_binding_bytes,
+        });
+    }
+
+    let tile_count = resolution.div_ceil(max_interior_rows);
+    let rows_per_tile = resolution.div_ceil(tile_count);
+    Ok((0..resolution)
+        .step_by(rows_per_tile as usize)
+        .map(|row_offset| ErosionTile {
+            row_offset,
+            interior_rows: (resolution - row_offset).min(rows_per_tile),
+        })
+        .collect())
+}
+
 pub struct ErosionPipeline {
     flow_pipeline: wgpu::ComputePipeline,
     erode_pipeline: wgpu::ComputePipeline,
@@ -862,6 +1005,26 @@ pub struct ErosionPipeline {
 }
 
 impl ErosionPipeline {
+    pub fn aggregate_tiled_bytes(
+        resolution: u32,
+        limits: &wgpu::Limits,
+    ) -> Result<u64, ErosionError> {
+        let max_binding_bytes =
+            u64::from(limits.max_storage_buffer_binding_size).min(limits.max_buffer_size);
+        let tiles = erosion_tiles(resolution, max_binding_bytes)?;
+        let rows_with_halos = tiles.iter().try_fold(0_u64, |total, tile| {
+            total
+                .checked_add(u64::from(tile.interior_rows) + 2)
+                .ok_or(ErosionError::MemoryEstimateOverflow)
+        })?;
+        u64::from(resolution)
+            .checked_mul(rows_with_halos)
+            .and_then(|values| values.checked_mul(std::mem::size_of::<f32>() as u64))
+            // Four concurrent storage buffers plus one staging buffer per tile.
+            .and_then(|tile_bytes| tile_bytes.checked_mul(5))
+            .ok_or(ErosionError::MemoryEstimateOverflow)
+    }
+
     pub fn new(gpu: &GpuContext) -> Self {
         let shader_source = format!(
             "{}\n{}",
@@ -984,263 +1147,336 @@ impl ErosionPipeline {
         terrain: &mut TectonicTerrain,
         iterations: u32,
         ocean_level: f32,
-    ) {
+    ) -> Result<(), ErosionError> {
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        self.erode_with_cancel(gpu, terrain, iterations, ocean_level, &cancel)
+    }
+
+    pub fn erode_with_cancel(
+        &self,
+        gpu: &GpuContext,
+        terrain: &mut TectonicTerrain,
+        iterations: u32,
+        ocean_level: f32,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<(), ErosionError> {
         if iterations == 0 {
-            return;
+            return Ok(());
         }
 
         let res = terrain.resolution;
-        let total_pixels = (res * res) as usize;
-        let buffer_size = (total_pixels * std::mem::size_of::<f32>()) as u64;
+        let limits = gpu.device.limits();
+        let tiles = erosion_tiles(
+            res,
+            u64::from(limits.max_storage_buffer_binding_size).min(limits.max_buffer_size),
+        )?;
         // Resolution-adaptive: longer propagation for higher resolution
         let flow_sub_iterations = (res / 8).max(16);
 
-        let erosion_params = ErosionParams {
-            resolution: res,
-            erosion_rate: 0.08,
-            deposition_rate: 0.05,
-            min_slope: 0.001,
-            channel_threshold: 8.0,
-            ocean_level,
-            seed: 42,
-            _pad0: 0,
-        };
-
-        let params_buffer = gpu
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("erosion params"),
-                contents: bytemuck::bytes_of(&erosion_params),
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
-
-        let workgroups = res.div_ceil(16);
-
         for face_idx in 0..6usize {
-            // Height ping-pong buffers
-            let buffer_a = gpu
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("erosion buf A"),
-                    contents: bytemuck::cast_slice(&terrain.faces[face_idx]),
-                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-                });
+            let tile_buffers: Vec<_> = tiles
+                .iter()
+                .copied()
+                .map(|tile| {
+                    let height = (0..tile.interior_rows + 2)
+                        .flat_map(|local_y| {
+                            let global_y =
+                                (tile.row_offset + local_y).saturating_sub(1).min(res - 1);
+                            let start = (global_y * res) as usize;
+                            terrain.faces[face_idx][start..start + res as usize]
+                                .iter()
+                                .copied()
+                        })
+                        .collect::<Vec<_>>();
+                    let tile_pixels = u64::from(res) * u64::from(tile.interior_rows + 2);
+                    let usage = wgpu::BufferUsages::STORAGE
+                        | wgpu::BufferUsages::COPY_SRC
+                        | wgpu::BufferUsages::COPY_DST;
+                    let params = ErosionParams {
+                        width: res,
+                        height: tile.interior_rows + 2,
+                        full_resolution: res,
+                        row_offset: tile.row_offset,
+                        erosion_rate: 0.08,
+                        deposition_rate: 0.05,
+                        min_slope: 0.001,
+                        channel_threshold: 8.0,
+                        ocean_level,
+                        seed: 42,
+                        _pad0: 0,
+                    };
+                    ErosionTileBuffers {
+                        tile,
+                        height_a: gpu.device.create_buffer_init(
+                            &wgpu::util::BufferInitDescriptor {
+                                label: Some("erosion height A"),
+                                contents: bytemuck::cast_slice(&height),
+                                usage,
+                            },
+                        ),
+                        height_b: gpu.device.create_buffer_init(
+                            &wgpu::util::BufferInitDescriptor {
+                                label: Some("erosion height B"),
+                                contents: bytemuck::cast_slice(&height),
+                                usage,
+                            },
+                        ),
+                        water_a: gpu
+                            .device
+                            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                label: Some("erosion water A"),
+                                contents: bytemuck::cast_slice(&vec![
+                                    1.0_f32;
+                                    tile_pixels as usize
+                                ]),
+                                usage,
+                            }),
+                        water_b: gpu
+                            .device
+                            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                label: Some("erosion water B"),
+                                contents: bytemuck::cast_slice(&vec![
+                                    1.0_f32;
+                                    tile_pixels as usize
+                                ]),
+                                usage,
+                            }),
+                        params: gpu
+                            .device
+                            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                label: Some("erosion params"),
+                                contents: bytemuck::bytes_of(&params),
+                                usage: wgpu::BufferUsages::UNIFORM,
+                            }),
+                    }
+                })
+                .collect();
 
-            let buffer_b = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("erosion buf B"),
-                size: buffer_size,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-                mapped_at_creation: false,
-            });
-
-            // Water ping-pong buffers (initialized to 1.0 = rainfall)
-            let water_init: Vec<f32> = vec![1.0; total_pixels];
-            let water_a = gpu
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("water A"),
-                    contents: bytemuck::cast_slice(&water_init),
-                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                });
-
-            let water_b = gpu
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("water B"),
-                    contents: bytemuck::cast_slice(&water_init),
-                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                });
-
-            // Flow bind groups: height stays constant, water ping-pongs
-            // Flow reads height from buffer_a (or current), water from water_in → water_out
-            let flow_a_to_b = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("flow W_A→W_B"),
-                layout: &self.bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: buffer_a.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: buffer_b.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: params_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: water_a.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: water_b.as_entire_binding(),
-                    },
-                ],
-            });
-
-            let flow_b_to_a = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("flow W_B→W_A"),
-                layout: &self.bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: buffer_a.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: buffer_b.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: params_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: water_b.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: water_a.as_entire_binding(),
-                    },
-                ],
-            });
-
-            // Erosion bind groups: height ping-pongs, reads final water
-            let erode_a_to_b = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("erode A→B"),
-                layout: &self.bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: buffer_a.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: buffer_b.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: params_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: water_a.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: water_b.as_entire_binding(),
-                    },
-                ],
-            });
-
-            let erode_b_to_a = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("erode B→A"),
-                layout: &self.bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: buffer_b.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: buffer_a.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: params_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: water_a.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: water_b.as_entire_binding(),
-                    },
-                ],
-            });
-
+            let bind_group = |label,
+                              tile: &ErosionTileBuffers,
+                              input_height: &wgpu::Buffer,
+                              output_height: &wgpu::Buffer,
+                              water_in: &wgpu::Buffer,
+                              water_out: &wgpu::Buffer| {
+                gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some(label),
+                    layout: &self.bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: input_height.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: output_height.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: tile.params.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: water_in.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: water_out.as_entire_binding(),
+                        },
+                    ],
+                })
+            };
             let mut encoder = gpu
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("erosion encoder"),
                 });
 
+            macro_rules! synchronize_halos {
+                ($field:ident) => {
+                    let row_bytes = u64::from(res) * std::mem::size_of::<f32>() as u64;
+                    for pair in tile_buffers.windows(2) {
+                        let upper = &pair[0];
+                        let lower = &pair[1];
+                        encoder.copy_buffer_to_buffer(
+                            &upper.$field,
+                            u64::from(upper.tile.interior_rows) * row_bytes,
+                            &lower.$field,
+                            0,
+                            row_bytes,
+                        );
+                        encoder.copy_buffer_to_buffer(
+                            &lower.$field,
+                            row_bytes,
+                            &upper.$field,
+                            u64::from(upper.tile.interior_rows + 1) * row_bytes,
+                            row_bytes,
+                        );
+                    }
+                };
+            }
+
             for iter in 0..iterations {
-                // Phase 1: Flow accumulation with water ping-pong
-                // Height buffer for flow is always buffer_a (current terrain) on even iters
-                let height_bg_even = iter % 2 == 0;
+                if iter.is_multiple_of(2) {
+                    synchronize_halos!(height_a);
+                } else {
+                    synchronize_halos!(height_b);
+                }
+                // Phase 1: Flow accumulation with the current height and water buffers.
                 for sub in 0..flow_sub_iterations {
-                    let flow_bg = if sub % 2 == 0 {
-                        &flow_a_to_b
+                    if sub.is_multiple_of(2) {
+                        synchronize_halos!(water_a);
                     } else {
-                        &flow_b_to_a
-                    };
-                    // Rebind with correct height buffer if height has ping-ponged
-                    let effective_flow_bg = if height_bg_even {
-                        flow_bg
-                    } else {
-                        // After odd erosion iteration, height is in buffer_b
-                        // We need flow bind groups that read from buffer_b
-                        // For simplicity, we always read height from the "input" side
-                        flow_bg
-                    };
-                    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                        label: Some("flow pass"),
-                        timestamp_writes: None,
-                    });
-                    pass.set_pipeline(&self.flow_pipeline);
-                    pass.set_bind_group(0, effective_flow_bg, &[]);
-                    pass.dispatch_workgroups(workgroups, workgroups, 1);
+                        synchronize_halos!(water_b);
+                    }
+                    for tile in &tile_buffers {
+                        let (input_height, output_height, water_in, water_out) =
+                            match (iter.is_multiple_of(2), sub.is_multiple_of(2)) {
+                                (true, true) => {
+                                    (&tile.height_a, &tile.height_b, &tile.water_a, &tile.water_b)
+                                }
+                                (true, false) => {
+                                    (&tile.height_a, &tile.height_b, &tile.water_b, &tile.water_a)
+                                }
+                                (false, true) => {
+                                    (&tile.height_b, &tile.height_a, &tile.water_a, &tile.water_b)
+                                }
+                                (false, false) => {
+                                    (&tile.height_b, &tile.height_a, &tile.water_b, &tile.water_a)
+                                }
+                            };
+                        let flow_bg = bind_group(
+                            "flow tile",
+                            tile,
+                            input_height,
+                            output_height,
+                            water_in,
+                            water_out,
+                        );
+                        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                            label: Some("flow pass"),
+                            timestamp_writes: None,
+                        });
+                        pass.set_pipeline(&self.flow_pipeline);
+                        pass.set_bind_group(0, &flow_bg, &[]);
+                        pass.dispatch_workgroups(
+                            res.div_ceil(16),
+                            (tile.tile.interior_rows + 2).div_ceil(16),
+                            1,
+                        );
+                    }
                 }
 
                 // Phase 2: Erosion — reads final water, writes new height
-                let _final_water_in_a = flow_sub_iterations.is_multiple_of(2);
-                let erode_bg = if iter % 2 == 0 {
-                    &erode_a_to_b
-                } else {
-                    &erode_b_to_a
-                };
-                {
+                for tile in &tile_buffers {
+                    let (input_height, output_height, water_in, water_out) = match (
+                        iter.is_multiple_of(2),
+                        flow_sub_iterations.is_multiple_of(2),
+                    ) {
+                        (true, true) => {
+                            (&tile.height_a, &tile.height_b, &tile.water_a, &tile.water_b)
+                        }
+                        (true, false) => {
+                            (&tile.height_a, &tile.height_b, &tile.water_b, &tile.water_a)
+                        }
+                        (false, true) => {
+                            (&tile.height_b, &tile.height_a, &tile.water_a, &tile.water_b)
+                        }
+                        (false, false) => {
+                            (&tile.height_b, &tile.height_a, &tile.water_b, &tile.water_a)
+                        }
+                    };
+                    let erode_bg = bind_group(
+                        "erode tile",
+                        tile,
+                        input_height,
+                        output_height,
+                        water_in,
+                        water_out,
+                    );
                     let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                         label: Some("erode pass"),
                         timestamp_writes: None,
                     });
                     pass.set_pipeline(&self.erode_pipeline);
-                    pass.set_bind_group(0, erode_bg, &[]);
-                    pass.dispatch_workgroups(workgroups, workgroups, 1);
+                    pass.set_bind_group(0, &erode_bg, &[]);
+                    pass.dispatch_workgroups(
+                        res.div_ceil(16),
+                        (tile.tile.interior_rows + 2).div_ceil(16),
+                        1,
+                    );
                 }
             }
 
-            // Read back result
-            let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("erosion staging"),
-                size: buffer_size,
-                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-
-            let result_buffer = if iterations.is_multiple_of(2) {
-                &buffer_a
-            } else {
-                &buffer_b
-            };
-            encoder.copy_buffer_to_buffer(result_buffer, 0, &staging, 0, buffer_size);
+            let staging: Vec<_> = tile_buffers
+                .iter()
+                .map(|tile| {
+                    let size = u64::from(res)
+                        * u64::from(tile.tile.interior_rows + 2)
+                        * std::mem::size_of::<f32>() as u64;
+                    let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("erosion staging"),
+                        size,
+                        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    });
+                    let result = if iterations.is_multiple_of(2) {
+                        &tile.height_a
+                    } else {
+                        &tile.height_b
+                    };
+                    encoder.copy_buffer_to_buffer(result, 0, &staging, 0, size);
+                    staging
+                })
+                .collect();
             gpu.queue.submit(Some(encoder.finish()));
 
-            staging.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-            let _ = gpu.device.poll(wgpu::PollType::Wait {
-                submission_index: None,
-                timeout: None,
-            });
+            let (sender, receiver) = std::sync::mpsc::channel();
+            for buffer in &staging {
+                let sender = sender.clone();
+                buffer
+                    .slice(..)
+                    .map_async(wgpu::MapMode::Read, move |result| {
+                        let _ = sender.send(result.map_err(|error| error.to_string()));
+                    });
+            }
+            drop(sender);
+            for _ in &staging {
+                loop {
+                    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                        return Err(ErosionError::ReadbackCancelled);
+                    }
+                    match receiver.try_recv() {
+                        Ok(Ok(())) => break,
+                        Ok(Err(error)) => return Err(ErosionError::ReadbackFailed(error)),
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            return Err(ErosionError::ReadbackFailed(
+                                "callback disconnected".into(),
+                            ));
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Empty) => {
+                            let _ = gpu.device.poll(wgpu::PollType::Poll);
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                        }
+                    }
+                }
+            }
 
-            let mapped = staging.slice(..).get_mapped_range();
-            terrain.faces[face_idx] = bytemuck::cast_slice(&mapped).to_vec();
-            drop(mapped);
-            staging.unmap();
+            let mut face = vec![0.0; (res * res) as usize];
+            for (tile, staging) in tile_buffers.iter().zip(&staging) {
+                let mapped = staging.slice(..).get_mapped_range();
+                let values: &[f32] = bytemuck::cast_slice(&mapped);
+                for row in 0..tile.tile.interior_rows as usize {
+                    let source = (row + 1) * res as usize;
+                    let destination = (tile.tile.row_offset as usize + row) * res as usize;
+                    face[destination..destination + res as usize]
+                        .copy_from_slice(&values[source..source + res as usize]);
+                }
+                drop(mapped);
+                staging.unmap();
+            }
+            terrain.faces[face_idx] = face;
         }
+        Ok(())
     }
 }
 
@@ -1952,6 +2188,99 @@ mod tests {
             }),
             resolution,
         }
+    }
+
+    fn sloped_terrain(resolution: u32) -> TectonicTerrain {
+        TectonicTerrain {
+            faces: std::array::from_fn(|_| {
+                (0..resolution * resolution)
+                    .map(|index| (index / resolution + index % resolution) as f32 * 0.02)
+                    .collect()
+            }),
+            resolution,
+        }
+    }
+
+    #[test]
+    fn erosion_tiles_keep_halo_bindings_within_device_limit() {
+        let limit = 134_217_728;
+        let tiles = erosion_tiles(8192, limit).expect("128 MiB should support tiled 8K erosion");
+        assert!(tiles.len() > 1);
+        assert_eq!(tiles.first().unwrap().row_offset, 0);
+        assert_eq!(
+            tiles.iter().map(|tile| tile.interior_rows).sum::<u32>(),
+            8192
+        );
+        assert!(
+            tiles.iter().all(|tile| {
+                u64::from(8192_u32) * u64::from(tile.interior_rows + 2) * 4 <= limit
+            })
+        );
+
+        let mut limits = wgpu::Limits::default();
+        limits.max_storage_buffer_binding_size = limit as u32;
+        limits.max_buffer_size = limit;
+        let expected = tiles
+            .iter()
+            .map(|tile| u64::from(8192_u32) * u64::from(tile.interior_rows + 2) * 4 * 5)
+            .sum::<u64>();
+        assert_eq!(
+            ErosionPipeline::aggregate_tiled_bytes(8192, &limits).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn erosion_tiles_return_a_structured_error_when_one_row_cannot_fit() {
+        assert!(matches!(
+            erosion_tiles(8192, 8192 * 4),
+            Err(ErosionError::InsufficientStorageBinding { .. })
+        ));
+    }
+
+    #[test]
+    fn erosion_readback_observes_cancellation() {
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let pipeline = ErosionPipeline::new(&gpu);
+        let mut terrain = sloped_terrain(16);
+        let cancel = std::sync::atomic::AtomicBool::new(true);
+        assert!(matches!(
+            pipeline.erode_with_cancel(&gpu, &mut terrain, 1, -1.0, &cancel),
+            Err(ErosionError::ReadbackCancelled)
+        ));
+    }
+
+    #[test]
+    fn erosion_ping_pong_uses_latest_iteration() {
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let pipeline = ErosionPipeline::new(&gpu);
+        let mut once = sloped_terrain(16);
+        let mut twice = sloped_terrain(16);
+
+        pipeline.erode(&gpu, &mut once, 1, -1.0).unwrap();
+        pipeline.erode(&gpu, &mut twice, 2, -1.0).unwrap();
+
+        assert_ne!(once.faces, twice.faces);
+        assert!(
+            twice
+                .faces
+                .iter()
+                .flatten()
+                .zip(sloped_terrain(16).faces.iter().flatten())
+                .any(|(eroded, original)| eroded != original)
+        );
+    }
+
+    #[test]
+    fn zero_erosion_iterations_preserve_terrain() {
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let pipeline = ErosionPipeline::new(&gpu);
+        let mut terrain = sloped_terrain(16);
+        let original = sloped_terrain(16);
+
+        pipeline.erode(&gpu, &mut terrain, 0, -1.0).unwrap();
+
+        assert_eq!(terrain.faces, original.faces);
     }
 
     fn read_texture(gpu: &GpuContext, texture: &wgpu::Texture, resolution: u32) -> Vec<f32> {

@@ -69,7 +69,10 @@ fn main() {
         );
 
         // Apply erosion
-        erosion.erode(&gpu, &mut terrain, *iterations, ocean_level);
+        if let Err(error) = erosion.erode(&gpu, &mut terrain, *iterations, ocean_level) {
+            eprintln!("erosion failed: {error}");
+            return;
+        }
 
         let cubemap_view = renderer.upload_terrain(&gpu, &terrain);
 

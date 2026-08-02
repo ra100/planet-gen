@@ -7,7 +7,8 @@ use crate::planet::{DerivedProperties, PlanetParams};
 use crate::plates::{PlateGenParams, generate_plates};
 use crate::preview::{PreviewRenderer, PreviewUniforms};
 use crate::terrain_compute::{
-    DynamicsTextures, ErosionPipeline, TerrainComputePipeline, WindFieldPipeline,
+    DynamicsTextures, ErosionPipeline, TerrainComputePipeline, TerrainGenerationParams,
+    WindFieldPipeline,
 };
 use crate::weather::{
     DEFAULT_WEATHER_RESOLUTION, WeatherFieldPipeline, WeatherLifecycle, WeatherSnapshot,
@@ -100,6 +101,48 @@ pub struct PlanetGenApp {
     export_status: String,
     export_progress: f32,
     gpu_error: Option<String>,
+}
+
+fn derive_terrain_params(
+    params: &PlanetParams,
+    derived: &DerivedProperties,
+    continental_scale: f32,
+    mountain_scale: f32,
+    boundary_width: f32,
+    warp_strength: f32,
+    detail_scale: f32,
+    age_override: Option<f32>,
+    num_plates_override: u32,
+    num_continents: u32,
+    continent_size_variety: f32,
+) -> TerrainGenerationParams {
+    let dist_factor = (params.star_distance_au.ln() / 3.0_f32.ln()).clamp(0.0, 1.0);
+    let beta = (1.47 + 0.91 * dist_factor + 0.3 * params.metallicity).clamp(1.2, 3.0);
+    let gain = 2.0_f32.powf(-(beta - 1.0) / 2.0);
+    let amplitude = 0.6 + 0.6 * params.mass_earth.powf(0.3).min(2.0);
+    let frequency = (1.0 + 0.5 * params.mass_earth.powf(0.2)) * continental_scale;
+    let octaves = (8.0 + 4.0 * (params.axial_tilt_deg / 90.0) * derived.tectonics_factor) as u32;
+    let lacunarity = 1.9 + 0.2 * (24.0 / params.rotation_period_h).clamp(0.5, 2.0);
+
+    TerrainGenerationParams {
+        seed: params.seed,
+        amplitude,
+        frequency,
+        octaves,
+        gain,
+        lacunarity,
+        mountain_scale,
+        boundary_width,
+        warp_strength,
+        detail_scale,
+        surface_gravity: derived.surface_gravity,
+        tectonics_factor: derived.tectonics_factor,
+        surface_age: age_override.unwrap_or(derived.surface_age),
+        continental_scale,
+        num_plates_override,
+        num_continents,
+        continent_size_variety,
+    }
 }
 
 impl PlanetGenApp {
@@ -282,26 +325,20 @@ impl PlanetGenApp {
         }
     }
 
-    fn terrain_params(&self) -> (f32, f32, u32, f32, f32) {
-        // Spectral exponent mapping from research
-        let dist = self.params.star_distance_au;
-        let dist_factor = (dist.ln() / 3.0_f32.ln()).clamp(0.0, 1.0);
-        let base_beta = 1.47 + 0.91 * dist_factor;
-        let beta = (base_beta + 0.3 * self.params.metallicity).clamp(1.2, 3.0);
-        let hurst = (beta - 1.0) / 2.0;
-        let gain = 2.0_f32.powf(-hurst);
-
-        let mass = self.params.mass_earth;
-        let amplitude = 0.6 + 0.6 * mass.powf(0.3).min(2.0);
-        let frequency = (1.0 + 0.5 * mass.powf(0.2)) * self.continental_scale;
-
-        let tilt_factor = self.params.axial_tilt_deg / 90.0;
-        let octaves = (8.0 + 4.0 * tilt_factor * self.derived.tectonics_factor) as u32;
-
-        let rotation_factor = (24.0 / self.params.rotation_period_h).clamp(0.5, 2.0);
-        let lacunarity = 1.9 + 0.2 * rotation_factor;
-
-        (amplitude, frequency, octaves, gain, lacunarity)
+    fn terrain_params(&self) -> TerrainGenerationParams {
+        derive_terrain_params(
+            &self.params,
+            &self.derived,
+            self.continental_scale,
+            self.mountain_scale,
+            self.boundary_width,
+            self.warp_strength,
+            self.detail_scale,
+            self.age_override,
+            self.num_plates_override,
+            self.num_continents,
+            self.continent_size_variety,
+        )
     }
 
     fn regenerate_terrain(&mut self) {
@@ -327,25 +364,25 @@ impl PlanetGenApp {
             continent_size_variety: self.continent_size_variety,
         });
 
-        let (amplitude, frequency, octaves, gain, lacunarity) = self.terrain_params();
+        let terrain_params = self.terrain_params();
         let terrain = self.terrain_compute.generate(
             &self.gpu,
             &plates,
             self.preview_resolution,
-            self.params.seed,
-            amplitude,
-            frequency,
-            octaves,
-            gain,
-            lacunarity,
-            self.mountain_scale,
-            self.boundary_width,
-            self.warp_strength,
-            self.detail_scale,
-            self.derived.surface_gravity,
-            self.derived.tectonics_factor,
-            self.age_override.unwrap_or(self.derived.surface_age),
-            self.continental_scale,
+            terrain_params.seed,
+            terrain_params.amplitude,
+            terrain_params.frequency,
+            terrain_params.octaves,
+            terrain_params.gain,
+            terrain_params.lacunarity,
+            terrain_params.mountain_scale,
+            terrain_params.boundary_width,
+            terrain_params.warp_strength,
+            terrain_params.detail_scale,
+            terrain_params.surface_gravity,
+            terrain_params.tectonics_factor,
+            terrain_params.surface_age,
+            terrain_params.continental_scale,
         );
 
         let effective_ocean = self.derived.ocean_fraction * (1.0 - self.water_loss);
@@ -426,10 +463,16 @@ impl PlanetGenApp {
 
         if let Some(ref mut terrain) = self.erosion_terrain {
             let t = Instant::now();
-            self.erosion_pipeline
+            if let Err(error) = self
+                .erosion_pipeline
                 .as_ref()
                 .expect("procedural terrain owns erosion pipeline")
-                .erode(&self.gpu, terrain, iters, self.erosion_ocean_level);
+                .erode(&self.gpu, terrain, iters, self.erosion_ocean_level)
+            {
+                self.gpu_error = Some(error.to_string());
+                self.erosion_remaining = 0;
+                return;
+            }
             self.cached_cubemap_view =
                 Some(self.preview_renderer.upload_terrain(&self.gpu, terrain));
             self.erosion_remaining -= iters;
@@ -1329,4 +1372,100 @@ fn rand_seed() -> u32 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .subsec_nanos()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::export::{ExportConfig, ExportLayers, run_export};
+
+    fn export_config(output_dir: std::path::PathBuf, planet_name: &str) -> ExportConfig {
+        ExportConfig {
+            face_resolution: 32,
+            tile_size: 16,
+            output_dir,
+            planet_name: planet_name.into(),
+            erosion_iterations: 0,
+            season: 0.5,
+            layers: ExportLayers {
+                height: true,
+                albedo: false,
+                normals: false,
+                roughness: false,
+                water_mask: false,
+                clouds: false,
+                emission: false,
+            },
+            cloud_coverage: 0.5,
+            cloud_type: 0.5,
+            cloud_seed: 42,
+            night_lights: 0.0,
+        }
+    }
+
+    #[test]
+    fn preview_export_v1_preset_preserves_non_default_plate_controls() {
+        let params = PlanetParams {
+            seed: 42,
+            ..PlanetParams::default()
+        };
+        let derived = DerivedProperties::from_params(&params);
+        let preview = derive_terrain_params(
+            &params,
+            &derived,
+            1.2,
+            1.3,
+            0.08,
+            0.7,
+            0.9,
+            Some(0.6),
+            13,
+            7,
+            0.8,
+        );
+        assert_eq!(preview.num_plates_override, 13);
+        assert_eq!(preview.num_continents, 7);
+        assert_eq!(preview.continent_size_variety, 0.8);
+
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let root = std::env::temp_dir().join(format!("planet-gen-parity-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (progress, _) = std::sync::mpsc::channel();
+        let exported = run_export(
+            &gpu,
+            &export_config(root.clone(), "preview"),
+            &params,
+            &derived,
+            preview.continental_scale,
+            0.0,
+            preview,
+            &progress,
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .expect("preview export failed");
+        let altered = TerrainGenerationParams {
+            num_plates_override: 4,
+            num_continents: 1,
+            continent_size_variety: 0.0,
+            ..preview
+        };
+        let exported_altered = run_export(
+            &gpu,
+            &export_config(root.clone(), "altered"),
+            &params,
+            &derived,
+            altered.continental_scale,
+            0.0,
+            altered,
+            &progress,
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .expect("altered export failed");
+
+        assert_ne!(
+            std::fs::read(exported.join("height.exr")).unwrap(),
+            std::fs::read(exported_altered.join("height.exr")).unwrap(),
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

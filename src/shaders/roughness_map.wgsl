@@ -12,7 +12,7 @@ struct RoughnessParams {
     tile_offset_x: u32,
     tile_offset_y: u32,
     full_resolution: u32,
-    _pad0: u32,
+    local_height: u32,
     _pad1: u32,
     _pad2: u32,
 }
@@ -35,16 +35,15 @@ fn biome_roughness_value(temp_c: f32, moisture_cm: f32, is_ocean: bool) -> f32 {
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let res = params.resolution;
-    if (id.x >= res || id.y >= res) {
+    if (id.x >= res || id.y >= params.local_height) {
         return;
     }
 
-    // Global coordinates for heightmap lookup and UV
+    // Global coordinates are only for planet-space calculations.
     let full_res = params.full_resolution;
     let global_x = params.tile_offset_x + id.x;
     let global_y = params.tile_offset_y + id.y;
-    let height_idx = global_y * full_res + global_x;
-    let height = heightmap[height_idx];
+    let height = heightmap[id.y * res + id.x];
     let is_ocean = height < params.ocean_level;
 
     let uv = vec2<f32>(
@@ -73,10 +72,14 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         let y_up = select(global_y - 1u, 0u, global_y == 0u);
         let y_down = min(global_y + 1u, full_res - 1u);
 
-        let h_left = heightmap[global_y * full_res + x_left];
-        let h_right = heightmap[global_y * full_res + x_right];
-        let h_up = heightmap[y_up * full_res + global_x];
-        let h_down = heightmap[y_down * full_res + global_x];
+        let local_x_left = u32(clamp(i32(x_left) - i32(params.tile_offset_x), 0, i32(res) - 1));
+        let local_x_right = u32(clamp(i32(x_right) - i32(params.tile_offset_x), 0, i32(res) - 1));
+        let local_y_up = u32(clamp(i32(y_up) - i32(params.tile_offset_y), 0, i32(params.local_height) - 1));
+        let local_y_down = u32(clamp(i32(y_down) - i32(params.tile_offset_y), 0, i32(params.local_height) - 1));
+        let h_left = heightmap[id.y * res + local_x_left];
+        let h_right = heightmap[id.y * res + local_x_right];
+        let h_up = heightmap[local_y_up * res + id.x];
+        let h_down = heightmap[local_y_down * res + id.x];
 
         let step_size = 2.0 / f32(full_res);
         let dx = (h_right - h_left) / step_size;

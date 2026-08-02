@@ -10,18 +10,17 @@ struct AoParams {
     tile_offset_x: u32,
     tile_offset_y: u32,
     resolution: u32,
-    _pad0: u32,
+    local_height: u32,
 }
 
 @group(0) @binding(0) var<storage, read> heightmap: array<f32>;
 @group(0) @binding(1) var<storage, read_write> ao_output: array<f32>;
 @group(0) @binding(2) var<uniform> params: AoParams;
 
-fn read_height(gx: i32, gy: i32) -> f32 {
-    let full = i32(params.full_resolution);
-    let cx = clamp(gx, 0, full - 1);
-    let cy = clamp(gy, 0, full - 1);
-    return heightmap[u32(cy) * params.full_resolution + u32(cx)];
+fn read_height(lx: i32, ly: i32) -> f32 {
+    let cx = clamp(lx, 0, i32(params.resolution) - 1);
+    let cy = clamp(ly, 0, i32(params.local_height) - 1);
+    return heightmap[u32(cy) * params.resolution + u32(cx)];
 }
 
 // Compute curvature at a given radius by comparing center to ring average.
@@ -50,13 +49,13 @@ fn curvature_at_radius(gx: i32, gy: i32, center_h: f32, radius: i32) -> f32 {
 @compute @workgroup_size(8, 8, 1)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let res = params.resolution;
-    if (id.x >= res || id.y >= res) {
+    if (id.x >= res || id.y >= params.local_height) {
         return;
     }
 
-    let gx = i32(params.tile_offset_x + id.x);
-    let gy = i32(params.tile_offset_y + id.y);
-    let center_h = read_height(gx, gy);
+    let lx = i32(id.x);
+    let ly = i32(id.y);
+    let center_h = read_height(lx, ly);
 
     // Ocean gets full AO (no occlusion)
     if (center_h < params.ocean_level) {
@@ -66,9 +65,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 
     // Multi-scale curvature: small (r=1), medium (r=3), large (r=6)
-    let curv_small  = curvature_at_radius(gx, gy, center_h, 1);
-    let curv_medium = curvature_at_radius(gx, gy, center_h, 3);
-    let curv_large  = curvature_at_radius(gx, gy, center_h, 6);
+    let curv_small  = curvature_at_radius(lx, ly, center_h, 1);
+    let curv_medium = curvature_at_radius(lx, ly, center_h, 3);
+    let curv_large  = curvature_at_radius(lx, ly, center_h, 6);
 
     // Weighted blend: small details matter most for AO
     let blended_curv = curv_small * 0.5 + curv_medium * 0.35 + curv_large * 0.15;
