@@ -1,0 +1,2 @@
+# Use only target/terrain-diffusion-native/env/bin/python; do not install dependencies here.
+torch==2.4.1+cu121
