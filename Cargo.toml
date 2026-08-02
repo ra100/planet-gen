@@ -18,9 +18,14 @@ egui = "0.33"
 # Image export
 image = "0.25"
 exr = "1.74"
+png = "0.18"
 
 # Utilities
 log = "0.4"
 env_logger = "0.11"
 thiserror = "2"
 half = "2"
+
+[build-dependencies]
+cc = "1"
+pkg-config = "0.3"

@@ -2741,6 +2741,7 @@ name = "planet-gen"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "cc",
  "eframe",
  "egui",
  "env_logger",
@@ -2748,6 +2749,8 @@ dependencies = [
  "half",
  "image",
  "log",
+ "pkg-config",
+ "png",
  "pollster",
  "thiserror 2.0.18",
  "wgpu",

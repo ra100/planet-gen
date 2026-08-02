@@ -2,6 +2,10 @@
 
 Status: `NOT_RUN` for change approval. This record captures the available pre-U2.a evaluator artifact, not an accepted U2 baseline.
 
+## Version Policy
+
+`procedural-terrain-u2-v1` names the current-pipeline U2 baseline. Final `procedural-terrain-*-v1` acceptance remains reserved for U7 because its required macro, hydrology, residual, and final-weather stages do not exist before U3–U6. This policy does not change `last-accepted=NOT_RUN`.
+
 ## Provenance
 
 | Field | Value |
@@ -84,7 +88,29 @@ metric.pole_slope_south_p50=0.007191223
 | Canonical preset parameter record | `NOT_RUN` | Existing evaluator exposes only resolution. |
 | Adapter / limits / RSS | `NOT_RUN` | Existing evaluator does not emit them. |
 | Last accepted evaluator report | `NOT_RUN` | The captured seed-42 control has failing normal and pole-elevation gates. |
-| Last accepted performance report | `NOT_RUN` | `perf_bench` emits console CSV for 256–2048 only; it has no persisted report, adapter metadata, or canonical run protocol. |
+| Last accepted performance report | `NOT_RUN` | The U2 report protocol is available, but no canonical 768/8K measured repetition set has been published. |
+
+## U2 Performance Evidence Protocol
+
+`cargo run --release --bin perf_bench -- --u2-not-run-report` publishes a durable `NOT_RUN` record under `target/procedural-terrain-evidence/`. The record includes the U2 preset, timing and memory fields, gate statuses, artifact SHA-256 values, and a SHA-256 manifest digest. It is intentionally not a performance claim and never updates `last-accepted.json`.
+
+`cargo run --release --bin perf_bench -- --u2-768` performs one unmeasured 768 warm-up plus one measured current-preview regeneration, then publishes actual adapter, device limits, stage timings, owned-live-byte estimate, and Linux RSS when available. `generation_inclusive_ms` and `erosion_inclusive_ms` include their internal GPU readback/mapping waits; they do not claim a separable readback phase. `upload_sync_ms` includes an explicit queue completion wait. It cannot advance `last-accepted.json` because the required 8K evidence is absent. `cargo run --release --bin perf_bench -- --u2-8k` is the only command that runs the expensive 8K end-to-end export phase; it must be invoked explicitly and remains non-accepting until all required stage measurements and run repetitions are present. The authoritative Cold8k deadline is `240,000 ms` (four minutes).
+
+The U2 768 mode uses the existing preview's 15-iteration adaptive erosion budget at 768 rather than the 25-iteration export/default budget. This changes benchmark accounting only; it does not alter preview, export, terrain, or erosion behavior.
+
+Canonical 768 warm and 8K cold measurements remain `NOT_RUN`; adapter limits, owned live bytes, and RSS remain `NOT_RUN` until a measured run records them. Only a report with all required U2 gates passing may replace `last-accepted.json`.
+
+### U2-006 representative 768 result
+
+The representative adapter run `u2-768-warm-seed42-rep1-1785334494108772784` recorded NVIDIA GeForce RTX 4090 (Vulkan), generation `10.906492ms`, erosion `1053.29134ms`, upload enqueue `4.452403ms`, total `1068.650885ms`, owned live bytes `28311552`, RSS `705695744`, and device limits `268435456` max buffer bytes / `134217728` storage-binding bytes / `8192` texture dimension. This pre-remediation evidence is retained unchanged; its upload field was enqueue timing, not completion-synchronized timing. The 768 warm gate is `FAIL` because total exceeds the one-second hard limit; 8K remains `NOT_RUN`. Its manifest is `1c568e77ad3dab1cec3838495fb75f5d1c553451780b4df1082604f6e8183659`, and `last-accepted.json` remains absent/unadvanced. No 8K run was attempted after this hard-gate failure.
+
+After aligning the benchmark with the existing 768 preview erosion budget, `u2-768-warm-seed42-rep1-1785335058012584537` recorded generation-inclusive `10.738536ms`, erosion-inclusive `646.166165ms`, upload-sync `3.910108ms`, and total `660.815269ms` on the same adapter. The 768 warm gate is `PASS`; owned bytes and RSS gates are also `PASS`. Its manifest is `f08ff4914954035d65280f050d0fae9b31e965e40c7e2d107c1d9db4e5564689`. Completion remains `FAIL` and `last-accepted.json` remains absent because 8K evidence is `NOT_RUN`.
+
+### U2-008 8K limit boundary
+
+Tile selection keeps the fixed six-texel halo and bounds a tile's input plus output/staging footprint by `(tile + 12)^2 * (4 + 2 * output_element_bytes)` against both queried buffer limits. On the RTX 4090's 128MiB storage-binding limit, a requested 2048 tile reduces to 1024; the configured 512 tile is already legal. The historical legacy path retained six full terrain faces, one full face map, and one full equirectangular layer; its `6 * n² * 4 + n² * 16 + 2 * n² * 16 = 4.5GiB` estimate caused the preserved failed run `u2-8k-cold-seed42-rep1-1785451466987823955` to stop before allocation. U2-013 retains exact halo-synchronised erosion and accounts for every concurrently allocated erosion strip: four storage buffers plus one staging buffer per strip. The 8K owned-live-byte budget is now 4GiB; export preflight takes the maximum of the staged-export peak and terrain-plus-aggregate-erosion peak, and rejects configurations above it before allocation. U2-012 still selects staged EXR/PNG layers only and explicitly excludes legacy emission. That estimate is not runtime proof; a fresh complete 8K evidence run remains required.
+
+The later complete cold run `u2-8k-cold-seed42-rep1-1785691878476508601` is retained at `target/procedural-terrain-evidence/u2-8k-cold-seed42-rep1-1785691878476508601/manifest.json` and `stage-journal.json`. It recorded total `240335.084225 ms`, exceeding the `240000 ms` Cold8k deadline; `cold_8k=FAIL` and completion is `FAIL`. The user explicitly accepts U2 as slow for 8K and authorizes U3 to proceed by manual product waiver. This is not a measured benchmark `PASS`, does not update `last-accepted.json`, and leaves the failed timing evidence and every final acceptance gate unchanged.
 
 ## Rollback Boundary
 
