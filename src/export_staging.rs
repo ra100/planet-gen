@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
 
 const ROW_CANCEL_CHECK_INTERVAL: u32 = 128;
 pub const MAX_EQUIRECT_INTERMEDIATE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
@@ -549,6 +549,7 @@ impl EquirectStage {
             .create(true)
             .read(true)
             .write(true)
+            .truncate(true)
             .open(&path)
         {
             Ok(file) => file,
@@ -573,7 +574,7 @@ impl EquirectStage {
         if self.complete || self.next_row == self.height {
             return Err("all declared equirect staging rows were already written".into());
         }
-        if values.len() * std::mem::size_of::<f32>() != self.row_bytes {
+        if std::mem::size_of_val(values) != self.row_bytes {
             return Err("equirect staging row has an unexpected component count".into());
         }
         self.file
@@ -707,6 +708,7 @@ impl FaceStage {
             .create(true)
             .read(true)
             .write(true)
+            .truncate(false)
             .open(self.face_path(face))
             .map_err(|error| format!("failed to open staged face: {error}"))?;
         let row_bytes =
@@ -1019,15 +1021,17 @@ mod tests {
     #[test]
     fn rejects_invalid_tile_metadata() {
         let root = std::env::temp_dir();
-        assert!(FaceStage::create(
-            &root,
-            StageMetadata {
-                face_resolution: 0,
-                components: 1,
-                halo: 0
-            }
-        )
-        .is_err());
+        assert!(
+            FaceStage::create(
+                &root,
+                StageMetadata {
+                    face_resolution: 0,
+                    components: 1,
+                    halo: 0
+                }
+            )
+            .is_err()
+        );
     }
 
     #[test]

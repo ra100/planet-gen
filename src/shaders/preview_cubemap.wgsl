@@ -411,29 +411,8 @@ fn compute_temperature(sphere_pos: vec3<f32>, height: f32, season: f32) -> f32 {
     return base_temp + lapse + temp_noise + region_temp_bias + current_temp;
 }
 
-// ---- Rotation-dependent cell boundaries (Kaspi & Showman 2015) ----
-// Returns Hadley cell top latitude in degrees from rotation rate Omega (Earth=1.0)
-// and planet mean temperature. Temperature widens 1° per 4°C up to 21°C, then reverses.
-fn preview_hadley_top() -> f32 {
-    let omega = max(uniforms.rotation_rate, 0.1);
-    // Base from rotation: 30°/Omega^0.3, capped at 70°
-    var base = min(30.0 / pow(omega, 0.3), 70.0);
-    // Temperature adjustment: +1° per 4°C above 15°C, reverses above 21°C
-    let temp_c = uniforms.base_temp_c;
-    if (temp_c <= 21.0) {
-        let temp_excess = clamp(temp_c - 15.0, -20.0, 6.0);
-        base += temp_excess * 0.25;
-    } else {
-        // Above 21°C: shrinks back (melting ice caps reduce pole-equator ΔT)
-        let overshoot = clamp(temp_c - 21.0, 0.0, 14.0);
-        base += 1.5 - overshoot * 0.25; // peaks at 21°C (+1.5°), shrinks above
-    }
-    return clamp(base, 15.0, 70.0);
-}
-
-fn preview_subpolar_lat() -> f32 {
-    let omega = max(uniforms.rotation_rate, 0.1);
-    return min(60.0 / pow(omega, 0.2), 80.0);
+fn wind_height_sample(direction: vec3<f32>) -> f32 {
+    return textureSample(height_tex, height_sampler, direction).r;
 }
 
 // ---- Hadley cell moisture ----
@@ -455,61 +434,6 @@ fn hadley_cell_moisture(latitude_rad: f32) -> f32 {
     return max(itcz_wet + subtropical_dry + polar_front_wet + polar_dry + 90.0, 10.0);
 }
 
-// Wind direction from Hadley/Ferrel/Polar cells — smooth transitions, Coriolis curvature
-// Cell boundaries shift with rotation rate (Kaspi & Showman 2015) and thermal equator
-fn wind_direction_vec(latitude_rad: f32) -> vec3<f32> {
-    let hemisphere = sign(latitude_rad + 0.0001);
-
-    // Rotation-dependent cell boundaries
-    let hadley_lat = preview_hadley_top();
-    let polar_lat = preview_subpolar_lat();
-    // Transition zone widths scale with cell size
-    let trade_top = hadley_lat * 0.75;       // trades fade near top of Hadley cell
-    let trade_full = hadley_lat * 1.05;      // fully into westerlies
-    let west_start = hadley_lat * 0.9;
-    let west_end = polar_lat * 0.92;
-    let polar_start = polar_lat * 0.95;
-
-    // Seasonal shift: thermal equator moves with sub-solar point
-    let season_shift = uniforms.axial_tilt_rad * ((uniforms.season - 0.5) * 2.0) * 0.4;
-    let shifted_lat = latitude_rad - season_shift;
-    let lat_deg = abs(shifted_lat) * 180.0 / 3.14159;
-
-    // Three-cell zonal wind with rotation-dependent boundaries
-    let trade = (1.0 - smooth_step(trade_top, trade_full, lat_deg)) * -0.8;
-    let westerly = smooth_step(west_start, west_start + 10.0, lat_deg)
-                 * (1.0 - smooth_step(west_end - 5.0, west_end + 8.0, lat_deg)) * 0.85;
-    let polar_east = smooth_step(polar_start, polar_start + 10.0, lat_deg) * -0.45;
-    var wind_x = trade + westerly + polar_east;
-
-    // Coriolis-deflected meridional flow (boundaries track cells)
-    let hadley_meridional = -smooth_step(8.0, hadley_lat * 0.7, lat_deg)
-                          * (1.0 - smooth_step(hadley_lat * 0.9, hadley_lat * 1.2, lat_deg)) * 0.35;
-    let ferrel_center = (hadley_lat + polar_lat) * 0.5;
-    let ferrel_meridional = smooth_step(ferrel_center - 10.0, ferrel_center, lat_deg)
-                          * (1.0 - smooth_step(ferrel_center, ferrel_center + 10.0, lat_deg)) * 0.25;
-    var wind_y = (hadley_meridional + ferrel_meridional) * hemisphere;
-
-    return normalize(vec3<f32>(wind_x, wind_y, 0.1));
-}
-
-// Enhanced wind with terrain deflection — samples heightmap to bend flow around mountains
-fn wind_direction_at(sphere_pos: vec3<f32>, latitude_rad: f32) -> vec3<f32> {
-    var wind = wind_direction_vec(latitude_rad);
-    // Project to sphere tangent plane
-    let tangent_wind = normalize(wind - sphere_pos * dot(wind, sphere_pos));
-
-    // Terrain deflection: sample height gradient perpendicular to wind
-    let perp = normalize(cross(sphere_pos, tangent_wind));
-    let step_d = 0.04;
-    let h_left = textureSample(height_tex, height_sampler, normalize(sphere_pos + perp * step_d)).r;
-    let h_right = textureSample(height_tex, height_sampler, normalize(sphere_pos - perp * step_d)).r;
-    let terrain_gradient = (h_left - h_right) * 3.0; // how much terrain slopes across wind path
-
-    // Wind deflects away from high terrain (flows around mountains, not through them)
-    let deflected = normalize(tangent_wind + perp * clamp(terrain_gradient, -0.4, 0.4));
-    return deflected;
-}
 
 fn compute_moisture(sphere_pos: vec3<f32>, height: f32, season: f32) -> f32 {
     let tilt = uniforms.axial_tilt_rad;

@@ -396,22 +396,22 @@ impl PlanetGenApp {
             let cloud_res = (self.preview_resolution / 2).max(192);
             let t_wind = std::time::Instant::now();
 
-            let rotation_rate = 24.0 / self.params.rotation_period_h;
             if self.dynamics.as_ref().map(|textures| textures.resolution) != Some(cloud_res) {
                 self.dynamics = Some(self.wind_pipeline.create_textures(&self.gpu, cloud_res));
             }
             let dynamics = self.dynamics.as_ref().unwrap();
+            let weather = self.weather_snapshot(cloud_res, ocean_level);
             self.wind_pipeline.generate_gpu(
                 &self.gpu,
                 &terrain,
                 dynamics,
-                self.params.seed,
-                ocean_level,
-                self.params.axial_tilt_deg.to_radians(),
-                self.season,
-                rotation_rate,
-                self.derived.base_temperature_c,
-                self.derived.atmosphere_strength,
+                weather.seed,
+                weather.ocean_level,
+                weather.axial_tilt_rad,
+                weather.season,
+                weather.rotation_rate_rad_s,
+                weather.base_temp_c,
+                weather.surface_pressure_bar,
             );
             eprintln!(
                 "[wind {}px] {:.0}ms",
@@ -546,7 +546,12 @@ impl PlanetGenApp {
             ));
         }
         let resolution = self.weather.as_ref().unwrap().front().resolution;
-        self.weather.as_mut().unwrap().request(WeatherSnapshot {
+        let snapshot = self.weather_snapshot(resolution, ocean_level);
+        self.weather.as_mut().unwrap().request(snapshot);
+    }
+
+    fn weather_snapshot(&self, resolution: u32, ocean_level: f32) -> WeatherSnapshot {
+        WeatherSnapshot {
             face: 0,
             resolution,
             seed: self.cloud_seed,
@@ -566,7 +571,7 @@ impl PlanetGenApp {
             } else {
                 0.0
             },
-        });
+        }
     }
 
     fn invalidate_weather(&mut self) {
@@ -611,13 +616,23 @@ impl PlanetGenApp {
     }
 
     fn start_export(&mut self) {
+        // Capture authored weather inputs at click time. Presentation-only controls are
+        // deliberately absent from WeatherSnapshot, so later visibility/opacity edits
+        // cannot change this export.
+        let weather = self.weather_snapshot(
+            self.weather
+                .as_ref()
+                .map_or(DEFAULT_WEATHER_RESOLUTION, |weather| {
+                    weather.front().resolution
+                }),
+            self.ocean_level(),
+        );
         let config = ExportConfig {
             face_resolution: self.export_resolution,
             tile_size: export::TILE_SIZE,
             output_dir: std::env::current_dir().unwrap_or_default().join("output"),
             planet_name: self.planet_name.clone(),
             erosion_iterations: self.erosion_iterations,
-            season: self.season,
             layers: ExportLayers {
                 height: self.export_height,
                 albedo: self.export_albedo,
@@ -627,9 +642,7 @@ impl PlanetGenApp {
                 clouds: self.export_clouds,
                 emission: self.export_emission,
             },
-            cloud_coverage: self.cloud_coverage,
-            cloud_type: 0.5,
-            cloud_seed: self.cloud_seed,
+            weather,
             night_lights: self.night_lights,
         };
 
@@ -651,6 +664,10 @@ impl PlanetGenApp {
     }
 
     fn poll_export(&mut self) {
+        // Interactive export shares eframe's device and queue. Poll that shared device
+        // from the update loop so async export readbacks progress without creating a
+        // competing standalone context.
+        let _ = self.gpu.device.poll(wgpu::PollType::Poll);
         let mut finished = false;
         if let Some(ref handle) = self.export_handle {
             while let Ok(progress) = handle.progress_rx.try_recv() {
@@ -1386,7 +1403,6 @@ mod tests {
             output_dir,
             planet_name: planet_name.into(),
             erosion_iterations: 0,
-            season: 0.5,
             layers: ExportLayers {
                 height: true,
                 albedo: false,
@@ -1396,9 +1412,7 @@ mod tests {
                 clouds: false,
                 emission: false,
             },
-            cloud_coverage: 0.5,
-            cloud_type: 0.5,
-            cloud_seed: 42,
+            weather: WeatherSnapshot::default(),
             night_lights: 0.0,
         }
     }

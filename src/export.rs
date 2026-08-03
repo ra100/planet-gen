@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bytemuck::{Pod, Zeroable};
+use half::f16;
 use thiserror::Error;
 use wgpu::util::DeviceExt;
 
@@ -15,12 +16,14 @@ use crate::export_staging::{
 use crate::gpu::GpuContext;
 use crate::openexr_writer::AtomicScanlineExrWriter;
 use crate::planet::{DerivedProperties, PlanetParams};
-use crate::plates::{generate_plates, PlateGenParams};
+use crate::plates::{PlateGenParams, generate_plates};
 use crate::png_writer::{AtomicScanlinePngWriter, PngRowFormat};
+use crate::preview::PreviewUniforms;
 use crate::terrain_compute::{
     ErosionPipeline, TectonicTerrain, TerrainComputePipeline, TerrainGenParams,
-    TerrainGenerationParams,
+    TerrainGenerationParams, WindFieldPipeline,
 };
+use crate::weather::{WeatherFieldPipeline, WeatherSnapshot, WeatherTextures};
 
 // ============ Constants ============
 
@@ -31,12 +34,21 @@ pub const MIN_EMISSION_STENCIL_RADIUS: u32 = 3;
 pub const MAX_8K_OWNED_LIVE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 pub const MAX_OWNED_LIVE_BYTES: u64 = MAX_8K_OWNED_LIVE_BYTES;
 pub const MESO_EROSION_RESOLUTION: u32 = 2048;
+const MAX_EXPORT_WEATHER_RESOLUTION: u32 = 384;
 
 pub const fn erosion_resolution_for_export(face_resolution: u32) -> u32 {
     if face_resolution == 8192 {
         MESO_EROSION_RESOLUTION
     } else {
         face_resolution
+    }
+}
+
+pub const fn export_weather_resolution(face_resolution: u32) -> u32 {
+    if face_resolution < MAX_EXPORT_WEATHER_RESOLUTION {
+        face_resolution
+    } else {
+        MAX_EXPORT_WEATHER_RESOLUTION
     }
 }
 const STAGED_SAMPLE_REGION_SIDE: u32 = 512;
@@ -51,7 +63,6 @@ enum QuantizedLayer {
     Albedo,
     Roughness,
     AmbientOcclusion,
-    CloudDensity,
     WaterMask,
 }
 
@@ -59,7 +70,7 @@ impl QuantizedLayer {
     fn png_format(self) -> PngRowFormat {
         match self {
             Self::Albedo => PngRowFormat::Rgba8,
-            Self::Roughness | Self::AmbientOcclusion | Self::CloudDensity => PngRowFormat::Gray16,
+            Self::Roughness | Self::AmbientOcclusion => PngRowFormat::Gray16,
             Self::WaterMask => PngRowFormat::Gray8,
         }
     }
@@ -67,7 +78,7 @@ impl QuantizedLayer {
     fn channels(self) -> u32 {
         match self {
             Self::Albedo => 4,
-            Self::Roughness | Self::AmbientOcclusion | Self::CloudDensity | Self::WaterMask => 1,
+            Self::Roughness | Self::AmbientOcclusion | Self::WaterMask => 1,
         }
     }
 }
@@ -122,13 +133,20 @@ pub struct ExportConfig {
     pub output_dir: PathBuf,
     pub planet_name: String,
     pub erosion_iterations: u32,
-    pub season: f32,
     pub layers: ExportLayers,
-    pub cloud_coverage: f32,
-    pub cloud_type: f32,
-    pub cloud_seed: u32,
+    /// Copied at export start so UI changes cannot alter the queued weather inputs.
+    pub weather: WeatherSnapshot,
     pub night_lights: f32,
 }
+
+pub const CLOUD_EXR_CHANNELS: [&str; 6] = [
+    "Y",
+    "coverage",
+    "base_km",
+    "thickness_km",
+    "character",
+    "cirrus",
+];
 
 // ============ Progress ============
 
@@ -339,7 +357,7 @@ impl TileCoordinator {
         if tile_size == 0 {
             return Err("tile size must be greater than zero".into());
         }
-        if face_resolution % tile_size != 0 {
+        if !face_resolution.is_multiple_of(tile_size) {
             return Err("face resolution must be a multiple of tile size".into());
         }
         Ok(Self {
@@ -392,7 +410,7 @@ pub fn select_tile_size(
     limits: &wgpu::Limits,
     output_element_bytes: u32,
 ) -> Result<u32, String> {
-    if requested_tile_size == 0 || face_resolution % requested_tile_size != 0 {
+    if requested_tile_size == 0 || !face_resolution.is_multiple_of(requested_tile_size) {
         return Err("requested tile size must divide the face resolution".into());
     }
     let mut tile_size = requested_tile_size;
@@ -405,7 +423,7 @@ pub fn select_tile_size(
             return Err("correctness halo exceeds device storage limits".into());
         }
         tile_size /= 2;
-        while face_resolution % tile_size != 0 {
+        while !face_resolution.is_multiple_of(tile_size) {
             tile_size -= 1;
         }
     }
@@ -558,14 +576,44 @@ pub fn estimated_staged_export_peak_bytes(
     };
     let quantized = if layers.albedo {
         estimated_staged_equirect_bytes(face_resolution, 4)?
-    } else if layers.roughness || layers.water_mask || layers.clouds {
+    } else if layers.roughness || layers.water_mask {
         estimated_staged_equirect_bytes(face_resolution, 1)?
     } else {
         0
     };
+    let weather = if layers.clouds {
+        estimated_export_weather_bytes(face_resolution)?
+    } else {
+        0
+    };
     terrain_faces
-        .checked_add(height.max(normal).max(quantized))
+        .checked_add(height.max(normal).max(quantized).max(weather))
         .ok_or_else(|| "staged authoritative live-byte ledger overflows u64".into())
+}
+
+/// Bounded transient allocations while deriving export weather from staged terrain.
+pub fn estimated_export_weather_bytes(face_resolution: u32) -> Result<u64, String> {
+    let resolution = export_weather_resolution(face_resolution);
+    if face_resolution <= 2 || resolution <= 2 {
+        return Err("export weather requires faces larger than 2 pixels".into());
+    }
+    let (region_side, cache_regions) = staged_sampler_config(face_resolution, 1)?;
+    let face_values = u64::from(resolution)
+        .checked_mul(u64::from(resolution))
+        .and_then(|values| values.checked_mul(6))
+        .ok_or("export weather face ledger overflows u64")?;
+    let sampler_values = u64::try_from(cache_regions)
+        .map_err(|_| "export weather sampler cache exceeds u64")?
+        .checked_mul(u64::from(region_side))
+        .and_then(|values| values.checked_mul(u64::from(region_side)))
+        .ok_or("export weather sampler ledger overflows u64")?;
+    // Terrain materialization, wind's five f32 fields, weather heights, and four RGBA16F fields.
+    face_values
+        .checked_mul(7)
+        .and_then(|values| values.checked_add(sampler_values))
+        .and_then(|values| values.checked_mul(std::mem::size_of::<f32>() as u64))
+        .and_then(|values| values.checked_add(face_values.checked_mul(4 * 8)?))
+        .ok_or_else(|| "export weather live-byte ledger overflows u64".into())
 }
 
 fn has_legacy_full_equirect_layer(layers: &ExportLayers) -> bool {
@@ -734,27 +782,6 @@ pub struct AlbedoMapParams {
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
-pub struct CloudMapParams {
-    pub face: u32,
-    pub resolution: u32,
-    pub seed: u32,
-    pub base_temp_c: f32,
-    pub ocean_level: f32,
-    pub ocean_fraction: f32,
-    pub axial_tilt_rad: f32,
-    pub season: f32,
-    pub cloud_coverage: f32,
-    pub cloud_type: f32,
-    pub tile_offset_x: u32,
-    pub tile_offset_y: u32,
-    pub full_resolution: u32,
-    pub local_height: u32,
-    pub _pad1: u32,
-    pub _pad2: u32,
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, Pod, Zeroable)]
 pub struct EmissionMapParams {
     pub face: u32,
     pub resolution: u32,
@@ -768,6 +795,258 @@ pub struct EmissionMapParams {
     pub full_resolution: u32,
     pub local_height: u32,
     pub _pad1: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+struct CloudExportParams {
+    face: u32,
+    tile_offset_x: u32,
+    tile_offset_y: u32,
+    tile_width: u32,
+    tile_height: u32,
+    full_resolution: u32,
+    _pad0: u32,
+    _pad1: u32,
+}
+
+struct CloudExportPipeline {
+    pipeline: wgpu::ComputePipeline,
+    layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+}
+
+impl CloudExportPipeline {
+    fn new(gpu: &GpuContext) -> Self {
+        let layout = gpu
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("cloud export layout"),
+                entries: &[
+                    uniform_binding(0),
+                    cube_texture_binding(1),
+                    sampler_binding(2),
+                    cube_texture_binding(3),
+                    cube_texture_binding(4),
+                    cube_texture_binding(5),
+                    uniform_binding(6),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 7,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+        // Compute shaders require explicit LOD. The checked-in shared cloud density stays
+        // byte-for-byte identical to preview; only this compute compilation unit selects LOD 0.
+        let cloud_density = include_str!("shaders/cloud_density.wgsl")
+            .replace(
+                "textureSample(weather_mass_tex, height_sampler, direction)",
+                "textureSampleLevel(weather_mass_tex, height_sampler, direction, 0.0)",
+            )
+            .replace(
+                "textureSample(weather_geometry_tex, height_sampler, direction)",
+                "textureSampleLevel(weather_geometry_tex, height_sampler, direction, 0.0)",
+            )
+            .replace(
+                "textureSample(height_tex, height_sampler, direction).r",
+                "textureSampleLevel(height_tex, height_sampler, direction, 0.0).r",
+            );
+        let shader = gpu
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("cloud export shader"),
+                source: wgpu::ShaderSource::Wgsl(
+                    format!(
+                        "{}\n{}\n{}\n{}\n{}",
+                        include_str!("shaders/cube_sphere.wgsl"),
+                        include_str!("shaders/noise.wgsl"),
+                        cloud_density,
+                        include_str!("shaders/cloud_wind_fallback.wgsl"),
+                        include_str!("shaders/cloud_export.wgsl"),
+                    )
+                    .into(),
+                ),
+            });
+        let pipeline_layout = gpu
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("cloud export pipeline layout"),
+                bind_group_layouts: &[&layout],
+                push_constant_ranges: &[],
+            });
+        let pipeline = gpu
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("cloud export pipeline"),
+                layout: Some(&pipeline_layout),
+                module: &shader,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        let sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("cloud export sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        Self {
+            pipeline,
+            layout,
+            sampler,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_tile(
+        &self,
+        gpu: &GpuContext,
+        uniforms: &PreviewUniforms,
+        height: &wgpu::TextureView,
+        dynamics: &crate::terrain_compute::DynamicsTextures,
+        weather: &WeatherTextures,
+        params: CloudExportParams,
+        cancel: &AtomicBool,
+    ) -> Result<Vec<f32>, String> {
+        let values = u64::from(params.tile_width)
+            .checked_mul(u64::from(params.tile_height))
+            .and_then(|pixels| pixels.checked_mul(CLOUD_EXR_CHANNELS.len() as u64))
+            .ok_or("cloud export tile size overflows u64")?;
+        let bytes = values
+            .checked_mul(4)
+            .ok_or("cloud export tile bytes overflow u64")?;
+        let owned_bytes = bytes
+            .checked_mul(2)
+            .ok_or("cloud export tile owned-byte ledger overflows u64")?;
+        let device_cap = u64::from(gpu.device.limits().max_storage_buffer_binding_size)
+            .min(gpu.device.limits().max_buffer_size);
+        if bytes > device_cap || owned_bytes > MAX_OWNED_LIVE_BYTES {
+            return Err("cloud export tile exceeds the bounded storage budget".into());
+        }
+        let uniform = gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("cloud export uniforms"),
+                contents: bytemuck::bytes_of(uniforms),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let params_buffer = gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("cloud export params"),
+                contents: bytemuck::bytes_of(&params),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let output = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cloud export output"),
+            size: bytes,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cloud export staging"),
+            size: bytes,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("cloud export bind group"),
+            layout: &self.layout,
+            entries: &[
+                buffer_entry(0, &uniform),
+                texture_entry(1, height),
+                sampler_entry(2, &self.sampler),
+                texture_entry(3, &dynamics.wind_continentality),
+                texture_entry(4, &weather.mass),
+                texture_entry(5, &weather.geometry),
+                buffer_entry(6, &params_buffer),
+                buffer_entry(7, &output),
+            ],
+        });
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("cloud export encoder"),
+            });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("cloud export pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(
+                params.tile_width.div_ceil(8),
+                params.tile_height.div_ceil(8),
+                1,
+            );
+        }
+        encoder.copy_buffer_to_buffer(&output, 0, &staging, 0, bytes);
+        gpu.queue.submit(Some(encoder.finish()));
+        wait_for_readback(gpu, staging.slice(..), cancel)?;
+        let mapped = staging.slice(..).get_mapped_range();
+        let values = bytemuck::cast_slice(&mapped).to_vec();
+        drop(mapped);
+        staging.unmap();
+        Ok(values)
+    }
+}
+
+fn uniform_binding(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
+}
+fn cube_texture_binding(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::Cube,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+fn sampler_binding(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+        count: None,
+    }
+}
+fn buffer_entry<'a>(binding: u32, buffer: &'a wgpu::Buffer) -> wgpu::BindGroupEntry<'a> {
+    wgpu::BindGroupEntry {
+        binding,
+        resource: buffer.as_entire_binding(),
+    }
+}
+fn texture_entry<'a>(binding: u32, view: &'a wgpu::TextureView) -> wgpu::BindGroupEntry<'a> {
+    wgpu::BindGroupEntry {
+        binding,
+        resource: wgpu::BindingResource::TextureView(view),
+    }
+}
+fn sampler_entry<'a>(binding: u32, sampler: &'a wgpu::Sampler) -> wgpu::BindGroupEntry<'a> {
+    wgpu::BindGroupEntry {
+        binding,
+        resource: wgpu::BindingResource::Sampler(sampler),
+    }
 }
 
 // ============ Generic Map Compute Pipeline ============
@@ -1199,93 +1478,6 @@ impl MapPipeline {
             workgroup_size,
         }
     }
-
-    fn dispatch_tile(
-        &self,
-        gpu: &GpuContext,
-        heightmap_buffer: &wgpu::Buffer,
-        params_bytes: &[u8],
-        tile_width: u32,
-        tile_height: u32,
-        output_element_bytes: usize,
-        cancel: &AtomicBool,
-    ) -> Result<Vec<u8>, String> {
-        let total_pixels = (tile_width * tile_height) as usize;
-        let output_size = (total_pixels * output_element_bytes) as u64;
-
-        let params_buffer = gpu
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("map params"),
-                contents: params_bytes,
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
-
-        let output_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("map output"),
-            size: output_size,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-
-        let staging_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("map staging"),
-            size: output_size,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("map bind group"),
-            layout: &self.bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: heightmap_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: output_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: params_buffer.as_entire_binding(),
-                },
-            ],
-        });
-
-        let mut encoder = gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("map compute encoder"),
-            });
-
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("map compute pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups(
-                tile_width.div_ceil(self.workgroup_size),
-                tile_height.div_ceil(self.workgroup_size),
-                1,
-            );
-        }
-
-        encoder.copy_buffer_to_buffer(&output_buffer, 0, &staging_buffer, 0, output_size);
-        gpu.queue.submit(Some(encoder.finish()));
-
-        wait_for_readback(gpu, staging_buffer.slice(..), cancel)?;
-
-        let mapped = staging_buffer.slice(..).get_mapped_range();
-        let result = mapped.to_vec();
-        drop(mapped);
-        staging_buffer.unmap();
-
-        Ok(result)
-    }
 }
 
 fn wait_for_readback(
@@ -1561,6 +1753,243 @@ fn stage_terrain_faces(
     Ok(stage)
 }
 
+fn export_weather_snapshot(snapshot: WeatherSnapshot, resolution: u32) -> WeatherSnapshot {
+    WeatherSnapshot {
+        resolution,
+        ..snapshot
+    }
+}
+
+fn materialize_staged_terrain_for_weather(
+    stage: &ExportStage,
+    resolution: u32,
+    cancel: &AtomicBool,
+) -> Result<TectonicTerrain, String> {
+    if resolution <= 2 {
+        return Err("export weather requires faces larger than 2 pixels".into());
+    }
+    let (region_side, cache_regions) = staged_sampler_config(stage.metadata().face_resolution, 1)?;
+    let mut sampler = StagedCubemapSampler::new(stage, region_side, cache_regions)?;
+    let mut faces: [Vec<f32>; 6] = Default::default();
+    for (face_index, face) in faces.iter_mut().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("Cancelled while materializing export weather terrain".into());
+        }
+        let values = (resolution as usize)
+            .checked_mul(resolution as usize)
+            .ok_or("export weather terrain resolution overflows usize")?;
+        *face = Vec::with_capacity(values);
+        for y in 0..resolution {
+            if cancel.load(Ordering::Relaxed) {
+                return Err("Cancelled while materializing export weather terrain".into());
+            }
+            for x in 0..resolution {
+                let direction = face_uv_to_direction(
+                    face_index,
+                    x as f32 / (resolution - 1) as f32,
+                    y as f32 / (resolution - 1) as f32,
+                );
+                face.push(sampler.sample_direction(direction[0], direction[1], direction[2], 0)?);
+            }
+        }
+    }
+    Ok(TectonicTerrain { faces, resolution })
+}
+
+fn wait_for_gpu_completion(gpu: &GpuContext, cancel: &AtomicBool) -> Result<(), String> {
+    let (sender, receiver) = mpsc::channel();
+    gpu.queue.on_submitted_work_done(move || {
+        let _ = sender.send(());
+    });
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("Cancelled while waiting for export weather GPU work".into());
+        }
+        match receiver.try_recv() {
+            Ok(()) => return Ok(()),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                return Err("export weather GPU completion callback disconnected".into());
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+        let _ = gpu.device.poll(wgpu::PollType::Poll);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+fn cloud_export_uniforms(snapshot: WeatherSnapshot) -> PreviewUniforms {
+    PreviewUniforms {
+        rotation: [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        light_dir: [0.0; 3],
+        ocean_level: snapshot.ocean_level,
+        base_temp_c: snapshot.base_temp_c,
+        ocean_fraction: 0.0,
+        axial_tilt_rad: snapshot.axial_tilt_rad,
+        view_mode: 0,
+        season: snapshot.season,
+        atmosphere_density: 0.0,
+        atmosphere_height: 0.0,
+        height_scale: 0.0,
+        zoom: 1.0,
+        pan_x: 0.0,
+        pan_y: 0.0,
+        cloud_coverage: snapshot.coverage,
+        cloud_seed: snapshot.seed,
+        night_lights: 0.0,
+        star_color_temp: 0.0,
+        city_light_hue: 0.0,
+        show_ao: 0.0,
+        show_water: 0.0,
+        show_ice: 0.0,
+        show_biomes: 0.0,
+        show_clouds: 1.0,
+        show_atmosphere_layer: 0.0,
+        show_cities: 0.0,
+        cloud_opacity: 1.0,
+        cloud_advection: if snapshot.wind_scale > 0.0 { 1.0 } else { 0.0 },
+        rotation_rate: snapshot.rotation_rate_rad_s / (std::f32::consts::TAU / 86_400.0),
+        atm_pressure: snapshot.surface_pressure_bar,
+        _pad4: 0.0,
+        lava_glow: 0.0,
+        ring_inner: 0.0,
+        ring_outer: 0.0,
+        ring_tilt: 0.0,
+        ring_opacity: 0.0,
+        planet_radius_km: snapshot.radius_km,
+        show_cloud_shadows: 0.0,
+        _pad5: 0.0,
+    }
+}
+
+fn create_cloud_export_height_texture(
+    gpu: &GpuContext,
+    terrain: &TectonicTerrain,
+) -> Result<(wgpu::Texture, wgpu::TextureView), String> {
+    let resolution = terrain.resolution;
+    let row_bytes = resolution
+        .checked_mul(8)
+        .ok_or("cloud export height row overflows u32")?;
+    let padded_row_bytes = row_bytes.div_ceil(256) * 256;
+    let total = usize::try_from(u64::from(padded_row_bytes) * u64::from(resolution) * 6)
+        .map_err(|_| "cloud export height upload exceeds usize")?;
+    let mut data = vec![0u8; total];
+    for (face, values) in terrain.faces.iter().enumerate() {
+        for y in 0..resolution as usize {
+            let destination = &mut data
+                [(face * resolution as usize + y) * padded_row_bytes as usize..]
+                [..row_bytes as usize];
+            for (height, pixel) in values[y * resolution as usize..(y + 1) * resolution as usize]
+                .iter()
+                .zip(destination.chunks_exact_mut(8))
+            {
+                let encoded = f16::from_f32(*height).to_bits().to_le_bytes();
+                for channel in pixel.chunks_exact_mut(2) {
+                    channel.copy_from_slice(&encoded);
+                }
+            }
+        }
+    }
+    let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("cloud export height cubemap"),
+        size: wgpu::Extent3d {
+            width: resolution,
+            height: resolution,
+            depth_or_array_layers: 6,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba16Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    gpu.queue.write_texture(
+        texture.as_image_copy(),
+        &data,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(padded_row_bytes),
+            rows_per_image: Some(resolution),
+        },
+        wgpu::Extent3d {
+            width: resolution,
+            height: resolution,
+            depth_or_array_layers: 6,
+        },
+    );
+    let view = texture.create_view(&wgpu::TextureViewDescriptor {
+        dimension: Some(wgpu::TextureViewDimension::Cube),
+        ..Default::default()
+    });
+    Ok((texture, view))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stage_cloud_faces(
+    gpu: &GpuContext,
+    output_dir: &Path,
+    terrain: &TectonicTerrain,
+    dynamics: &crate::terrain_compute::DynamicsTextures,
+    weather: &WeatherTextures,
+    snapshot: WeatherSnapshot,
+    coordinator: &TileCoordinator,
+    cancel: &AtomicBool,
+) -> Result<ExportStage, String> {
+    let stage = ExportStage::create(
+        output_dir,
+        StageMetadata {
+            face_resolution: coordinator.face_resolution,
+            components: CLOUD_EXR_CHANNELS.len() as u32,
+            halo: 0,
+        },
+    )?;
+    let (_height_texture, height_view) = create_cloud_export_height_texture(gpu, terrain)?;
+    let pipeline = CloudExportPipeline::new(gpu);
+    let uniforms = cloud_export_uniforms(snapshot);
+    for face in 0..6 {
+        for tile_y in 0..coordinator.tiles_per_axis {
+            for tile_x in 0..coordinator.tiles_per_axis {
+                if cancel.load(Ordering::Relaxed) {
+                    return Err("Cancelled".into());
+                }
+                let region = coordinator.region(tile_x, tile_y);
+                let values = pipeline.dispatch_tile(
+                    gpu,
+                    &uniforms,
+                    &height_view,
+                    dynamics,
+                    weather,
+                    CloudExportParams {
+                        face,
+                        tile_offset_x: region.origin_x + region.crop_x,
+                        tile_offset_y: region.origin_y + region.crop_y,
+                        tile_width: region.crop_width,
+                        tile_height: region.crop_height,
+                        full_resolution: coordinator.face_resolution,
+                        _pad0: 0,
+                        _pad1: 0,
+                    },
+                    cancel,
+                )?;
+                stage.write_tile(
+                    face,
+                    region.origin_x + region.crop_x,
+                    region.origin_y + region.crop_y,
+                    region.crop_width,
+                    region.crop_height,
+                    &values,
+                )?;
+            }
+        }
+    }
+    Ok(stage)
+}
+
 fn stage_ocean_mask_faces(
     output_dir: &Path,
     terrain: &TectonicTerrain,
@@ -1624,7 +2053,7 @@ fn stage_map_layer<P: Pod>(
 ) -> Result<ExportStage, String> {
     let components = u32::try_from(output_element_bytes / std::mem::size_of::<f32>())
         .map_err(|_| "staged map component count exceeds u32")?;
-    if components == 0 || output_element_bytes % std::mem::size_of::<f32>() != 0 {
+    if components == 0 || !output_element_bytes.is_multiple_of(std::mem::size_of::<f32>()) {
         return Err("staged map output must contain f32 components".into());
     }
     let stage = ExportStage::create(
@@ -1949,8 +2378,9 @@ fn materialize_staged_equirect<F>(
     channels: u32,
     output_dir: &Path,
     cancel: &AtomicBool,
-    checkpoints: &mut (dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String>
-              + '_),
+    checkpoints: &mut (
+             dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String> + '_
+         ),
     finish: F,
 ) -> Result<(EquirectStage, StagedIoMetrics), StagedExportFailure>
 where
@@ -1982,8 +2412,9 @@ fn materialize_staged_equirect_with_worker_cap<F>(
     channels: u32,
     output_dir: &Path,
     cancel: &AtomicBool,
-    checkpoints: &mut (dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String>
-              + '_),
+    checkpoints: &mut (
+             dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String> + '_
+         ),
     worker_cap: usize,
     finish: F,
 ) -> Result<(EquirectStage, StagedIoMetrics), StagedExportFailure>
@@ -2242,8 +2673,9 @@ where
 }
 
 fn emit_materialization_checkpoint(
-    checkpoints: &mut (dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String>
-              + '_),
+    checkpoints: &mut (
+             dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String> + '_
+         ),
     layer: &'static str,
     metrics: &StagedIoMetrics,
     rows_completed: u32,
@@ -2279,8 +2711,9 @@ fn export_staged_equirect_exr(
     channels: u32,
     path: &Path,
     cancel: &AtomicBool,
-    checkpoints: &mut (dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String>
-              + '_),
+    checkpoints: &mut (
+             dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String> + '_
+         ),
 ) -> Result<StagedIoMetrics, StagedExportFailure> {
     if channels != 1 && channels != 4 {
         return Err(StagedExportFailure {
@@ -2303,10 +2736,11 @@ fn export_staged_equirect_exr(
         checkpoints,
         EquirectStage::finish,
     )?;
-    let mut writer = match AtomicScanlineExrWriter::create(path, width, height) {
-        Ok(writer) => writer,
-        Err(message) => return Err(StagedExportFailure { message, metrics }),
-    };
+    let mut writer =
+        match AtomicScanlineExrWriter::create(path, width, height, &["R", "G", "B", "A"]) {
+            Ok(writer) => writer,
+            Err(message) => return Err(StagedExportFailure { message, metrics }),
+        };
     let mut rgba = if channels == 1 {
         vec![0.0; width as usize * 4]
     } else {
@@ -2327,14 +2761,14 @@ fn export_staged_equirect_exr(
         };
         let write_started = Instant::now();
         if channels == 4 {
-            if let Err(message) = writer.write_rgba_scanline(&row) {
+            if let Err(message) = writer.write_scanline(&row) {
                 return Err(StagedExportFailure { message, metrics });
             }
         } else {
             for (pixel, value) in rgba.chunks_exact_mut(4).zip(row) {
                 pixel.copy_from_slice(&[value, value, value, 1.0]);
             }
-            if let Err(message) = writer.write_rgba_scanline(&rgba) {
+            if let Err(message) = writer.write_scanline(&rgba) {
                 return Err(StagedExportFailure { message, metrics });
             }
         }
@@ -2355,6 +2789,70 @@ fn export_staged_equirect_exr(
     Ok(metrics)
 }
 
+fn export_staged_cloud_exr(
+    stage: &ExportStage,
+    path: &Path,
+    width: u32,
+    height: u32,
+    cancel: &AtomicBool,
+    checkpoints: &mut (
+             dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String> + '_
+         ),
+) -> Result<StagedIoMetrics, Box<StagedExportFailure>> {
+    let output_dir = path.parent().ok_or_else(|| {
+        Box::new(StagedExportFailure {
+            message: "cloud EXR output path has no parent directory".into(),
+            metrics: StagedIoMetrics::default(),
+        })
+    })?;
+    let (mut intermediate, mut metrics) = materialize_staged_equirect(
+        "clouds",
+        stage,
+        width,
+        height,
+        CLOUD_EXR_CHANNELS.len() as u32,
+        output_dir,
+        cancel,
+        checkpoints,
+        EquirectStage::finish,
+    )
+    .map_err(Box::new)?;
+    let mut writer = AtomicScanlineExrWriter::create(path, width, height, &CLOUD_EXR_CHANNELS)
+        .map_err(|message| Box::new(StagedExportFailure { message, metrics }))?;
+    for y in 0..height {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Box::new(StagedExportFailure {
+                message: "Cancelled".into(),
+                metrics,
+            }));
+        }
+        let write_started = Instant::now();
+        let row = intermediate
+            .read_row(y)
+            .map_err(|message| Box::new(StagedExportFailure { message, metrics }))?;
+        writer
+            .write_scanline(&row)
+            .map_err(|message| Box::new(StagedExportFailure { message, metrics }))?;
+        metrics.output_write_ms += write_started.elapsed().as_secs_f64() * 1000.0;
+        metrics.output_write_bytes +=
+            u64::from(width) * CLOUD_EXR_CHANNELS.len() as u64 * std::mem::size_of::<f32>() as u64;
+    }
+    let finish_started = Instant::now();
+    writer
+        .finish()
+        .map_err(|message| Box::new(StagedExportFailure { message, metrics }))?;
+    metrics.output_finish_ms = finish_started.elapsed().as_secs_f64() * 1000.0;
+    metrics.published_file_bytes = std::fs::metadata(path)
+        .map_err(|error| {
+            Box::new(StagedExportFailure {
+                message: format!("published EXR metadata failed: {error}"),
+                metrics,
+            })
+        })?
+        .len();
+    Ok(metrics)
+}
+
 fn quantize_unit(value: f32, max: u32) -> Result<u32, String> {
     if !value.is_finite() || !(0.0..=1.0).contains(&value) {
         return Err("quantized PNG source value must be finite and within [0, 1]".into());
@@ -2370,8 +2868,9 @@ fn export_staged_equirect_png(
     output_layer: QuantizedLayer,
     path: &Path,
     cancel: &AtomicBool,
-    checkpoints: &mut (dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String>
-              + '_),
+    checkpoints: &mut (
+             dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String> + '_
+         ),
 ) -> Result<StagedIoMetrics, StagedExportFailure> {
     let channels = output_layer.channels();
     let output_dir = path.parent().ok_or_else(|| StagedExportFailure {
@@ -2618,8 +3117,9 @@ pub fn run_export_with_timings_and_checkpoints(
     progress_tx: &Sender<ExportProgress>,
     cancel: &AtomicBool,
     timings: &mut ExportTimings,
-    checkpoints: &mut (dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String>
-              + '_),
+    checkpoints: &mut (
+             dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String> + '_
+         ),
 ) -> Result<PathBuf, String> {
     *timings = ExportTimings::default();
     let tile_size = select_tile_size(
@@ -2653,7 +3153,6 @@ pub fn run_export_with_timings_and_checkpoints(
         layers.roughness,
         layers.albedo,
         layers.albedo, /*ao bundled with albedo*/
-        layers.clouds,
     ]
     .iter()
     .filter(|&&b| b)
@@ -2822,21 +3321,6 @@ pub fn run_export_with_timings_and_checkpoints(
     } else {
         None
     };
-    let cloud_pipeline = if layers.clouds {
-        Some(MapPipeline::new(
-            gpu,
-            &format!(
-                "{}\n{}\n{}",
-                include_str!("shaders/cube_sphere.wgsl"),
-                include_str!("shaders/noise.wgsl"),
-                include_str!("shaders/cloud_map.wgsl"),
-            ),
-            "cloud map",
-            16,
-        ))
-    } else {
-        None
-    };
     let emission_pipeline = if layers.emission {
         Some(MapPipeline::new(
             gpu,
@@ -2972,7 +3456,7 @@ pub fn run_export_with_timings_and_checkpoints(
                 ocean_level,
                 ocean_fraction: effective_ocean,
                 axial_tilt_rad: params.axial_tilt_deg.to_radians(),
-                season: config.season,
+                season: config.weather.season,
                 tile_offset_x: region.origin_x,
                 tile_offset_y: region.origin_y,
                 full_resolution: full_res,
@@ -3059,50 +3543,55 @@ pub fn run_export_with_timings_and_checkpoints(
         )?;
     }
 
-    if let Some(pipeline) = cloud_pipeline.as_ref() {
-        let stage = stage_map_layer(
-            gpu,
-            pipeline,
-            &terrain,
-            &coordinator,
-            |face, region| CloudMapParams {
-                face,
-                resolution: region.width,
-                seed: config.cloud_seed,
-                base_temp_c: derived.base_temperature_c,
-                ocean_level,
-                ocean_fraction: effective_ocean,
-                axial_tilt_rad: params.axial_tilt_deg.to_radians(),
-                season: config.season,
-                cloud_coverage: config.cloud_coverage,
-                cloud_type: config.cloud_type,
-                tile_offset_x: region.origin_x,
-                tile_offset_y: region.origin_y,
-                full_resolution: full_res,
-                local_height: region.height,
-                _pad1: 0,
-                _pad2: 0,
-            },
-            4,
-            &mut progress,
-            "Clouds",
-            cancel,
-            &planet_dir,
-            &mut timings.map_batch_metrics,
-        )?;
+    if layers.clouds {
         progress.advance("Exporting clouds...");
+        // Snapshot values are copied before the background export begins; no app polling here.
+        let terrain_stage = stage_terrain_faces(&planet_dir, &terrain, &coordinator, cancel)?;
+        let weather_resolution = export_weather_resolution(config.face_resolution);
+        let weather_terrain =
+            materialize_staged_terrain_for_weather(&terrain_stage, weather_resolution, cancel)?;
+        let snapshot = export_weather_snapshot(config.weather, weather_resolution);
+        let wind_pipeline = WindFieldPipeline::new(gpu)
+            .map_err(|error| format!("export wind pipeline unavailable: {error}"))?;
+        let dynamics = wind_pipeline.create_textures(gpu, weather_resolution);
+        wind_pipeline.generate_gpu(
+            gpu,
+            &weather_terrain,
+            &dynamics,
+            snapshot.seed,
+            snapshot.ocean_level,
+            snapshot.axial_tilt_rad,
+            snapshot.season,
+            snapshot.rotation_rate_rad_s,
+            snapshot.base_temp_c,
+            snapshot.surface_pressure_bar,
+        );
+        let weather_pipeline = WeatherFieldPipeline::new(gpu)
+            .map_err(|error| format!("export weather pipeline unavailable: {error}"))?;
+        let weather = weather_pipeline.create_textures(gpu, weather_resolution);
+        weather_pipeline.generate(gpu, snapshot, &weather_terrain, &dynamics, &weather);
+        wait_for_gpu_completion(gpu, cancel)?;
+        let stage = stage_cloud_faces(
+            gpu,
+            &planet_dir,
+            &weather_terrain,
+            &dynamics,
+            &weather,
+            snapshot,
+            &coordinator,
+            cancel,
+        )?;
         merge_staged_export(
             timings,
-            export_staged_equirect_png(
-                "clouds",
+            export_staged_cloud_exr(
                 &stage,
+                &planet_dir.join("clouds.exr"),
                 eq_w,
                 eq_ht,
-                QuantizedLayer::CloudDensity,
-                &planet_dir.join("clouds.png"),
                 cancel,
                 checkpoints,
-            ),
+            )
+            .map_err(|failure| *failure),
         )?;
     }
 
@@ -3211,9 +3700,9 @@ pub fn spawn_export(
             &tx,
             &cancel_clone,
         ) {
-            Ok(_) => {
-                let _ = tx.send(ExportProgress::Complete);
-            }
+            // run_export emits the single terminal Complete event after all atomic
+            // writers have published. Do not duplicate it from the worker wrapper.
+            Ok(_) => {}
             Err(e) => {
                 let _ = tx.send(ExportProgress::Error(e));
             }
@@ -3231,6 +3720,312 @@ pub fn spawn_export(
 mod tests {
     use super::*;
     use crate::gpu::GpuContext;
+
+    #[test]
+    fn export_config_copies_weather_snapshot_and_weather_defaults_are_stable() {
+        let source = WeatherSnapshot {
+            seed: 17,
+            coverage: 0.8,
+            season: 0.25,
+            wind_scale: 2.0,
+            ..WeatherSnapshot::default()
+        };
+        let config = ExportConfig {
+            face_resolution: 32,
+            tile_size: 16,
+            output_dir: std::env::temp_dir(),
+            planet_name: "snapshot".into(),
+            erosion_iterations: 0,
+            layers: ExportLayers::default(),
+            weather: source,
+            night_lights: 0.0,
+        };
+        let mut changed_after_queue = source;
+        changed_after_queue.coverage = 0.0;
+        changed_after_queue.seed = 99;
+
+        assert_ne!(changed_after_queue, config.weather);
+        assert_eq!(config.weather.seed, 17);
+        assert_eq!(config.weather.coverage, 0.8);
+        assert_eq!(WeatherSnapshot::default().season, 0.5);
+        assert_eq!(WeatherSnapshot::default().wind_scale, 1.0);
+    }
+
+    #[test]
+    fn export_weather_snapshot_is_reproducible_and_preserves_controls() {
+        let source = WeatherSnapshot {
+            face: 5,
+            resolution: 2048,
+            seed: 0xDEAD_BEEF,
+            storm_count: 7,
+            coverage: 0.72,
+            moisture: 0.34,
+            surface_pressure_bar: 1.8,
+            base_temp_c: -12.5,
+            ocean_level: -0.17,
+            axial_tilt_rad: 0.41,
+            season: 0.83,
+            storm_size: 1.6,
+            radius_km: 7_100.0,
+            rotation_rate_rad_s: 1.1e-4,
+            wind_scale: 0.0,
+        };
+        let first = export_weather_snapshot(source, export_weather_resolution(8192));
+        let second = export_weather_snapshot(source, export_weather_resolution(8192));
+
+        assert_eq!(first, second);
+        assert_eq!(first.resolution, 384);
+        assert_eq!(first.seed, source.seed);
+        assert_eq!(first.wind_scale, 0.0);
+        assert_eq!(first.surface_pressure_bar, source.surface_pressure_bar);
+        assert_eq!(first.rotation_rate_rad_s, source.rotation_rate_rad_s);
+    }
+
+    #[test]
+    fn zero_wind_cloud_density_uses_the_shared_preview_fallback() {
+        let shared = include_str!("shaders/cloud_wind_fallback.wgsl");
+        assert!(shared.contains("fn wind_direction_at"));
+        assert!(shared.contains("wind_height_sample"));
+        assert!(include_str!("shaders/preview_cubemap.wgsl").contains("fn wind_height_sample"));
+        assert!(include_str!("shaders/cloud_export.wgsl").contains("fn wind_height_sample"));
+        let snapshot = WeatherSnapshot {
+            wind_scale: 0.0,
+            rotation_rate_rad_s: std::f32::consts::TAU / 43_200.0,
+            ..WeatherSnapshot::default()
+        };
+        let uniforms = cloud_export_uniforms(snapshot);
+        assert_eq!(uniforms.cloud_advection, 0.0);
+        assert_eq!(uniforms.rotation_rate, 2.0);
+    }
+
+    #[test]
+    fn staged_weather_terrain_is_reproducible_and_bounded() {
+        let root = std::env::temp_dir().join(format!(
+            "planet-gen-export-weather-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let (stage, _) = staged_fixture(&root, 8, 1);
+        let active = AtomicBool::new(false);
+        let first = materialize_staged_terrain_for_weather(&stage, 4, &active).unwrap();
+        let second = materialize_staged_terrain_for_weather(&stage, 4, &active).unwrap();
+
+        assert_eq!(first.faces, second.faces);
+        assert_eq!(first.resolution, 4);
+        for values in &first.faces {
+            assert_eq!(values.len(), 16);
+            assert!(values.iter().all(|value| value.is_finite()));
+        }
+        assert_eq!(estimated_export_weather_bytes(8192).unwrap(), 61_472_768);
+        assert!(estimated_export_weather_bytes(8192).unwrap() <= MAX_8K_OWNED_LIVE_BYTES);
+        assert!(materialize_staged_terrain_for_weather(&stage, 4, &AtomicBool::new(true)).is_err());
+        drop(stage);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn export_weather_completion_wait_honors_cancellation() {
+        let gpu = GpuContext::new().expect("GPU init failed");
+        assert!(wait_for_gpu_completion(&gpu, &AtomicBool::new(true)).is_err());
+    }
+
+    #[test]
+    fn clouds_exr_uses_the_declared_atomic_named_channel_schema() {
+        let path = std::env::temp_dir().join(format!(
+            "planet-gen-cloud-schema-{}-{}.exr",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        assert_eq!(
+            CLOUD_EXR_CHANNELS,
+            [
+                "Y",
+                "coverage",
+                "base_km",
+                "thickness_km",
+                "character",
+                "cirrus",
+            ]
+        );
+        let values = [0.11, 0.22, 1.5, 2.5, 0.55, 0.66];
+        let mut writer = AtomicScanlineExrWriter::create(&path, 1, 1, &CLOUD_EXR_CHANNELS).unwrap();
+        writer.write_scanline(&values).unwrap();
+        writer.finish().unwrap();
+
+        let image = exr::prelude::read_first_flat_layer_from_file(&path).unwrap();
+        assert_eq!(
+            image.layer_data.encoding.compression,
+            exr::prelude::Compression::ZIP16
+        );
+        let actual: std::collections::HashMap<_, _> = image
+            .layer_data
+            .channel_data
+            .list
+            .iter()
+            .map(|channel| {
+                let exr::image::FlatSamples::F32(values) = &channel.sample_data else {
+                    panic!("{} is not a FLOAT channel", channel.name);
+                };
+                (channel.name.to_string(), values[0])
+            })
+            .collect();
+        let expected: Vec<_> = CLOUD_EXR_CHANNELS
+            .iter()
+            .copied()
+            .zip(values)
+            .map(|(name, value)| (name.to_owned(), value))
+            .collect();
+        assert_eq!(actual.len(), expected.len());
+        for (name, value) in expected {
+            assert_eq!(actual.get(&name), Some(&value), "wrong value for {name}");
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn cancelled_cloud_export_leaves_no_partial_or_legacy_png() {
+        let root = std::env::temp_dir().join(format!(
+            "planet-gen-cloud-atomic-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("clouds.exr");
+        let cancel = AtomicBool::new(true);
+        let (stage, _) = staged_fixture(&root, 4, CLOUD_EXR_CHANNELS.len() as u32);
+        let mut checkpoints = discard_layer_materialization_checkpoint;
+        assert!(export_staged_cloud_exr(&stage, &path, 8, 4, &cancel, &mut checkpoints).is_err());
+        assert!(!path.exists());
+        assert!(!path.with_extension("exr.part").exists());
+        assert!(!path.with_extension("png").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn zero_cloud_stage_writes_bit_zero_six_channel_exr_deterministically() {
+        let root =
+            std::env::temp_dir().join(format!("planet-gen-cloud-zero-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let stage = ExportStage::create(
+            &root,
+            StageMetadata {
+                face_resolution: 4,
+                components: 6,
+                halo: 0,
+            },
+        )
+        .unwrap();
+        for face in 0..6 {
+            stage.write_tile(face, 0, 0, 4, 4, &[0.0; 96]).unwrap();
+        }
+        let write = |name: &str| {
+            let path = root.join(name);
+            let mut checkpoints = discard_layer_materialization_checkpoint;
+            export_staged_cloud_exr(
+                &stage,
+                &path,
+                8,
+                4,
+                &AtomicBool::new(false),
+                &mut checkpoints,
+            )
+            .unwrap();
+            std::fs::read(&path).unwrap()
+        };
+        let first = write("clouds.exr");
+        let second = write("clouds-copy.exr");
+        assert_eq!(first, second);
+        let image = exr::prelude::read_first_flat_layer_from_file(root.join("clouds.exr")).unwrap();
+        assert_eq!(
+            image.layer_data.channel_data.list.len(),
+            CLOUD_EXR_CHANNELS.len()
+        );
+        for channel in &image.layer_data.channel_data.list {
+            let exr::image::FlatSamples::F32(values) = &channel.sample_data else {
+                panic!("cloud channel must be FLOAT");
+            };
+            assert!(
+                values.iter().all(|value| value.to_bits() == 0),
+                "{} was not bit-zero",
+                channel.name
+            );
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cloud_export_preserves_cubemap_orientation_and_equirect_seams() {
+        let root = std::env::temp_dir().join(format!(
+            "planet-gen-cloud-orientation-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let resolution = 8;
+        let stage = ExportStage::create(
+            &root,
+            StageMetadata {
+                face_resolution: resolution,
+                components: 6,
+                halo: 0,
+            },
+        )
+        .unwrap();
+        let faces = std::array::from_fn(|face| {
+            (0..resolution * resolution)
+                .flat_map(|index| {
+                    let direction = face_uv_to_direction(
+                        face,
+                        (index % resolution) as f32 / (resolution - 1) as f32,
+                        (index / resolution) as f32 / (resolution - 1) as f32,
+                    );
+                    [direction[0], direction[1], direction[2], 1.0, 0.0, 0.0]
+                })
+                .collect::<Vec<_>>()
+        });
+        for (face, values) in faces.iter().enumerate() {
+            stage
+                .write_tile(face as u32, 0, 0, resolution, resolution, values)
+                .unwrap();
+        }
+        let path = root.join("clouds.exr");
+        let mut checkpoints = discard_layer_materialization_checkpoint;
+        export_staged_cloud_exr(
+            &stage,
+            &path,
+            resolution * 2,
+            resolution,
+            &AtomicBool::new(false),
+            &mut checkpoints,
+        )
+        .unwrap();
+        let image = exr::prelude::read_first_flat_layer_from_file(&path).unwrap();
+        let y = image
+            .layer_data
+            .channel_data
+            .list
+            .iter()
+            .find(|channel| channel.name.to_string() == "Y")
+            .unwrap();
+        let exr::image::FlatSamples::F32(actual) = &y.sample_data else {
+            panic!("Y must be FLOAT");
+        };
+        let (expected, _, _) = cubemap_to_equirect(&faces, resolution, 6);
+        for (pixel, expected) in actual.iter().zip(expected.chunks_exact(6)) {
+            assert!((*pixel - expected[0]).abs() < 1e-5);
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn eight_k_staged_sampler_cache_remains_bounded_below_one_face() {
@@ -3261,16 +4056,336 @@ mod tests {
         }
     }
 
+    fn u5_validation_snapshot() -> WeatherSnapshot {
+        WeatherSnapshot {
+            resolution: 32,
+            seed: 42,
+            storm_count: 4,
+            coverage: 0.65,
+            moisture: 0.85,
+            surface_pressure_bar: 0.8,
+            base_temp_c: 15.0,
+            ocean_level: -0.1,
+            axial_tilt_rad: 0.35,
+            season: 0.5,
+            storm_size: 1.25,
+            radius_km: 6371.0,
+            rotation_rate_rad_s: std::f32::consts::TAU / 86_400.0,
+            wind_scale: 1.0,
+            ..WeatherSnapshot::default()
+        }
+    }
+
+    fn u5_validation_cloud_faces(
+        gpu: &GpuContext,
+        snapshot: WeatherSnapshot,
+        terrain: &TectonicTerrain,
+        tile_size: u32,
+    ) -> [Vec<f32>; 6] {
+        let wind = WindFieldPipeline::new(gpu).expect("U5 wind pipeline unavailable");
+        let dynamics = wind.create_textures(gpu, snapshot.resolution);
+        wind.generate_gpu(
+            gpu,
+            terrain,
+            &dynamics,
+            snapshot.seed,
+            snapshot.ocean_level,
+            snapshot.axial_tilt_rad,
+            snapshot.season,
+            snapshot.rotation_rate_rad_s,
+            snapshot.base_temp_c,
+            snapshot.surface_pressure_bar,
+        );
+        let weather_pipeline =
+            WeatherFieldPipeline::new(gpu).expect("U5 weather pipeline unavailable");
+        let weather = weather_pipeline.create_textures(gpu, snapshot.resolution);
+        weather_pipeline.generate(gpu, snapshot, terrain, &dynamics, &weather);
+
+        let root = std::env::temp_dir().join(format!(
+            "planet-gen-u5-cloud-validation-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock before Unix epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("create U5 validation output directory");
+        let coordinator = TileCoordinator::try_new(snapshot.resolution, tile_size)
+            .expect("valid U5 cloud tile size");
+        let stage = stage_cloud_faces(
+            gpu,
+            &root,
+            terrain,
+            &dynamics,
+            &weather,
+            snapshot,
+            &coordinator,
+            &AtomicBool::new(false),
+        )
+        .expect("stage U5 cloud validation faces");
+        let faces = std::array::from_fn(|face| {
+            stage
+                .read_region(face as u32, 0, 0, snapshot.resolution, snapshot.resolution)
+                .expect("read complete U5 cloud face")
+        });
+        drop(stage);
+        let _ = std::fs::remove_dir_all(root);
+        faces
+    }
+
+    fn u5_y_metrics(reference: &[Vec<f32>; 6], candidate: &[Vec<f32>; 6]) -> (f32, f32, f32, f32) {
+        let mut y_errors = Vec::new();
+        let mut coverage_errors = Vec::new();
+        let mut reference_y = Vec::new();
+        let mut candidate_y = Vec::new();
+        for (reference_face, candidate_face) in reference.iter().zip(candidate) {
+            for (reference_pixel, candidate_pixel) in reference_face
+                .chunks_exact(CLOUD_EXR_CHANNELS.len())
+                .zip(candidate_face.chunks_exact(CLOUD_EXR_CHANNELS.len()))
+            {
+                let error = (reference_pixel[0] - candidate_pixel[0]).abs();
+                y_errors.push(error);
+                if reference_pixel[0] >= 0.01 {
+                    coverage_errors.push((reference_pixel[1] - candidate_pixel[1]).abs());
+                    reference_y.push(reference_pixel[0]);
+                    candidate_y.push(candidate_pixel[0]);
+                }
+            }
+        }
+        y_errors.sort_by(f32::total_cmp);
+        let y_mae = y_errors.iter().sum::<f32>() / y_errors.len().max(1) as f32;
+        let y_p95 = y_errors[(y_errors.len().saturating_sub(1) * 95) / 100];
+        let coverage_delta =
+            coverage_errors.iter().sum::<f32>() / coverage_errors.len().max(1) as f32;
+        let reference_mean = reference_y.iter().sum::<f32>() / reference_y.len().max(1) as f32;
+        let candidate_mean = candidate_y.iter().sum::<f32>() / candidate_y.len().max(1) as f32;
+        let (covariance, reference_variance, candidate_variance) =
+            reference_y.iter().zip(&candidate_y).fold(
+                (0.0, 0.0, 0.0),
+                |(covariance, reference_variance, candidate_variance), (left, right)| {
+                    let left = *left - reference_mean;
+                    let right = *right - candidate_mean;
+                    (
+                        covariance + left * right,
+                        reference_variance + left * left,
+                        candidate_variance + right * right,
+                    )
+                },
+            );
+        let correlation = covariance
+            / (reference_variance * candidate_variance)
+                .sqrt()
+                .max(f32::EPSILON);
+        (y_mae, coverage_delta, correlation, y_p95)
+    }
+
+    fn u5_max_shared_boundary_delta(faces: &[Vec<f32>; 6], resolution: u32) -> f32 {
+        let mut shared_values = BTreeMap::<(i32, i32, i32), Vec<f32>>::new();
+        for (face, values) in faces.iter().enumerate() {
+            for y in 0..resolution as usize {
+                for x in 0..resolution as usize {
+                    if x != 0
+                        && y != 0
+                        && x + 1 != resolution as usize
+                        && y + 1 != resolution as usize
+                    {
+                        continue;
+                    }
+                    let direction = face_uv_to_direction(
+                        face,
+                        x as f32 / (resolution - 1) as f32,
+                        y as f32 / (resolution - 1) as f32,
+                    );
+                    let length = direction
+                        .iter()
+                        .map(|value| value * value)
+                        .sum::<f32>()
+                        .sqrt();
+                    let key = (
+                        (direction[0] / length * 1_000_000.0).round() as i32,
+                        (direction[1] / length * 1_000_000.0).round() as i32,
+                        (direction[2] / length * 1_000_000.0).round() as i32,
+                    );
+                    shared_values
+                        .entry(key)
+                        .or_default()
+                        .push(values[(y * resolution as usize + x) * CLOUD_EXR_CHANNELS.len()]);
+                }
+            }
+        }
+        let deltas = shared_values
+            .values()
+            .filter(|values| values.len() > 1)
+            .map(|values| {
+                values.iter().copied().fold(f32::NEG_INFINITY, f32::max)
+                    - values.iter().copied().fold(f32::INFINITY, f32::min)
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            deltas.len() >= 12,
+            "U5 must sample all shared edges and corners"
+        );
+        deltas.into_iter().fold(0.0, f32::max)
+    }
+
+    #[test]
+    fn u5_shared_cloud_export_parity_gates_are_deterministic_and_seam_safe() {
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let snapshot = u5_validation_snapshot();
+        let terrain = directional_terrain(snapshot.resolution);
+        let direct = u5_validation_cloud_faces(&gpu, snapshot, &terrain, snapshot.resolution);
+        let tiled = u5_validation_cloud_faces(&gpu, snapshot, &terrain, 16);
+        let repeat = u5_validation_cloud_faces(&gpu, snapshot, &terrain, snapshot.resolution);
+
+        // Preview and export compile the same density include; this compares the shared
+        // world-space rays before tiled staging changes their output ownership.
+        let shared_density = include_str!("shaders/cloud_density.wgsl");
+        assert!(shared_density.contains("fn weather_cloud_sample"));
+        assert!(
+            include_str!("preview.rs").contains("include_str!(\"shaders/cloud_density.wgsl\")")
+        );
+        assert!(include_str!("export.rs").contains("include_str!(\"shaders/cloud_density.wgsl\")"));
+        assert!(include_str!("shaders/cloud_export.wgsl").contains("weather_cloud_sample"));
+
+        let (y_mae, coverage_delta, directional_correlation, y_p95) = u5_y_metrics(&direct, &tiled);
+        assert!(y_mae <= 0.03, "shared-ray Y MAE={y_mae}");
+        assert!(
+            coverage_delta <= 0.02,
+            "shared-ray coverage delta={coverage_delta}"
+        );
+        assert!(
+            directional_correlation >= 0.95,
+            "shared-ray directional correlation={directional_correlation}"
+        );
+        assert!(y_p95 <= 0.05, "shared-ray Y p95 error={y_p95}");
+        let direct_seam = u5_max_shared_boundary_delta(&direct, snapshot.resolution);
+        let tiled_seam = u5_max_shared_boundary_delta(&tiled, snapshot.resolution);
+        assert!(
+            direct_seam <= 0.02,
+            "direct seam/corner delta={direct_seam}"
+        );
+        assert!(tiled_seam <= 0.02, "tiled seam/corner delta={tiled_seam}");
+        println!(
+            "U5 shared-ray: Y_MAE={y_mae:.8}, coverage_delta={coverage_delta:.8}, directional_correlation={directional_correlation:.8}, Y_p95={y_p95:.8}, direct_seam={direct_seam:.8}, tiled_seam={tiled_seam:.8}"
+        );
+
+        for (first, second) in direct.iter().zip(&repeat) {
+            for (first, second) in first.iter().zip(second) {
+                assert!(
+                    (first - second).abs() <= 1.0e-6,
+                    "same-adapter export drift={}",
+                    (first - second).abs()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn u5_cloud_snapshot_controls_change_export_while_presentation_controls_cannot() {
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let snapshot = u5_validation_snapshot();
+        let terrain = directional_terrain(snapshot.resolution);
+        let baseline = u5_validation_cloud_faces(&gpu, snapshot, &terrain, snapshot.resolution);
+        let terrain_variant = TectonicTerrain {
+            faces: std::array::from_fn(|face| {
+                terrain.faces[face]
+                    .iter()
+                    .enumerate()
+                    .map(|(index, height)| {
+                        height + (index as f32 * 0.17 + face as f32).sin() * 0.15
+                    })
+                    .collect()
+            }),
+            resolution: terrain.resolution,
+        };
+        let variants = [
+            (
+                "seed",
+                WeatherSnapshot {
+                    seed: 43,
+                    ..snapshot
+                },
+                &terrain,
+            ),
+            (
+                "moisture",
+                WeatherSnapshot {
+                    moisture: 0.45,
+                    ..snapshot
+                },
+                &terrain,
+            ),
+            (
+                "season",
+                WeatherSnapshot {
+                    season: 0.85,
+                    ..snapshot
+                },
+                &terrain,
+            ),
+            (
+                "wind",
+                WeatherSnapshot {
+                    wind_scale: 2.0,
+                    ..snapshot
+                },
+                &terrain,
+            ),
+            ("terrain", snapshot, &terrain_variant),
+        ];
+        for (label, changed_snapshot, changed_terrain) in variants {
+            let changed = u5_validation_cloud_faces(
+                &gpu,
+                changed_snapshot,
+                changed_terrain,
+                snapshot.resolution,
+            );
+            let (_, _, correlation, y_p95) = u5_y_metrics(&baseline, &changed);
+            assert!(
+                correlation < 0.999_999 || y_p95 > 1.0e-6,
+                "{label} did not change the shared preview/export weather result"
+            );
+        }
+
+        let storms = WeatherSnapshot {
+            storm_count: 8,
+            storm_size: 3.0,
+            ..snapshot
+        };
+        assert_eq!(export_weather_snapshot(storms, snapshot.resolution), storms);
+        assert!(include_str!("shaders/weather_spinup.wgsl").contains("params.storm_count"));
+        assert!(include_str!("shaders/weather_spinup.wgsl").contains("params.storm_size"));
+
+        let exported_uniforms = cloud_export_uniforms(snapshot);
+        assert_eq!(exported_uniforms.show_clouds, 1.0);
+        assert_eq!(exported_uniforms.cloud_opacity, 1.0);
+        assert_eq!(exported_uniforms.show_cloud_shadows, 0.0);
+    }
+
+    #[test]
+    fn u5_zero_coverage_is_bit_zero_before_atomic_export() {
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let snapshot = WeatherSnapshot {
+            coverage: 0.0,
+            ..u5_validation_snapshot()
+        };
+        let terrain = directional_terrain(snapshot.resolution);
+        let faces = u5_validation_cloud_faces(&gpu, snapshot, &terrain, snapshot.resolution);
+        assert!(faces.iter().flatten().all(|value| value.to_bits() == 0));
+    }
+
     #[test]
     fn reconstruction_keeps_zero_delta_continuous_across_cube_edges() {
         let full = directional_terrain(8);
         let meso = directional_terrain(2);
         let reconstructed = reconstruct_8k_from_meso_delta(&full, &meso, &meso).unwrap();
         for (actual, expected) in reconstructed.faces.iter().zip(&full.faces) {
-            assert!(actual
-                .iter()
-                .zip(expected)
-                .all(|(actual, expected)| (actual - expected).abs() < 1e-6));
+            assert!(
+                actual
+                    .iter()
+                    .zip(expected)
+                    .all(|(actual, expected)| (actual - expected).abs() < 1e-6)
+            );
         }
         for direction in [[1.0, 0.0, 1.0], [1.0, 1.0, 0.0], [0.0, 1.0, 1.0]] {
             let before = sample_cubemap_height(&full, direction);
@@ -3901,10 +5016,6 @@ mod tests {
             QuantizedLayer::AmbientOcclusion.png_format(),
             PngRowFormat::Gray16
         );
-        assert_eq!(
-            QuantizedLayer::CloudDensity.png_format(),
-            PngRowFormat::Gray16
-        );
         assert_eq!(QuantizedLayer::Albedo.png_format(), PngRowFormat::Rgba8);
         assert_staged_png_matches_monolithic(QuantizedLayer::WaterMask);
         assert_staged_png_matches_monolithic(QuantizedLayer::Roughness);
@@ -4006,9 +5117,11 @@ mod tests {
         assert!(!height_staged.with_extension("exr.part").exists());
         assert!(!normal_staged.with_extension("exr.part").exists());
         assert_eq!(recorded.len(), 4);
-        assert!(recorded
-            .chunks_exact(2)
-            .all(|pair| !pair[0].completed && pair[1].completed));
+        assert!(
+            recorded
+                .chunks_exact(2)
+                .all(|pair| !pair[0].completed && pair[1].completed)
+        );
         assert!(recorded.iter().all(|checkpoint| {
             checkpoint.rows_completed == height_px
                 && checkpoint.rows_total == height_px
@@ -4212,30 +5325,6 @@ mod tests {
         );
         assert_map_parity(
             &gpu,
-            "cloud",
-            shader(include_str!("shaders/cloud_map.wgsl")),
-            4,
-            |region| CloudMapParams {
-                face: 0,
-                resolution: region.width,
-                seed: 42,
-                base_temp_c: 15.0,
-                ocean_level: 0.0,
-                ocean_fraction: 0.7,
-                axial_tilt_rad: 0.4,
-                season: 0.5,
-                cloud_coverage: 0.5,
-                cloud_type: 0.5,
-                tile_offset_x: region.origin_x,
-                tile_offset_y: region.origin_y,
-                full_resolution: resolution,
-                local_height: region.height,
-                _pad1: 0,
-                _pad2: 0,
-            },
-        );
-        assert_map_parity(
-            &gpu,
             "emission",
             shader(include_str!("shaders/emission_map.wgsl")),
             4,
@@ -4374,11 +5463,11 @@ mod tests {
             output_dir: tmp_dir.clone(),
             planet_name: "test_planet".into(),
             erosion_iterations: 2,
-            season: 0.5,
             layers: ExportLayers::default(),
-            cloud_coverage: 0.5,
-            cloud_type: 0.5,
-            cloud_seed: 42,
+            weather: WeatherSnapshot {
+                wind_scale: 0.0,
+                ..WeatherSnapshot::default()
+            },
             night_lights: 0.5,
         };
 
@@ -4407,6 +5496,37 @@ mod tests {
         assert!(planet_dir.join("roughness.png").exists());
         assert!(planet_dir.join("water_mask.png").exists());
         assert!(planet_dir.join("ao.png").exists());
+        let clouds = planet_dir.join("clouds.exr");
+        assert!(clouds.exists());
+        assert!(!planet_dir.join("clouds.png").exists());
+        let image = exr::prelude::read_first_flat_layer_from_file(&clouds).unwrap();
+        let channels = image.layer_data.channel_data.list;
+        assert_eq!(channels.len(), CLOUD_EXR_CHANNELS.len());
+        let channel = |name: &str| {
+            channels
+                .iter()
+                .find(|channel| channel.name.to_string() == name)
+                .unwrap()
+        };
+        let values = |name: &str| match &channel(name).sample_data {
+            exr::image::FlatSamples::F32(values) => values,
+            _ => panic!("{name} must be FLOAT"),
+        };
+        assert!(values("Y").iter().any(|value| *value > 0.0));
+        for name in ["coverage", "character", "cirrus"] {
+            assert!(
+                values(name).iter().all(|value| (0.0..=1.0).contains(value)),
+                "{name} outside [0,1]"
+            );
+        }
+        for name in ["base_km", "thickness_km"] {
+            assert!(
+                values(name)
+                    .iter()
+                    .all(|value| *value >= 0.0 && value.is_finite()),
+                "{name} invalid"
+            );
+        }
 
         // Check last progress was Complete
         let mut last = None;
@@ -4433,11 +5553,8 @@ mod tests {
             output_dir: tmp_dir.clone(),
             planet_name: "cancel_test".into(),
             erosion_iterations: 2,
-            season: 0.5,
             layers: ExportLayers::default(),
-            cloud_coverage: 0.5,
-            cloud_type: 0.5,
-            cloud_seed: 42,
+            weather: WeatherSnapshot::default(),
             night_lights: 0.5,
         };
 
@@ -4479,11 +5596,8 @@ mod tests {
             output_dir: tmp_dir.clone(),
             planet_name: "benchmark".into(),
             erosion_iterations: 10,
-            season: 0.5,
             layers: ExportLayers::default(),
-            cloud_coverage: 0.5,
-            cloud_type: 0.5,
-            cloud_seed: 42,
+            weather: WeatherSnapshot::default(),
             night_lights: 0.5,
         };
 

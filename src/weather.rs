@@ -13,7 +13,7 @@ pub const WEATHER_DIAGNOSTIC_NO_SOURCE: u32 = 1;
 /// Mass channels are low, deep, high, occupancy. Geometry channels are
 /// base, low top, deep top, high top, all in kilometers.
 #[repr(C)]
-#[derive(Copy, Clone, Pod, Zeroable)]
+#[derive(Copy, Clone, Debug, PartialEq, Pod, Zeroable)]
 pub struct WeatherSnapshot {
     pub face: u32,
     pub resolution: u32,
@@ -31,6 +31,28 @@ pub struct WeatherSnapshot {
     pub rotation_rate_rad_s: f32,
     /// 0 = calm, 1 = physical baseline, 2 = strong transport.
     pub wind_scale: f32,
+}
+
+impl Default for WeatherSnapshot {
+    fn default() -> Self {
+        Self {
+            face: 0,
+            resolution: DEFAULT_WEATHER_RESOLUTION,
+            seed: 0,
+            storm_count: 0,
+            coverage: 0.5,
+            moisture: 0.5,
+            surface_pressure_bar: 1.0,
+            base_temp_c: 15.0,
+            ocean_level: 0.0,
+            axial_tilt_rad: 0.0,
+            season: 0.5,
+            storm_size: 1.0,
+            radius_km: 6_371.0,
+            rotation_rate_rad_s: 7.292_115e-5,
+            wind_scale: 1.0,
+        }
+    }
 }
 
 const SPINUP_RESOLUTION: u32 = 128;

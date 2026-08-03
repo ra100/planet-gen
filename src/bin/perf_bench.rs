@@ -7,22 +7,23 @@
 //! Also prints a Quick vs Classified comparison at 768px.
 
 use planet_gen::export::{
+    ExportConfig, ExportLayers, ExportTimings, MAX_8K_OWNED_LIVE_BYTES,
     estimated_export_preflight_bytes_with_erosion, estimated_peak_streaming_bytes,
-    run_export_with_timings_and_checkpoints, ExportConfig, ExportLayers, ExportTimings,
-    MAX_8K_OWNED_LIVE_BYTES,
+    run_export_with_timings_and_checkpoints,
 };
 use planet_gen::gpu::GpuContext;
 use planet_gen::perf_evidence::{
-    publish, sha256, AcceptanceProfile, CanonicalReport, GateStatus, StageJournal, PRESET,
+    AcceptanceProfile, CanonicalReport, GateStatus, PRESET, StageJournal, publish, sha256,
 };
 use planet_gen::planet::{DerivedProperties, PlanetParams};
-use planet_gen::plates::{generate_plates, PlateGenParams};
+use planet_gen::plates::{PlateGenParams, generate_plates};
 use planet_gen::preview::PreviewRenderer;
 use planet_gen::terrain_compute::{
     ErosionPipeline, TerrainComputePipeline, TerrainGenerationParams,
 };
-use std::sync::atomic::{AtomicBool, Ordering};
+use planet_gen::weather::WeatherSnapshot;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 const EVIDENCE_ROOT: &str = "target/procedural-terrain-evidence";
@@ -386,11 +387,11 @@ fn run_u2_8k() {
         output_dir: "target/procedural-terrain-exports".into(),
         planet_name: evidence.run_id.clone(),
         erosion_iterations: 25,
-        season: 0.5,
         layers,
-        cloud_coverage: 0.5,
-        cloud_type: 0.5,
-        cloud_seed: params.seed.wrapping_add(1000),
+        weather: WeatherSnapshot {
+            seed: params.seed.wrapping_add(1000),
+            ..WeatherSnapshot::default()
+        },
         night_lights: 0.0,
     };
     let (progress, _progress_rx) = std::sync::mpsc::channel();

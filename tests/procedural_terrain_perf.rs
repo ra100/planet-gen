@@ -1,7 +1,7 @@
 use planet_gen::export::LayerMaterializationCheckpoint;
 use planet_gen::perf_evidence::{
-    publish, publish_with_failpoint, sha256, AcceptanceProfile, CanonicalReport, GateStatus,
-    PublishFailpoint, StageJournal, PRESET,
+    AcceptanceProfile, CanonicalReport, GateStatus, PRESET, PublishFailpoint, StageJournal,
+    publish, publish_with_failpoint, sha256,
 };
 
 fn root(name: &str) -> std::path::PathBuf {
@@ -288,9 +288,11 @@ fn warm_768_acceptance_requires_only_warm_measurements_and_publishes_journal() {
     cold.gate_768_warm = GateStatus::NotRun;
     let cold_publication = publish(&root, &cold, &[("stage-journal.json", b"{}")]).unwrap();
     assert!(cold_publication.accepted);
-    assert!(std::fs::read_to_string(root.join("last-accepted.json"))
-        .unwrap()
-        .contains("u2-8k-success"));
+    assert!(
+        std::fs::read_to_string(root.join("last-accepted.json"))
+            .unwrap()
+            .contains("u2-8k-success")
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 

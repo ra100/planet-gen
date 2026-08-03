@@ -7,6 +7,8 @@
 
 #include <memory>
 #include <string>
+#include <unordered_set>
+#include <vector>
 
 using namespace OPENEXR_IMF_NAMESPACE;
 
@@ -23,13 +25,23 @@ extern "C" const char* planet_gen_exr_last_error() {
     return planet_gen_exr_error.c_str();
 }
 
-extern "C" PlanetGenExrWriter* planet_gen_exr_open(const char* path, int width, int height) {
-    if (path == nullptr || width <= 0 || height <= 0) { set_error("invalid OpenEXR output path or dimensions"); return nullptr; }
+extern "C" PlanetGenExrWriter* planet_gen_exr_open(
+    const char* path, int width, int height, const char* const* channels, int channel_count
+) {
+    if (path == nullptr || width <= 0 || height <= 0 || channels == nullptr || channel_count <= 0) {
+        set_error("invalid OpenEXR output path, dimensions, or channels");
+        return nullptr;
+    }
     try {
         Header header(width, height);
         header.compression() = ZIP_COMPRESSION;
-        for (const char* channel : {"R", "G", "B", "A"}) {
-            header.channels().insert(channel, Channel(FLOAT));
+        std::unordered_set<std::string> names;
+        for (int index = 0; index < channel_count; ++index) {
+            if (channels[index] == nullptr || channels[index][0] == '\0' || !names.insert(channels[index]).second) {
+                set_error("OpenEXR channels must be non-empty and unique");
+                return nullptr;
+            }
+            header.channels().insert(channels[index], Channel(FLOAT));
         }
         return new PlanetGenExrWriter { std::make_unique<OutputFile>(path, header), width, height };
     } catch (const std::exception& error) {
@@ -38,18 +50,24 @@ extern "C" PlanetGenExrWriter* planet_gen_exr_open(const char* path, int width, 
     }
 }
 
-extern "C" int planet_gen_exr_write_rgba_scanline(PlanetGenExrWriter* writer, int y, const float* rgba) {
-    if (writer == nullptr || rgba == nullptr || y != writer->file->currentScanLine() || y < 0 || y >= writer->height) {
+extern "C" int planet_gen_exr_write_scanline(
+    PlanetGenExrWriter* writer, int y, const float* pixels, const char* const* channels, int channel_count
+) {
+    if (writer == nullptr || pixels == nullptr || channels == nullptr || channel_count <= 0
+        || y != writer->file->currentScanLine() || y < 0 || y >= writer->height) {
         set_error("invalid OpenEXR scanline write");
         return 0;
     }
     try {
         FrameBuffer frame_buffer;
-        const size_t pixel_stride = sizeof(float) * 4;
-        for (int channel = 0; channel < 4; ++channel) {
-            const char* name = channel == 0 ? "R" : channel == 1 ? "G" : channel == 2 ? "B" : "A";
-            char* base = reinterpret_cast<char*>(const_cast<float*>(rgba)) + sizeof(float) * channel;
-            frame_buffer.insert(name, Slice(FLOAT, base, pixel_stride, 0));
+        const size_t pixel_stride = sizeof(float) * channel_count;
+        for (int channel = 0; channel < channel_count; ++channel) {
+            if (channels[channel] == nullptr) {
+                set_error("invalid OpenEXR channel name");
+                return 0;
+            }
+            char* base = reinterpret_cast<char*>(const_cast<float*>(pixels)) + sizeof(float) * channel;
+            frame_buffer.insert(channels[channel], Slice(FLOAT, base, pixel_stride, 0));
         }
         writer->file->setFrameBuffer(frame_buffer);
         writer->file->writePixels(1);

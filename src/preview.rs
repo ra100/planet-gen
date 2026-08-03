@@ -97,9 +97,10 @@ impl PreviewRenderer {
             &format!("const CLOUD_RAY_SAMPLES: u32 = {samples}u;"),
         );
         let shader_source = format!(
-            "{}\n{}\n{}",
+            "{}\n{}\n{}\n{}",
             include_str!("shaders/noise.wgsl"),
             cloud_density,
+            include_str!("shaders/cloud_wind_fallback.wgsl"),
             preview_shader,
         );
 
@@ -1603,9 +1604,10 @@ mod tests {
 
     fn layer_profile_oracle(gpu: &GpuContext) -> Vec<f32> {
         let shader_source = format!(
-            "{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}",
             include_str!("shaders/noise.wgsl"),
             include_str!("shaders/cloud_density.wgsl"),
+            include_str!("shaders/cloud_wind_fallback.wgsl"),
             include_str!("shaders/preview_cubemap.wgsl"),
             r#"
 @group(1) @binding(0) var<storage, read_write> output: array<f32, 80>;
@@ -1706,9 +1708,10 @@ fn layer_profile_oracle() {
         resolution: u32,
     ) -> Vec<f32> {
         let shader_source = format!(
-            "{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}",
             include_str!("shaders/noise.wgsl"),
             include_str!("shaders/cloud_density.wgsl"),
+            include_str!("shaders/cloud_wind_fallback.wgsl"),
             include_str!("shaders/preview_cubemap.wgsl"),
             r#"
 @fragment fn cloud_sun_path_oracle(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
@@ -1906,9 +1909,10 @@ fn layer_profile_oracle() {
     #[test]
     fn u4_cloud_phase_is_normalized_bounded_and_forward_weighted() {
         let shader_source = format!(
-            "{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}",
             include_str!("shaders/noise.wgsl"),
             include_str!("shaders/cloud_density.wgsl"),
+            include_str!("shaders/cloud_wind_fallback.wgsl"),
             include_str!("shaders/preview_cubemap.wgsl"),
             r#"@group(1) @binding(0) var<storage, read_write> output: array<f32, 80>;
 @compute @workgroup_size(1) fn u4_phase_oracle() {

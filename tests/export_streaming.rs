@@ -9,6 +9,7 @@ use planet_gen::{
     gpu::GpuContext,
     planet::{DerivedProperties, PlanetParams},
     terrain_compute::{TectonicTerrain, TerrainGenerationParams},
+    weather::WeatherSnapshot,
 };
 use std::sync::{Arc, atomic::AtomicBool, mpsc::channel};
 
@@ -195,11 +196,11 @@ fn streamed_layers_release_previous_face_buffers() {
         output_dir: root.clone(),
         planet_name: "streaming".into(),
         erosion_iterations: 0,
-        season: 0.5,
         layers: ExportLayers::default(),
-        cloud_coverage: 0.5,
-        cloud_type: 0.5,
-        cloud_seed: params.seed,
+        weather: WeatherSnapshot {
+            seed: params.seed,
+            ..WeatherSnapshot::default()
+        },
         night_lights: 0.0,
     };
     let (progress, _) = channel();
@@ -222,7 +223,7 @@ fn streamed_layers_release_previous_face_buffers() {
         "albedo.png",
         "ao.png",
         "water_mask.png",
-        "clouds.png",
+        "clouds.exr",
         "emission.exr",
     ] {
         assert!(output.join(name).is_file(), "missing {name}");
@@ -257,11 +258,11 @@ fn invalid_tile_sizes_are_export_errors() {
             output_dir: std::env::temp_dir(),
             planet_name: "invalid-tile".into(),
             erosion_iterations: 0,
-            season: 0.5,
             layers: ExportLayers::default(),
-            cloud_coverage: 0.5,
-            cloud_type: 0.5,
-            cloud_seed: params.seed,
+            weather: WeatherSnapshot {
+                seed: params.seed,
+                ..WeatherSnapshot::default()
+            },
             night_lights: 0.0,
         };
         let (progress, _) = channel();
