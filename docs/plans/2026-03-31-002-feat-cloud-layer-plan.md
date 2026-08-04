@@ -1,11 +1,13 @@
 ---
 title: "feat: Procedural cloud layer with climate-driven coverage"
 type: feat
-status: active
+status: superseded
 date: 2026-03-31
 ---
 
 # Procedural Cloud Layer
+
+> Superseded by [the shallow volumetric clouds plan](2026-07-10-001-feat-shallow-volumetric-clouds-plan.md). This plan is retained as historical shell-rendering context.
 
 ## Overview
 

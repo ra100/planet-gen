@@ -1,12 +1,14 @@
 ---
 title: Native Terrain Diffusion CUDA Feasibility Spike
 type: feat
-status: approved-to-run
+status: dropped
 date: 2026-07-26
 origin: GEN-006, GEN-007, GEN-008
 ---
 
 # Native Terrain Diffusion CUDA Feasibility Spike
+
+> **ARCHIVED / NO-GO.** The retained spike records a rejected whole-planet direction: the final held-out export gate failed, so no further spike work is planned. See [the archived roadmap entry](../../Plans.md#archived-terrain-diffusion-and-imported-terrain) and [native evidence](../research/terrain-diffusion-native-spike-manifest.md).
 
 > **APPROVED TO RUN AN ISOLATED NATIVE CUDA FEASIBILITY SPIKE. NOT APPROVED FOR APP/UI INTEGRATION, SCIENTIFIC SUITABILITY CLAIMS, OR MODEL DISTRIBUTION.**
 
@@ -57,11 +59,11 @@ Phases are `preflight -> acquire -> export -> python-parity -> native-parity -> 
 
 ## Implementation Units
 
-### P0 — Isolated crate and protocol (`TODO`)
+### P0 — Isolated crate and protocol (archived)
 
 Create only the listed committed spike crate and strict runner grammar. `Cargo.toml` fixes `default=[]`, `nvidia=["dep:ort"]`, and optional `ort = "=2.0.0-rc.12"` with `default-features=false` plus `std,ndarray,load-dynamic,cuda,api-24`. Emit ordered phase records; paths are relative to the spike output root. No root workspace membership or root Cargo changes.
 
-### P1 — Runtime preflight (`TODO`)
+### P1 — Runtime preflight (archived)
 
 Probe the official GPU 1.24.4 asset and its SHA-256, `libonnxruntime.so.1.24.4`, shared/CUDA provider libraries, CUDA 12, cuDNN 9, and compatible driver before acquisition. Run `rtk ldd -r` and a CUDA-only ORT provider registration/session proof; stop on any absence or incompatibility. A CUDA 13.0 host report is insufficient; CPU fallback is forbidden.
 
@@ -81,23 +83,23 @@ BE-003D1B2 review remediation supersedes all prior replay/pipeline reports with 
 
 BE-003D1B1 PyTorch reference verdict: `PYTORCH_REAL_REFERENCE_PASS`. Two independent CUDA processes exactly matched all three model call records and the final 256² LE-f32 elevation after enforcing normal source cleanliness plus source/model/stats/lock/interpreter pins before imports; semantic call identity excludes sequence ordinal, fixture bytes are independently summed from published files, and failed staging is preserved. The local fixture is input evidence for a later replay only. It does not change the ONNX, native, scientific, app, or distribution `NO-GO`/`NOT_RUN` statuses.
 
-### P3 — Python/native parity and deterministic CUDA runner (`TODO`)
+### P3 — Python/native parity and deterministic CUDA runner (archived)
 
 Create hash-bound deterministic fixture requests and Python outputs. The native `ort` runner registers CUDA with `.error_on_failure()`, disables CPU fallback, records strict/deterministic settings and provider assignment/profile proving every node is CUDA, checks cancellation before submission, records peak worker VRAM, and repeats the request for exact-hash determinism. Model-free tests must compile without ORT; both test modes use `--locked`.
 
-### P4 — Atlas and canonical cubemap projection (`TODO`)
+### P4 — Atlas and canonical cubemap projection (archived)
 
 Generate the 2048x1024 atlas for 512 faces. Apply the frozen face equations, texel centres, lon/lat periodic lookup, polar origin/radius/angle transform, quintic 60°–75° blend, orientation/files, numeric seam/edge/corner/pole tolerances, and `H=(m-min)/(max-min)` displacement `1+0.01*H`. Preserve non-finite/range failures.
 
-### P5 — Technical gates and evidence (`TODO`)
+### P5 — Technical gates and evidence (archived)
 
 Require recorded Python/native parity, exact native repeatability, `<=4 GiB` worker VRAM, orientation, 12 edge, 8 corner, finite/range, pole-cap/ring, cancellation, provider-negative-test, and SHA-256 fixture evidence. Publication atomically reserves `<run>.incomplete`, verifies canonical files/evidence, removes the marker only on success, rejects readers of incomplete runs, and retains crash residue without reuse. Missing evidence is `FAIL`.
 
-### P6 — Result manifest and decision split (`TODO`)
+### P6 — Result manifest and decision split (archived)
 
 Write only the local result manifest. Set a technical decision from P1–P5; leave app integration `BLOCKED` because the Phase 5.24 procedural evaluator is `NO-GO`, and leave distribution `NO-GO` because no model/ONNX/checkpoint distribution is in scope.
 
-### P7 — Review and cleanup (`TODO`)
+### P7 — Review and cleanup (archived)
 
 Confirm all generated materials remain ignored under `target/terrain-diffusion-native/`, no source/weight/ONNX/fixture asset entered Git, no root files changed, and docs have no implied product/scientific approval.
 

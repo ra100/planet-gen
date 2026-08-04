@@ -37,15 +37,17 @@ pub struct PreviewUniforms {
     pub show_atmosphere_layer: f32,
     pub show_cities: f32,
     pub cloud_opacity: f32,
-    pub cloud_advection: f32, // 1.0 = advected cubemap modulates clouds, 0.0 = per-pixel only
-    pub rotation_rate: f32,   // relative to Earth (1.0 = 24h day)
-    pub atm_pressure: f32,    // atmospheric pressure in bar (1.0 = Earth)
-    pub _pad4: f32,           // retained uniform slot after U15 removes render-only wind strength
-    pub lava_glow: f32,       // tectonic emission intensity (0.0-1.0)
-    pub ring_inner: f32,      // ring system inner radius (planet radii, 0 = no rings)
-    pub ring_outer: f32,      // ring system outer radius
-    pub ring_tilt: f32,       // ring plane tilt angle (radians)
-    pub ring_opacity: f32,    // ring opacity (0-1)
+    // Historical field name: selects persistent GPU wind/continentality textures;
+    // zero keeps the analytical fallback for deterministic no-wind cases.
+    pub cloud_advection: f32,
+    pub rotation_rate: f32, // relative to Earth (1.0 = 24h day)
+    pub atm_pressure: f32,  // atmospheric pressure in bar (1.0 = Earth)
+    pub _pad4: f32,         // retained uniform slot after U15 removes render-only wind strength
+    pub lava_glow: f32,     // tectonic emission intensity (0.0-1.0)
+    pub ring_inner: f32,    // ring system inner radius (planet radii, 0 = no rings)
+    pub ring_outer: f32,    // ring system outer radius
+    pub ring_tilt: f32,     // ring plane tilt angle (radians)
+    pub ring_opacity: f32,  // ring opacity (0-1)
     pub planet_radius_km: f32,
     pub show_cloud_shadows: f32,
     pub _pad5: f32,
@@ -716,7 +718,7 @@ mod tests {
     use super::*;
     use crate::cube_sphere::cube_to_sphere;
     use crate::gpu::GpuContext;
-    use crate::plates::{PlateGenParams, generate_plates};
+    use crate::plates::{generate_plates, PlateGenParams};
     use crate::terrain_compute::{TectonicTerrain, TerrainComputePipeline, WindFieldPipeline};
     use crate::weather::{WeatherFieldPipeline, WeatherSnapshot};
 
@@ -1583,13 +1585,11 @@ mod tests {
             percentile(samples, 0.50)
         };
         let zero = std::array::from_fn(|_| vec![0.0; (resolution * resolution * 4) as usize]);
-        assert!(
-            render(&zero)
-                .iter()
-                .enumerate()
-                .filter(|(index, _)| sphere_mask(size, *index))
-                .all(|(_, value)| *value == 0.0)
-        );
+        assert!(render(&zero)
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| sphere_mask(size, *index))
+            .all(|(_, value)| *value == 0.0));
         let tau_01 = mean_tau(0.01);
         let tau_02 = mean_tau(0.02);
         let tau_04 = mean_tau(0.04);
@@ -1993,11 +1993,9 @@ fn layer_profile_oracle() {
             .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
             .collect();
         readback.unmap();
-        assert!(
-            values[..68]
-                .iter()
-                .all(|value| value.is_finite() && *value >= 0.0 && *value <= 0.62)
-        );
+        assert!(values[..68]
+            .iter()
+            .all(|value| value.is_finite() && *value >= 0.0 && *value <= 0.62));
         assert!(values[2] > values[1] && values[1] > values[0]);
         let integral = values[78];
         assert!((integral - 1.0).abs() <= 0.02, "integral={integral}");
@@ -2288,19 +2286,15 @@ fn layer_profile_oracle() {
             thick_metrics.3,
         );
         assert!(low_metrics.4 > 0.0);
-        assert!(high_metrics.0.0 < low_metrics.0.0);
+        assert!(high_metrics.0 .0 < low_metrics.0 .0);
         assert!(thick_metrics.5 > thin_metrics.5);
         assert_eq!(thick_metrics.3, 1);
         assert_eq!(zero_shadow, clear);
-        assert!(
-            clear
-                .chunks_exact(4)
-                .zip(low_shadow.chunks_exact(4))
-                .enumerate()
-                .all(|(index, (clear, shadowed))| {
-                    sphere_mask(size, index) || clear == shadowed
-                })
-        );
+        assert!(clear
+            .chunks_exact(4)
+            .zip(low_shadow.chunks_exact(4))
+            .enumerate()
+            .all(|(index, (clear, shadowed))| { sphere_mask(size, index) || clear == shadowed }));
     }
 
     #[test]
@@ -2355,11 +2349,9 @@ fn layer_profile_oracle() {
         assert!((translated - tall).abs() / tall.max(f32::EPSILON) <= 0.02);
         assert_eq!(ocean_tall, 0.0);
         assert!(coast.windows(2).all(|values| values[0] <= values[1]));
-        assert!(
-            coast
-                .iter()
-                .all(|value| value.is_finite() && *value <= tall)
-        );
+        assert!(coast
+            .iter()
+            .all(|value| value.is_finite() && *value <= tall));
     }
 
     #[test]
@@ -2413,15 +2405,13 @@ fn layer_profile_oracle() {
             })
             .unwrap();
         assert!(support.iter().any(|supported| *supported));
-        assert!(
-            density
-                .iter()
-                .zip(&support)
-                .enumerate()
-                .all(|(index, (density, supported))| !sphere_mask(size, index)
-                    || *supported
-                    || *density == 0.0)
-        );
+        assert!(density
+            .iter()
+            .zip(&support)
+            .enumerate()
+            .all(|(index, (density, supported))| !sphere_mask(size, index)
+                || *supported
+                || *density == 0.0));
     }
 
     #[test]
@@ -2912,20 +2902,16 @@ fn layer_profile_oracle() {
             Some((&dense_weather.mass, &dense_weather.geometry)),
             64,
         );
-        assert!(
-            hidden_shadow
-                .chunks_exact(4)
-                .zip(expected.chunks_exact(4))
-                .enumerate()
-                .any(|(index, (shadowed, clear))| sphere_mask(64, index) && shadowed != clear)
-        );
-        assert!(
-            hidden_shadow
-                .chunks_exact(4)
-                .zip(expected.chunks_exact(4))
-                .enumerate()
-                .all(|(index, (shadowed, clear))| sphere_mask(64, index) || shadowed == clear)
-        );
+        assert!(hidden_shadow
+            .chunks_exact(4)
+            .zip(expected.chunks_exact(4))
+            .enumerate()
+            .any(|(index, (shadowed, clear))| sphere_mask(64, index) && shadowed != clear));
+        assert!(hidden_shadow
+            .chunks_exact(4)
+            .zip(expected.chunks_exact(4))
+            .enumerate()
+            .all(|(index, (shadowed, clear))| sphere_mask(64, index) || shadowed == clear));
 
         assert_eq!(
             renderer.render(
@@ -3347,13 +3333,11 @@ fn layer_profile_oracle() {
             "U4 shadow p95 difference={shadow_p95_difference:.6}"
         );
         assert!(atmosphere_difference > 0.000_01);
-        assert!(
-            shadow_on_pixels
-                .chunks_exact(4)
-                .zip(shadow_off_pixels.chunks_exact(4))
-                .enumerate()
-                .all(|(index, (on, off))| sphere_mask(size, index) || on == off)
-        );
+        assert!(shadow_on_pixels
+            .chunks_exact(4)
+            .zip(shadow_off_pixels.chunks_exact(4))
+            .enumerate()
+            .all(|(index, (on, off))| sphere_mask(size, index) || on == off));
 
         let artifact_dir = std::path::Path::new("/tmp/planet-gen-u4-corrected-768");
         let _ = std::fs::remove_dir_all(artifact_dir);

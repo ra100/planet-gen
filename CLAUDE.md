@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Planet Gen is a GPU-accelerated procedural planet generator built with Rust + wgpu. It produces physically plausible planets with biomes, atmospheres, oceans, and terrain from user-controlled parameters. Currently implements preview mode with plans for full-resolution 8K+ export.
+Planet Gen is a GPU-accelerated procedural planet generator built with Rust + wgpu. It produces physically plausible planets with biomes, atmospheres, oceans, terrain, and shallow volumetric clouds from user-controlled parameters, with bounded tiled export up to 8K.
 
 ## Tech Stack
 
@@ -18,12 +18,16 @@ Planet Gen is a GPU-accelerated procedural planet generator built with Rust + wg
 ```
 src/
   app.rs          — Main application, UI, parameter sliders
-  preview.rs      — Preview renderer, uniform buffer, GPU pipeline
+  preview.rs      — Preview renderer, uniforms, persistent-GPU field bindings
+  weather.rs      — Revisioned front/back cloud mass and geometry cubemaps
+  export.rs       — Tiled EXR export, including six-channel cloud reconstruction output
   planet.rs       — PlanetParams, DerivedProperties, physics model
   lib.rs          — Module declarations
   shaders/
-    preview.wgsl  — Fragment shader: terrain, climate, biomes, coloring
-    compute.wgsl  — Compute shader (gradient test)
+    preview_cubemap.wgsl — Fragment shader: terrain, climate, bounded cloud volume
+    weather_field.wgsl   — Cloud mass and geometry field generation
+    cloud_density.wgsl   — Shared preview/export density definitions
+    cloud_export.wgsl    — Direct optical-depth and reconstruction-channel export
 docs/
   research/       — Research documents (planetary science, GPU techniques)
   brainstorms/    — Requirements documents
@@ -35,7 +39,7 @@ Plans.md          — Master progress tracker across all phases
 
 ### Preview Pipeline
 
-User parameters → `PlanetParams` → `DerivedProperties` (physics model) → `PreviewUniforms` (GPU buffer) → fragment shader renders lit sphere with:
+User parameters → `PlanetParams` → `DerivedProperties` (physics model) → revisioned `WeatherSnapshot` → persistent weather cubemaps + `PreviewUniforms` → fragment shader renders a lit sphere with:
 
 - Continental structure (low-freq noise + domain warping)
 - Multi-octave fBm terrain detail (8-12 octaves)
@@ -45,6 +49,9 @@ User parameters → `PlanetParams` → `DerivedProperties` (physics model) → `
 - Altitude zonation (forest → alpine → rock → snow)
 - Ocean and polar ice rendering
 - Crater stamping
+- Bounded ray-marched cloud volume, lighting, and surface shadows
+
+Export repeats the weather sequence from an immutable snapshot at bounded field resolution. `clouds.exr` contains direct optical depth plus reconstruction channels; preview visibility and opacity do not affect export.
 
 ### Key Physical Models
 

@@ -1,7 +1,7 @@
 ---
 title: "feat: Add shallow volumetric clouds"
 type: feat
-status: active
+status: completed
 date: 2026-07-10
 origin: docs/brainstorms/2026-03-31-cloud-layer-requirements.md
 deepened: 2026-07-12
@@ -12,6 +12,19 @@ deepened: 2026-07-12
 ## Summary
 
 Keep the completed unified GPU foundation and always-on U12 moisture spin-up, then replace the remaining stamped/mask-like cloud interpretation with continuous causal weather regimes. Existing wind, pressure, moisture, temperature, terrain, latitude, season, and rotation inputs produce overlapping low, deep/storm, and high/cirrus mass plus physical geometry; procedural detail only shapes eligible mass into decks, cells, fronts, towers, downshear anvils, or fibres. The same snapshot, algorithms, and two-cubemap field contract drive preview lighting, surface shadows, and export.
+
+### Completion Record
+
+- U5 is complete in `21be76c`: preview/export parity channels.
+- U6 is complete in `33d55a2`: cloud export controls and design QA.
+- U11 is complete in `e0f611d`: direct EXR export with the 2K stress gate passing.
+- U7 is complete in the working tree: it verified that superseded shell-only, CPU-packed-wind, and independent export paths are absent, then documented the accepted runtime.
+
+### Delivery Lessons
+
+- Direct ordered EXR streaming restored the Cloud U5 2K export latency gate to under 60 seconds; retain ordered writes rather than rebuilding full cloud-face products in memory.
+- Immutable `WeatherSnapshot` inputs plus shared density and wind helpers are the parity boundary: preview and export must derive from the same snapshot and definitions.
+- Durable per-phase and per-layer evidence is required to expose real timing and cancellation outcomes; incomplete or cancelled work must never appear as a completed export.
 
 ---
 
@@ -84,7 +97,7 @@ F1 regenerates weather only for density-affecting inputs. Camera and lighting ch
 - `src/shaders/weather_field.wgsl` currently stamps 2 sheets, 4 fronts, and 6 convective ellipses, samples only a global moisture scalar, and uses a short nearest-height difference for terrain forcing. These are the immediate sources of repeated topology and coastline-shaped artifacts.
 - `src/shaders/cloud_density.wgsl` currently thresholds noise by one character scalar and reconstructs cyclone geometry independently from the weather field. It cannot represent low cloud, deep towers, and high anvil or cirrus at the same location.
 - `src/shaders/preview_cubemap.wgsl` has an eight-level density estimate and basic lighting, but does not yet perform the planned bounded front-to-back optical-depth march or render cloud depth through the atmosphere-only limb path.
-- `src/export.rs` still compiles the independent `src/shaders/cloud_map.wgsl`; `src/bin/sweep.rs` cannot provide a separate weather texture; `src/bin/perf_bench.rs` does not measure cloud work.
+- U5 replaced the independent `src/shaders/cloud_map.wgsl` path with shared density definitions and direct export. Export and sweep now receive the weather textures required for parity validation.
 
 ### Meteorological Formation Model
 
@@ -785,7 +798,7 @@ Freeze this protocol before U14 starts. `docs/research/shallow-volumetric-cloud-
 
 **Files:**
 - Modify: `src/export.rs`
-- Replace: `src/shaders/cloud_map.wgsl`
+- Modify: `src/shaders/cloud_export.wgsl`
 - Modify: `src/app.rs`
 - Modify: `src/bin/sweep.rs`
 - Test: `src/export.rs`
@@ -915,6 +928,8 @@ Freeze this protocol before U14 starts. `docs/research/shallow-volumetric-cloud-
 **Requirements:** R13, R16-R18
 
 **Dependencies:** U11
+
+**Completion:** The superseded paths were already absent after U1-U6/U11. U7 retained the accepted persistent weather, bounded volume, no-cloud early exit, and direct six-channel export paths; it updates their documentation rather than deleting uncertain active code.
 
 **Files:**
 - Modify: `src/shaders/preview_cubemap.wgsl`
@@ -1056,7 +1071,7 @@ flowchart TB
 
 - **Origin document:** [docs/brainstorms/2026-03-31-cloud-layer-requirements.md](../brainstorms/2026-03-31-cloud-layer-requirements.md)
 - Related code: `src/app.rs`, `src/preview.rs`, `src/terrain_compute.rs`, `src/export.rs`
-- Related shaders: `src/shaders/preview_cubemap.wgsl`, `src/shaders/wind_field.wgsl`, `src/shaders/weather_field.wgsl`, `src/shaders/cloud_density.wgsl`, `src/shaders/cloud_map.wgsl`
+- Related shaders: `src/shaders/preview_cubemap.wgsl`, `src/shaders/wind_field.wgsl`, `src/shaders/weather_field.wgsl`, `src/shaders/cloud_density.wgsl`, `src/shaders/cloud_export.wgsl`
 - Local research: `docs/research/cloud-rendering.md`, `docs/research/performance-visual-comparison.md`, `docs/research/pbr-materials-pipeline.md`
 - External: [Horizon Zero Dawn cloudscapes](https://advances.realtimerendering.com/s2015/The%20Real-time%20Volumetric%20Cloudscapes%20of%20Horizon%20-%20Zero%20Dawn%20-%20ARTR.pdf)
 - External: [Nubis, Evolved](https://advances.realtimerendering.com/s2022/SIGGRAPH2022-Advances-NubisEvolved-NoVideos.pdf)

@@ -3,6 +3,8 @@
 **Date:** 2026-04-06
 **Phases covered:** 5.18 (Pressure-based wind), 5.19 (Climate model refinement), 5.20 (Wind-shaped clouds)
 
+> **Historical record — superseded for runtime decisions.** The timings and implementation notes below describe the Phase 5.20 renderer. The current cloud path uses persistent, revisioned weather mass and geometry cubemaps, a bounded shallow volume in preview, and direct six-channel `clouds.exr` export. Retain the measurements as evidence; do not treat them as current performance or export behavior.
+
 ---
 
 ## Architecture Changes

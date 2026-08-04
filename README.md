@@ -25,12 +25,12 @@ Requires a GPU with Vulkan, Metal, or DX12 support (most GPUs from 2018+).
 - **Continent controls** — sliders for number of continents (1-10), size variety (equal to supercontinent), and continental scale (noise frequency)
 - **Whittaker biome system** — temperature x moisture lookup with altitude zonation (forest, alpine, rock, snow)
 - **Hadley cell climate** — latitude-driven temperature, wind-terrain rain shadows, continentality effects
-- **Cloud layers** — stratus/cumulus blend, orographic lift, cyclone storm systems with spiral arms
+- **Shallow volumetric clouds** — persistent GPU weather fields drive bounded ray-marched stratus, convection, cirrus, lighting, and surface shadows in preview and export
 - **Atmosphere** — Mie scattering haze, star color temperature tinting
 - **Night lights** — procedural city lights with cloud occlusion and scattered glow
 - **GPU-rendered preview** — real-time cubemap-sampled sphere with diffuse + specular lighting, AO, normal mapping
 - **Progressive erosion** — GPU hydraulic erosion with moisture-weighted intensity
-- **Selective EXR export** — height, albedo, normal, roughness, AO, water mask, clouds, emission at up to 8K resolution
+- **Selective EXR export** — height, albedo, normal, roughness, AO, water mask, emission, plus a six-channel `clouds.exr` (optical depth and reconstruction data) at up to 8K resolution
 - **Pressure-based wind** — continentality, pressure gradient, Coriolis deflection, terrain deflection
 - **Lava glow** — volcanic emission at plate boundaries with adjustable intensity
 - **Ocean sun glint** — PBR-correct specular reflection on water surface
@@ -100,7 +100,9 @@ TerrainComputePipeline   preview_cubemap.wgsl
 
 **Terrain pipeline:** Plate centers (Fibonacci sphere) are uploaded to GPU. The `plates.wgsl` compute shader assigns each pixel to the nearest plate via Voronoi, then generates heightmap from plate type elevation + noise detail + mountain ridges + ocean floor variation.
 
-**Preview pipeline:** Fragment shader samples the height cubemap, computes temperature/moisture/biomes per pixel, applies Whittaker lookup, renders with lighting, clouds, atmosphere, and night lights.
+**Weather and preview pipeline:** `weather.rs` publishes bounded, revisioned mass and geometry cubemaps from an immutable snapshot. The fragment shader samples those fields with the height cubemap, computes temperature/moisture/biomes, and ray marches the bounded cloud volume with lighting, atmosphere, and night lights. Disabling clouds exits the density path early.
+
+**Cloud export:** Export regenerates the same weather inputs at bounded resolution from its immutable snapshot, then writes direct optical depth (`Y`) and reconstruction channels (`coverage`, `base_km`, `thickness_km`, `character`, `cirrus`) to `clouds.exr` without depending on preview visibility or opacity.
 
 ## Project Structure
 

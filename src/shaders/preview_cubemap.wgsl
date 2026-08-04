@@ -31,7 +31,9 @@ struct Uniforms {
     show_atmosphere_layer: f32,
     show_cities: f32,
     cloud_opacity: f32,    // 0.0 = transparent, 1.0 = full opacity
-    cloud_advection: f32,  // 1.0 = advected cubemap modulates clouds, 0.0 = per-pixel only
+    // Historical name: selects persistent GPU wind/continentality textures;
+    // zero uses the analytical fallback for no-wind cases.
+    cloud_advection: f32,
     rotation_rate: f32,    // relative to Earth (1.0 = 24h day)
     atm_pressure: f32,     // atmospheric pressure in bar (1.0 = Earth)
     _pad4: f32,

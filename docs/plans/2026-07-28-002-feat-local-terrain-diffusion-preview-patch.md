@@ -1,12 +1,14 @@
 ---
 title: Local Terrain Diffusion Preview Patch
 type: feat
-status: active
+status: dropped
 date: 2026-07-28
 origin: BE-005
 ---
 
 # Local Terrain Diffusion Preview Patch
+
+> **ARCHIVED / NOT A PRODUCT PATH.** This developer-preview exception is dropped with the whole-planet Terrain Diffusion direction; no worker or preview work is active. The retained document records the narrow local exception only. See [the archived roadmap entry](../../Plans.md#archived-terrain-diffusion-and-imported-terrain).
 
 Implement a maintainer-only process boundary for one fixed local eager-PyTorch 256×256 elevation patch. It is a developer-preview exception only: a local environment-gated preview UI may display the validated patch, but it has no globe application, scientific suitability, model distribution, network access, export, or product activation claim.
 
@@ -22,8 +24,8 @@ Implement a maintainer-only process boundary for one fixed local eager-PyTorch 2
 
 | Unit | Scope | Status |
 |------|-------|--------|
-| BE-005 | Local worker, bounded Rust process/protocol boundary, and validator tests | cc:IN REVIEW |
-| FE-005 | Environment-gated native preview panel, state handling, and grayscale display | cc:IN REVIEW |
+| BE-005 | Local worker, bounded Rust process/protocol boundary, and validator tests | Archived / not planned |
+| FE-005 | Environment-gated native preview panel, state handling, and grayscale display | Archived / not planned |
 
 ## Decision boundary
 

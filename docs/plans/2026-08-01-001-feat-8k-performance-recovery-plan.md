@@ -28,7 +28,7 @@ This is a recovery plan for the existing procedural-terrain direction. It does n
 
 `target/procedural-terrain-evidence/u2-8k-cold-seed42-rep1-1785691878476508601/manifest.json` records the U2 8K cold seed-42 run at `240335.084225 ms`, over the `240000 ms` gate; `cold_8k=FAIL` and completion is `FAIL`. The paired `stage-journal.json` remains the original failed-stage evidence. The earlier preflight failure at `target/procedural-terrain-evidence/u2-8k-cold-seed42-rep1-1785451466987823955/manifest.json` also remains retained evidence, including its before-allocation 4.5 GiB ownership estimate and `owned_bytes=FAIL` condition.
 
-The user explicitly accepts this U2 8K result as slow for 8K and authorizes proceeding. This is a manual product acceptance waiver only: it unblocks U3 work, does not convert either U2 result into a measured benchmark `PASS`, does not update `last-accepted.json`, and does not weaken any recovery-plan timing, memory, quality, determinism, or final-release acceptance gate.
+The user explicitly accepts this U2 8K result as slow for 8K and authorizes proceeding. This is a manual product acceptance waiver only: it unblocks U3 work, remains distinct from any passing performance artifact, does not convert either U2 result into a measured benchmark `PASS`, preserves `last-accepted=NOT_RUN` without updating `last-accepted.json`, and does not weaken any recovery-plan timing, memory, quality, determinism, or final-release acceptance gate.
 
 ---
 

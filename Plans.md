@@ -102,39 +102,33 @@ Plan: [docs/plans/2026-07-10-001-feat-shallow-volumetric-clouds-plan.md](docs/pl
 | U3 | Shared shallow-volume density and ray marching | cc:完了 [e1b260d] (release-518 authoritative 512px local jitter run passed the low/deep isotropic identity and high-only local symmetric dominant-octave gates.) |
 | U16 | Land-profile segment integration and approved `.990` topology bound | cc:完了 [d8c7de5] (QA-020 implemented and validated: GPU oracle, native, U3/U14/U15, lib, sweep, fmt, clippy, and build passed. `.990` is user-approved; all other gates are unchanged.) |
 | U4 | Cloud lighting and surface shadows | cc:完了 [3c9266a] (QA-036 final validation complete: exact fingerprint and outside-sphere equality; candidate on/off `83.836/10.379 ms` against committed U16 `86.829/10.536 ms`, ratios `.9655/.9851`; visual criteria PASS. U14 `277.062/42.354 ms` and U15 seed-997 frozen fragmentation exact-match candidate vs detached HEAD, so they remain baseline blockers, not U4 regressions. See `docs/research/shallow-volumetric-cloud-validation.md`.) |
-| U5 | Preview/export parity and channels | cc:TODO |
-| U6 | Visual, seam, and parity validation | cc:TODO |
-| U11 | Performance, latency, and stress validation | cc:TODO |
-| U7 | Remove superseded paths and document | cc:TODO |
+| U5 | Preview/export parity and channels | cc:完了 [21be76c] |
+| U6 | Visual, seam, and parity validation | cc:完了 [33d55a2] |
+| U11 | Performance, latency, and stress validation | cc:完了 [e0f611d] (direct EXR export; 2K stress gate PASS) |
+| U7 | Remove superseded paths and document | cc:完了 [uncommitted] (verified superseded paths absent; accepted persistent-weather, bounded-volume, direct six-channel export architecture documented) |
 
 ---
 
-## Phase 5.24: Terrain Diffusion Artifact-Harness Evaluation
+## Archived: Terrain Diffusion and Imported Terrain
 
-Evaluation-only canonical cubemap harness; upstream inference, projection, product integration, and human review remain `NOT RUN`.
+Terrain Diffusion is dropped as a whole-planet product path: the procedural control remains `NO-GO`, native export is `NO-GO`, and TorchScript replay is `NO-GO`. The committed evaluator, spike plans, and research manifests are retained as negative evidence; no Terrain Diffusion or imported-terrain implementation is active. See [the procedural-terrain plan](docs/plans/2026-07-28-003-feat-procedural-terrain-realism-plan.md), [evaluation manifest](docs/research/terrain-diffusion-evaluation-manifest.md), [native manifest](docs/research/terrain-diffusion-native-spike-manifest.md), and [LibTorch manifest](docs/research/terrain-diffusion-libtorch-spike-manifest.md).
 
-Plan: [docs/plans/2026-07-12-001-feat-terrain-diffusion-evaluation-plan.md](docs/plans/2026-07-12-001-feat-terrain-diffusion-evaluation-plan.md)
+Archived evaluation plan: [docs/plans/2026-07-12-001-feat-terrain-diffusion-evaluation-plan.md](docs/plans/2026-07-12-001-feat-terrain-diffusion-evaluation-plan.md)
 
 | Unit | 内容 | Status |
 |------|------|--------|
-| U1 | Evaluation-only canonical artifact loader | cc:TODO |
-| U2 | Procedural controls and deterministic CPU gates | cc:TODO |
-| U3 | Invalid-artifact rejection and exact repeatability | cc:TODO |
-| U4 | Isolated preview render and evidence labeling | cc:TODO |
+| U1-U4 | Evaluation-only artifact harness | Archived / not planned; local evidence remains `NO-GO` / `NOT_RUN` as recorded. |
 
-## Phase 5.25 — Approved Terrain Artifact Import (Dormant)
+### Archived imported-terrain path
 
-Depends on Phase 5.24 evidence. Required U1–U4 code-complete wording (not a current completion marker): Import infrastructure implemented but dormant; approved candidate NOT AVAILABLE; product activation and readiness NOT RUN. Approval rejects `KNOWN_NO_GO_CONTROL_FNV=243e1887675e77a8` and `KNOWN_NO_GO_VALIDATOR_COMMIT=0cba9579e68f0fc72a75d21db2d655496ef76d09`.
+The former import path is also retired. Its infrastructure is retained only as historic evidence; approved candidate is NOT AVAILABLE and product activation/readiness are NOT RUN. Approval rejects `KNOWN_NO_GO_CONTROL_FNV=243e1887675e77a8` and `KNOWN_NO_GO_VALIDATOR_COMMIT=0cba9579e68f0fc72a75d21db2d655496ef76d09`.
 
 Plan: [docs/plans/2026-07-26-001-feat-approved-terrain-artifact-import-plan.md](docs/plans/2026-07-26-001-feat-approved-terrain-artifact-import-plan.md)
 
 | Unit | 内容 | Status |
 |------|------|--------|
-| U1 | Canonical loader and strict approval gate | cc:完了 [a1fcf3f7e60a097a83d241fd7b9a9c46e99aa7ac]; implemented but dormant; approved candidate NOT AVAILABLE; product activation and readiness NOT RUN. |
-| U2 | Fail-closed paired CLI import mode | cc:完了 [a1fcf3f7e60a097a83d241fd7b9a9c46e99aa7ac]; implemented but dormant; approved candidate NOT AVAILABLE; product activation and readiness NOT RUN. |
-| U3 | Shared imported terrain lifecycle in app | cc:完了 [a1fcf3f7e60a097a83d241fd7b9a9c46e99aa7ac]; implemented but dormant; approved candidate NOT AVAILABLE; product activation and readiness NOT RUN. |
-| U4 | Export refusal and CPU-only regression tests | cc:完了 [a1fcf3f7e60a097a83d241fd7b9a9c46e99aa7ac]; implemented but dormant; approved candidate NOT AVAILABLE; product activation and readiness NOT RUN. |
-| U5 | Real candidate activation evidence | BLOCKED / NOT RUN |
+| U1-U4 | Retained import infrastructure | Archived [a1fcf3f7e60a097a83d241fd7b9a9c46e99aa7ac]; no product activation. |
+| U5 | Real candidate activation evidence | Archived / NOT RUN; no activation is planned. |
 
 ---
 

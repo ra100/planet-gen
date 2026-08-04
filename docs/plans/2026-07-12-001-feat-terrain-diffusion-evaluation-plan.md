@@ -1,12 +1,14 @@
 ---
 title: "feat: Terrain Diffusion artifact-harness evaluation"
 type: feat
-status: active
+status: dropped
 date: 2026-07-12
 origin: docs/brainstorms/terrain-diffusion-integration-requirements.md
 ---
 
 # Terrain Diffusion Artifact-Harness Evaluation
+
+> **ARCHIVED / NOT FEASIBLE FOR WHOLE-PLANET PRODUCT USE.** This retained evaluation plan records the rejected artifact-harness direction. No implementation unit below is active or planned; the procedural control remains `NO-GO`, while external model, projection, resource, review, and product evidence remain `NOT_RUN`. See [the archived roadmap entry](../../Plans.md#archived-terrain-diffusion-and-imported-terrain) and [the procedural replacement](2026-07-28-003-feat-procedural-terrain-realism-plan.md).
 
 ## Summary
 
@@ -139,9 +141,9 @@ Exit `0` means every implemented required local gate passed. Exit `2` means CLI/
 - Height p95, corner p95, normal p95/max, and pole p10/p50/p90 use its frozen control-relative equations. Do not introduce tolerance/config flags.
 - Exact byte equality is determinism authority. FNV-1a-64 is non-cryptographic display identity only. External source/checkpoint SHA-256 is a future manifest input and `NOT_RUN`; do not add a hash dependency.
 
-## Implementation Units
+## Historical Implementation Units (Not Planned)
 
-- [ ] **U1: Canonical loader, fixture, and result protocol**
+- **U1: Canonical loader, fixture, and result protocol**
 
   **Requirements:** R1, R2, R7  
   **Files:** create only `src/bin/terrain_diffusion_eval.rs`  
@@ -153,7 +155,7 @@ Exit `0` means every implemented required local gate passed. Exit `2` means CLI/
 
   Expected: exit 0; fixture reports canonical order `PASS` and every deliberate face/order/row/column/transpose mutation as named `FAIL` internally.
 
-- [ ] **U2: Built-in procedural control and frozen CPU validation**
+- **U2: Built-in procedural control and frozen CPU validation**
 
   **Requirements:** R3, R4  
   **Dependencies:** U1  
@@ -166,7 +168,7 @@ Exit `0` means every implemented required local gate passed. Exit `2` means CLI/
 
   Expected: both exit 0; all implemented local gates `PASS`; every external/model/projection/resource/reviewer/product field `NOT_RUN`. A pre-existing `control-a` directory exits 2 without mutation.
 
-- [ ] **U3: Candidate comparison and fresh-process determinism**
+- **U3: Candidate comparison and fresh-process determinism**
 
   **Requirements:** R3, R5  
   **Dependencies:** U2  
@@ -180,7 +182,7 @@ Exit `0` means every implemented required local gate passed. Exit `2` means CLI/
 
   Expected: candidate exits 0 only when every local frozen gate passes; each capture is a fresh process; comparison exits 0 only for exact byte equality and exits 3 for any mismatch. No external-evaluation field becomes `PASS`.
 
-- [ ] **U4: Public isolated preview capture**
+- **U4: Public isolated preview capture**
 
   **Requirements:** R5, R6  
   **Dependencies:** U3  

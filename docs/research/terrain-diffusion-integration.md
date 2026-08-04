@@ -1,5 +1,7 @@
 # Terrain Diffusion Integration Research
 
+> **Archived research / not feasible for whole-planet product use.** The retained records establish `NO-GO` for the procedural control, native export, and TorchScript replay. Terrain Diffusion has no active implementation roadmap; the deterministic GPU-only replacement is [the procedural terrain plan](../plans/2026-07-28-003-feat-procedural-terrain-realism-plan.md). See also [the archived roadmap entry](../../Plans.md#archived-terrain-diffusion-and-imported-terrain), [evaluation evidence](terrain-diffusion-evaluation-manifest.md), [native evidence](terrain-diffusion-native-spike-manifest.md), and [LibTorch evidence](terrain-diffusion-libtorch-spike-manifest.md).
+
 **Date:** 2026-07-12  
 **Decision scope:** Specify an evaluation-only harness for offline terrain artifacts. This is not runtime integration, an upstream evaluation result, or legal advice.
 
@@ -98,6 +100,6 @@ The procedural compute shader samples inclusive face endpoints. To produce the r
 
 Render only with existing public `PreviewRenderer::new`, `upload_terrain`, and `render`. Every `preview-control`/`preview-candidate` invocation is one fresh OS process; validation and control generation are separate invocations too. Fixed size is 512. `render` receives `cloud_view=None`, `weather_views=None`, and these frozen uniforms: identity rotation; `light_dir=[0.5,0.7,-1.0]`; control ocean level `-0.5+1.7*ocean_fraction`; derived base temperature/ocean fraction/axial tilt/radius/rotation rate/pressure; `view_mode=0`, season `.5`, height scale `3`, zoom `1`, pan `0`; atmosphere/cloud/night/city/lava/rings all `0`; `show_ao=1`, water/ice/biomes/clouds/atmosphere/cities/cloud shadows `0`; pads `0`. `render` already creates RGBA8 sRGB target and strips row padding on readback. Save exactly `artifacts/terrain-diffusion-eval/{control|candidate}-512.png` via existing `image::RgbaImage::from_raw(512,512,pixels).save`; write no product output.
 
-## Recommendation
+## Historical Recommendation
 
-Keep procedural terrain as the sole product source. The linked plan may implement only this local gatekeeper. Planar projection, upstream inference, runtime/product integration, export parity, license clearance, resource capture, and human review remain deferred and honest `NOT RUN`.
+Keep procedural terrain as the sole product source. The local gatekeeper is retained as evidence only and is not planned for implementation. Planar projection, upstream inference, runtime/product integration, export parity, license clearance, resource capture, and human review remain `NOT RUN`.
