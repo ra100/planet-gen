@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,7 +17,7 @@ use crate::export_staging::{
 use crate::gpu::GpuContext;
 use crate::openexr_writer::AtomicScanlineExrWriter;
 use crate::planet::{DerivedProperties, PlanetParams};
-use crate::plates::{PlateGenParams, generate_plates};
+use crate::plates::{generate_plates, PlateGenParams};
 use crate::png_writer::{AtomicScanlinePngWriter, PngRowFormat};
 use crate::preview::PreviewUniforms;
 use crate::terrain_compute::{
@@ -28,7 +29,7 @@ use crate::weather::{WeatherFieldPipeline, WeatherSnapshot, WeatherTextures};
 // ============ Constants ============
 
 pub const DEFAULT_EXPORT_RESOLUTION: u32 = 4096;
-pub const TILE_SIZE: u32 = 512;
+pub const TILE_SIZE: u32 = 1024;
 pub const MAX_AO_STENCIL_RADIUS: u32 = 6;
 pub const MIN_EMISSION_STENCIL_RADIUS: u32 = 3;
 pub const MAX_8K_OWNED_LIVE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
@@ -159,6 +160,22 @@ pub enum ExportProgress {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ExportTimings {
+    /// Wall-clock time spent generating terrain tiles; excludes plate generation.
+    pub terrain_tiles_wall_ms: f64,
+    /// Wall-clock time spent submitting and reading back all selected map tile batches.
+    pub map_dispatch_readback_wall_ms: f64,
+    /// Wall-clock time spent materializing weather inputs and completing export weather GPU work.
+    pub export_weather_wall_ms: f64,
+    /// Wall-clock time spent dispatching, reading back, and staging cloud tiles.
+    pub cloud_tile_dispatch_readback_wall_ms: f64,
+    /// Wall-clock time spent materializing staged cubemap layers into equirectangular rows.
+    pub staged_equirect_materialization_wall_ms: f64,
+    /// Wall-clock time spent writing final output scanlines, including row encoding.
+    pub writer_output_wall_ms: f64,
+    /// Wall-clock time spent finishing final output writers.
+    pub writer_finish_wall_ms: f64,
+    /// Wall-clock time for the complete export invocation.
+    pub total_wall_ms: f64,
     pub generation_inclusive_ms: f64,
     pub erosion_inclusive_ms: f64,
     pub export_inclusive_ms: f64,
@@ -184,9 +201,9 @@ pub struct StagedIoMetrics {
     pub peak_cached_values: usize,
     pub cache_capacity_values: usize,
     /// Wall-clock time for row materialization and intermediate staging.
-    pub row_generation_ms: f64,
-    /// Summed worker time; diagnostic only and never used as a wall-clock stage duration.
-    pub worker_row_generation_ms: f64,
+    pub row_generation_wall_ms: f64,
+    /// Sum of worker wall-clock intervals. This can exceed wall time when workers overlap; it is not CPU time.
+    pub worker_row_generation_wall_sum_ms: f64,
     pub output_write_ms: f64,
     pub output_finish_ms: f64,
     pub output_write_bytes: u64,
@@ -209,7 +226,14 @@ impl StagedIoMetrics {
     }
 
     pub fn stage_wall_elapsed_ms(&self) -> f64 {
-        self.row_generation_ms + self.output_write_ms + self.output_finish_ms
+        // Direct EXR sinks write while row workers are still producing. The row
+        // materialization timer already covers that overlap.
+        let write_ms = if self.intermediate_write_bytes == 0 {
+            0.0
+        } else {
+            self.output_write_ms
+        };
+        self.row_generation_wall_ms + write_ms + self.output_finish_ms
     }
 
     fn record(&mut self, metrics: Self) {
@@ -221,8 +245,8 @@ impl StagedIoMetrics {
         self.cache_capacity_values = self
             .cache_capacity_values
             .max(metrics.cache_capacity_values);
-        self.row_generation_ms += metrics.row_generation_ms;
-        self.worker_row_generation_ms += metrics.worker_row_generation_ms;
+        self.row_generation_wall_ms += metrics.row_generation_wall_ms;
+        self.worker_row_generation_wall_sum_ms += metrics.worker_row_generation_wall_sum_ms;
         self.output_write_ms += metrics.output_write_ms;
         self.output_finish_ms += metrics.output_finish_ms;
         self.output_write_bytes += metrics.output_write_bytes;
@@ -500,6 +524,7 @@ fn equirect_row_materialization_config(
     region_side: u32,
     cache_regions: usize,
     worker_cap: usize,
+    store_intermediate: bool,
 ) -> Result<EquirectRowMaterializationConfig, String> {
     if worker_cap == 0 {
         return Err("parallel equirect worker count must be nonzero".into());
@@ -509,6 +534,11 @@ fn equirect_row_materialization_config(
         .and_then(|value| value.checked_mul(u64::from(channels)))
         .and_then(|value| value.checked_mul(std::mem::size_of::<f32>() as u64))
         .ok_or("parallel equirect intermediate size overflows u64")?;
+    let intermediate_bytes = if store_intermediate {
+        intermediate_bytes
+    } else {
+        0
+    };
     let cache_values_per_worker = u64::try_from(cache_regions)
         .map_err(|_| "parallel equirect cache count exceeds u64")?
         .checked_mul(u64::from(region_side))
@@ -1126,6 +1156,8 @@ pub struct MapBatchMetrics {
     pub failed: bool,
     pub completed: bool,
     pub elapsed_ms: f64,
+    /// Wall-clock time spent submitting and reading back map tile batches.
+    pub dispatch_readback_wall_ms: f64,
     pub submissions: u64,
     pub polls: u64,
     pub map_requests: u64,
@@ -2081,7 +2113,9 @@ fn stage_map_layer<P: Pod>(
                     metrics.owned_bytes = metrics.owned_bytes.max(failure.metrics.owned_bytes);
                     metrics.retained_bytes_after_consume +=
                         failure.metrics.retained_bytes_after_consume;
-                    metrics.elapsed_ms += started.elapsed().as_secs_f64() * 1000.0;
+                    let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+                    metrics.elapsed_ms += elapsed_ms;
+                    metrics.dispatch_readback_wall_ms += elapsed_ms;
                     return Err(failure.message);
                 }
             };
@@ -2090,7 +2124,9 @@ fn stage_map_layer<P: Pod>(
             metrics.map_requests += read.metrics.map_requests;
             metrics.owned_bytes = metrics.owned_bytes.max(read.metrics.owned_bytes);
             metrics.retained_bytes_after_consume += read.metrics.retained_bytes_after_consume;
-            metrics.elapsed_ms += started.elapsed().as_secs_f64() * 1000.0;
+            let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+            metrics.elapsed_ms += elapsed_ms;
+            metrics.dispatch_readback_wall_ms += elapsed_ms;
             for ((face, region), tile_data) in regions.into_iter().zip(read.results) {
                 let cropped = crop_region_bytes(region, &tile_data, output_element_bytes);
                 let values = bytemuck::try_cast_slice(&cropped)
@@ -2378,9 +2414,8 @@ fn materialize_staged_equirect<F>(
     channels: u32,
     output_dir: &Path,
     cancel: &AtomicBool,
-    checkpoints: &mut (
-             dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String> + '_
-         ),
+    checkpoints: &mut (dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String>
+              + '_),
     finish: F,
 ) -> Result<(EquirectStage, StagedIoMetrics), StagedExportFailure>
 where
@@ -2412,21 +2447,84 @@ fn materialize_staged_equirect_with_worker_cap<F>(
     channels: u32,
     output_dir: &Path,
     cancel: &AtomicBool,
-    checkpoints: &mut (
-             dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String> + '_
-         ),
+    checkpoints: &mut (dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String>
+              + '_),
     worker_cap: usize,
     finish: F,
 ) -> Result<(EquirectStage, StagedIoMetrics), StagedExportFailure>
 where
     F: FnOnce(&mut EquirectStage) -> Result<(), String>,
 {
-    if estimated_staged_equirect_bytes(stage.metadata().face_resolution, channels).map_err(
-        |message| StagedExportFailure {
-            message,
-            metrics: StagedIoMetrics::default(),
+    let intermediate = RefCell::new(Some(
+        EquirectStage::create(output_dir, width, height, channels).map_err(|message| {
+            StagedExportFailure {
+                message,
+                metrics: StagedIoMetrics::default(),
+            }
+        })?,
+    ));
+    let metrics = consume_staged_equirect_rows_with_worker_cap(
+        layer,
+        stage,
+        width,
+        height,
+        channels,
+        cancel,
+        checkpoints,
+        worker_cap,
+        true,
+        std::mem::size_of::<f32>() as u64,
+        |values| {
+            intermediate
+                .borrow_mut()
+                .as_mut()
+                .ok_or_else(|| "staged equirect intermediate is already finalized".to_owned())?
+                .write_row(values)
         },
-    )? > MAX_OWNED_LIVE_BYTES
+        || {
+            let mut intermediate = intermediate.borrow_mut();
+            let stage = intermediate
+                .as_mut()
+                .ok_or_else(|| "staged equirect intermediate is already finalized".to_owned())?;
+            finish(stage)
+        },
+    )?;
+    let intermediate = intermediate
+        .into_inner()
+        .ok_or_else(|| StagedExportFailure {
+            message: "staged equirect intermediate is already finalized".into(),
+            metrics,
+        })?;
+    Ok((intermediate, metrics))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn consume_staged_equirect_rows_with_worker_cap<F, G>(
+    layer: &'static str,
+    stage: &ExportStage,
+    width: u32,
+    height: u32,
+    channels: u32,
+    cancel: &AtomicBool,
+    checkpoints: &mut (dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String>
+              + '_),
+    worker_cap: usize,
+    store_intermediate: bool,
+    bytes_per_value: u64,
+    mut consume_row: F,
+    finish: G,
+) -> Result<StagedIoMetrics, StagedExportFailure>
+where
+    F: FnMut(&[f32]) -> Result<(), String>,
+    G: FnOnce() -> Result<(), String>,
+{
+    if store_intermediate
+        && estimated_staged_equirect_bytes(stage.metadata().face_resolution, channels).map_err(
+            |message| StagedExportFailure {
+                message,
+                metrics: StagedIoMetrics::default(),
+            },
+        )? > MAX_OWNED_LIVE_BYTES
     {
         return Err(StagedExportFailure {
             message: "staged equirect rows exceed the owned live-byte budget".into(),
@@ -2447,19 +2545,13 @@ where
         region_side,
         cache_regions,
         worker_cap,
+        store_intermediate,
     )
     .map_err(|message| StagedExportFailure {
         message,
         metrics: StagedIoMetrics::default(),
     })?;
     let materialization_started = Instant::now();
-    let mut intermediate =
-        EquirectStage::create(output_dir, width, height, channels).map_err(|message| {
-            StagedExportFailure {
-                message,
-                metrics: StagedIoMetrics::default(),
-            }
-        })?;
     let mut metrics = StagedIoMetrics {
         cache_capacity_values: row_config.aggregate_cache_values,
         ..Default::default()
@@ -2593,7 +2685,7 @@ where
                     return Err("parallel equirect workers stopped before completing rows".into());
                 }
             };
-            metrics.worker_row_generation_ms += row.elapsed.as_secs_f64() * 1000.0;
+            metrics.worker_row_generation_wall_sum_ms += row.elapsed.as_secs_f64() * 1000.0;
             record_sampler_diagnostics(&mut metrics, row.diagnostics);
             merge_worker_cache_peaks(&mut metrics, &worker_peaks);
             let y = row
@@ -2610,10 +2702,16 @@ where
             pending.insert(y, values);
             while let Some(values) = pending.remove(&rows_written) {
                 let write_started = Instant::now();
-                intermediate.write_row(&values)?;
-                metrics.intermediate_write_ms += write_started.elapsed().as_secs_f64() * 1000.0;
-                metrics.intermediate_write_bytes +=
-                    values.len() as u64 * std::mem::size_of::<f32>() as u64;
+                consume_row(&values)?;
+                let write_ms = write_started.elapsed().as_secs_f64() * 1000.0;
+                let write_bytes = values.len() as u64 * bytes_per_value;
+                if store_intermediate {
+                    metrics.intermediate_write_ms += write_ms;
+                    metrics.intermediate_write_bytes += write_bytes;
+                } else {
+                    metrics.output_write_ms += write_ms;
+                    metrics.output_write_bytes += write_bytes;
+                }
                 rows_written += 1;
                 if rows_written.is_multiple_of(MATERIALIZATION_CHECKPOINT_ROW_INTERVAL)
                     || rows_written == height
@@ -2633,7 +2731,7 @@ where
         }
     });
     merge_worker_cache_peaks(&mut metrics, &worker_peaks);
-    metrics.row_generation_ms = materialization_started.elapsed().as_secs_f64() * 1000.0;
+    metrics.row_generation_wall_ms = materialization_started.elapsed().as_secs_f64() * 1000.0;
     if let Err(message) = parallel_result {
         let reason = if cancel.load(Ordering::Relaxed) {
             "Cancelled"
@@ -2654,8 +2752,7 @@ where
             metrics,
         });
     }
-    if let Err(message) = finish(&mut intermediate) {
-        metrics.row_generation_ms = materialization_started.elapsed().as_secs_f64() * 1000.0;
+    if let Err(message) = finish() {
         emit_materialization_checkpoint(
             checkpoints,
             layer,
@@ -2667,15 +2764,13 @@ where
         )?;
         return Err(StagedExportFailure { message, metrics });
     }
-    metrics.row_generation_ms = materialization_started.elapsed().as_secs_f64() * 1000.0;
     emit_materialization_checkpoint(checkpoints, layer, &metrics, height, height, true, None)?;
-    Ok((intermediate, metrics))
+    Ok(metrics)
 }
 
 fn emit_materialization_checkpoint(
-    checkpoints: &mut (
-             dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String> + '_
-         ),
+    checkpoints: &mut (dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String>
+              + '_),
     layer: &'static str,
     metrics: &StagedIoMetrics,
     rows_completed: u32,
@@ -2711,9 +2806,8 @@ fn export_staged_equirect_exr(
     channels: u32,
     path: &Path,
     cancel: &AtomicBool,
-    checkpoints: &mut (
-             dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String> + '_
-         ),
+    checkpoints: &mut (dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String>
+              + '_),
 ) -> Result<StagedIoMetrics, StagedExportFailure> {
     if channels != 1 && channels != 4 {
         return Err(StagedExportFailure {
@@ -2721,65 +2815,56 @@ fn export_staged_equirect_exr(
             metrics: StagedIoMetrics::default(),
         });
     }
-    let output_dir = path.parent().ok_or_else(|| StagedExportFailure {
-        message: "EXR output path has no parent directory".into(),
-        metrics: StagedIoMetrics::default(),
-    })?;
-    let (mut intermediate, mut metrics) = materialize_staged_equirect(
+    let writer = RefCell::new(Some(
+        AtomicScanlineExrWriter::create(path, width, height, &["R", "G", "B", "A"]).map_err(
+            |message| StagedExportFailure {
+                message,
+                metrics: StagedIoMetrics::default(),
+            },
+        )?,
+    ));
+    let finish_elapsed = RefCell::new(Duration::ZERO);
+    let mut rgba = vec![0.0; width as usize * 4];
+    let mut metrics = consume_staged_equirect_rows_with_worker_cap(
         layer,
         stage,
         width,
         height,
         channels,
-        output_dir,
         cancel,
         checkpoints,
-        EquirectStage::finish,
+        std::thread::available_parallelism()
+            .map_or(1, std::num::NonZeroUsize::get)
+            .min(MAX_EQUIRECT_ROW_WORKERS),
+        false,
+        u64::from(4 * std::mem::size_of::<f32>() as u32 / channels),
+        |row| {
+            let mut writer = writer.borrow_mut();
+            let writer = writer
+                .as_mut()
+                .ok_or_else(|| "EXR writer is already finalized".to_owned())?;
+            if channels == 4 {
+                writer.write_scanline(row)
+            } else {
+                for (pixel, value) in rgba.chunks_exact_mut(4).zip(row) {
+                    pixel.copy_from_slice(&[*value, *value, *value, 1.0]);
+                }
+                writer.write_scanline(&rgba)
+            }
+        },
+        || {
+            let started = Instant::now();
+            let writer = writer
+                .borrow_mut()
+                .take()
+                .ok_or_else(|| "EXR writer is already finalized".to_owned())?;
+            let result = writer.finish();
+            *finish_elapsed.borrow_mut() = started.elapsed();
+            result
+        },
     )?;
-    let mut writer =
-        match AtomicScanlineExrWriter::create(path, width, height, &["R", "G", "B", "A"]) {
-            Ok(writer) => writer,
-            Err(message) => return Err(StagedExportFailure { message, metrics }),
-        };
-    let mut rgba = if channels == 1 {
-        vec![0.0; width as usize * 4]
-    } else {
-        Vec::new()
-    };
-    for y in 0..height {
-        if cancel.load(Ordering::Relaxed) {
-            return Err(StagedExportFailure {
-                message: "Cancelled".into(),
-                metrics,
-            });
-        }
-        let row = match intermediate.read_row(y) {
-            Ok(row) => row,
-            Err(message) => {
-                return Err(StagedExportFailure { message, metrics });
-            }
-        };
-        let write_started = Instant::now();
-        if channels == 4 {
-            if let Err(message) = writer.write_scanline(&row) {
-                return Err(StagedExportFailure { message, metrics });
-            }
-        } else {
-            for (pixel, value) in rgba.chunks_exact_mut(4).zip(row) {
-                pixel.copy_from_slice(&[value, value, value, 1.0]);
-            }
-            if let Err(message) = writer.write_scanline(&rgba) {
-                return Err(StagedExportFailure { message, metrics });
-            }
-        }
-        metrics.output_write_ms += write_started.elapsed().as_secs_f64() * 1000.0;
-        metrics.output_write_bytes += u64::from(width) * 4 * std::mem::size_of::<f32>() as u64;
-    }
-    let finish_started = Instant::now();
-    if let Err(message) = writer.finish() {
-        return Err(StagedExportFailure { message, metrics });
-    }
-    metrics.output_finish_ms = finish_started.elapsed().as_secs_f64() * 1000.0;
+    // `consume_*` includes direct scanline writes in its wall interval; only finish is separate.
+    metrics.output_finish_ms = finish_elapsed.borrow().as_secs_f64() * 1000.0;
     metrics.published_file_bytes = std::fs::metadata(path)
         .map_err(|error| StagedExportFailure {
             message: format!("published EXR metadata failed: {error}"),
@@ -2795,53 +2880,53 @@ fn export_staged_cloud_exr(
     width: u32,
     height: u32,
     cancel: &AtomicBool,
-    checkpoints: &mut (
-             dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String> + '_
-         ),
+    checkpoints: &mut (dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String>
+              + '_),
 ) -> Result<StagedIoMetrics, Box<StagedExportFailure>> {
-    let output_dir = path.parent().ok_or_else(|| {
-        Box::new(StagedExportFailure {
-            message: "cloud EXR output path has no parent directory".into(),
-            metrics: StagedIoMetrics::default(),
-        })
-    })?;
-    let (mut intermediate, mut metrics) = materialize_staged_equirect(
+    let writer = RefCell::new(Some(
+        AtomicScanlineExrWriter::create(path, width, height, &CLOUD_EXR_CHANNELS).map_err(
+            |message| {
+                Box::new(StagedExportFailure {
+                    message,
+                    metrics: StagedIoMetrics::default(),
+                })
+            },
+        )?,
+    ));
+    let finish_elapsed = RefCell::new(Duration::ZERO);
+    let mut metrics = consume_staged_equirect_rows_with_worker_cap(
         "clouds",
         stage,
         width,
         height,
         CLOUD_EXR_CHANNELS.len() as u32,
-        output_dir,
         cancel,
         checkpoints,
-        EquirectStage::finish,
+        std::thread::available_parallelism()
+            .map_or(1, std::num::NonZeroUsize::get)
+            .min(MAX_EQUIRECT_ROW_WORKERS),
+        false,
+        std::mem::size_of::<f32>() as u64,
+        |row| {
+            writer
+                .borrow_mut()
+                .as_mut()
+                .ok_or_else(|| "EXR writer is already finalized".to_owned())?
+                .write_scanline(row)
+        },
+        || {
+            let started = Instant::now();
+            let writer = writer
+                .borrow_mut()
+                .take()
+                .ok_or_else(|| "EXR writer is already finalized".to_owned())?;
+            let result = writer.finish();
+            *finish_elapsed.borrow_mut() = started.elapsed();
+            result
+        },
     )
     .map_err(Box::new)?;
-    let mut writer = AtomicScanlineExrWriter::create(path, width, height, &CLOUD_EXR_CHANNELS)
-        .map_err(|message| Box::new(StagedExportFailure { message, metrics }))?;
-    for y in 0..height {
-        if cancel.load(Ordering::Relaxed) {
-            return Err(Box::new(StagedExportFailure {
-                message: "Cancelled".into(),
-                metrics,
-            }));
-        }
-        let write_started = Instant::now();
-        let row = intermediate
-            .read_row(y)
-            .map_err(|message| Box::new(StagedExportFailure { message, metrics }))?;
-        writer
-            .write_scanline(&row)
-            .map_err(|message| Box::new(StagedExportFailure { message, metrics }))?;
-        metrics.output_write_ms += write_started.elapsed().as_secs_f64() * 1000.0;
-        metrics.output_write_bytes +=
-            u64::from(width) * CLOUD_EXR_CHANNELS.len() as u64 * std::mem::size_of::<f32>() as u64;
-    }
-    let finish_started = Instant::now();
-    writer
-        .finish()
-        .map_err(|message| Box::new(StagedExportFailure { message, metrics }))?;
-    metrics.output_finish_ms = finish_started.elapsed().as_secs_f64() * 1000.0;
+    metrics.output_finish_ms = finish_elapsed.borrow().as_secs_f64() * 1000.0;
     metrics.published_file_bytes = std::fs::metadata(path)
         .map_err(|error| {
             Box::new(StagedExportFailure {
@@ -2868,9 +2953,8 @@ fn export_staged_equirect_png(
     output_layer: QuantizedLayer,
     path: &Path,
     cancel: &AtomicBool,
-    checkpoints: &mut (
-             dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String> + '_
-         ),
+    checkpoints: &mut (dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String>
+              + '_),
 ) -> Result<StagedIoMetrics, StagedExportFailure> {
     let channels = output_layer.channels();
     let output_dir = path.parent().ok_or_else(|| StagedExportFailure {
@@ -3117,11 +3201,11 @@ pub fn run_export_with_timings_and_checkpoints(
     progress_tx: &Sender<ExportProgress>,
     cancel: &AtomicBool,
     timings: &mut ExportTimings,
-    checkpoints: &mut (
-             dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String> + '_
-         ),
+    checkpoints: &mut (dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String>
+              + '_),
 ) -> Result<PathBuf, String> {
     *timings = ExportTimings::default();
+    let total_started = Instant::now();
     let tile_size = select_tile_size(
         config.face_resolution,
         config.tile_size,
@@ -3202,6 +3286,7 @@ pub fn run_export_with_timings_and_checkpoints(
         &mut progress,
         cancel,
     )?;
+    timings.terrain_tiles_wall_ms = generation_started.elapsed().as_secs_f64() * 1000.0;
     timings.generation_inclusive_ms = generation_started.elapsed().as_secs_f64() * 1000.0;
     timings.generation_completed = true;
 
@@ -3545,6 +3630,7 @@ pub fn run_export_with_timings_and_checkpoints(
 
     if layers.clouds {
         progress.advance("Exporting clouds...");
+        let weather_started = Instant::now();
         // Snapshot values are copied before the background export begins; no app polling here.
         let terrain_stage = stage_terrain_faces(&planet_dir, &terrain, &coordinator, cancel)?;
         let weather_resolution = export_weather_resolution(config.face_resolution);
@@ -3571,6 +3657,8 @@ pub fn run_export_with_timings_and_checkpoints(
         let weather = weather_pipeline.create_textures(gpu, weather_resolution);
         weather_pipeline.generate(gpu, snapshot, &weather_terrain, &dynamics, &weather);
         wait_for_gpu_completion(gpu, cancel)?;
+        timings.export_weather_wall_ms = weather_started.elapsed().as_secs_f64() * 1000.0;
+        let cloud_tiles_started = Instant::now();
         let stage = stage_cloud_faces(
             gpu,
             &planet_dir,
@@ -3581,6 +3669,8 @@ pub fn run_export_with_timings_and_checkpoints(
             &coordinator,
             cancel,
         )?;
+        timings.cloud_tile_dispatch_readback_wall_ms =
+            cloud_tiles_started.elapsed().as_secs_f64() * 1000.0;
         merge_staged_export(
             timings,
             export_staged_cloud_exr(
@@ -3596,6 +3686,7 @@ pub fn run_export_with_timings_and_checkpoints(
     }
 
     timings.map_batch_metrics.completed = timings.map_batch_metrics.reached;
+    timings.map_dispatch_readback_wall_ms = timings.map_batch_metrics.dispatch_readback_wall_ms;
     timings.staged_io_completed = timings.staged_io_metrics.rows_generated > 0;
 
     if let Some(pipeline) = emission_pipeline.as_ref() {
@@ -3629,6 +3720,11 @@ pub fn run_export_with_timings_and_checkpoints(
 
     timings.export_inclusive_ms = export_started.elapsed().as_secs_f64() * 1000.0;
     timings.export_completed = true;
+    timings.staged_equirect_materialization_wall_ms =
+        timings.staged_io_metrics.row_generation_wall_ms;
+    timings.writer_output_wall_ms = timings.staged_io_metrics.output_write_ms;
+    timings.writer_finish_wall_ms = timings.staged_io_metrics.output_finish_ms;
+    timings.total_wall_ms = total_started.elapsed().as_secs_f64() * 1000.0;
     let _ = progress_tx.send(ExportProgress::Complete);
     Ok(planet_dir)
 }
@@ -3964,7 +4060,7 @@ mod tests {
     }
 
     #[test]
-    fn cloud_export_preserves_cubemap_orientation_and_equirect_seams() {
+    fn written_cloud_exr_preserves_cardinals_latitude_polarity_and_seam_continuity() {
         let root = std::env::temp_dir().join(format!(
             "planet-gen-cloud-orientation-{}",
             std::process::id()
@@ -3981,7 +4077,7 @@ mod tests {
             },
         )
         .unwrap();
-        let faces = std::array::from_fn(|face| {
+        let faces: [Vec<f32>; 6] = std::array::from_fn(|face| {
             (0..resolution * resolution)
                 .flat_map(|index| {
                     let direction = face_uv_to_direction(
@@ -4010,20 +4106,60 @@ mod tests {
         )
         .unwrap();
         let image = exr::prelude::read_first_flat_layer_from_file(&path).unwrap();
-        let y = image
-            .layer_data
-            .channel_data
-            .list
-            .iter()
-            .find(|channel| channel.name.to_string() == "Y")
-            .unwrap();
-        let exr::image::FlatSamples::F32(actual) = &y.sample_data else {
-            panic!("Y must be FLOAT");
+        let channel = |name: &str| {
+            image
+                .layer_data
+                .channel_data
+                .list
+                .iter()
+                .find(|channel| channel.name.to_string() == name)
+                .unwrap_or_else(|| panic!("missing {name} channel"))
         };
-        let (expected, _, _) = cubemap_to_equirect(&faces, resolution, 6);
-        for (pixel, expected) in actual.iter().zip(expected.chunks_exact(6)) {
-            assert!((*pixel - expected[0]).abs() < 1e-5);
-        }
+        let values = |name: &str| match &channel(name).sample_data {
+            exr::image::FlatSamples::F32(values) => values,
+            _ => panic!("{name} must be FLOAT"),
+        };
+        let x = values("Y");
+        let y = values("coverage");
+        let z = values("base_km");
+        let width = (resolution * 2) as usize;
+        let equator = resolution as usize / 2 - 1;
+        let sample = |values: &[f32], column: usize, row: usize| values[row * width + column];
+
+        assert!(
+            sample(z, 0, equator) < -0.9,
+            "-Z must be at the first column"
+        );
+        assert!(
+            sample(x, width / 4, equator) < -0.9,
+            "-X must be at one quarter"
+        );
+        assert!(
+            sample(z, width / 2, equator) > 0.9,
+            "+Z must be at the center"
+        );
+        assert!(
+            sample(x, width * 3 / 4, equator) > 0.9,
+            "+X must be at three quarters"
+        );
+        assert!(sample(y, width / 2, 0) > 0.9, "north must be the first row");
+        assert!(
+            sample(y, width / 2, resolution as usize - 1) < -0.9,
+            "south must be the last row"
+        );
+
+        let seam_delta = [x, y, z]
+            .into_iter()
+            .map(|values| {
+                let delta = sample(values, 0, equator) - sample(values, width - 1, equator);
+                delta * delta
+            })
+            .sum::<f32>()
+            .sqrt();
+        assert!(
+            seam_delta < 0.5,
+            "first/last columns are discontinuous: {seam_delta}"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -4241,9 +4377,7 @@ mod tests {
         // world-space rays before tiled staging changes their output ownership.
         let shared_density = include_str!("shaders/cloud_density.wgsl");
         assert!(shared_density.contains("fn weather_cloud_sample"));
-        assert!(
-            include_str!("preview.rs").contains("include_str!(\"shaders/cloud_density.wgsl\")")
-        );
+        assert!(include_str!("preview.rs").contains("include_str!(\"shaders/cloud_density.wgsl\")"));
         assert!(include_str!("export.rs").contains("include_str!(\"shaders/cloud_density.wgsl\")"));
         assert!(include_str!("shaders/cloud_export.wgsl").contains("weather_cloud_sample"));
 
@@ -4380,12 +4514,10 @@ mod tests {
         let meso = directional_terrain(2);
         let reconstructed = reconstruct_8k_from_meso_delta(&full, &meso, &meso).unwrap();
         for (actual, expected) in reconstructed.faces.iter().zip(&full.faces) {
-            assert!(
-                actual
-                    .iter()
-                    .zip(expected)
-                    .all(|(actual, expected)| (actual - expected).abs() < 1e-6)
-            );
+            assert!(actual
+                .iter()
+                .zip(expected)
+                .all(|(actual, expected)| (actual - expected).abs() < 1e-6));
         }
         for direction in [[1.0, 0.0, 1.0], [1.0, 1.0, 0.0], [0.0, 1.0, 1.0]] {
             let before = sample_cubemap_height(&full, direction);
@@ -4565,6 +4697,16 @@ mod tests {
             .collect()
     }
 
+    fn decoded_rgba_hash(path: &Path) -> u64 {
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for pixel in read_rgba(path) {
+            pixel.map(f32::to_bits).hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
     fn normalized_staged_fixture(
         root: &Path,
         resolution: u32,
@@ -4644,6 +4786,7 @@ mod tests {
             region_side,
             cache_regions,
             worker_cap,
+            true,
         )
         .unwrap();
         assert!(diagnostics.peak_cached_values > 0);
@@ -4853,12 +4996,17 @@ mod tests {
 
     #[test]
     fn parallel_materialization_resources_are_bounded_under_four_gib() {
-        let config = equirect_row_materialization_config(16_384, 8_192, 4, 512, 8, 8).unwrap();
+        let config =
+            equirect_row_materialization_config(16_384, 8_192, 4, 512, 8, 8, true).unwrap();
         assert_eq!(config.workers, 8);
         assert_eq!(config.queue_bound, 16);
         assert_eq!(config.aggregate_cache_values, 8 * 8 * 512 * 512 * 4);
         assert!(config.resource_bytes <= MAX_OWNED_LIVE_BYTES);
-        assert!(equirect_row_materialization_config(16, 8, 1, 2, 1, 0).is_err());
+        let direct_config =
+            equirect_row_materialization_config(16_384, 8_192, 4, 512, 8, 8, false).unwrap();
+        assert!(direct_config.resource_bytes <= MAX_OWNED_LIVE_BYTES);
+        assert!(direct_config.resource_bytes < config.resource_bytes);
+        assert!(equirect_row_materialization_config(16, 8, 1, 2, 1, 0, true).is_err());
     }
 
     #[test]
@@ -4998,14 +5146,15 @@ mod tests {
     #[test]
     fn staged_wall_elapsed_excludes_parallel_worker_cpu_time() {
         let metrics = StagedIoMetrics {
-            row_generation_ms: 240_000.0,
-            worker_row_generation_ms: 1_301_222.0,
+            row_generation_wall_ms: 240_000.0,
+            worker_row_generation_wall_sum_ms: 1_301_222.0,
             output_write_ms: 800.0,
             output_finish_ms: 67.0,
+            intermediate_write_bytes: 1,
             ..Default::default()
         };
         assert_eq!(metrics.stage_wall_elapsed_ms(), 240_867.0);
-        assert!(metrics.stage_wall_elapsed_ms() < metrics.worker_row_generation_ms);
+        assert!(metrics.stage_wall_elapsed_ms() < metrics.worker_row_generation_wall_sum_ms);
     }
 
     #[test]
@@ -5081,7 +5230,7 @@ mod tests {
         let (height_stage, height_faces) = staged_fixture(&root, resolution, 1);
         let (height, width, height_px) = cubemap_to_equirect(&height_faces, resolution, 1);
         export_equirect_exr_gray(&height, width, height_px, &height_full).unwrap();
-        export_staged_equirect_exr(
+        let height_metrics = export_staged_equirect_exr(
             "height",
             &height_stage,
             width,
@@ -5097,7 +5246,7 @@ mod tests {
         let (normal_stage, normal_faces) = staged_fixture(&root, resolution, 4);
         let (normal, width, height_px) = cubemap_to_equirect(&normal_faces, resolution, 4);
         export_equirect_exr_rgba(&normal, width, height_px, &normal_full).unwrap();
-        export_staged_equirect_exr(
+        let normal_metrics = export_staged_equirect_exr(
             "normal",
             &normal_stage,
             width,
@@ -5112,26 +5261,81 @@ mod tests {
 
         assert_eq!(read_rgba(&height_staged), read_rgba(&height_full));
         assert_eq!(read_rgba(&normal_staged), read_rgba(&normal_full));
+        assert_eq!(
+            decoded_rgba_hash(&height_staged),
+            decoded_rgba_hash(&height_full)
+        );
+        assert_eq!(
+            decoded_rgba_hash(&normal_staged),
+            decoded_rgba_hash(&normal_full)
+        );
+        for metrics in [height_metrics, normal_metrics] {
+            assert_eq!(metrics.intermediate_write_bytes, 0);
+            assert_eq!(metrics.intermediate_write_ms, 0.0);
+            assert!(metrics.output_write_bytes > 0);
+            assert_eq!(
+                metrics.stage_wall_elapsed_ms(),
+                metrics.row_generation_wall_ms + metrics.output_finish_ms
+            );
+        }
         assert!(height_staged.is_file());
         assert!(normal_staged.is_file());
         assert!(!height_staged.with_extension("exr.part").exists());
         assert!(!normal_staged.with_extension("exr.part").exists());
         assert_eq!(recorded.len(), 4);
-        assert!(
-            recorded
-                .chunks_exact(2)
-                .all(|pair| !pair[0].completed && pair[1].completed)
-        );
+        assert!(recorded
+            .chunks_exact(2)
+            .all(|pair| !pair[0].completed && pair[1].completed));
         assert!(recorded.iter().all(|checkpoint| {
             checkpoint.rows_completed == height_px
                 && checkpoint.rows_total == height_px
-                && checkpoint.intermediate_write_bytes > 0
+                && checkpoint.intermediate_write_bytes == 0
         }));
         assert!(std::fs::read_dir(&root).unwrap().all(|entry| {
             let name = entry.unwrap().file_name().to_string_lossy().into_owned();
             !name.starts_with(".planet-gen-stage-")
                 && !name.starts_with(".planet-gen-equirect-stage-")
         }));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn direct_exr_cancellation_cleans_the_atomic_partial_without_an_intermediate() {
+        let root = std::env::temp_dir().join(format!(
+            "planet-gen-direct-exr-cancel-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let (stage, _) = staged_fixture(&root, 8, 1);
+        let path = root.join("height.exr");
+        let mut checkpoints = discard_layer_materialization_checkpoint;
+        let failure = export_staged_equirect_exr(
+            "height",
+            &stage,
+            16,
+            8,
+            1,
+            &path,
+            &AtomicBool::new(true),
+            &mut checkpoints,
+        )
+        .unwrap_err();
+        assert_eq!(failure.message, "Cancelled");
+        assert_eq!(failure.metrics.intermediate_write_bytes, 0);
+        assert_eq!(failure.metrics.intermediate_write_ms, 0.0);
+        assert!(!path.exists());
+        assert!(!path.with_extension("exr.part").exists());
+        assert!(std::fs::read_dir(&root).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".planet-gen-equirect-stage-")
+        }));
+        drop(stage);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -5592,7 +5796,7 @@ mod tests {
         let derived = DerivedProperties::from_params(&params);
         let config = ExportConfig {
             face_resolution: 2048,
-            tile_size: 512,
+            tile_size: TILE_SIZE,
             output_dir: tmp_dir.clone(),
             planet_name: "benchmark".into(),
             erosion_iterations: 10,
@@ -5600,12 +5804,14 @@ mod tests {
             weather: WeatherSnapshot::default(),
             night_lights: 0.5,
         };
+        assert_eq!(config.tile_size, TILE_SIZE);
 
         let (tx, _rx) = std::sync::mpsc::channel();
         let cancel = AtomicBool::new(false);
+        let mut timings = ExportTimings::default();
 
         let start = Instant::now();
-        let result = run_export(
+        let result = run_export_with_timings(
             &gpu,
             &config,
             &params,
@@ -5615,6 +5821,7 @@ mod tests {
             terrain_params(),
             &tx,
             &cancel,
+            &mut timings,
         );
         let elapsed = start.elapsed();
 
@@ -5623,8 +5830,62 @@ mod tests {
             "Benchmark export failed: {:?}",
             result.err()
         );
+        assert!(timings.terrain_tiles_wall_ms.is_finite());
+        assert!(timings.map_dispatch_readback_wall_ms.is_finite());
+        assert!(timings.export_weather_wall_ms.is_finite());
+        assert!(timings.cloud_tile_dispatch_readback_wall_ms.is_finite());
+        assert!(timings.staged_equirect_materialization_wall_ms.is_finite());
+        assert!(timings.writer_output_wall_ms.is_finite());
+        assert!(timings.writer_finish_wall_ms.is_finite());
+        assert!(timings.total_wall_ms.is_finite());
         println!("2K export completed in {:.2}s", elapsed.as_secs_f64());
         println!("GPU: {}", gpu.adapter_name());
+        let phase = |completed: bool, milliseconds: f64| {
+            completed
+                .then(|| {
+                    format!(
+                        "{milliseconds:.2}ms ({:.1}%)",
+                        milliseconds / elapsed.as_secs_f64() / 10.0
+                    )
+                })
+                .unwrap_or_else(|| "NOT_RUN".into())
+        };
+        println!(
+            "2K ExportTimings wall-clock phases: terrain_tiles={}, map_dispatch_readback={}, export_weather={}, cloud_tile_dispatch_readback={}, staged_equirect_materialization={}, writer_output={}, writer_finish={}, total={}",
+            phase(true, timings.terrain_tiles_wall_ms),
+            phase(
+                timings.map_batch_metrics.reached,
+                timings.map_dispatch_readback_wall_ms
+            ),
+            phase(config.layers.clouds, timings.export_weather_wall_ms),
+            phase(
+                config.layers.clouds,
+                timings.cloud_tile_dispatch_readback_wall_ms
+            ),
+            phase(
+                timings.staged_io_completed,
+                timings.staged_equirect_materialization_wall_ms
+            ),
+            phase(timings.staged_io_completed, timings.writer_output_wall_ms),
+            phase(timings.staged_io_completed, timings.writer_finish_wall_ms),
+            phase(true, timings.total_wall_ms),
+        );
+        println!(
+            "2K ExportTimings worker wall sum (not CPU time; overlaps equirect wall-clock)={}",
+            phase(
+                timings.staged_io_completed,
+                timings.staged_io_metrics.worker_row_generation_wall_sum_ms
+            ),
+        );
+        println!(
+            "2K ExportTimings inclusive phases: generation={}, erosion={}, export={}",
+            phase(
+                timings.generation_completed,
+                timings.generation_inclusive_ms
+            ),
+            phase(timings.erosion_completed, timings.erosion_inclusive_ms),
+            phase(timings.export_completed, timings.export_inclusive_ms),
+        );
 
         // At 2K, should complete well under 30s even on modest hardware
         assert!(

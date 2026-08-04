@@ -1,7 +1,7 @@
 use planet_gen::{
     export::{
-        ExportConfig, ExportLayers, MAP_BATCH_SIZE, MAX_OWNED_LIVE_BYTES, TileCoordinator,
-        crop_region_bytes, emission_stencil_radius, erosion_resolution_for_export,
+        ExportConfig, ExportLayers, MAP_BATCH_SIZE, MAX_OWNED_LIVE_BYTES, TILE_SIZE,
+        TileCoordinator, crop_region_bytes, emission_stencil_radius, erosion_resolution_for_export,
         estimated_export_preflight_bytes_with_erosion, estimated_peak_streaming_bytes,
         map_batch_fits, map_tile_fits_device, map_tile_owned_bytes, max_map_stencil_radius,
         reconstruct_8k_from_meso_delta, run_export, select_tile_size,
@@ -115,6 +115,20 @@ fn limit_constrained_tiles_keep_the_fixed_halo() {
     let region = TileCoordinator::new(8192, tile_size).region(1, 1);
     assert_eq!(region.crop_x, max_map_stencil_radius(8192));
     assert_eq!(region.crop_y, max_map_stencil_radius(8192));
+}
+
+#[test]
+fn default_tile_size_is_1024_and_device_fallback_remains_available() {
+    assert_eq!(TILE_SIZE, 1024);
+    assert_eq!(
+        select_tile_size(2048, TILE_SIZE, &wgpu::Limits::default(), 16).unwrap(),
+        TILE_SIZE
+    );
+
+    let mut limits = wgpu::Limits::default();
+    limits.max_buffer_size = 32_000_000;
+    limits.max_storage_buffer_binding_size = 32_000_000;
+    assert_eq!(select_tile_size(2048, TILE_SIZE, &limits, 16).unwrap(), 512);
 }
 
 #[test]

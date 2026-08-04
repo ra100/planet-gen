@@ -7,23 +7,23 @@
 //! Also prints a Quick vs Classified comparison at 768px.
 
 use planet_gen::export::{
-    ExportConfig, ExportLayers, ExportTimings, MAX_8K_OWNED_LIVE_BYTES,
     estimated_export_preflight_bytes_with_erosion, estimated_peak_streaming_bytes,
-    run_export_with_timings_and_checkpoints,
+    run_export_with_timings_and_checkpoints, ExportConfig, ExportLayers, ExportTimings,
+    MAX_8K_OWNED_LIVE_BYTES,
 };
 use planet_gen::gpu::GpuContext;
 use planet_gen::perf_evidence::{
-    AcceptanceProfile, CanonicalReport, GateStatus, PRESET, StageJournal, publish, sha256,
+    publish, sha256, AcceptanceProfile, CanonicalReport, GateStatus, StageJournal, PRESET,
 };
 use planet_gen::planet::{DerivedProperties, PlanetParams};
-use planet_gen::plates::{PlateGenParams, generate_plates};
+use planet_gen::plates::{generate_plates, PlateGenParams};
 use planet_gen::preview::PreviewRenderer;
 use planet_gen::terrain_compute::{
     ErosionPipeline, TerrainComputePipeline, TerrainGenerationParams,
 };
 use planet_gen::weather::WeatherSnapshot;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const EVIDENCE_ROOT: &str = "target/procedural-terrain-evidence";
@@ -89,7 +89,7 @@ fn report(gpu: &GpuContext, mode: &str, resolution: u32, owned_live_bytes: u64) 
                 25
             },
             if resolution == 8192 {
-                "staged-exr-png-no-emission"
+                "direct-exr-staged-png-no-emission"
             } else {
                 "preview"
             },
@@ -182,7 +182,7 @@ fn u2_8k_artifact(
     outcome: &str,
 ) -> String {
     format!(
-        "mode=8k-cold\nexport_path=staged-exr-png\nenabled_layers={}\nunsupported_legacy=emission\nowned_live_bytes_estimate={bounded_ledger}\ngeneration_inclusive_ms={}\nerosion_inclusive_ms={}\nmeso_erosion_resolution={}\nmeso_erosion_ms={}\ndelta_reconstruction_ms={}\nupload_sync_ms={}\nencode_ms={} (inclusive streamed export)\nio_ms={} (inclusive streamed export; overlaps encode)\ntotal_ms={total_ms}\nresult={outcome}\n",
+        "mode=8k-cold\nexport_path=direct-exr-staged-png\nenabled_layers={}\nunsupported_legacy=emission\nowned_live_bytes_estimate={bounded_ledger}\ngeneration_inclusive_ms={}\nerosion_inclusive_ms={}\nmeso_erosion_resolution={}\nmeso_erosion_ms={}\ndelta_reconstruction_ms={}\nupload_sync_ms={}\nencode_ms={} (inclusive streamed export)\nio_ms={} (inclusive streamed export; overlaps encode)\ntotal_ms={total_ms}\nresult={outcome}\n",
         u2_8k_enabled_layers(layers),
         stage_timing(
             timings.generation_completed,
@@ -481,9 +481,9 @@ fn run_u2_8k() {
             record.cache_capacity_bytes = Some(timings.staged_io_metrics.cache_capacity_bytes());
             record.io_bytes = Some(timings.staged_io_metrics.published_file_bytes);
             record.retained_bytes = Some(timings.staged_io_metrics.peak_cached_bytes());
-            record.row_generation_ms = Some(timings.staged_io_metrics.row_generation_ms);
-            record.worker_row_generation_ms =
-                Some(timings.staged_io_metrics.worker_row_generation_ms);
+            record.row_generation_wall_ms = Some(timings.staged_io_metrics.row_generation_wall_ms);
+            record.worker_row_generation_wall_sum_ms =
+                Some(timings.staged_io_metrics.worker_row_generation_wall_sum_ms);
             record.output_write_ms = Some(timings.staged_io_metrics.output_write_ms);
             record.output_finish_ms = Some(timings.staged_io_metrics.output_finish_ms);
         }
@@ -644,6 +644,7 @@ mod tests {
             "target/procedural-terrain-exports/u2-test",
         );
         for field in [
+            "export_path=direct-exr-staged-png",
             "enabled_layers=height,albedo,normal,roughness,water_mask,clouds",
             "unsupported_legacy=emission",
             "owned_live_bytes_estimate=123",

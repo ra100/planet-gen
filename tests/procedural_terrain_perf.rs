@@ -70,8 +70,8 @@ fn layer_staging_journal_preserves_cache_and_row_io_metrics() {
         stage.cache_misses = Some(3);
         stage.io_bytes = Some(4096);
         stage.retained_bytes = Some(1024);
-        stage.row_generation_ms = Some(1.5);
-        stage.worker_row_generation_ms = Some(6.0);
+        stage.row_generation_wall_ms = Some(1.5);
+        stage.worker_row_generation_wall_sum_ms = Some(6.0);
         stage.output_write_ms = Some(2.0);
         stage.output_finish_ms = Some(0.5);
     }
@@ -80,7 +80,7 @@ fn layer_staging_journal_preserves_cache_and_row_io_metrics() {
     assert!(json.contains("\"name\":\"layer_staging\",\"status\":\"PASS\""));
     assert!(json.contains("\"cache_hits\":12,\"cache_misses\":3,\"cache_capacity_bytes\":\"NOT_RUN\",\"io_bytes\":4096"));
     assert!(
-        json.contains("\"row_generation_ms\":1.5,\"worker_row_generation_ms\":6,\"output_write_ms\":2,\"output_finish_ms\":0.5")
+        json.contains("\"row_generation_wall_ms\":1.5,\"worker_row_generation_wall_sum_ms\":6,\"output_write_ms\":2,\"output_finish_ms\":0.5")
     );
 }
 

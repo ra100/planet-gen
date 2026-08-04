@@ -1,4 +1,4 @@
-use std::ffi::{CString, c_char};
+use std::ffi::{c_char, CString};
 use std::path::{Path, PathBuf};
 
 unsafe extern "C" {
@@ -109,6 +109,9 @@ impl AtomicScanlineExrWriter {
 
 impl Drop for AtomicScanlineExrWriter {
     fn drop(&mut self) {
+        // Close the native handle before deleting its path. Windows refuses the
+        // deletion while the handle is live, and this also makes cleanup explicit.
+        self.writer.take();
         let _ = std::fs::remove_file(&self.staging);
     }
 }
@@ -219,14 +222,12 @@ mod tests {
             .map(|channel| channel.name.to_string())
             .collect();
         assert_eq!(names, ["Y", "coverage"]);
-        assert!(
-            image
-                .layer_data
-                .channel_data
-                .list
-                .iter()
-                .all(|channel| matches!(channel.sample_data, exr::image::FlatSamples::F32(_)))
-        );
+        assert!(image
+            .layer_data
+            .channel_data
+            .list
+            .iter()
+            .all(|channel| matches!(channel.sample_data, exr::image::FlatSamples::F32(_))));
         let _ = std::fs::remove_file(path);
     }
 
@@ -241,6 +242,36 @@ mod tests {
         let mut writer = AtomicScanlineExrWriter::create(&path, 1, 2, &["Y"]).unwrap();
         writer.write_scanline(&[0.0]).unwrap();
         assert!(writer.finish().is_err());
+        assert!(!path.exists());
+        assert!(!staging.exists());
+    }
+
+    #[test]
+    fn dropped_writer_closes_before_removing_the_partial_file() {
+        let path = std::env::temp_dir().join(format!(
+            "planet-gen-openexr-drop-{}.exr",
+            std::process::id()
+        ));
+        let staging = path.with_extension("exr.part");
+        let _ = std::fs::remove_file(&path);
+        let writer = AtomicScanlineExrWriter::create(&path, 1, 1, &["Y"]).unwrap();
+        assert!(staging.exists());
+        drop(writer);
+        assert!(!path.exists());
+        assert!(!staging.exists());
+    }
+
+    #[test]
+    fn failed_scanline_write_cleans_the_partial_on_drop() {
+        let path = std::env::temp_dir().join(format!(
+            "planet-gen-openexr-write-failure-{}.exr",
+            std::process::id()
+        ));
+        let staging = path.with_extension("exr.part");
+        let _ = std::fs::remove_file(&path);
+        let mut writer = AtomicScanlineExrWriter::create(&path, 1, 1, &["Y"]).unwrap();
+        assert!(writer.write_scanline(&[]).is_err());
+        drop(writer);
         assert!(!path.exists());
         assert!(!staging.exists());
     }

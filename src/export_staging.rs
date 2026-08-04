@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 const ROW_CANCEL_CHECK_INTERVAL: u32 = 128;
 pub const MAX_EQUIRECT_INTERMEDIATE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
@@ -251,7 +251,7 @@ impl<'stage> StagedCubemapSampler<'stage> {
         stencil: BilinearStencil,
         values: &mut [f32],
     ) -> Result<(), String> {
-        let mut corners = [[0.0; 4]; 4];
+        let mut corners = [[0.0; 6]; 4];
         if values.len() > corners[0].len() {
             return self.sample_stencil_channels_heap(stencil, values);
         }
@@ -1021,17 +1021,15 @@ mod tests {
     #[test]
     fn rejects_invalid_tile_metadata() {
         let root = std::env::temp_dir();
-        assert!(
-            FaceStage::create(
-                &root,
-                StageMetadata {
-                    face_resolution: 0,
-                    components: 1,
-                    halo: 0
-                }
-            )
-            .is_err()
-        );
+        assert!(FaceStage::create(
+            &root,
+            StageMetadata {
+                face_resolution: 0,
+                components: 1,
+                halo: 0
+            }
+        )
+        .is_err());
     }
 
     #[test]
@@ -1368,10 +1366,6 @@ mod tests {
 
     #[test]
     fn multi_channel_sampling_matches_components_across_faces_and_boundaries() {
-        let components = 5;
-        let (stage, _) = staged_faces(8, components);
-        let mut per_component = StagedCubemapSampler::new(&stage, 2, 2).unwrap();
-        let mut multi_channel = StagedCubemapSampler::new(&stage, 2, 2).unwrap();
         let directions = [
             [1.0, 0.0, 0.0],
             [-1.0, 0.0, 0.0],
@@ -1389,24 +1383,29 @@ mod tests {
             [0.0, 1.0, 1.0],
         ];
 
-        for [dx, dy, dz] in directions {
-            let expected = (0..components)
-                .map(|channel| per_component.sample_direction(dx, dy, dz, channel).unwrap())
-                .collect::<Vec<_>>();
-            let mut actual = vec![0.0; components as usize];
-            multi_channel
-                .sample_direction_channels(dx, dy, dz, &mut actual)
-                .unwrap();
-            assert_eq!(
-                actual
-                    .iter()
-                    .map(|value| value.to_bits())
-                    .collect::<Vec<_>>(),
-                expected
-                    .iter()
-                    .map(|value| value.to_bits())
-                    .collect::<Vec<_>>()
-            );
+        for components in [6, 7] {
+            let (stage, _) = staged_faces(8, components);
+            let mut per_component = StagedCubemapSampler::new(&stage, 2, 2).unwrap();
+            let mut multi_channel = StagedCubemapSampler::new(&stage, 2, 2).unwrap();
+            for [dx, dy, dz] in directions {
+                let expected = (0..components)
+                    .map(|channel| per_component.sample_direction(dx, dy, dz, channel).unwrap())
+                    .collect::<Vec<_>>();
+                let mut actual = vec![0.0; components as usize];
+                multi_channel
+                    .sample_direction_channels(dx, dy, dz, &mut actual)
+                    .unwrap();
+                assert_eq!(
+                    actual
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>(),
+                    expected
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>()
+                );
+            }
         }
     }
 
