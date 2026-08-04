@@ -100,6 +100,8 @@ pub struct PlanetGenApp {
     export_handle: Option<ExportHandle>,
     export_status: String,
     export_progress: f32,
+    export_destination: String,
+    export_layers: String,
     gpu_error: Option<String>,
 }
 
@@ -245,6 +247,8 @@ impl PlanetGenApp {
             export_handle: None,
             export_status: String::new(),
             export_progress: 0.0,
+            export_destination: String::new(),
+            export_layers: String::new(),
             gpu_error: None,
         })
     }
@@ -627,10 +631,25 @@ impl PlanetGenApp {
                 }),
             self.ocean_level(),
         );
+        let output_dir = std::env::current_dir().unwrap_or_default().join("output");
+        self.export_destination = output_dir.join(&self.planet_name).display().to_string();
+        self.export_layers = [
+            (self.export_albedo, "albedo.exr + ao.png"),
+            (self.export_roughness, "roughness.png"),
+            (self.export_clouds, "clouds.exr (6 channels)"),
+            (self.export_height, "height.exr"),
+            (self.export_emission, "emission.exr"),
+            (self.export_water_mask, "water_mask.png"),
+            (self.export_normals, "normal.exr"),
+        ]
+        .into_iter()
+        .filter_map(|(enabled, layer)| enabled.then_some(layer))
+        .collect::<Vec<_>>()
+        .join(", ");
         let config = ExportConfig {
             face_resolution: self.export_resolution,
             tile_size: export::TILE_SIZE,
-            output_dir: std::env::current_dir().unwrap_or_default().join("output"),
+            output_dir,
             planet_name: self.planet_name.clone(),
             erosion_iterations: self.erosion_iterations,
             layers: ExportLayers {
@@ -659,7 +678,10 @@ impl PlanetGenApp {
         );
 
         self.export_handle = Some(handle);
-        self.export_status = "Starting export...".into();
+        self.export_status = format!(
+            "Starting export to {} (layers: {}).",
+            self.export_destination, self.export_layers
+        );
         self.export_progress = 0.0;
     }
 
@@ -677,12 +699,25 @@ impl PlanetGenApp {
                         self.export_progress = fraction;
                     }
                     ExportProgress::Complete => {
-                        self.export_status = "Export complete!".into();
+                        self.export_status = format!(
+                            "Export complete: wrote {} (layers: {}).",
+                            self.export_destination, self.export_layers
+                        );
                         self.export_progress = 1.0;
                         finished = true;
                     }
                     ExportProgress::Error(e) => {
-                        self.export_status = format!("Error: {e}");
+                        self.export_status = if e == "Cancelled" {
+                            format!(
+                                "Export cancelled for {} (layers: {}). Recovery: adjust settings and retry.",
+                                self.export_destination, self.export_layers
+                            )
+                        } else {
+                            format!(
+                                "Export failed for {} (layers: {}). {e} Recovery: check disk space or GPU, then retry.",
+                                self.export_destination, self.export_layers
+                            )
+                        };
                         self.export_progress = 0.0;
                         finished = true;
                     }
@@ -693,10 +728,61 @@ impl PlanetGenApp {
             self.export_handle = None;
         }
     }
+
+    fn reset_preview(&mut self) {
+        self.rotation_y = 0.0;
+        self.rotation_x = 0.0;
+        self.zoom = 1.0;
+        self.pan = [0.0, 0.0];
+        self.needs_render = true;
+    }
+
+    fn handle_keyboard_shortcuts(&mut self, ctx: &egui::Context) {
+        if ctx.wants_keyboard_input() {
+            return;
+        }
+        let (randomize_seed, reset, left, right, up, down, zoom_in, zoom_out) =
+            ctx.input(|input| {
+                (
+                    input.key_pressed(egui::Key::N),
+                    input.key_pressed(egui::Key::R),
+                    input.key_pressed(egui::Key::ArrowLeft),
+                    input.key_pressed(egui::Key::ArrowRight),
+                    input.key_pressed(egui::Key::ArrowUp),
+                    input.key_pressed(egui::Key::ArrowDown),
+                    input.key_pressed(egui::Key::Plus) || input.key_pressed(egui::Key::Equals),
+                    input.key_pressed(egui::Key::Minus),
+                )
+            });
+
+        if randomize_seed {
+            self.params.seed = rand_seed();
+            self.planet_name = format!("planet_{}", self.params.seed);
+            self.update_derived();
+            self.needs_terrain = true;
+        }
+        if reset {
+            self.reset_preview();
+        }
+        let rotation_step = 0.1;
+        self.rotation_y += rotation_step * (left as i8 - right as i8) as f32;
+        self.rotation_x = (self.rotation_x + rotation_step * (down as i8 - up as i8) as f32).clamp(
+            -std::f32::consts::FRAC_PI_2 + 0.1,
+            std::f32::consts::FRAC_PI_2 - 0.1,
+        );
+        if left || right || up || down {
+            self.needs_render = true;
+        }
+        if zoom_in || zoom_out {
+            self.zoom = (self.zoom * if zoom_in { 1.1 } else { 1.0 / 1.1 }).clamp(0.1, 20.0);
+            self.needs_render = true;
+        }
+    }
 }
 
 impl eframe::App for PlanetGenApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.handle_keyboard_shortcuts(ctx);
         if self.export_handle.is_some() {
             self.poll_export();
             ctx.request_repaint();
@@ -759,7 +845,7 @@ impl eframe::App for PlanetGenApp {
                 ui.separator();
 
                 ui.horizontal(|ui| {
-                    if ui.button("🎲").on_hover_text("Random seed").clicked() {
+                    if ui.button("Randomize Seed (N)").clicked() {
                         self.params.seed = rand_seed();
                         self.planet_name = format!("planet_{}", self.params.seed);
                         changed = true;
@@ -879,14 +965,14 @@ impl eframe::App for PlanetGenApp {
                     self.invalidate_weather();
                 }
                 if ui.add(egui::Slider::new(&mut self.wind_scale, 0.0..=2.0)
-                    .text("Cloud Wind Force"))
-                    .on_hover_text("0 = calm, 1 = physical baseline, 2 = strong cloud transport")
+                    .text("Wind Strength"))
+                    .on_hover_text("0 = calm, 1 = physical baseline, 2 = strong transport. Changing this regenerates weather transport.")
                     .changed()
                 {
                     self.invalidate_weather();
                 }
                 ui.horizontal(|ui| {
-                    if ui.small_button("🎲").on_hover_text("Randomize cloud pattern").clicked() {
+                    if ui.small_button("Randomize Clouds").clicked() {
                         self.cloud_seed = rand_seed();
                         self.invalidate_weather();
                     }
@@ -1038,9 +1124,7 @@ impl eframe::App for PlanetGenApp {
                     });
 
                     if ui.button("Reset rotation").clicked() {
-                        self.rotation_y = 0.0;
-                        self.rotation_x = 0.0;
-                        self.needs_render = true;
+                        self.reset_preview();
                     }
                 });
 
@@ -1134,6 +1218,7 @@ impl eframe::App for PlanetGenApp {
                 ui.separator();
                 ui.small(format!("GPU: {}", self.gpu.adapter_name()));
                 ui.small("Drag to rotate • Scroll to zoom • Middle-drag to pan");
+                ui.small("Keyboard: arrows rotate • +/- zoom • R reset view • N randomize seed");
                 }); // ScrollArea
             });
 
@@ -1222,6 +1307,7 @@ impl eframe::App for PlanetGenApp {
                 ui.checkbox(&mut self.export_albedo, "Albedo (with AO)");
                 ui.checkbox(&mut self.export_roughness, "Roughness");
                 ui.checkbox(&mut self.export_clouds, "Clouds");
+                ui.small("Writes six-channel reconstruction clouds.exr, not the composited preview.");
                 ui.checkbox(&mut self.export_height, "Height");
                 ui.checkbox(&mut self.export_emission, "Emission (city lights)");
                 ui.checkbox(&mut self.export_water_mask, "Water Mask");
@@ -1230,6 +1316,13 @@ impl eframe::App for PlanetGenApp {
                 ui.separator();
 
                 let is_exporting = self.export_handle.is_some();
+                let has_export_layers = self.export_albedo
+                    || self.export_roughness
+                    || self.export_clouds
+                    || self.export_height
+                    || self.export_emission
+                    || self.export_water_mask
+                    || self.export_normals;
 
                 if is_exporting {
                     ui.add(egui::ProgressBar::new(self.export_progress).text(&self.export_status));
@@ -1237,10 +1330,20 @@ impl eframe::App for PlanetGenApp {
                         && let Some(ref handle) = self.export_handle
                     {
                         handle.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                        self.export_status = format!(
+                            "Cancelling export to {} (layers: {}).",
+                            self.export_destination, self.export_layers
+                        );
                     }
                 } else {
-                    if ui.button("Export Textures").clicked() {
+                    if ui
+                        .add_enabled(has_export_layers, egui::Button::new("Export Textures"))
+                        .clicked()
+                    {
                         self.start_export();
+                    }
+                    if !has_export_layers {
+                        ui.small("Select at least one export layer.");
                     }
                     if !self.export_status.is_empty() {
                         ui.small(&self.export_status);
