@@ -64,6 +64,29 @@ fn tangent_basis(pos: vec3<f32>) -> mat2x3<f32> {
     return mat2x3<f32>(east, normalize(cross(pos, east)));
 }
 
+struct TerrainTransect {
+    ascent: f32,
+    lee_drying: f32,
+}
+
+fn terrain_transect(pos: vec3<f32>, wind_dir: vec3<f32>, wind_speed: f32) -> TerrainTransect {
+    let step = clamp(220.0 / max(params.radius_km, 1.0), 0.018, 0.065);
+    let h0 = sample_height(pos);
+    let h1 = sample_height(normalize(pos - wind_dir * step));
+    let h2 = sample_height(normalize(pos - wind_dir * step * 2.0));
+    let h3 = sample_height(normalize(pos - wind_dir * step * 3.0));
+    let h4 = sample_height(normalize(pos - wind_dir * step * 4.0));
+    let wind_gate = smooth_step(0.03, 0.20, wind_speed);
+    // Only the immediately upwind slope lifts this column. Looking farther
+    // upstream crosses a ridge from its lee side and incorrectly creates lift.
+    let ascent = max(h0 - h1, 0.0);
+    let lee_height = max(max(h1, h2), max(h3, h4)) - h0;
+    return TerrainTransect(
+        smooth_step(0.0005, 0.015, ascent) * wind_gate,
+        smooth_step(0.003, 0.040, lee_height) * wind_gate,
+    );
+}
+
 fn catalyst_center(index: u32) -> vec3<f32> {
     let rank = f32(reverseBits(index) >> 29u);
     let z = 1.0 - 2.0 * (rank + 0.5) / 8.0;
@@ -73,6 +96,32 @@ fn catalyst_center(index: u32) -> vec3<f32> {
     let basis = tangent_basis(base);
     let jitter = (noise_seed_offset(params.seed, 201u + index).xy * 2.0 - 1.0) * 0.12;
     return normalize(base + basis[0] * jitter.x + basis[1] * jitter.y);
+}
+
+fn catalyst_owner_steering(index: u32) -> vec3<f32> {
+    let center = catalyst_center(index);
+    let basis = tangent_basis(center);
+    let wind = textureSampleLevel(wind_tex, weather_sampler, center, 0.0).xyz;
+    let tangent_wind = wind - center * dot(wind, center);
+    return normalize(tangent_wind + basis[0] * 0.0001);
+}
+
+fn catalyst_support(pos: vec3<f32>, index: u32) -> f32 {
+    let center = catalyst_center(index);
+    let along = catalyst_owner_steering(index);
+    let across = normalize(cross(center, along));
+    let size_t = clamp((params.storm_size - 0.3) / 2.7, 0.0, 1.0);
+    let radius = 0.085 + (0.20 - 0.085) * pow(size_t, 2.0135171);
+    let delta = pos - center * dot(pos, center);
+    let warp_a = snoise(pos * 19.0 + noise_seed_offset(params.seed, 301u));
+    let warp_b = snoise(pos * 37.0 + noise_seed_offset(params.seed, 302u));
+    let major = radius * 1.45 * (1.0 + warp_a * 0.13);
+    let along_distance = dot(delta, along);
+    let width_t = smooth_step(-radius * 0.35, radius * 0.55, along_distance);
+    let minor = radius * mix(0.56, 0.88, width_t) * (1.0 + warp_b * 0.13);
+    let ellipse = pow(along_distance / max(major, 0.001), 2.0)
+        + pow(dot(delta, across) / max(minor, 0.001), 2.0);
+    return smooth_step(1.0, 0.72, ellipse);
 }
 
 fn physical_latitude(pos: vec3<f32>) -> f32 {
@@ -92,24 +141,9 @@ fn temperature_at(pos: vec3<f32>) -> f32 {
 
 fn convective_catalyst(pos: vec3<f32>) -> f32 {
     let active_count = min(params.storm_count, 8u);
-    let size_t = clamp((params.storm_size - 0.3) / 2.7, 0.0, 1.0);
-    let radius = 0.085 + (0.20 - 0.085) * pow(size_t, 2.0135171);
     var response = 0.0;
     for (var index = 0u; index < active_count; index++) {
-        let center = catalyst_center(index);
-        let basis = tangent_basis(center);
-        let wind = textureSampleLevel(wind_tex, weather_sampler, center, 0.0).xyz;
-        let tangent_wind = wind - center * dot(wind, center);
-        let along = normalize(tangent_wind + basis[0] * 0.0001);
-        let across = normalize(cross(center, along));
-        let delta = pos - center * dot(pos, center);
-        let warp_a = snoise(pos * 19.0 + noise_seed_offset(params.seed, 301u));
-        let warp_b = snoise(pos * 37.0 + noise_seed_offset(params.seed, 302u));
-        let major = radius * 1.45 * (1.0 + warp_a * 0.13);
-        let minor = radius * 0.78 * (1.0 + warp_b * 0.13);
-        let ellipse = pow(dot(delta, along) / max(major, 0.001), 2.0)
-            + pow(dot(delta, across) / max(minor, 0.001), 2.0);
-        response = max(response, smooth_step(1.0, 0.72, ellipse));
+        response = max(response, catalyst_support(pos, index));
     }
     return response;
 }
@@ -142,26 +176,16 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         / (2.0 * diagnostic_step);
     let convergence = clamp(-divergence * 0.2, -1.0, 1.0);
 
-    let terrain_step = diagnostic_step * 1.5;
-    let upwind_height = (
-        sample_height(normalize(pos - wind_dir * terrain_step))
-            + sample_height(normalize(pos - wind_dir * terrain_step * 2.0))
-    ) * 0.5;
-    let downwind_height = (
-        sample_height(normalize(pos + wind_dir * terrain_step))
-            + sample_height(normalize(pos + wind_dir * terrain_step * 2.0))
-    ) * 0.5;
-    let terrain_response = (downwind_height - upwind_height)
-        * smooth_step(0.03, 0.2, wind_speed);
-    let terrain_lift = smooth_step(0.005, 0.08, terrain_response);
-    let rain_shadow = smooth_step(0.005, 0.08, -terrain_response);
+    let terrain = terrain_transect(pos, wind_dir, wind_speed);
+    let terrain_lift = terrain.ascent;
+    let rain_shadow = terrain.lee_drying;
     let latitude = physical_latitude(pos);
     let temperature = temperature_at(pos);
     let thermal = smooth_step(-25.0, 30.0, temperature);
     let continentality = wind.a;
     let pressure_factor = smooth_step(0.05, 0.3, params.surface_pressure_bar);
-    let surface_supply = mix(1.0, 0.55, smooth_step(0.15, 0.85, continentality));
-    let moisture = clamp(params.moisture, 0.0, 1.0) * pressure_factor * surface_supply;
+    let marine_fraction = 1.0 - smooth_step(0.15, 0.85, continentality);
+    let moisture = clamp(params.moisture, 0.0, 1.0) * pressure_factor * marine_fraction;
 
     let pressure_east = textureSampleLevel(pressure_tex, weather_sampler, east_pos, 0.0).r;
     let pressure_west = textureSampleLevel(pressure_tex, weather_sampler, west_pos, 0.0).r;
@@ -277,17 +301,14 @@ fn diagnose(@builtin(global_invocation_id) id: vec3<u32>) {
     let wind_tangent = (wind.xyz - pos * dot(wind.xyz, pos)) * params.wind_scale;
     let wind_speed = length(wind_tangent);
     let wind_dir = wind_tangent / max(wind_speed, 0.0001);
-    let terrain_step = clamp(300.0 / max(params.radius_km, 1.0), 0.02, 0.08);
-    let terrain_response = sample_height(normalize(pos + wind_dir * terrain_step * 1.5))
-        - sample_height(normalize(pos - wind_dir * terrain_step * 1.5));
-    let terrain_wind = smooth_step(0.03, 0.2, wind_speed);
-    let terrain_lift = smooth_step(0.005, 0.08, terrain_response) * terrain_wind;
-    let rain_shadow = smooth_step(0.005, 0.08, -terrain_response) * terrain_wind;
+    let terrain = terrain_transect(pos, wind_dir, wind_speed);
+    let terrain_lift = terrain.ascent;
+    let rain_shadow = terrain.lee_drying;
 
     // Erosion shapes existing warm trade mass; it never creates an occupancy threshold.
     let trade_erosion = 0.05 + 0.95 * smooth_step(
-        -0.5,
-        0.5,
+        -0.20,
+        0.80,
         snoise(pos * 5.0 + noise_seed_offset(params.seed, 61u)),
     );
     let detail_erosion = 0.55 + 0.45 * smooth_step(
@@ -300,48 +321,42 @@ fn diagnose(@builtin(global_invocation_id) id: vec3<u32>) {
         0.5,
         snoise(pos + noise_seed_offset(params.seed, 31u)),
     );
-    // Diagnosis only scales U12's transported condensate; vapor never becomes
-    // diagnosed cloud mass outside U12 phase change.
-    let marine_low_gain = 0.65 + marine_stability * 0.74 + trade_cumulus * 5.0;
-    let terrain_low_gain = 1.0 + terrain_lift * 2.9 - rain_shadow * 1.2;
-    let transported_low = state.y * mix(terrain_low_gain, marine_low_gain, marine_fraction);
+    // Diagnosis preserves U12's transported condensate history. Vapor never
+    // becomes cloud mass here, and marine/terrain forcing never adds local mass.
+    let transported_low = state.y * 1.25;
     let low = soft_bound(
-        transported_low * detail_erosion * mix(1.0, trade_erosion, trade_cumulus) * seed_erosion,
+        transported_low * min(
+            detail_erosion * mix(1.0, trade_erosion, trade_cumulus) * seed_erosion,
+            1.0,
+        ),
         1.0,
     );
     let deep = soft_bound(
-        state.z * (1.0 - marine_stability * 0.78) * (1.0 + terrain_lift * 0.35),
+        state.z * (1.0 - marine_stability * 0.20),
         1.0 - low,
     );
     // This is a diagnostic down-direction from the available pressure wind,
     // not a vertical-wind or upper-divergence model.
     let anvil_step = params.wind_scale * clamp(600.0 / max(params.radius_km, 1.0), 0.02, 0.10);
-    let anvil_near = textureSampleLevel(
-        spinup_state,
-        weather_sampler,
-        normalize(pos - wind_dir * anvil_step),
-        0.0,
-    );
-    let anvil_far = textureSampleLevel(
-        spinup_state,
-        weather_sampler,
-        normalize(pos - wind_dir * anvil_step * 2.2),
-        0.0,
-    );
-    let lateral = normalize(cross(pos, wind_dir) + tangent_basis(pos)[0] * 0.0001);
     let anvil_spread = anvil_step * 0.08;
-    let anvil_left = textureSampleLevel(
-        spinup_state,
-        weather_sampler,
-        normalize(pos - wind_dir * anvil_step + lateral * anvil_spread),
-        0.0,
-    );
-    let anvil_right = textureSampleLevel(
-        spinup_state,
-        weather_sampler,
-        normalize(pos - wind_dir * anvil_step - lateral * anvil_spread),
-        0.0,
-    );
+    var anvil_near = vec4<f32>(0.0);
+    var anvil_far = vec4<f32>(0.0);
+    var anvil_left = vec4<f32>(0.0);
+    var anvil_right = vec4<f32>(0.0);
+    // Owner-local steering only contributes when its source is inside that
+    // owner's catalyst support. This avoids Voronoi seams in unsupported air.
+    for (var owner = 0u; owner < min(params.storm_count, 8u); owner++) {
+        let steering = catalyst_owner_steering(owner);
+        let lateral = normalize(cross(pos, steering) + tangent_basis(pos)[0] * 0.0001);
+        let near_pos = normalize(pos - steering * anvil_step);
+        let far_pos = normalize(pos - steering * anvil_step * 2.2);
+        let left_pos = normalize(near_pos + lateral * anvil_spread);
+        let right_pos = normalize(near_pos - lateral * anvil_spread);
+        anvil_near = max(anvil_near, textureSampleLevel(spinup_state, weather_sampler, near_pos, 0.0) * catalyst_support(near_pos, owner));
+        anvil_far = max(anvil_far, textureSampleLevel(spinup_state, weather_sampler, far_pos, 0.0) * catalyst_support(far_pos, owner));
+        anvil_left = max(anvil_left, textureSampleLevel(spinup_state, weather_sampler, left_pos, 0.0) * catalyst_support(left_pos, owner));
+        anvil_right = max(anvil_right, textureSampleLevel(spinup_state, weather_sampler, right_pos, 0.0) * catalyst_support(right_pos, owner));
+    }
     // U14 frontal/local high remains bounded by occupied low/deep mass. Only
     // the catalyst-supported anvil can extend beyond a deep response core.
     let frontal_high = min(
@@ -352,22 +367,11 @@ fn diagnose(@builtin(global_invocation_id) id: vec3<u32>) {
         anvil_near.z,
         max(anvil_far.z, max(anvil_left.z, anvil_right.z)),
     );
-    let upstream_catalyst = max(
-        convective_catalyst(normalize(pos - wind_dir * anvil_step)),
-        max(
-            convective_catalyst(normalize(pos - wind_dir * anvil_step * 2.2)),
-            max(
-                convective_catalyst(normalize(pos - wind_dir * anvil_step + lateral * anvil_spread)),
-                convective_catalyst(normalize(pos - wind_dir * anvil_step - lateral * anvil_spread)),
-            ),
-        ),
-    );
     let spread_high = anvil_near.w * 0.62 + anvil_far.w * 0.22
         + (anvil_left.w + anvil_right.w) * 0.01
         + anvil_near.z * 0.42 + anvil_far.z * 0.16
         + (anvil_left.z + anvil_right.z) * 0.01;
     let anvil_high = spread_high * smooth_step(0.02, 0.08, deep_support)
-        * smooth_step(0.08, 0.35, upstream_catalyst)
         * (1.0 - marine_stability * 0.4);
     let high = clamp(max(frontal_high, anvil_high), 0.0, 1.0);
     let occupancy = max(low, max(deep, high));

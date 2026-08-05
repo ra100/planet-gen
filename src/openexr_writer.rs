@@ -1,4 +1,4 @@
-use std::ffi::{c_char, CString};
+use std::ffi::{CString, c_char};
 use std::path::{Path, PathBuf};
 
 unsafe extern "C" {
@@ -222,12 +222,14 @@ mod tests {
             .map(|channel| channel.name.to_string())
             .collect();
         assert_eq!(names, ["Y", "coverage"]);
-        assert!(image
-            .layer_data
-            .channel_data
-            .list
-            .iter()
-            .all(|channel| matches!(channel.sample_data, exr::image::FlatSamples::F32(_))));
+        assert!(
+            image
+                .layer_data
+                .channel_data
+                .list
+                .iter()
+                .all(|channel| matches!(channel.sample_data, exr::image::FlatSamples::F32(_)))
+        );
         let _ = std::fs::remove_file(path);
     }
 

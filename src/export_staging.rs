@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
 
 const ROW_CANCEL_CHECK_INTERVAL: u32 = 128;
 pub const MAX_EQUIRECT_INTERMEDIATE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
@@ -1021,15 +1021,17 @@ mod tests {
     #[test]
     fn rejects_invalid_tile_metadata() {
         let root = std::env::temp_dir();
-        assert!(FaceStage::create(
-            &root,
-            StageMetadata {
-                face_resolution: 0,
-                components: 1,
-                halo: 0
-            }
-        )
-        .is_err());
+        assert!(
+            FaceStage::create(
+                &root,
+                StageMetadata {
+                    face_resolution: 0,
+                    components: 1,
+                    halo: 0
+                }
+            )
+            .is_err()
+        );
     }
 
     #[test]

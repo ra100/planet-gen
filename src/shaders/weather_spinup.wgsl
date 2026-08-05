@@ -103,26 +103,37 @@ fn catalyst_center(index: u32) -> vec3<f32> {
     return normalize(base + basis[0] * jitter.x + basis[1] * jitter.y);
 }
 
-fn convective_catalyst(pos: vec3<f32>) -> f32 {
-    let active_count = min(params.storm_count, 8u);
+fn catalyst_owner_steering(index: u32) -> vec3<f32> {
+    let center = catalyst_center(index);
+    let basis = tangent_basis(center);
+    let wind = textureSampleLevel(wind_tex, spinup_sampler, center, 0.0).xyz;
+    let tangent_wind = wind - center * dot(wind, center);
+    return normalize(tangent_wind + basis[0] * 0.0001);
+}
+
+fn catalyst_support(pos: vec3<f32>, index: u32) -> f32 {
+    let center = catalyst_center(index);
+    let along = catalyst_owner_steering(index);
+    let across = normalize(cross(center, along));
     let size_t = clamp((params.storm_size - 0.3) / 2.7, 0.0, 1.0);
     let radius = 0.085 + (0.20 - 0.085) * pow(size_t, 2.0135171);
+    let delta = pos - center * dot(pos, center);
+    let warp_a = snoise(pos * 19.0 + noise_seed_offset(params.seed, 301u));
+    let warp_b = snoise(pos * 37.0 + noise_seed_offset(params.seed, 302u));
+    let major = radius * 1.45 * (1.0 + warp_a * 0.13);
+    let along_distance = dot(delta, along);
+    let width_t = smooth_step(-radius * 0.35, radius * 0.55, along_distance);
+    let minor = radius * mix(0.56, 0.88, width_t) * (1.0 + warp_b * 0.13);
+    let ellipse = pow(along_distance / max(major, 0.001), 2.0)
+        + pow(dot(delta, across) / max(minor, 0.001), 2.0);
+    return smooth_step(1.0, 0.72, ellipse);
+}
+
+fn convective_catalyst(pos: vec3<f32>) -> f32 {
+    let active_count = min(params.storm_count, 8u);
     var response = 0.0;
     for (var index = 0u; index < active_count; index++) {
-        let center = catalyst_center(index);
-        let basis = tangent_basis(center);
-        let wind = textureSampleLevel(wind_tex, spinup_sampler, center, 0.0).xyz;
-        let tangent_wind = wind - center * dot(wind, center);
-        let along = normalize(tangent_wind + basis[0] * 0.0001);
-        let across = normalize(cross(center, along));
-        let delta = pos - center * dot(pos, center);
-        let warp_a = snoise(pos * 19.0 + noise_seed_offset(params.seed, 301u));
-        let warp_b = snoise(pos * 37.0 + noise_seed_offset(params.seed, 302u));
-        let major = radius * 1.45 * (1.0 + warp_a * 0.13);
-        let minor = radius * 0.78 * (1.0 + warp_b * 0.13);
-        let ellipse = pow(dot(delta, along) / max(major, 0.001), 2.0)
-            + pow(dot(delta, across) / max(minor, 0.001), 2.0);
-        response = max(response, smooth_step(1.0, 0.72, ellipse));
+        response = max(response, catalyst_support(pos, index));
     }
     return response;
 }
@@ -170,18 +181,14 @@ fn calm_wet_land_mask(
 
 fn source_potential(
     marine_fraction: f32,
-    convergence: f32,
-    terrain_lift: f32,
-    rain_shadow: f32,
-    thermal_stability: f32,
+    thermal: f32,
 ) -> f32 {
-    let surface_supply = mix(0.50, 0.60, marine_fraction);
-    return clamp(
-        surface_supply + convergence * 0.25 + terrain_lift * 10.0 - rain_shadow * 1.0
-            + thermal_stability * 0.04,
-        0.0,
-        1.0,
-    );
+    // Ocean evaporation dominates; warm land contributes weaker, climate-ranked
+    // evapotranspiration. Terrain only converts or removes transported vapor.
+    let marine_evaporation = marine_fraction * mix(0.42, 0.68, thermal);
+    let land_evapotranspiration = (1.0 - marine_fraction)
+        * smooth_step(0.20, 0.80, thermal) * 0.10;
+    return clamp(marine_evaporation + land_evapotranspiration, 0.0, 1.0);
 }
 
 struct SourceBudgets {
@@ -195,22 +202,20 @@ fn source_budgets(
     coverage: f32,
     marine_fraction: f32,
     convergence: f32,
-    terrain_lift: f32,
-    rain_shadow: f32,
-    thermal_stability: f32,
+    thermal: f32,
     persistent_ice: f32,
 ) -> SourceBudgets {
     let local_potential = source_potential(
         marine_fraction,
-        convergence,
-        terrain_lift,
-        rain_shadow,
-        thermal_stability,
+        thermal,
     );
     let c = clamp(coverage, 0.0, 1.0);
     let source_envelope = smoothstep(0.0, 0.25, c);
-    let surface_supply = mix(0.50, 0.60, marine_fraction);
-    let thermal_regime = mix(0.14, 0.04, thermal_stability);
+    let surface_supply = source_potential(
+        marine_fraction,
+        thermal,
+    );
+    let thermal_regime = mix(0.14, 0.04, thermal);
     let phase_rank = clamp(
         surface_supply + 0.25 * convergence + thermal_regime - 0.15 * persistent_ice,
         0.0,
@@ -231,6 +236,31 @@ fn source_budgets(
 fn direction(id: vec3<u32>, resolution: u32) -> vec3<f32> {
     let uv = vec2<f32>(id.xy) / f32(resolution - 1u);
     return cube_to_sphere(id.z, uv);
+}
+
+struct TerrainTransect {
+    ascent: f32,
+    lee_drying: f32,
+}
+
+// Four bounded upwind samples retain terrain history long enough for a lee
+// shadow without adding a second weather field or an unbounded integration.
+fn terrain_transect(pos: vec3<f32>, wind_dir: vec3<f32>, wind_speed: f32) -> TerrainTransect {
+    let step = clamp(220.0 / max(params.radius_km, 1.0), 0.018, 0.065);
+    let h0 = sample_height(pos);
+    let h1 = sample_height(normalize(pos - wind_dir * step));
+    let h2 = sample_height(normalize(pos - wind_dir * step * 2.0));
+    let h3 = sample_height(normalize(pos - wind_dir * step * 3.0));
+    let h4 = sample_height(normalize(pos - wind_dir * step * 4.0));
+    let wind_gate = smooth_step(0.03, 0.20, wind_speed);
+    // Only the immediately upwind slope lifts this column. Looking farther
+    // upstream crosses a ridge from its lee side and incorrectly creates lift.
+    let ascent = max(h0 - h1, 0.0);
+    let lee_height = max(max(h1, h2), max(h3, h4)) - h0;
+    return TerrainTransect(
+        smooth_step(0.0005, 0.015, ascent) * wind_gate,
+        smooth_step(0.003, 0.040, lee_height) * wind_gate,
+    );
 }
 
 fn mc_slope(left: vec4<f32>, center: vec4<f32>, right: vec4<f32>) -> vec4<f32> {
@@ -368,15 +398,13 @@ fn init(@builtin(global_invocation_id) id: vec3<u32>) {
         params.coverage,
         marine_fraction,
         0.0,
-        0.0,
-        0.0,
         thermal_stability,
         persistent_ice,
     );
     let surface_supply_factor = 1.0 - 0.25 * persistent_ice;
     let vapor = select(
         budgets.supply * surface_supply_factor * clamp(params.moisture, 0.0, 1.0)
-            * pressure * mix(0.18, 0.36, marine_fraction),
+            * pressure * 0.42,
         0.0,
         (params.diagnostic_flags & DIAGNOSTIC_NO_SOURCE) != 0u,
     );
@@ -440,13 +468,9 @@ fn transport(@builtin(global_invocation_id) id: vec3<u32>) {
     let divergence = (dot(divergence_east_wind - divergence_west_wind, east) + dot(divergence_north_wind - divergence_south_wind, north)) / (2.0 * diagnostic_step);
     let convergence = smooth_step(0.01, 0.3, -divergence * 0.2);
 
-    let terrain_lookahead = 1.5 * clamp(300.0 / max(params.radius_km, 1.0), 0.02, 0.08);
-    let upwind_height = sample_height(normalize(pos - wind_dir * terrain_lookahead));
-    let downwind_height = sample_height(normalize(pos + wind_dir * terrain_lookahead));
-    let terrain_response = (downwind_height - upwind_height)
-        * smooth_step(0.03, 0.2, effective_speed);
-    let terrain_lift = smooth_step(0.005, 0.08, terrain_response);
-    let rain_shadow = smooth_step(0.005, 0.08, -terrain_response);
+    let terrain = terrain_transect(pos, wind_dir, effective_speed);
+    let terrain_lift = terrain.ascent;
+    let rain_shadow = terrain.lee_drying;
     let thermal = smooth_step(-25.0, 30.0, temperature_at(pos));
     let pressure_factor = smooth_step(0.05, 0.3, params.surface_pressure_bar);
     let local_pressure = clamp(textureSampleLevel(pressure_tex, spinup_sampler, pos, 0.0).r / 1013.0, 0.8, 1.2);
@@ -458,8 +482,6 @@ fn transport(@builtin(global_invocation_id) id: vec3<u32>) {
         params.coverage,
         marine_fraction,
         convergence,
-        terrain_lift,
-        rain_shadow,
         thermal,
         persistent_ice,
     );
@@ -474,9 +496,8 @@ fn transport(@builtin(global_invocation_id) id: vec3<u32>) {
     let q_target = q_sat * supply_budget * clamp(params.moisture, 0.0, 1.0)
         * relative_humidity_target;
     if ((params.diagnostic_flags & DIAGNOSTIC_NO_SOURCE) == 0u) {
-        let recharge = max(q_target - state.x, 0.0)
-            * mix(0.006, 0.030, marine_fraction) * step_fraction;
-        state.x += recharge;
+        let evaporation = max(q_target - state.x, 0.0) * 0.030 * step_fraction;
+        state.x += evaporation;
     }
 
     let calm_wet_land = calm_wet_land_mask(
@@ -490,38 +511,6 @@ fn transport(@builtin(global_invocation_id) id: vec3<u32>) {
     let stratiform_regime = calm_wet_land * stratiform_wind;
     let calm_land_source = min(0.60, 0.20 + calm_wet_land * 0.40);
     let storm_catalyst = convective_catalyst(pos) * (1.0 - stratiform_regime);
-    if ((params.diagnostic_flags & DIAGNOSTIC_NO_SOURCE) == 0u
-        && storm_catalyst > 0.0
-        && budgets.source_envelope > 0.0
-        && params.moisture > 0.0) {
-        let storm_lcl_lift = clamp(
-            convergence * 0.70 + terrain_lift * 1.75
-                + marine_fraction * (0.04 + cold * 0.16) - rain_shadow * 0.14,
-            0.0,
-            1.0,
-        );
-        let storm_warm_gate = thermal * smooth_step(0.10, 0.20, storm_lcl_lift);
-        let storm_humidity = smooth_step(0.45, 0.95, state.x / max(q_sat, 0.0001));
-        let storm_physical_eligibility = storm_warm_gate
-            * smooth_step(0.12, 0.75, storm_lcl_lift) * storm_humidity;
-        if (storm_physical_eligibility > 0.0) {
-            let catalyst_activation = storm_catalyst * budgets.source_envelope;
-            let organizing = smooth_step(
-                0.0,
-                CATALYST_TARGET_ORGANIZING_ELIGIBILITY,
-                storm_physical_eligibility,
-            );
-            let storm_gate = catalyst_activation * organizing * phase_budget;
-            let recharge_fraction = clamp(
-                mix(STORM_RECHARGE_LAND, STORM_RECHARGE_MARINE, marine_fraction)
-                    * storm_gate * step_fraction,
-                0.0,
-                STORM_RECHARGE_HARD_CAP,
-            );
-            state.x += max(q_target - state.x, 0.0) * recharge_fraction;
-        }
-    }
-
     if ((params.diagnostic_flags & DIAGNOSTIC_NO_PHASE_CHANGE) == 0u) {
         let catalyst = storm_catalyst;
         let pressure_east = textureSampleLevel(pressure_tex, spinup_sampler, normalize(pos + east * diagnostic_step), 0.0).r;
@@ -541,10 +530,10 @@ fn transport(@builtin(global_invocation_id) id: vec3<u32>) {
             * smooth_step(1.0, 12.0, temperature_gradient)
             * smooth_step(-0.45, 0.45, frontal_alignment)
             * convergence;
-        let marine_lift = marine_fraction * (0.04 + cold * 0.16);
+        let warm_marine_lift = marine_fraction * thermal * smooth_step(0.05, 0.30, 1.0 - cold);
         let lcl_lift = clamp(
             convergence * 0.70 + terrain_lift * 1.75 + frontal_lift * 0.35
-                + marine_lift - rain_shadow * 0.14,
+                + warm_marine_lift - rain_shadow * 0.55,
             0.0,
             1.0,
         );
@@ -565,7 +554,8 @@ fn transport(@builtin(global_invocation_id) id: vec3<u32>) {
             max(state.x - q_lcl, 0.0) * mix(0.16, 0.56, convective_lift)
                 * phase_budget * step_fraction,
         );
-        let physical_convective_eligibility = warm_gate * smooth_step(0.12, 0.75, lcl_lift)
+        let storm_environment = max(convergence, max(frontal_lift, max(warm_marine_lift, terrain_lift)));
+        let physical_convective_eligibility = warm_gate * smooth_step(0.12, 0.75, storm_environment)
             * humidity_gate;
         let final_convective_eligibility = budgets.source_envelope * physical_convective_eligibility;
         let deep_fraction = clamp(

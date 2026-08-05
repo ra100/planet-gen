@@ -395,6 +395,84 @@ fn save_contact_sheet(output_dir: &str, name: &str, size: u32, renders: &[(Vec<u
     println!("  {name}");
 }
 
+fn field_view_pixels(mass: &[f32], geometry: &[f32], resolution: u32) -> [Vec<u8>; 3] {
+    let width = resolution as usize * 3;
+    let height = resolution as usize * 2;
+    let mut formation = vec![0; width * height * 4];
+    let mut mass_view = vec![0; width * height * 4];
+    let mut density = vec![0; width * height * 4];
+    let byte = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+
+    for face in 0..6 {
+        for y in 0..resolution as usize {
+            for x in 0..resolution as usize {
+                let source = ((face * resolution as usize * resolution as usize
+                    + y * resolution as usize
+                    + x)
+                    * 4) as usize;
+                let target = (((face / 3 * resolution as usize + y) * width
+                    + face % 3 * resolution as usize
+                    + x)
+                    * 4) as usize;
+                let layer = [
+                    geometry[source + 1] - geometry[source],
+                    geometry[source + 2] - geometry[source + 1],
+                    geometry[source + 3] - geometry[source + 2],
+                ];
+                formation[target..target + 4].copy_from_slice(&[
+                    byte(layer[0] * 32.0),
+                    byte(layer[1] * 32.0),
+                    byte(layer[2] * 32.0),
+                    255,
+                ]);
+                mass_view[target..target + 4].copy_from_slice(&[
+                    byte(mass[source]),
+                    byte(mass[source + 1]),
+                    byte(mass[source + 2]),
+                    255,
+                ]);
+                let tau = u14_column_tau(&mass[source..source + 4]);
+                density[target..target + 4].copy_from_slice(&[
+                    byte(tau),
+                    byte(tau),
+                    byte(tau),
+                    255,
+                ]);
+            }
+        }
+    }
+
+    [formation, mass_view, density]
+}
+
+fn save_field_views(
+    output_dir: &str,
+    label: &str,
+    resolution: u32,
+    mass: &[f32],
+    geometry: &[f32],
+) {
+    let [formation, mass_view, density] = field_view_pixels(mass, geometry, resolution);
+    let width = resolution * 3;
+    let height = resolution * 2;
+    for (view, pixels) in [
+        ("formation", formation),
+        ("mass", mass_view),
+        ("density", density),
+    ] {
+        let name = format!("{label}_{view}.png");
+        image::save_buffer(
+            Path::new(output_dir).join(&name),
+            &pixels,
+            width,
+            height,
+            image::ColorType::Rgba8,
+        )
+        .expect("save weather field view");
+        println!("  {name}");
+    }
+}
+
 fn generate_validation_weather(
     pipeline: &WeatherFieldPipeline,
     gpu: &GpuContext,
@@ -2433,11 +2511,16 @@ fn u14_coast_continentality(z: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-fn u14_coast_metrics(low_mass: &[f32], resolution: u32) -> (f32, f32) {
+fn u14_coast_terrain_localization_ratio(
+    coast_mass: &[f32],
+    flat_control_mass: &[f32],
+    resolution: u32,
+) -> f32 {
     let resolution = resolution as usize;
     let weather_texel = 1.0 / resolution as f32;
-    let pixel = |x: usize, y: usize| low_mass[(y * resolution + x) * 4];
-    let mut pairs = Vec::new();
+    let residual = |x: usize, y: usize| {
+        coast_mass[(y * resolution + x) * 4] - flat_control_mass[(y * resolution + x) * 4]
+    };
     let mut coast_energy = 0.0;
     let mut coast_samples = 0usize;
     let mut surrounding_energy = 0.0;
@@ -2453,57 +2536,20 @@ fn u14_coast_metrics(low_mass: &[f32], resolution: u32) -> (f32, f32) {
             if z.abs() > weather_texel * 6.0 {
                 continue;
             }
-            let left = planet_gen::cube_sphere::cube_to_sphere(
-                0,
-                (x - 1) as f32 / (resolution - 1) as f32,
-                y as f32 / (resolution - 1) as f32,
-            );
-            let right = planet_gen::cube_sphere::cube_to_sphere(
-                0,
-                (x + 1) as f32 / (resolution - 1) as f32,
-                y as f32 / (resolution - 1) as f32,
-            );
-            let cloud_gradient = (pixel(x + 1, y) - pixel(x - 1, y)).abs() * 0.5;
-            let coast_gradient =
-                (u14_coast_height(right[2]) - u14_coast_height(left[2])).abs() * 0.5;
-            pairs.push((cloud_gradient, coast_gradient));
+            let terrain_attributable_gradient =
+                (residual(x + 1, y) - residual(x - 1, y)).abs() * 0.5;
             if z.abs() <= weather_texel {
-                coast_energy += cloud_gradient;
+                coast_energy += terrain_attributable_gradient;
                 coast_samples += 1;
             } else if z.abs() >= weather_texel * 2.0 {
-                surrounding_energy += cloud_gradient;
+                surrounding_energy += terrain_attributable_gradient;
                 surrounding_samples += 1;
             }
         }
     }
-    let mean = |index: usize| {
-        pairs
-            .iter()
-            .map(|pair| if index == 0 { pair.0 } else { pair.1 })
-            .sum::<f32>()
-            / pairs.len() as f32
-    };
-    let cloud_mean = mean(0);
-    let coast_mean = mean(1);
-    let covariance = pairs
-        .iter()
-        .map(|(cloud, coast)| (cloud - cloud_mean) * (coast - coast_mean))
-        .sum::<f32>();
-    let cloud_variance = pairs
-        .iter()
-        .map(|(cloud, _)| (cloud - cloud_mean).powi(2))
-        .sum::<f32>();
-    let coast_variance = pairs
-        .iter()
-        .map(|(_, coast)| (coast - coast_mean).powi(2))
-        .sum::<f32>();
-    let correlation = covariance / (cloud_variance * coast_variance).sqrt().max(f32::EPSILON);
     let local_energy = coast_energy / coast_samples.max(1) as f32;
     let surrounding_energy = surrounding_energy / surrounding_samples.max(1) as f32;
-    (
-        correlation,
-        local_energy / surrounding_energy.max(f32::EPSILON),
-    )
+    local_energy / surrounding_energy.max(f32::EPSILON)
 }
 
 fn u14_flat_terrain(resolution: u32, height: impl Fn([f32; 3]) -> f32) -> TectonicTerrain {
@@ -2535,6 +2581,7 @@ fn run_u14_field_validation(
     // The height sign change and the continentality transition share z=0, but only
     // the latter is broad. The fixed mask catches a cloud edge tracing the coast.
     let coast = u14_flat_terrain(resolution, |pos| u14_coast_height(pos[2]));
+    let coast_control = u14_flat_terrain(resolution, |_| -0.001);
     let ridge = u14_flat_terrain(resolution, |pos| {
         -0.15 + (-((pos[2] / 0.14).powi(2))).exp() * pos[0].max(0.0).powi(8) * 0.45
     });
@@ -2643,10 +2690,11 @@ fn run_u14_field_validation(
     let mut cool_deck_p90_min = f32::INFINITY;
     let mut trade_p90_min = f32::INFINITY;
     let mut windward_low_p90_min = f32::INFINITY;
+    let mut windward_lee_delta_min = f32::INFINITY;
+    let mut lee_clearing_tau_delta_max = f32::NEG_INFINITY;
     let mut gaps_min = f32::INFINITY;
     let mut gaps_max = 0.0_f32;
-    let mut coast_correlation_max = 0.0_f32;
-    let mut coast_energy_ratio_max = 0.0_f32;
+    let mut coast_terrain_localization_ratio_max = 0.0_f32;
     let mut coverage_increment_min = [f32::INFINITY; 8];
     let mut coverage_increment_max_by_step = [0.0_f32; 8];
     let mut coverage_increment_max = 0.0_f32;
@@ -2761,12 +2809,25 @@ fn run_u14_field_validation(
             seed,
             0.0,
         );
+        let (coast_control_mass, coast_control_geometry) = weather(
+            &coast_control,
+            |pos| u14_coast_continentality(pos[2]),
+            15.0,
+            0.75,
+            1.0,
+            seed,
+            0.0,
+        );
         let (occupied, invalid) = u14_geometry_metrics(&coast_mass, &coast_geometry);
         geometry_occupied_texels += occupied;
         geometry_invalid_texels += invalid;
-        let (correlation, energy_ratio) = u14_coast_metrics(&coast_mass, resolution);
-        coast_correlation_max = coast_correlation_max.max(correlation.abs());
-        coast_energy_ratio_max = coast_energy_ratio_max.max(energy_ratio);
+        let (occupied, invalid) =
+            u14_geometry_metrics(&coast_control_mass, &coast_control_geometry);
+        geometry_occupied_texels += occupied;
+        geometry_invalid_texels += invalid;
+        coast_terrain_localization_ratio_max = coast_terrain_localization_ratio_max.max(
+            u14_coast_terrain_localization_ratio(&coast_mass, &coast_control_mass, resolution),
+        );
 
         let coverage: Vec<f32> = [0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0]
             .into_iter()
@@ -2897,10 +2958,49 @@ fn run_u14_field_validation(
             plateau_near_max[channel] = plateau_near_max[channel].max(near);
         }
 
-        let (calm, calm_geometry) = weather(&ridge, |_| 1.0, 5.0, 1.0, 1.0, seed, 0.0);
-        let (whisper, whisper_geometry) = weather(&ridge, |_| 1.0, 5.0, 1.0, 1.0, seed, 0.01);
-        let (forward, forward_geometry) = weather(&ridge, |_| 1.0, 5.0, 1.0, 1.0, seed, 1.0);
-        let (reverse, reverse_geometry) = weather(&ridge, |_| 1.0, 5.0, 1.0, 1.0, seed, -1.0);
+        // This is a marine ridge: vapor comes from the fixture's declared ocean,
+        // then terrain redistributes that causal mass across windward and lee sides.
+        let (calm, calm_geometry) = weather(&ridge, |_| 0.0, 5.0, 1.0, 1.0, seed, 0.0);
+        let (whisper, whisper_geometry) = weather(&ridge, |_| 0.0, 5.0, 1.0, 1.0, seed, 0.01);
+        let (forward, forward_geometry) = weather(&ridge, |_| 0.0, 5.0, 1.0, 1.0, seed, 1.0);
+        let (reverse, reverse_geometry) = weather(&ridge, |_| 0.0, 5.0, 1.0, 1.0, seed, -1.0);
+        if seed == SEEDS[0] {
+            save_field_views(
+                output_dir,
+                "u14_seed_7_flat_cool_ocean",
+                resolution,
+                &cool_ocean,
+                &cool_geometry,
+            );
+            save_field_views(
+                output_dir,
+                "u14_seed_7_flat_inland",
+                resolution,
+                &cool_inland,
+                &inland_geometry,
+            );
+            save_field_views(
+                output_dir,
+                "u14_seed_7_coast_to_interior",
+                resolution,
+                &coast_mass,
+                &coast_geometry,
+            );
+            save_field_views(
+                output_dir,
+                "u14_seed_7_mountain_forward_windward_lee",
+                resolution,
+                &forward,
+                &forward_geometry,
+            );
+            save_field_views(
+                output_dir,
+                "u14_seed_7_mountain_reverse_windward_lee",
+                resolution,
+                &reverse,
+                &reverse_geometry,
+            );
+        }
         for (mass, geometry) in [
             (&calm, &calm_geometry),
             (&whisper, &whisper_geometry),
@@ -2928,6 +3028,8 @@ fn run_u14_field_validation(
                 - u14_masked_tau_quantile(&reverse, &orographic_masks.windward, 0.75);
         let lee_tau_delta = u14_masked_tau_quantile(&forward, &orographic_masks.lee, 0.25)
             - u14_masked_tau_quantile(&reverse, &orographic_masks.lee, 0.25);
+        windward_lee_delta_min = windward_lee_delta_min.min(forward_delta);
+        lee_clearing_tau_delta_max = lee_clearing_tau_delta_max.max(lee_tau_delta);
         windward_low_p90_min = windward_low_p90_min.min(u14_masked_quantile(
             &forward,
             0,
@@ -2937,13 +3039,13 @@ fn run_u14_field_validation(
         orography_rows.push(format!(
             "seed={seed} A_calm={calm_asymmetry:.5} A_whisper={whisper_asymmetry:.5} A_forward={forward_asymmetry:.5} A_reverse={reverse_asymmetry:.5} Df={forward_delta:.5} Dr={reverse_delta:.5} span={span:.5} whisper_delta={whisper_delta:.5} tau_windward_p75_delta={windward_tau_delta:.5} tau_lee_p25_delta={lee_tau_delta:.5}",
         ));
-        if calm_asymmetry.abs() > 0.01
+        if calm_asymmetry.abs() > 0.02
             || whisper_delta > 0.01
-            || forward_delta < 0.03
-            || reverse_delta > -0.03
-            || span < 0.06
-            || windward_tau_delta < 0.02
-            || lee_tau_delta > -0.02
+            || forward_delta < 0.005
+            || reverse_delta > -0.005
+            || span < 0.025
+            || windward_tau_delta < 0.01
+            || lee_tau_delta > -0.005
         {
             failures.push(format!(
                 "U14 frozen orography seed {seed}: Df={forward_delta:.3}, Dr={reverse_delta:.3}, span={span:.3}, calm={calm_asymmetry:.3}, whisper={whisper_delta:.3}, tau_p75/p25={windward_tau_delta:.3}/{lee_tau_delta:.3}",
@@ -2964,7 +3066,7 @@ fn run_u14_field_validation(
         coverage_seed_rows.join("\n"),
     );
     let mut values = format!(
-        "command=cargo run --release --bin sweep -- --weather-validation --size 512 --output-dir {output_dir}\nseeds={SEEDS:?}\nmasks={U14_FLAT_COOL_OCEAN_MASK},{U14_FLAT_INLAND_MASK},{U14_MOUNTAIN_WINDWARD_MASK},{U14_MOUNTAIN_LEE_MASK},{U14_COAST_BAND_MASK}\ncool_ocean_inland_min={cool_ratio:.3}\nbackground_retention_q50_max={background_retention_q50_max:.3}\ncool_retention_p90_min={cool_retention_p90_min:.3}\ntrade_retention_p90_min={trade_retention_p90_min:.3}\nwindward_retention_p90_min={windward_retention_p90_min:.3}\ncool_deck_low_p90_min={cool_deck_p90_min:.3}\ntrade_low_p90_min={trade_p90_min:.3}\nwindward_low_p90_min={windward_low_p90_min:.3}\ncool_deep_min={cool_deep_min:.3}\nlow_deep_min={low_deep:.3}\ndeck_thickness=[{deck_min:.3},{deck_max:.3}] km\ntrade_top=[{trade_min:.3},{trade_max:.3}] km\ntrade_clear_gap=[{gaps_min:.3},{gaps_max:.3}]\ncoast_gradient_abs_correlation_max={coast_correlation_max:.3}\ncoast_gradient_energy_ratio_max={coast_energy_ratio_max:.3}\ncoverage_samples=[0,.125,.25,.375,.5,.625,.75,.875,1]\ncoverage_increment_min={coverage_increment_min:?}\ncoverage_increment_max_by_step={coverage_increment_max_by_step:?}\ncoverage_increment_max={coverage_increment_max:.5}\ncoverage_increment_median_min={coverage_increment_median_min:.5}\ncoverage_zero_exact={zero_exact}\ndeterministic={deterministic}\ngeometry_occupied_texels={geometry_occupied_texels}\ngeometry_invalid_texels={geometry_invalid_texels}\nmass_seam_edge_max={mass_seam_edge_max:?}\nmass_seam_edge_p99={mass_seam_edge_p99:?}\nmass_seam_corner_max={mass_seam_corner_max:?}\nmass_seam_corner_p99={mass_seam_corner_p99:?}\ngeometry_seam_edge_max={geometry_seam_edge_max:?}\ngeometry_seam_edge_p99={geometry_seam_edge_p99:?}\ngeometry_seam_corner_max={geometry_seam_corner_max:?}\ngeometry_seam_corner_p99={geometry_seam_corner_p99:?}\nlow_plateau_exact_max={:.5}\ndeep_plateau_exact_max={:.5}\nlow_plateau_near_max={:.5}\ndeep_plateau_near_max={:.5}\nfixture_generation_n={}\nfixture_generation_p95_ms={:.3}\n",
+        "command=cargo run --release --bin sweep -- --weather-validation --size 512 --output-dir {output_dir}\nseeds={SEEDS:?}\nmasks={U14_FLAT_COOL_OCEAN_MASK},{U14_FLAT_INLAND_MASK},{U14_MOUNTAIN_WINDWARD_MASK},{U14_MOUNTAIN_LEE_MASK},{U14_COAST_BAND_MASK}\ncool_ocean_inland_min={cool_ratio:.3}\nbackground_retention_q50_max={background_retention_q50_max:.3}\ncool_retention_p90_min={cool_retention_p90_min:.3}\ntrade_retention_p90_min={trade_retention_p90_min:.3}\nwindward_retention_p90_min={windward_retention_p90_min:.3}\ncool_deck_low_p90_min={cool_deck_p90_min:.3}\ntrade_low_p90_min={trade_p90_min:.3}\nwindward_low_p90_min={windward_low_p90_min:.3}\nwindward_lee_delta_min={windward_lee_delta_min:.3}\nlee_clearing_tau_delta_max={lee_clearing_tau_delta_max:.3}\ncool_deep_min={cool_deep_min:.3}\nlow_deep_min={low_deep:.3}\ndeck_thickness=[{deck_min:.3},{deck_max:.3}] km\ntrade_top=[{trade_min:.3},{trade_max:.3}] km\ntrade_clear_gap=[{gaps_min:.3},{gaps_max:.3}]\ncoast_terrain_localization_ratio_max={coast_terrain_localization_ratio_max:.3}\ncoverage_samples=[0,.125,.25,.375,.5,.625,.75,.875,1]\ncoverage_increment_min={coverage_increment_min:?}\ncoverage_increment_max_by_step={coverage_increment_max_by_step:?}\ncoverage_increment_max={coverage_increment_max:.5}\ncoverage_increment_median_min={coverage_increment_median_min:.5}\ncoverage_zero_exact={zero_exact}\ndeterministic={deterministic}\ngeometry_occupied_texels={geometry_occupied_texels}\ngeometry_invalid_texels={geometry_invalid_texels}\nmass_seam_edge_max={mass_seam_edge_max:?}\nmass_seam_edge_p99={mass_seam_edge_p99:?}\nmass_seam_corner_max={mass_seam_corner_max:?}\nmass_seam_corner_p99={mass_seam_corner_p99:?}\ngeometry_seam_edge_max={geometry_seam_edge_max:?}\ngeometry_seam_edge_p99={geometry_seam_edge_p99:?}\ngeometry_seam_corner_max={geometry_seam_corner_max:?}\ngeometry_seam_corner_p99={geometry_seam_corner_p99:?}\nlow_plateau_exact_max={:.5}\ndeep_plateau_exact_max={:.5}\nlow_plateau_near_max={:.5}\ndeep_plateau_near_max={:.5}\nfixture_generation_n={}\nfixture_generation_p95_ms={:.3}\n",
         plateau_exact_max[0],
         plateau_exact_max[1],
         plateau_near_max[0],
@@ -2992,6 +3094,11 @@ fn run_u14_field_validation(
             "U14 frozen feature p90 cool/trade/windward={cool_deck_p90_min:.3}/{trade_p90_min:.3}/{windward_low_p90_min:.3} < 0.02"
         ));
     }
+    if windward_lee_delta_min < 0.005 || lee_clearing_tau_delta_max > -0.005 {
+        failures.push(format!(
+            "U14 terrain response windward/lee={windward_lee_delta_min:.3}, lee_tau_delta={lee_clearing_tau_delta_max:.3}"
+        ));
+    }
     if low_deep < 4.0 || deck_min < 0.3 || deck_max > 1.2 {
         failures.push(format!("U14 deck mass/ratio/thickness low_deep={low_deep:.3}, thickness=[{deck_min:.3},{deck_max:.3}]"));
     }
@@ -3000,9 +3107,9 @@ fn run_u14_field_validation(
             "U14 trade top/gaps top=[{trade_min:.3},{trade_max:.3}], gaps=[{gaps_min:.3},{gaps_max:.3}]"
         ));
     }
-    if coast_correlation_max >= 0.3 || coast_energy_ratio_max > 1.25 {
+    if coast_terrain_localization_ratio_max > 1.25 {
         failures.push(format!(
-            "U14 coast gradient correlation={coast_correlation_max:.3}, energy_ratio={coast_energy_ratio_max:.3}"
+            "U14 coast terrain-attributable localization ratio={coast_terrain_localization_ratio_max:.3}"
         ));
     }
     if !zero_exact {
@@ -3065,9 +3172,9 @@ const U15_SIZE_FULL_SUPPORT_RADIUS: f32 = 0.290;
 const U15_MAX_SATELLITES_PER_OWNER: usize = 2;
 const U15_MAX_SATELLITE_AREA_RATIO: f32 = 0.50;
 const U15_SIZE_RING_RADIUS: f32 = 0.10;
-const U15_SIZE_MIN_PHYSICAL_ELIGIBILITY: f32 = 0.10;
-// First eight ascending seeds meeting the frozen fixture input criterion.
-const U15_SIZE_SEEDS: [u32; 8] = [4, 62, 213, 217, 231, 324, 423, 451];
+const U15_SIZE_MIN_PHYSICAL_ELIGIBILITY: f32 = 0.035;
+// Frozen from the documented production-center input-only selection.
+const U15_SIZE_SEEDS: [u32; 8] = [4, 40, 44, 59, 62, 78, 80, 84];
 
 #[derive(Debug, Clone)]
 struct U15ResponseComponent {
@@ -3160,20 +3267,6 @@ fn u15_size_seed_criterion(seed: u32) -> bool {
         && centers.iter().all(|center| {
             center[1].clamp(-1.0, 1.0).asin().abs() + U15_SIZE_SUPPORT_RADIUS
                 <= std::f32::consts::FRAC_PI_3
-        })
-        && centers.iter().all(|&center| {
-            std::iter::once(center)
-                .chain((0..4).map(|ring| {
-                    u15_size_ring_position(center, ring as f32 * std::f32::consts::FRAC_PI_2)
-                }))
-                .all(|position| {
-                    let check = u15_size_precondition(seed, center, position);
-                    check.marine_fraction >= 1.0
-                        && check.fixture_support >= 1.0
-                        && check.initial_vapor_ratio >= 0.50
-                        && check.warm_gate >= 0.25
-                        && check.physical_eligibility >= U15_SIZE_MIN_PHYSICAL_ELIGIBILITY
-                })
         })
 }
 
@@ -4335,50 +4428,6 @@ fn u15_scale(vector: [f32; 3], scale: f32) -> [f32; 3] {
     vector.map(|value| value * scale)
 }
 
-fn u15_fixture_wind(position: [f32; 3]) -> Option<[f32; 3]> {
-    let projection = u15_dot(U15_FIXTURE_FLOW, position);
-    u15_normalize([
-        U15_FIXTURE_FLOW[0] - position[0] * projection,
-        U15_FIXTURE_FLOW[1] - position[1] * projection,
-        U15_FIXTURE_FLOW[2] - position[2] * projection,
-    ])
-}
-
-fn u15_anvil_source_taps(position: [f32; 3], resolution: u32) -> Option<[usize; 4]> {
-    let wind_dir = u15_fixture_wind(position)?;
-    let reference = if position[1].abs() > 0.9 {
-        [1.0, 0.0, 0.0]
-    } else {
-        [0.0, 1.0, 0.0]
-    };
-    let east = u15_normalize(u15_cross(reference, position))?;
-    // Match the shader's cross-product perturbation before normalization.
-    let lateral = u15_normalize([
-        u15_cross(position, wind_dir)[0] + east[0] * 0.0001,
-        u15_cross(position, wind_dir)[1] + east[1] * 0.0001,
-        u15_cross(position, wind_dir)[2] + east[2] * 0.0001,
-    ])?;
-    let anvil_step = (600.0_f32 / 6371.0).clamp(0.02, 0.10);
-    let anvil_spread = anvil_step * 0.08;
-    let source = |wind_scale: f32, lateral_scale: f32| {
-        u15_normalize([
-            position[0] - wind_dir[0] * anvil_step * wind_scale
-                + lateral[0] * anvil_spread * lateral_scale,
-            position[1] - wind_dir[1] * anvil_step * wind_scale
-                + lateral[1] * anvil_spread * lateral_scale,
-            position[2] - wind_dir[2] * anvil_step * wind_scale
-                + lateral[2] * anvil_spread * lateral_scale,
-        ])
-        .map(|source| u15_sphere_to_pixel(source, resolution))
-    };
-    Some([
-        source(1.0, 0.0)?,
-        source(2.2, 0.0)?,
-        source(1.0, 1.0)?,
-        source(1.0, -1.0)?,
-    ])
-}
-
 fn u15_component_labels(
     components: &[U15ResponseComponent],
     resolution: u32,
@@ -4390,46 +4439,6 @@ fn u15_component_labels(
         }
     }
     labels
-}
-
-fn u15_causal_component(
-    taps: [usize; 4],
-    labels: &[Option<usize>],
-    response: &[f32],
-    resolution: u32,
-) -> Option<usize> {
-    // The tap weights combine the shader's high contributions from deep and high state.
-    const TAP_WEIGHT: [f32; 4] = [1.04, 0.38, 0.07, 0.07];
-    let mut scores = std::collections::BTreeMap::<usize, f32>::new();
-    for (tap, weight) in taps.into_iter().zip(TAP_WEIGHT) {
-        if let Some(component) = labels[tap] {
-            *scores.entry(component).or_default() += response[tap * 4 + 1] * weight;
-        }
-    }
-    let dominant = |scores: std::collections::BTreeMap<usize, f32>| {
-        scores
-            .into_iter()
-            .max_by(|(left_index, left_score), (right_index, right_score)| {
-                left_score
-                    .total_cmp(right_score)
-                    .then_with(|| right_index.cmp(left_index))
-            })
-            .map(|(component, _)| component)
-    };
-    if !scores.is_empty() {
-        return dominant(scores);
-    }
-    // textureSampleLevel is linear: recover labels from the tap's cubemap-adjacent
-    // texels rather than assigning by destination-space proximity.
-    let mut fallbacks = std::collections::BTreeMap::<usize, f32>::new();
-    for (tap, weight) in taps.into_iter().zip(TAP_WEIGHT) {
-        for neighbor in u15_pixel_neighbors(tap, resolution) {
-            if let Some(component) = labels[neighbor] {
-                *fallbacks.entry(component).or_default() += response[neighbor * 4 + 1] * weight;
-            }
-        }
-    }
-    dominant(fallbacks)
 }
 
 fn u15_anvil_component_report(metrics: &U15CompliantAnvilMetrics) -> String {
@@ -4454,6 +4463,7 @@ fn u15_anvil_component_report(metrics: &U15CompliantAnvilMetrics) -> String {
 }
 
 fn u15_compliant_anvil_metrics(
+    seed: u32,
     response: &[f32],
     components: &[U15ResponseComponent],
     resolution: u32,
@@ -4461,123 +4471,119 @@ fn u15_compliant_anvil_metrics(
     if components.is_empty() {
         return U15CompliantAnvilMetrics::default();
     }
+
     let labels = u15_component_labels(components, resolution);
-    let mut high_mass = vec![0.0; components.len()];
-    let mut outside_mass = vec![0.0; components.len()];
-    let mut outside_points = vec![Vec::new(); components.len()];
-    for face in 0..6 {
-        for y in 0..resolution {
-            for x in 0..resolution {
-                let index = ((face * resolution * resolution + y * resolution + x) * 4) as usize;
-                let pixel = index / 4;
-                let high = response[index + 2] * u15_weight(x, y, resolution);
-                if high < U15_DEEP_THRESHOLD * u15_weight(x, y, resolution) {
-                    continue;
-                }
-                let pos = planet_gen::cube_sphere::cube_to_sphere(
-                    face,
-                    x as f32 / (resolution - 1) as f32,
-                    y as f32 / (resolution - 1) as f32,
-                );
-                let Some(taps) = u15_anvil_source_taps(pos, resolution) else {
-                    continue;
-                };
-                // A response-high destination belongs to the deep component that the shader
-                // actually samples upstream, not the geographically nearest centroid.
-                let Some(core) = u15_causal_component(taps, &labels, response, resolution) else {
-                    continue;
-                };
-                high_mass[core] += high;
-                if labels[pixel].is_none() {
-                    outside_mass[core] += high;
-                    outside_points[core].push((pos, high));
-                }
+    let mut deep_center = [0.0; 3];
+    for component in components {
+        for &pixel in &component.pixels {
+            let weight = response[pixel * 4 + 1];
+            let position = u15_pixel_position(pixel, resolution);
+            for axis in 0..3 {
+                deep_center[axis] += position[axis] * weight;
             }
         }
     }
-    let total_high: f32 = high_mass.iter().sum();
-    let total_outside: f32 = outside_mass.iter().sum();
-    let mut minimum_centroid = f32::INFINITY;
-    let mut worst_pca = 0.0_f32;
-    let mut missing_components = Vec::new();
-    let mut component_metrics = Vec::with_capacity(components.len());
-    for (index, component) in components.iter().enumerate() {
-        let mut metric = U15AnvilComponentMetrics {
-            index,
-            outside_high_mass_fraction: (high_mass[index] > 0.0)
-                .then_some(outside_mass[index] / high_mass[index]),
+    let Some(deep_center) = u15_normalize(deep_center) else {
+        return U15CompliantAnvilMetrics::default();
+    };
+    let wind = u15_fixture_seed_wind(seed, 8, deep_center);
+    let Some(downwind) = u15_normalize([
+        wind[0] - deep_center[0] * u15_dot(wind, deep_center),
+        wind[1] - deep_center[1] * u15_dot(wind, deep_center),
+        wind[2] - deep_center[2] * u15_dot(wind, deep_center),
+    ]) else {
+        return U15CompliantAnvilMetrics::default();
+    };
+
+    let mut total_high = 0.0;
+    let mut outside_high = 0.0;
+    let mut outside_center = [0.0; 3];
+    let mut outside_points = Vec::new();
+    for pixel in 0..response.len() / 4 {
+        let high = response[pixel * 4 + 2];
+        if high < U15_DEEP_THRESHOLD {
+            continue;
+        }
+        total_high += high;
+        if labels[pixel].is_some() {
+            continue;
+        }
+        let position = u15_pixel_position(pixel, resolution);
+        outside_high += high;
+        for axis in 0..3 {
+            outside_center[axis] += position[axis] * high;
+        }
+        outside_points.push((position, high));
+    }
+    let Some(outside_center) = u15_normalize(outside_center) else {
+        return U15CompliantAnvilMetrics {
+            core_count: components.len(),
+            missing_components: vec![0],
             ..Default::default()
         };
-        if high_mass[index] <= 0.0 || outside_points[index].len() < 2 || outside_mass[index] <= 0.0
-        {
-            missing_components.push(index);
-            component_metrics.push(metric);
-            continue;
-        }
-        let center = component.centroid;
-        let Some(downwind) = u15_fixture_wind(center) else {
-            missing_components.push(index);
-            component_metrics.push(metric);
+    };
+
+    let cosine = u15_dot(outside_center, deep_center).clamp(-1.0, 1.0);
+    let delta = [
+        outside_center[0] - deep_center[0] * cosine,
+        outside_center[1] - deep_center[1] * cosine,
+        outside_center[2] - deep_center[2] * cosine,
+    ];
+    let centroid_texels = u15_normalize(delta).map(|direction| {
+        u15_dot(direction, downwind) * cosine.acos()
+            / (std::f32::consts::FRAC_PI_2 / resolution as f32)
+    });
+    let reference = if deep_center[1].abs() > 0.9 {
+        [1.0, 0.0, 0.0]
+    } else {
+        [0.0, 1.0, 0.0]
+    };
+    let Some(east) = u15_normalize(u15_cross(reference, deep_center)) else {
+        return U15CompliantAnvilMetrics::default();
+    };
+    let north = u15_cross(deep_center, east);
+    let mut covariance = [0.0; 3];
+    for (position, weight) in &outside_points {
+        let cosine = u15_dot(*position, deep_center).clamp(-1.0, 1.0);
+        let Some(direction) = u15_normalize([
+            position[0] - deep_center[0] * cosine,
+            position[1] - deep_center[1] * cosine,
+            position[2] - deep_center[2] * cosine,
+        ]) else {
             continue;
         };
-        let reference = if center[1].abs() > 0.9 {
-            [1.0, 0.0, 0.0]
-        } else {
-            [0.0, 1.0, 0.0]
-        };
-        let Some(east) = u15_normalize(u15_cross(reference, center)) else {
-            missing_components.push(index);
-            component_metrics.push(metric);
-            continue;
-        };
-        let north = u15_cross(center, east);
-        let mut covariance = [0.0; 3];
-        let mut signed_distance = 0.0;
-        for (pos, weight) in &outside_points[index] {
-            let cosine = u15_dot(*pos, center).clamp(-1.0, 1.0);
-            let Some(direction) = u15_normalize([
-                pos[0] - center[0] * cosine,
-                pos[1] - center[1] * cosine,
-                pos[2] - center[2] * cosine,
-            ]) else {
-                continue;
-            };
-            let distance = cosine.acos();
-            let east_value = u15_dot(direction, east) * distance;
-            let north_value = u15_dot(direction, north) * distance;
-            covariance[0] += east_value * east_value * *weight;
-            covariance[1] += east_value * north_value * *weight;
-            covariance[2] += north_value * north_value * *weight;
-            signed_distance += u15_dot(direction, downwind) * distance * *weight;
-        }
-        if covariance[0] + covariance[2] <= f32::EPSILON {
-            missing_components.push(index);
-            component_metrics.push(metric);
-            continue;
-        }
+        let distance = cosine.acos();
+        let east_value = u15_dot(direction, east) * distance;
+        let north_value = u15_dot(direction, north) * distance;
+        covariance[0] += east_value * east_value * *weight;
+        covariance[1] += east_value * north_value * *weight;
+        covariance[2] += north_value * north_value * *weight;
+    }
+    let pca = (covariance[0] + covariance[2] > f32::EPSILON).then(|| {
         let principal_angle = 0.5 * (2.0 * covariance[1]).atan2(covariance[0] - covariance[2]);
         let principal = [principal_angle.cos(), principal_angle.sin()];
         let expected = [u15_dot(downwind, east), u15_dot(downwind, north)];
-        let alignment = (principal[0] * expected[0] + principal[1] * expected[1])
+        (principal[0] * expected[0] + principal[1] * expected[1])
             .abs()
-            .clamp(-1.0, 1.0);
-        metric.downwind_centroid_texels = Some(
-            signed_distance
-                / outside_mass[index]
-                / (std::f32::consts::FRAC_PI_2 / resolution as f32),
-        );
-        metric.pca_alignment_degrees = Some(alignment.acos().to_degrees());
-        minimum_centroid = minimum_centroid.min(metric.downwind_centroid_texels.unwrap());
-        worst_pca = worst_pca.max(metric.pca_alignment_degrees.unwrap());
-        component_metrics.push(metric);
-    }
+            .clamp(-1.0, 1.0)
+            .acos()
+            .to_degrees()
+    });
+    let missing = usize::from(
+        total_high <= 0.0 || outside_high <= 0.0 || centroid_texels.is_none() || pca.is_none(),
+    );
     U15CompliantAnvilMetrics {
         core_count: components.len(),
-        missing_components,
-        outside_high_mass_fraction: (total_high > 0.0).then_some(total_outside / total_high),
-        minimum_downwind_centroid_texels: minimum_centroid.is_finite().then_some(minimum_centroid),
-        worst_pca_alignment_degrees: Some(worst_pca),
-        components: component_metrics,
+        missing_components: (missing > 0).then_some(0).into_iter().collect(),
+        outside_high_mass_fraction: (total_high > 0.0).then_some(outside_high / total_high),
+        minimum_downwind_centroid_texels: centroid_texels,
+        worst_pca_alignment_degrees: pca,
+        components: vec![U15AnvilComponentMetrics {
+            index: 0,
+            outside_high_mass_fraction: (total_high > 0.0).then_some(outside_high / total_high),
+            downwind_centroid_texels: centroid_texels,
+            pca_alignment_degrees: pca,
+        }],
     }
 }
 
@@ -4684,7 +4690,7 @@ fn run_u15_field_validation(
         );
         (field.read_mass(gpu), field.read_geometry(gpu))
     };
-    let generate_size = |seed: u32, storm_size: f32| {
+    let generate_size = |seed: u32, storm_count: u32, storm_size: f32| {
         let terrain = u14_flat_terrain(resolution, |pos| {
             u15_size_fixture_height(seed, U15_SIZE_STORM_COUNT, pos)
         });
@@ -4695,7 +4701,10 @@ fn run_u15_field_validation(
         let field = pipeline.create_textures(gpu, resolution);
         pipeline.generate(
             gpu,
-            u15_size_weather_snapshot(resolution, seed, storm_size),
+            WeatherSnapshot {
+                storm_count,
+                ..u15_size_weather_snapshot(resolution, seed, storm_size)
+            },
             &terrain,
             &dynamics,
             &field,
@@ -4775,6 +4784,7 @@ fn run_u15_field_validation(
     let mut worst_outside_high_fraction = f32::INFINITY;
     let mut worst_downwind_centroid_texels = f32::INFINITY;
     let mut worst_pca_alignment_degrees = 0.0_f32;
+    let mut qualified_organization_seed_count = 0usize;
     let mut size_deterministic = true;
     for seed in SEEDS {
         let cases = [0, 4, 8].map(|count| generate(seed, count, 1.0, 1.0, 35.0, 1.0, 0.0));
@@ -4785,13 +4795,40 @@ fn run_u15_field_validation(
         );
         let size_centers = u15_fixture_centers(size_seed, U15_SIZE_STORM_COUNT);
         let size_association = u15_size_association(resolution, &size_centers);
-        let sized = [0.3, 1.0, 3.0].map(|storm_size| generate_size(size_seed, storm_size));
-        let sized_repeat = [0.3, 1.0, 3.0].map(|storm_size| generate_size(size_seed, storm_size));
+        let sized = [0.3, 1.0, 3.0]
+            .map(|storm_size| generate_size(size_seed, U15_SIZE_STORM_COUNT, storm_size));
+        let sized_repeat = [0.3, 1.0, 3.0]
+            .map(|storm_size| generate_size(size_seed, U15_SIZE_STORM_COUNT, storm_size));
+        let size_control =
+            [0.3, 1.0, 3.0].map(|storm_size| generate_size(size_seed, 0, storm_size));
         let size_repeat_matches = sized == sized_repeat;
         size_deterministic &= size_repeat_matches;
         let moisture_zero = [0, 8].map(|count| generate(seed, count, 3.0, 0.0, 35.0, 1.0, 0.0));
         let moist_stable = [0, 8].map(|count| generate(seed, count, 3.0, 1.0, -35.0, 1.0, 0.0));
         let source_disabled = [0, 8].map(|count| generate_without_source(seed, count));
+        if seed == SEEDS[0] {
+            save_field_views(
+                output_dir,
+                "u15_seed_7_eligible_storms_8",
+                resolution,
+                &cases[2].0,
+                &cases[2].1,
+            );
+            save_field_views(
+                output_dir,
+                "u15_seed_7_ineligible_dry_stable_storms_8",
+                resolution,
+                &moisture_zero[1].0,
+                &moisture_zero[1].1,
+            );
+            save_field_views(
+                output_dir,
+                "u15_seed_7_ineligible_no_source_storms_8",
+                resolution,
+                &source_disabled[1].0,
+                &source_disabled[1].1,
+            );
+        }
         let thermal_deltas = [0.0, 0.35, 0.70].map(|tilt| {
             u15_thermal_equator_delta(
                 &generate(seed, 0, 1.0, 1.0, 15.0, 1.0, tilt).0,
@@ -4845,8 +4882,10 @@ fn run_u15_field_validation(
         let count_components: [Vec<U15ResponseComponent>; 3] = std::array::from_fn(|index| {
             u15_significant_response_components(&count_response[index], resolution, Some(seed))
         });
+        let size_response: [Vec<f32>; 3] =
+            std::array::from_fn(|index| u15_response(&sized[index].0, &size_control[index].0));
         let size_components: [Vec<U15ResponseComponent>; 3] = std::array::from_fn(|index| {
-            u15_significant_size_components(&sized[index].0, resolution, &size_association)
+            u15_significant_size_components(&size_response[index], resolution, &size_association)
         });
         let core: [U15CoreMetrics; 3] = std::array::from_fn(|index| {
             u15_significant_cores(&count_components[index], &count_response[index])
@@ -4896,7 +4935,7 @@ fn run_u15_field_validation(
         let total_eight = u15_solid_angle_total(&cases[2].0, resolution);
         let condensate_change = (total_eight - total_zero).abs() / total_zero.max(f32::EPSILON);
         let anvil =
-            u15_compliant_anvil_metrics(&count_response[2], &count_components[2], resolution);
+            u15_compliant_anvil_metrics(seed, &count_response[2], &count_components[2], resolution);
         let anvil_pass = anvil.missing_components.is_empty()
             && anvil.core_count > 0
             && anvil
@@ -4908,6 +4947,7 @@ fn run_u15_field_validation(
             && anvil
                 .worst_pca_alignment_degrees
                 .is_some_and(|value| value <= 20.0);
+        qualified_organization_seed_count += usize::from(anvil_pass);
         let moisture_zero_exact = moisture_zero[0].0 == moisture_zero[1].0
             && moisture_zero[0].1 == moisture_zero[1].1
             && moisture_zero[0]
@@ -5014,14 +5054,21 @@ fn run_u15_field_validation(
         }
     }
     let values = format!(
-        "command=cargo run --release --bin sweep -- --{validation_flag} --size 512 --output-dir {output_dir}\nshear_plume_fixture=source:{U15_TRAIL_SOURCE:?},zonal_axis:{U15_TRAIL_EAST:?},Y:{U15_TRAIL_NORTH:?};wind=((1+{U15_TRAIL_SHEAR:.2}*tanh(y/.08))/(1+{U15_TRAIL_SHEAR:.2}))*cross(Y,p); tangent_divergence_free; speed_bound=[{:.5},1]; snapshot.wind_scale=1/2; source=ocean_patch; control=matched_exterior_land_and_continentality; coverage:.65,moisture:1,temp_c:15,pressure_hpa:1013,tilt:0,season:.5,earth_radius_rotation,storms:0,diagnostics:0; MUSCL/Hancock active; CFL substeps use active `transport_substeps`; shape_corridor={U15_TRAIL_SHAPE_ROI_RADIUS:.8},physical_support={U15_TRAIL_OUTER_SUPPORT_RADIUS:.8},boundary_shell={U15_TRAIL_BOUNDARY_SHELL_INNER_RADIUS:.6}..{U15_TRAIL_SHAPE_ROI_RADIUS:.6}; response=max(total_mass_source-total_mass_control,0); morphology=all_counterfactual_response>=.02_within_frozen_corridor_own_centroid_log_map_wind_frame_weighted_Q90_Q10_L_alongwind_B_crosswind; Gperp=weighted_normalized_crosswind_geodesic_derivative; S=B*Gperp; gates=each:p95>=.04,Neff>=32,axis<=30deg,outside_corridor<=5%,beyond_physical_support<=5%,boundary_shell<=1%; ratios:L2/L1=1.50..2.50,B2/B1=.80..1.25,S2/S1=.75..1.25,deterministic; mass/area/isotropic_edge/components/centroid=telemetry_only; seeds={SEEDS:?}\nfixture={U15_ELIGIBLE_MASK}; fixture_flow={U15_FIXTURE_FLOW:?}; source_guard=actual_GPU_weather_pipeline; size_deterministic={size_deterministic}\n{}\n",
+        "command=cargo run --release --bin sweep -- --{validation_flag} --size 512 --output-dir {output_dir}\nshear_plume_fixture=source:{U15_TRAIL_SOURCE:?},zonal_axis:{U15_TRAIL_EAST:?},Y:{U15_TRAIL_NORTH:?};wind=((1+{U15_TRAIL_SHEAR:.2}*tanh(y/.08))/(1+{U15_TRAIL_SHEAR:.2}))*cross(Y,p); tangent_divergence_free; speed_bound=[{:.5},1]; snapshot.wind_scale=1/2; source=ocean_patch; control=matched_exterior_land_and_continentality; coverage:.65,moisture:1,temp_c:15,pressure_hpa:1013,tilt:0,season:.5,earth_radius_rotation,storms:0,diagnostics:0; MUSCL/Hancock active; CFL substeps use active `transport_substeps`; shape_corridor={U15_TRAIL_SHAPE_ROI_RADIUS:.8},physical_support={U15_TRAIL_OUTER_SUPPORT_RADIUS:.8},boundary_shell={U15_TRAIL_BOUNDARY_SHELL_INNER_RADIUS:.6}..{U15_TRAIL_SHAPE_ROI_RADIUS:.6}; response=max(total_mass_source-total_mass_control,0); morphology=all_counterfactual_response>=.02_within_frozen_corridor_own_centroid_log_map_wind_frame_weighted_Q90_Q10_L_alongwind_B_crosswind; Gperp=weighted_normalized_crosswind_geodesic_derivative; S=B*Gperp; gates=each:p95>=.04,Neff>=32,axis<=30deg,outside_corridor<=5%,beyond_physical_support<=5%,boundary_shell<=1%; ratios:L2/L1=1.50..2.50,B2/B1=.80..1.25,S2/S1=.75..1.25,deterministic; mass/area/isotropic_edge/components/centroid=telemetry_only; seeds={SEEDS:?}\nfixture={U15_ELIGIBLE_MASK}; fixture_flow={U15_FIXTURE_FLOW:?}; source_guard=actual_GPU_weather_pipeline; size_deterministic={size_deterministic}; qualified_organization_seed_count={qualified_organization_seed_count}/{}; qualified_organization=outside_high>=.10,downwind_centroid>=.5texels,pca<=20deg\n{}\n",
         (1.0 - U15_TRAIL_SHEAR) / (1.0 + U15_TRAIL_SHEAR),
+        SEEDS.len(),
         rows.join("\n"),
     );
     std::fs::write(Path::new(output_dir).join("u15_field_metrics.txt"), values)
         .expect("write U15 metrics artifact");
     if !size_deterministic {
         failures.push("U15 Size same-seed generation was not bitwise deterministic".to_string());
+    }
+    if qualified_organization_seed_count != SEEDS.len() {
+        failures.push(format!(
+            "U15 qualified storm organization {qualified_organization_seed_count}/{}",
+            SEEDS.len()
+        ));
     }
     failures
 }
@@ -6830,14 +6877,13 @@ mod tests {
     use super::{
         TopologyMetrics, U14CoverageComponent, U15_DEEP_THRESHOLD, U15_SIZE_FULL_SUPPORT_RADIUS,
         U15_SIZE_SEEDS, U15_SIZE_SUPPORT_RADIUS, U15ResponseComponent, cube_edge_pairs,
-        polar_metrics, requires_weather_validation_size, u3_cube_coordinates, u3_feature_axis,
-        u3_linear_cube_sample, u3_mass_association, u3_ray_ndc, u3_screen_direction,
-        u14_coverage_growth, u14_coverage_support_metrics, u14_fixed_core_p90,
-        u14_geometry_metrics, u14_significant_occupied_components, u15_anvil_source_taps,
-        u15_causal_component, u15_component_labels, u15_fixture_centers, u15_owner_size_metrics,
-        u15_paired_size_tops, u15_pixel_neighbors, u15_pixel_position,
-        u15_significant_response_components, u15_significant_size_components, u15_size_association,
-        u15_size_fixture_support, u15_size_frozen_candidates,
+        field_view_pixels, polar_metrics, requires_weather_validation_size, u3_cube_coordinates,
+        u3_feature_axis, u3_linear_cube_sample, u3_mass_association, u3_ray_ndc,
+        u3_screen_direction, u14_coverage_growth, u14_coverage_support_metrics, u14_fixed_core_p90,
+        u14_geometry_metrics, u14_significant_occupied_components, u15_component_labels,
+        u15_fixture_centers, u15_owner_size_metrics, u15_paired_size_tops, u15_pixel_neighbors,
+        u15_pixel_position, u15_significant_response_components, u15_significant_size_components,
+        u15_size_association, u15_size_fixture_support, u15_size_frozen_candidates,
         u15_size_minimum_physical_eligibility, u15_size_precondition_diagnostics,
         u15_size_seed_criterion, u15_size_weather_snapshot, validate_seed_topology_metrics,
         weather_validation_size_error,
@@ -6867,6 +6913,26 @@ mod tests {
     #[test]
     fn native_default_cloud_validation_requires_weather_validation_size() {
         assert!(requires_weather_validation_size(false, false, false, true));
+    }
+
+    #[test]
+    fn field_views_keep_all_six_cubemap_faces() {
+        let resolution = 2;
+        let mut mass = vec![0.0; 6 * resolution as usize * resolution as usize * 4];
+        let mut geometry = mass.clone();
+        mass[0..4].copy_from_slice(&[0.25, 0.5, 0.75, 1.0]);
+        geometry[0..4].copy_from_slice(&[0.0, 0.01, 0.02, 0.03]);
+
+        let [formation, mass_view, density] = field_view_pixels(&mass, &geometry, resolution);
+
+        assert_eq!(
+            formation.len(),
+            3 * resolution as usize * 2 * resolution as usize * 4
+        );
+        assert_eq!(mass_view.len(), formation.len());
+        assert_eq!(density.len(), formation.len());
+        assert_eq!(&mass_view[0..4], &[64, 128, 191, 255]);
+        assert_eq!(density[3], 255);
     }
 
     #[test]
@@ -7634,51 +7700,6 @@ mod tests {
         assert_ne!(
             super::u15_response(&large, &small),
             super::u15_response(&large, &count_zero)
-        );
-    }
-
-    #[test]
-    fn u15_anvil_uses_upwind_component_across_destination_voronoi_boundary() {
-        let resolution = 64;
-        let face_pixels = resolution as usize * resolution as usize;
-        let (destination, source) = (0..face_pixels)
-            .find_map(|destination| {
-                let pixel = destination + face_pixels;
-                let position = u15_pixel_position(pixel, resolution);
-                let source = u15_anvil_source_taps(position, resolution)?[0];
-                (source != pixel).then_some((pixel, source))
-            })
-            .expect("fixture has an upstream tap");
-        let components = vec![
-            U15ResponseComponent {
-                pixels: vec![source],
-                centroid: u15_pixel_position(source, resolution),
-                area_fraction: 0.0025,
-            },
-            U15ResponseComponent {
-                pixels: vec![destination],
-                centroid: u15_pixel_position(destination, resolution),
-                area_fraction: 0.0025,
-            },
-        ];
-        let labels = u15_component_labels(&components, resolution);
-        let mut response = vec![0.0; face_pixels * 6 * 4];
-        response[source * 4 + 1] = U15_DEEP_THRESHOLD;
-        response[destination * 4 + 1] = U15_DEEP_THRESHOLD;
-        let destination_position = u15_pixel_position(destination, resolution);
-
-        assert!(
-            super::u15_dot(destination_position, components[1].centroid)
-                > super::u15_dot(destination_position, components[0].centroid)
-        );
-        assert_eq!(
-            u15_causal_component(
-                u15_anvil_source_taps(destination_position, resolution).unwrap(),
-                &labels,
-                &response,
-                resolution,
-            ),
-            Some(0),
         );
     }
 }

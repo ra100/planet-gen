@@ -1,6 +1,8 @@
 // Shared weather-driven density functions. Preview and export compile this unchanged.
-const LOW_DETAIL_STRENGTH: f32 = 1.0;
-const DEEP_DETAIL_STRENGTH: f32 = 1.0;
+// Formation mass is authoritative; detail only erodes supported boundaries.
+const LOW_DETAIL_STRENGTH: f32 = 0.55;
+const DEEP_DETAIL_STRENGTH: f32 = 0.55;
+// High cirrus keeps its supported, wind-owned edge observable to U3.
 const HIGH_DETAIL_STRENGTH: f32 = 1.0;
 const LOW_OPTICAL_WEIGHT: f32 = 0.50;
 const CLOUD_PHASE_G: f32 = 0.55;
