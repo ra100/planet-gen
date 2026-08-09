@@ -451,6 +451,8 @@ fn polar_ice_coverage(sphere_pos: vec3<f32>, is_ocean: bool) -> f32 {
             1.0,
         );
         let lowland = 1.0 - smooth_step(0.15, 0.45, land_height);
+        // Polar-cap coverage ends below the alpine terrain bands; DS-027 owns those materials.
+        coverage *= lowland;
         let moisture = compute_moisture(sphere_pos, height, 0.5);
         // Dry lowlands remain polar desert/rock instead of becoming a white cap.
         coverage *= mix(1.0, smooth_step(25.0, 65.0, moisture), lowland);
@@ -692,21 +694,55 @@ fn compute_terrain_normal(sphere_pos: vec3<f32>, geo_normal: vec3<f32>) -> vec3<
     return perturbed_view;
 }
 
-// ---- Surface roughness from climate ----
-fn compute_roughness(temp_c: f32, moisture_cm: f32, is_ocean: bool, is_ice: bool) -> f32 {
+fn terrain_slope(sphere_pos: vec3<f32>) -> f32 {
+    let step = 0.015;
+    let east = textureSample(height_tex, height_sampler, sphere_pos + vec3<f32>(step, 0.0, 0.0)).r;
+    let west = textureSample(height_tex, height_sampler, sphere_pos - vec3<f32>(step, 0.0, 0.0)).r;
+    let north = textureSample(height_tex, height_sampler, sphere_pos + vec3<f32>(0.0, step, 0.0)).r;
+    let south = textureSample(height_tex, height_sampler, sphere_pos - vec3<f32>(0.0, step, 0.0)).r;
+    return max(abs(east - west), abs(north - south)) / (2.0 * step);
+}
+
+// Mountain snow needs elevation, sustained cold, terrain that can retain it,
+// and precipitation. Dry summits still get a sparse residual dusting.
+fn mountain_snow_coverage(
+    land_height: f32,
+    seasonal_temp: f32,
+    moisture_cm: f32,
+    slope: f32,
+) -> f32 {
+    let altitude = smooth_step(0.34, 0.82, land_height);
+    let thermal = smooth_step(2.0, -14.0, seasonal_temp);
+    let slope_retention = smooth_step(5.5, 1.5, slope);
+    let moisture_supply = mix(0.12, 1.0, smooth_step(15.0, 75.0, moisture_cm));
+    return altitude * thermal * slope_retention * moisture_supply;
+}
+
+// ---- Surface roughness from climate and terrain material ----
+fn compute_roughness(
+    temp_c: f32,
+    moisture_cm: f32,
+    is_ocean: bool,
+    is_ice: bool,
+    land_height: f32,
+    slope: f32,
+    mountain_snow: f32,
+) -> f32 {
     if (is_ocean) {
         if (is_ice) { return 0.15; }
         return 0.10;
     }
-    // Continuous land roughness from temperature + moisture (no hard thresholds)
-    // Cold → smooth (snow/ice), hot+dry → rough (desert), wet → moderate (vegetation)
-    let snow_smooth = smooth_step(5.0, -5.0, temp_c) * 0.55; // snow: pulls toward 0.20
+    // Climate supplies the base material; terrain exposes rough alpine rock on
+    // steep high ground, while retained snow restores a smoother surface.
     let desert_rough = smooth_step(50.0, 15.0, moisture_cm) * smooth_step(5.0, 20.0, temp_c); // dry+warm
     let vegetation = smooth_step(30.0, 120.0, moisture_cm) * smooth_step(5.0, 15.0, temp_c); // wet+warm
-    var roughness = 0.55; // base: moderate
-    roughness -= snow_smooth; // snow smooths it
+    let highland_rough = smooth_step(0.35, 0.70, land_height) * 0.08;
+    let exposed_rock = smooth_step(0.55, 0.85, land_height) * (1.0 - mountain_snow) * 0.16;
+    let slope_rough = smooth_step(0.5, 4.0, slope) * (1.0 - mountain_snow) * 0.18;
+    var roughness = 0.55 + highland_rough + exposed_rock + slope_rough;
     roughness += desert_rough * 0.25; // desert roughens
     roughness -= vegetation * 0.15; // dense vegetation slightly smoother
+    roughness = mix(roughness, 0.22, mountain_snow);
     // Per-pixel noise from spatial position (NOT temp/moisture which creates sharp biome edges)
     roughness += snoise(vec3<f32>(temp_c * 0.02 + moisture_cm * 0.005, moisture_cm * 0.01 - temp_c * 0.01, temp_c * 0.015)) * 0.06;
     return clamp(roughness, 0.15, 0.85);
@@ -994,6 +1030,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let pure_elevation = uniforms.show_biomes < 0.5 && uniforms.show_water < 0.5;
     var surface_color: vec3<f32>;
     let polar_ice = select(0.0, polar_ice_coverage(rotated, is_ocean), uniforms.show_ice > 0.5);
+    var terrain_land_height = 0.0;
+    var terrain_slope_value = 0.0;
+    var mountain_snow = 0.0;
 
     // Base layer: when biomes OFF, always show clean grayscale elevation for everything
     if (pure_elevation) {
@@ -1030,37 +1069,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
         // Elevation tinting: darken lowlands, lighten highlands
         // Uses raw height for strong contrast on dry worlds (Mars, Venus)
-        let land_height = (height - uniforms.ocean_level) / max(1.0 - uniforms.ocean_level, 0.01);
+        terrain_land_height = clamp(
+            (height - uniforms.ocean_level) / max(1.0 - uniforms.ocean_level, 0.01),
+            0.0,
+            1.0,
+        );
         let h_for_tint = clamp((height + 0.5) / 1.0, 0.0, 1.0);
         let elev_tint = mix(0.65, 1.35, h_for_tint);
         surface_color *= elev_tint;
-
-        // Slope computation for snow reduction (finer sampling step for less patchiness)
-        let stp_s = 0.015;
-        let sh_e = textureSample(height_tex, height_sampler, rotated + vec3<f32>(stp_s, 0.0, 0.0)).r;
-        let sh_w = textureSample(height_tex, height_sampler, rotated + vec3<f32>(-stp_s, 0.0, 0.0)).r;
-        let sh_n = textureSample(height_tex, height_sampler, rotated + vec3<f32>(0.0, stp_s, 0.0)).r;
-        let sh_s = textureSample(height_tex, height_sampler, rotated + vec3<f32>(0.0, -stp_s, 0.0)).r;
-        let slope = max(abs(sh_e - sh_w), abs(sh_n - sh_s)) / (2.0 * stp_s);
-        // Subtle snow reduction on slopes (not elimination — mix with 0.4 floor)
-        let slope_factor = mix(0.4, 1.0, smooth_step(6.0, 2.5, slope));
-        // Only the very highest peaks lose snow (threshold raised from 0.75 to 0.9)
-        let altitude_dryness = smooth_step(0.95, 0.80, land_height);
-
-        // Land ice/snow (gated by show_ice)
-        if (uniforms.show_ice > 0.5) {
-            let land_ice_noise = snoise(rotated * 10.0) * 2.0;
-            // Snow requires sustained freezing — threshold -3°C (was 2°C which is too warm,
-            // caused snow to trace coastline because any slight elevation cooled below 2°C)
-            let cold_snow = smooth_step(-3.0 + land_ice_noise, -12.0, seasonal_temp);
-            let altitude_bonus = smooth_step(0.3, 0.6, land_height) * smooth_step(5.0, -5.0, seasonal_temp);
-            var ice_blend = max(cold_snow, altitude_bonus);
-            ice_blend *= slope_factor * altitude_dryness;
-            let glacier_blue = vec3<f32>(1.05, 1.15, 1.25);
-            let fresh_snow = vec3<f32>(1.20, 1.22, 1.25) + vec3<f32>(0.015) * color_var;
-            let land_ice_color = mix(fresh_snow, glacier_blue, land_height * cold_snow);
-            surface_color = mix(surface_color, land_ice_color, ice_blend);
-        }
+        terrain_slope_value = terrain_slope(rotated);
 
         // Altitude zonation — derived from 6.5°C/km lapse rate
         // 1km altitude ~ 8° poleward for vegetation/snow lines
@@ -1079,47 +1096,56 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
         let seasonal_temp_local = compute_temperature(rotated, height, uniforms.season);
         let mean_moisture_local = compute_moisture(rotated, height, 0.5);
-        let is_arid = mean_moisture_local < 30.0;
+        // Bounded material bands: highland vegetation, alpine meadow/scree,
+        // then exposed rock. Snow is a separate final deposit over these bands.
+        let highland_material = smooth_step(highland_line, highland_line + 0.08, terrain_land_height)
+            * (1.0 - smooth_step(alpine_line - 0.04, alpine_line + 0.02, terrain_land_height));
+        let alpine_material = smooth_step(alpine_line, alpine_line + 0.06, terrain_land_height)
+            * (1.0 - smooth_step(rock_line - 0.03, rock_line + 0.02, terrain_land_height));
+        let rock_material = smooth_step(rock_line, rock_line + 0.05, terrain_land_height)
+            * (1.0 - smooth_step(snow_line - 0.03, snow_line + 0.02, terrain_land_height));
 
-        // Highland zone: climate-dependent coloring
-        if (land_height > highland_line && land_height <= alpine_line) {
-            let blend = smooth_step(highland_line, highland_line + 0.12, land_height);
-            // Arid highlands: lighter rocky brown; wet highlands: darker forest-brown
+        if (highland_material > 0.0) {
             let highland_arid = surface_color * vec3<f32>(0.90, 0.82, 0.72);
             let highland_wet = surface_color * vec3<f32>(0.78, 0.75, 0.65);
             let highland_color = mix(highland_wet, highland_arid, smooth_step(30.0, 15.0, mean_moisture_local));
-            surface_color = mix(surface_color, highland_color, blend * 0.6);
+            surface_color = mix(surface_color, highland_color, highland_material * 0.6);
         }
 
-        // Alpine zone: varies with climate
-        if (land_height > alpine_line && land_height <= rock_line) {
-            let blend = smooth_step(alpine_line, alpine_line + 0.08, land_height);
-            // Tropical alpine: green meadow; temperate: grey-green; arid: brown-grey
-            let alpine_tropical = vec3<f32>(0.38, 0.48, 0.28); // paramo/alpine meadow
-            let alpine_temperate = vec3<f32>(0.42, 0.45, 0.32); // alpine grassland
-            let alpine_arid = vec3<f32>(0.52, 0.46, 0.36); // dry alpine scree
+        if (alpine_material > 0.0) {
+            let alpine_tropical = vec3<f32>(0.38, 0.48, 0.28);
+            let alpine_temperate = vec3<f32>(0.42, 0.45, 0.32);
+            let alpine_arid = vec3<f32>(0.52, 0.46, 0.36);
             var alpine_color = mix(alpine_temperate, alpine_tropical, smooth_step(15.0, 25.0, seasonal_temp_local));
             alpine_color = mix(alpine_color, alpine_arid, smooth_step(30.0, 12.0, mean_moisture_local));
-            surface_color = mix(surface_color, alpine_color, blend);
+            surface_color = mix(surface_color, alpine_color, alpine_material);
         }
 
-        // Rock zone
-        if (land_height > rock_line && land_height <= snow_line) {
-            let blend = smooth_step(rock_line, rock_line + 0.06, land_height);
+        if (rock_material > 0.0) {
             let rock_color = vec3<f32>(0.48, 0.46, 0.42) + vec3<f32>(0.04) * color_var;
-            surface_color = mix(surface_color, rock_color, blend);
+            surface_color = mix(surface_color, rock_color, rock_material);
         }
 
-        // Snow line
-        if (land_height > snow_line && seasonal_temp_local < 15.0) {
-            let blend = smooth_step(snow_line, snow_line + 0.06, land_height)
-                      * slope_factor * altitude_dryness;
-            surface_color = mix(surface_color, vec3<f32>(1.15, 1.18, 1.22), blend);
+        mountain_snow = select(
+            0.0,
+            mountain_snow_coverage(
+                terrain_land_height,
+                seasonal_temp_local,
+                mean_moisture_local,
+                terrain_slope_value,
+            ),
+            uniforms.show_ice > 0.5,
+        );
+        if (mountain_snow > 0.0) {
+            let fresh_snow = vec3<f32>(0.90, 0.93, 0.96) + vec3<f32>(0.012) * color_var;
+            let glacier_blue = vec3<f32>(0.78, 0.86, 0.93);
+            let snow_color = mix(fresh_snow, glacier_blue, terrain_land_height * mountain_snow);
+            surface_color = mix(surface_color, snow_color, mountain_snow);
         }
 
         // Beach transition — very subtle, only at close zoom
-        if (land_height < 0.015) {
-            let beach_blend = smooth_step(0.015, 0.0, land_height);
+        if (terrain_land_height < 0.015) {
+            let beach_blend = smooth_step(0.015, 0.0, terrain_land_height);
             surface_color = mix(surface_color, vec3<f32>(0.55, 0.52, 0.42), beach_blend * 0.3);
         }
     }
@@ -1216,7 +1242,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 // Roughness visualization (uses actual compute_roughness)
                 let rt = compute_temperature(rotated, height, uniforms.season);
                 let rm = compute_moisture(rotated, height, uniforms.season);
-                let r = compute_roughness(rt, rm, is_ocean, is_ocean && rt < -2.0);
+                let r = compute_roughness(
+                    rt,
+                    rm,
+                    is_ocean,
+                    is_ocean && rt < -2.0,
+                    terrain_land_height,
+                    terrain_slope_value,
+                    mountain_snow,
+                );
                 debug_color = vec3<f32>(r, r, r);
             }
             case 8u: {
@@ -1368,7 +1402,19 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let ocean_ice = is_ocean && !pure_elevation && polar_ice > 0.01;
     let temp_for_rough = compute_temperature(rotated, height, uniforms.season);
     let moist_for_rough = compute_moisture(rotated, height, uniforms.season);
-    let roughness = compute_roughness(temp_for_rough, moist_for_rough, is_ocean, ocean_ice);
+    let roughness = select(
+        0.55,
+        compute_roughness(
+            temp_for_rough,
+            moist_for_rough,
+            is_ocean,
+            ocean_ice || mountain_snow > 0.01,
+            terrain_land_height,
+            terrain_slope_value,
+            mountain_snow,
+        ),
+        !pure_elevation,
+    );
     let f0 = select(0.04, 0.06, is_ocean); // Water has stronger Fresnel at glancing angles
 
     // GGX specular
