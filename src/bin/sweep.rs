@@ -2511,6 +2511,10 @@ fn u14_coast_continentality(z: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+fn u14_marine_to_land_continentality(pos: [f32; 3]) -> f32 {
+    if pos[2] > 0.0 { 0.0 } else { 1.0 }
+}
+
 fn u14_coast_terrain_localization_ratio(
     coast_mass: &[f32],
     flat_control_mass: &[f32],
@@ -2550,6 +2554,35 @@ fn u14_coast_terrain_localization_ratio(
     let local_energy = coast_energy / coast_samples.max(1) as f32;
     let surrounding_energy = surrounding_energy / surrounding_samples.max(1) as f32;
     local_energy / surrounding_energy.max(f32::EPSILON)
+}
+
+fn u14_mixed_coast_land_support(values: &[f32], resolution: u32) -> (f32, f32) {
+    let mut low_mass = Vec::new();
+    let mut occupied = 0usize;
+    for face in 0..6 {
+        for y in 0..resolution {
+            for x in 0..resolution {
+                let position = planet_gen::cube_sphere::cube_to_sphere(
+                    face,
+                    x as f32 / (resolution - 1) as f32,
+                    y as f32 / (resolution - 1) as f32,
+                );
+                if u14_marine_to_land_continentality(position) < 1.0
+                    || position[0] <= 0.8
+                    || !(position[2] < -0.04 && position[2] > -0.12)
+                {
+                    continue;
+                }
+                let pixel =
+                    &values[((face * resolution * resolution + y * resolution + x) * 4) as usize..];
+                low_mass.push(pixel[0]);
+                occupied += usize::from(pixel[3] >= 0.01);
+            }
+        }
+    }
+    low_mass.sort_by(f32::total_cmp);
+    let p90 = low_mass[(low_mass.len() * 9 / 10).min(low_mass.len() - 1)];
+    (occupied as f32 / low_mass.len() as f32, p90)
 }
 
 fn u14_flat_terrain(resolution: u32, height: impl Fn([f32; 3]) -> f32) -> TectonicTerrain {
@@ -2718,6 +2751,7 @@ fn run_u14_field_validation(
     let mut coverage_seed_rows = Vec::new();
     let mut inland_occupied_min = f32::INFINITY;
     let mut inland_low_p90_min = f32::INFINITY;
+    let mut inland_no_source_exact = true;
     for seed in SEEDS {
         let (cool_ocean, cool_geometry) = weather(&terrain, |_| 0.0, 5.0, 0.75, 1.0, seed, 0.0);
         let (cool_inland, inland_geometry) = weather(&terrain, |_| 1.0, 5.0, 0.75, 1.0, seed, 0.0);
@@ -2765,14 +2799,7 @@ fn run_u14_field_validation(
         let ocean_low = u14_field_mean(&cool_ocean, 0);
         let inland_low = u14_field_mean(&cool_inland, 0);
         cool_ratio = cool_ratio.min(ocean_low / inland_low.max(f32::EPSILON));
-        inland_occupied_min = inland_occupied_min.min(
-            cool_inland
-                .chunks_exact(4)
-                .filter(|pixel| pixel[3] >= 0.01)
-                .count() as f32
-                / (cool_inland.len() / 4) as f32,
-        );
-        inland_low_p90_min = inland_low_p90_min.min(u14_field_quantile(&cool_inland, 0, 0.9));
+        inland_no_source_exact &= cool_inland.iter().all(|value| *value == 0.0);
         cool_deck_p90_min = cool_deck_p90_min.min(u14_field_quantile(&cool_ocean, 0, 0.90));
         let ocean_deep = u14_field_mean(&cool_ocean, 1);
         low_deep = low_deep.min(ocean_low / ocean_deep.max(f32::EPSILON));
@@ -2799,6 +2826,23 @@ fn run_u14_field_validation(
             / (warm.len() / 4) as f32;
         gaps_min = gaps_min.min(gaps);
         gaps_max = gaps_max.max(gaps);
+
+        let (mixed_coast_mass, mixed_coast_geometry) = weather(
+            &ridge,
+            u14_marine_to_land_continentality,
+            15.0,
+            1.0,
+            1.0,
+            seed,
+            0.8,
+        );
+        let (occupied, invalid) = u14_geometry_metrics(&mixed_coast_mass, &mixed_coast_geometry);
+        geometry_occupied_texels += occupied;
+        geometry_invalid_texels += invalid;
+        let (coast_land_occupied, coast_land_low_p90) =
+            u14_mixed_coast_land_support(&mixed_coast_mass, resolution);
+        inland_occupied_min = inland_occupied_min.min(coast_land_occupied);
+        inland_low_p90_min = inland_low_p90_min.min(coast_land_low_p90);
 
         let (coast_mass, coast_geometry) = weather(
             &coast,
@@ -3061,7 +3105,7 @@ fn run_u14_field_validation(
     let windward_retention_p90_min = 0.0;
     let cool_deep_min = 0.0;
     let feedback = format!(
-        "\nfeedback_u14_coverage_threshold=tau>=.01; tau=1.2*(.5*low+1.2*deep+.35*high)\nfeedback_u14_significant_component_area>={:.2}% face\nfeedback_u14_component_growth=.25_frozen_to_.75_significant,max_positive_pixel_overlap,deterministic_lowest_label_tie,all_frozen_overlap,conservative_lower_median_ratio>=1.30,merges_reported\nfeedback_u14_coverage_seed_tuples=\n{}\nfeedback_u14_land_occupied_min={inland_occupied_min:.3}\nfeedback_u14_land_low_p90_min={inland_low_p90_min:.3}\n",
+        "\nfeedback_u14_coverage_threshold=tau>=.01; tau=1.2*(.5*low+1.2*deep+.35*high)\nfeedback_u14_significant_component_area>={:.2}% face\nfeedback_u14_component_growth=.25_frozen_to_.75_significant,max_positive_pixel_overlap,deterministic_lowest_label_tie,all_frozen_overlap,conservative_lower_median_ratio>=1.30,merges_reported\nfeedback_u14_coverage_seed_tuples=\n{}\nfeedback_u14_land_support_fixture=mixed_coast_marine_source_flow=1\nfeedback_u14_land_occupied_min={inland_occupied_min:.3}\nfeedback_u14_land_low_p90_min={inland_low_p90_min:.3}\nsource_flow_scenarios=inland_no_source_exact,humid_marine_ridge_windward,lee_drying\nfeedback_u14_inland_no_source_exact={inland_no_source_exact}\nfeedback_u14_humid_marine_windward_low_p90={windward_low_p90_min:.3}\nfeedback_u14_humid_marine_windward_lee_delta_min={windward_lee_delta_min:.3}\n",
         U14_MINIMUM_COMPONENT_FACE_AREA * 100.0,
         coverage_seed_rows.join("\n"),
     );
@@ -3088,6 +3132,9 @@ fn run_u14_field_validation(
         failures.push(format!(
             "U14 causal land support occupied={inland_occupied_min:.3}, low_p90={inland_low_p90_min:.3}"
         ));
+    }
+    if !inland_no_source_exact {
+        failures.push("U14 inland no-source field was not exact zero".to_string());
     }
     if cool_deck_p90_min < 0.02 || trade_p90_min < 0.02 || windward_low_p90_min < 0.02 {
         failures.push(format!(
@@ -6880,10 +6927,11 @@ mod tests {
         field_view_pixels, polar_metrics, requires_weather_validation_size, u3_cube_coordinates,
         u3_feature_axis, u3_linear_cube_sample, u3_mass_association, u3_ray_ndc,
         u3_screen_direction, u14_coverage_growth, u14_coverage_support_metrics, u14_fixed_core_p90,
-        u14_geometry_metrics, u14_significant_occupied_components, u15_component_labels,
-        u15_fixture_centers, u15_owner_size_metrics, u15_paired_size_tops, u15_pixel_neighbors,
-        u15_pixel_position, u15_significant_response_components, u15_significant_size_components,
-        u15_size_association, u15_size_fixture_support, u15_size_frozen_candidates,
+        u14_geometry_metrics, u14_marine_to_land_continentality, u14_mixed_coast_land_support,
+        u14_significant_occupied_components, u15_component_labels, u15_fixture_centers,
+        u15_owner_size_metrics, u15_paired_size_tops, u15_pixel_neighbors, u15_pixel_position,
+        u15_significant_response_components, u15_significant_size_components, u15_size_association,
+        u15_size_fixture_support, u15_size_frozen_candidates,
         u15_size_minimum_physical_eligibility, u15_size_precondition_diagnostics,
         u15_size_seed_criterion, u15_size_weather_snapshot, validate_seed_topology_metrics,
         weather_validation_size_error,
@@ -6913,6 +6961,45 @@ mod tests {
     #[test]
     fn native_default_cloud_validation_requires_weather_validation_size() {
         assert!(requires_weather_validation_size(false, false, false, true));
+    }
+
+    #[test]
+    fn u14_mixed_land_support_excludes_ocean_and_all_inland_diagnostic() {
+        let resolution = 8;
+        let mut mass = vec![0.0; resolution as usize * resolution as usize * 6 * 4];
+        let mut ocean_samples = 0;
+        let mut land_samples = 0;
+        for face in 0..6 {
+            for y in 0..resolution {
+                for x in 0..resolution {
+                    let position = planet_gen::cube_sphere::cube_to_sphere(
+                        face,
+                        x as f32 / (resolution - 1) as f32,
+                        y as f32 / (resolution - 1) as f32,
+                    );
+                    let pixel =
+                        ((face * resolution * resolution + y * resolution + x) * 4) as usize;
+                    if u14_marine_to_land_continentality(position) >= 1.0
+                        && position[0] > 0.8
+                        && position[2] < -0.04
+                        && position[2] > -0.12
+                    {
+                        mass[pixel] = 0.03;
+                        mass[pixel + 3] = 1.0;
+                        land_samples += 1;
+                    } else {
+                        mass[pixel] = 0.9;
+                        mass[pixel + 3] = 1.0;
+                        ocean_samples += 1;
+                    }
+                }
+            }
+        }
+
+        let (occupied, p90) = u14_mixed_coast_land_support(&mass, resolution);
+        assert!(ocean_samples > 0 && land_samples > 0);
+        assert_eq!(occupied, 1.0);
+        assert_eq!(p90, 0.03);
     }
 
     #[test]

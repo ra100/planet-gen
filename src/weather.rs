@@ -1414,9 +1414,10 @@ mod tests {
         assert_eq!(geometry_a, geometry_b);
         assert!(a.iter().all(|value| value.is_finite()));
         assert!(geometry_a.iter().all(|value| value.is_finite()));
-        assert!(a
-            .chunks_exact(4)
-            .all(|pixel| pixel.iter().all(|value| (0.0..=1.0).contains(value))));
+        assert!(
+            a.chunks_exact(4)
+                .all(|pixel| pixel.iter().all(|value| (0.0..=1.0).contains(value)))
+        );
         assert!(a.chunks_exact(4).all(|pixel| {
             pixel[3] + 0.002 >= pixel[0]
                 && pixel[3] + 0.002 >= pixel[1]
@@ -1475,16 +1476,20 @@ mod tests {
         let mut clear = snapshot(16);
         clear.moisture = 0.0;
         let clear = generate_weather(&gpu, &pipeline, &dynamics, &terrain, clear);
-        assert!(read_texture(&gpu, &clear._mass_texture, 16)
-            .chunks_exact(4)
-            .all(|pixel| pixel == [0.0; 4]));
+        assert!(
+            read_texture(&gpu, &clear._mass_texture, 16)
+                .chunks_exact(4)
+                .all(|pixel| pixel == [0.0; 4])
+        );
 
         let mut clear = snapshot(16);
         clear.coverage = 0.0;
         let clear = generate_weather(&gpu, &pipeline, &dynamics, &terrain, clear);
-        assert!(read_texture(&gpu, &clear._mass_texture, 16)
-            .chunks_exact(4)
-            .all(|pixel| pixel == [0.0; 4]));
+        assert!(
+            read_texture(&gpu, &clear._mass_texture, 16)
+                .chunks_exact(4)
+                .all(|pixel| pixel == [0.0; 4])
+        );
     }
 
     #[test]
@@ -2051,6 +2056,84 @@ mod tests {
     }
 
     #[test]
+    fn inland_clouds_require_upstream_marine_transport() {
+        let resolution = 64;
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let terrain = terrain_from(resolution, |pos| {
+            -0.15 + (-(pos[2] / 0.14).powi(2)).exp() * pos[0].max(0.0).powi(8) * 0.45
+        });
+        let wind = WindFieldPipeline::new(&gpu).expect("dynamics unavailable");
+        let pipeline = WeatherFieldPipeline::new(&gpu).expect("weather unavailable");
+        let run = |wind_scale, diagnostic_flags| {
+            let dynamics = wind.create_test_textures(&gpu, resolution, |pos| {
+                let tangent = [pos[2], 0.0, -pos[0]];
+                let length = (tangent[0] * tangent[0] + tangent[2] * tangent[2])
+                    .sqrt()
+                    .max(0.0001);
+                (
+                    [
+                        tangent[0] / length * wind_scale,
+                        0.0,
+                        tangent[2] / length * wind_scale,
+                        if pos[2] > 0.0 { 0.0 } else { 1.0 },
+                    ],
+                    1025.0,
+                )
+            });
+            let weather = pipeline.create_textures(&gpu, resolution);
+            run_spinup_pass_with_config(
+                &gpu,
+                &pipeline,
+                &terrain,
+                &dynamics,
+                WeatherSnapshot {
+                    coverage: 1.0,
+                    storm_count: 0,
+                    storm_size: 3.0,
+                    ..snapshot(resolution)
+                },
+                &weather,
+                SpinupTestConfig {
+                    iterations: 16,
+                    diagnostic_flags,
+                    initial_state: Some([0.0; 4]),
+                    ..Default::default()
+                },
+            )
+        };
+
+        let downwind_land = |spinup: &SpinupPass| {
+            channel_sum_where(&spinup.mass, resolution, 0, |pos| {
+                pos[0] > 0.8 && pos[2] < -0.04 && pos[2] > -0.12
+            })
+        };
+        let forward = run(0.8, 0);
+        let reverse = run(-0.8, 0);
+        let source_disabled = run(0.8, SPINUP_DIAGNOSTIC_NO_SOURCE);
+        let forward_land = downwind_land(&forward);
+        let reverse_land = downwind_land(&reverse);
+        let disabled_land = downwind_land(&source_disabled);
+
+        assert!(
+            forward_land > 0.0,
+            "forward downwind land mass={forward_land}"
+        );
+        assert!(
+            forward_land > reverse_land * 2.0,
+            "forward/reverse downwind land mass={forward_land}/{reverse_land}"
+        );
+        assert_eq!(
+            disabled_land, 0.0,
+            "disabled source land mass={disabled_land}"
+        );
+        assert!(
+            source_disabled.state.iter().all(|value| *value == 0.0)
+                && source_disabled.mass.iter().all(|value| *value == 0.0),
+            "dry no-source fixture generated state or condensate"
+        );
+    }
+
+    #[test]
     fn divergence_suppresses_occupancy() {
         let resolution = 32;
         let gpu = GpuContext::new().expect("GPU init failed");
@@ -2082,48 +2165,15 @@ mod tests {
     }
 
     #[test]
-    fn cloud_seed_changes_source_eligible_mass_without_unbounded_totals() {
-        let resolution = 32;
-        let gpu = GpuContext::new().expect("GPU init failed");
-        let terrain = terrain(resolution);
-        let wind = WindFieldPipeline::new(&gpu).expect("dynamics unavailable");
-        let dynamics = wind.create_textures(&gpu, resolution);
-        wind.generate_gpu(&gpu, &terrain, &dynamics, 42, 0.0, 0.4, 0.5, 1.0, 15.0, 1.0);
-        let pipeline = WeatherFieldPipeline::new(&gpu).expect("weather unavailable");
-        let generate = |seed| {
-            let mut params = snapshot(resolution);
-            params.seed = seed;
-            params.storm_count = 0;
-            read_texture(
-                &gpu,
-                &generate_weather(&gpu, &pipeline, &dynamics, &terrain, params)._mass_texture,
-                resolution,
-            )
-        };
-        let first = generate(1 << 24);
-        let second = generate((1 << 24) + 1);
-        let pixels = (resolution * resolution * 6) as usize;
-        let changed = first
-            .chunks_exact(4)
-            .zip(second.chunks_exact(4))
-            .filter(|(a, b)| (a[3] - b[3]).abs() > 0.05)
-            .count();
-        let core_union = first
-            .chunks_exact(4)
-            .zip(second.chunks_exact(4))
-            .filter(|(a, b)| a[3] > 0.15 || b[3] > 0.15)
-            .count();
-        let totals =
-            [&first, &second].map(|mass| mass.chunks_exact(4).map(|pixel| pixel[3]).sum::<f32>());
-        assert!(
-            changed > pixels / 32,
-            "adjacent high seeds changed only {changed}/{pixels} eligible mass pixels"
-        );
-        assert!(core_union > pixels / 16, "core union={core_union}/{pixels}");
-        assert!(
-            (0.8..=1.25).contains(&(totals[1] / totals[0])),
-            "totals={totals:?}"
-        );
+    fn physical_weather_mass_has_no_seeded_detail_path() {
+        let finalize = include_str!("shaders/weather_spinup.wgsl")
+            .split("fn finalize")
+            .nth(1)
+            .expect("weather finalize entry point");
+        assert!(!finalize.contains("snoise"));
+        assert!(!finalize.contains("noise_seed_offset"));
+        assert!(finalize.contains("state.y * 1.25"));
+        assert!(finalize.contains("state.z * 1.5"));
     }
 
     #[test]
@@ -2879,10 +2929,12 @@ mod tests {
             },
         );
         assert!(no_phase.state.chunks_exact(4).any(|state| state[0] > 0.0));
-        assert!(no_phase
-            .state
-            .chunks_exact(4)
-            .all(|state| state[1] == 0.0 && state[2] == 0.0 && state[3] == 0.0));
+        assert!(
+            no_phase
+                .state
+                .chunks_exact(4)
+                .all(|state| state[1] == 0.0 && state[2] == 0.0 && state[3] == 0.0)
+        );
         assert!(no_phase.mass.iter().all(|value| *value == 0.0));
     }
 

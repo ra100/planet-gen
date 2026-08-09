@@ -154,7 +154,7 @@ fn temperature_at(pos: vec3<f32>) -> f32 {
         - elevation_km * 6.5 + continentality * season_shift * 5.0;
 }
 
-// A local, deterministic wet-land mask for calm stratiform clouds only.
+// Terrain selects where transported marine vapor can settle into a calm deck.
 fn calm_wet_land_mask(
     pos: vec3<f32>,
     marine_fraction: f32,
@@ -162,8 +162,6 @@ fn calm_wet_land_mask(
     rain_shadow: f32,
     effective_speed: f32,
 ) -> f32 {
-    let seeded_broad = snoise(pos * 1.9 + noise_seed_offset(params.seed, 403u)) * 0.5 + 0.5;
-    let broad = select(0.5, seeded_broad, effective_speed > 0.0);
     let height = sample_height(pos);
     let land_height = height - params.ocean_level;
     let exposed_land = select(
@@ -174,8 +172,8 @@ fn calm_wet_land_mask(
     let elevation_km = max(height - params.ocean_level, 0.0) * 5.0;
     let lowland = 1.0 - smooth_step(0.35, 1.8, elevation_km);
     let continentality = 1.0 - marine_fraction;
-    let climate_rank = broad * 0.45 + thermal_stability * 0.28 + lowland * 0.17
-        + continentality * 0.15 - rain_shadow * 0.35;
+    let climate_rank = thermal_stability * 0.58 + lowland * 0.27 + continentality * 0.15
+        - rain_shadow * 0.35;
     return exposed_land * continentality * lowland * smooth_step(0.46, 0.70, climate_rank);
 }
 
@@ -183,12 +181,9 @@ fn source_potential(
     marine_fraction: f32,
     thermal: f32,
 ) -> f32 {
-    // Ocean evaporation dominates; warm land contributes weaker, climate-ranked
-    // evapotranspiration. Terrain only converts or removes transported vapor.
-    let marine_evaporation = marine_fraction * mix(0.42, 0.68, thermal);
-    let land_evapotranspiration = (1.0 - marine_fraction)
-        * smooth_step(0.20, 0.80, thermal) * 0.10;
-    return clamp(marine_evaporation + land_evapotranspiration, 0.0, 1.0);
+    // Vapor enters this field only over open water. Land can only convert
+    // transported vapor already held in state.x.
+    return marine_fraction * mix(0.42, 0.68, thermal);
 }
 
 struct SourceBudgets {
@@ -216,8 +211,11 @@ fn source_budgets(
         thermal,
     );
     let thermal_regime = mix(0.14, 0.04, thermal);
+    // Phase capacity is independent of local supply: dry land has no source,
+    // but humid marine air may be transported there before it condenses.
     let phase_rank = clamp(
-        surface_supply + 0.25 * convergence + thermal_regime - 0.15 * persistent_ice,
+        surface_supply + (1.0 - marine_fraction) * 0.45 + 0.25 * convergence
+            + thermal_regime - 0.15 * persistent_ice,
         0.0,
         1.0,
     );
@@ -509,7 +507,6 @@ fn transport(@builtin(global_invocation_id) id: vec3<u32>) {
     );
     let stratiform_wind = 1.0 - smooth_step(0.35, 0.70, effective_speed);
     let stratiform_regime = calm_wet_land * stratiform_wind;
-    let calm_land_source = min(0.60, 0.20 + calm_wet_land * 0.40);
     let storm_catalyst = convective_catalyst(pos) * (1.0 - stratiform_regime);
     if ((params.diagnostic_flags & DIAGNOSTIC_NO_PHASE_CHANGE) == 0u) {
         let catalyst = storm_catalyst;
@@ -539,6 +536,10 @@ fn transport(@builtin(global_invocation_id) id: vec3<u32>) {
         );
         let humidity_gate = smooth_step(0.45, 0.95, state.x / max(q_sat, 0.0001));
         let warm_gate = thermal * smooth_step(0.10, 0.20, lcl_lift);
+        let physical_lift = smooth_step(0.12, 0.75, max(convergence, max(frontal_lift, max(warm_marine_lift, terrain_lift))));
+        // Land has no vapor source. Its phase changes require humid vapor that
+        // was carried in state.x; catalysts only repartition existing mass.
+        let inland_provenance = mix(humidity_gate, 1.0, marine_fraction);
         let convective_lift = clamp(
             lcl_lift + catalyst * humidity_gate * warm_gate * 0.40,
             0.0,
@@ -552,10 +553,9 @@ fn transport(@builtin(global_invocation_id) id: vec3<u32>) {
         let condensation = min(
             state.x,
             max(state.x - q_lcl, 0.0) * mix(0.16, 0.56, convective_lift)
-                * phase_budget * step_fraction,
+                * phase_budget * inland_provenance * step_fraction,
         );
-        let storm_environment = max(convergence, max(frontal_lift, max(warm_marine_lift, terrain_lift)));
-        let physical_convective_eligibility = warm_gate * smooth_step(0.12, 0.75, storm_environment)
+        let physical_convective_eligibility = warm_gate * physical_lift
             * humidity_gate;
         let final_convective_eligibility = budgets.source_envelope * physical_convective_eligibility;
         let deep_fraction = clamp(
@@ -570,7 +570,7 @@ fn transport(@builtin(global_invocation_id) id: vec3<u32>) {
         if (stratiform_regime > 0.0) {
             let low_target = min(0.12, q_sat * 0.24 * calm_wet_land);
             let approach = 1.0 - exp(
-                -0.75 * calm_land_source * stratiform_wind * step_fraction,
+                -0.75 * humidity_gate * stratiform_wind * step_fraction,
             );
             let calm_stratiform = min(
                 state.x,
