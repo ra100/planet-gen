@@ -20,6 +20,10 @@ Keep the completed unified GPU foundation and always-on U12 moisture spin-up, th
 - U11 is complete in `e0f611d`: direct EXR export with the 2K stress gate passing.
 - U7 is complete in the working tree: it verified that superseded shell-only, CPU-packed-wind, and independent export paths are absent, then documented the accepted runtime.
 
+### Deferred Storm Organization Follow-up
+
+FE-034–047 was a clean-slate post-completion experiment, not a replacement for the accepted U15 evidence. Its selection and harness were corrected, but the bounded organizer plus conservative coupling did not form qualifying U15 deep cores. Safe sweeps found no viable parameter-only path, so the user chose to park the work and revert to accepted checkpoint `0e2b044`. Keep the terrain-driven and marine/sea-cloud gains at that checkpoint; storm organization is blocked/deferred pending a new causal approach. The next investigation is polar-cap cloud diagnosis.
+
 ### Delivery Lessons
 
 - Direct ordered EXR streaming restored the Cloud U5 2K export latency gate to under 60 seconds; retain ordered writes rather than rebuilding full cloud-face products in memory.

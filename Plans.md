@@ -107,6 +107,14 @@ Plan: [docs/plans/2026-07-10-001-feat-shallow-volumetric-clouds-plan.md](docs/pl
 | U11 | Performance, latency, and stress validation | cc:完了 [e0f611d] (direct EXR export; 2K stress gate PASS) |
 | U7 | Remove superseded paths and document | cc:完了 [uncommitted] (verified superseded paths absent; accepted persistent-weather, bounded-volume, direct six-channel export architecture documented) |
 
+### Deferred storm organization follow-up
+
+| Task | 内容 | Status |
+|------|------|--------|
+| FE-034–047 | Clean-slate storm organization experiment | blocked/deferred; reverted to accepted checkpoint [0e2b044] |
+
+The experiment corrected its selection and harness, but the bounded organizer with conservative coupling did not form qualifying U15 deep cores. Safe parameter sweeps found no viable parameter-only path. The user chose to park the work and revert; retain the terrain-driven and marine/sea-cloud gains already present at `0e2b044`. Next priority: diagnose the polar-cap cloud behavior before reopening storm organization.
+
 ---
 
 ## Archived: Terrain Diffusion and Imported Terrain
