@@ -51,3 +51,6 @@ output/
 docs/research/.claude
 # agent memory
 data
+
+# Serena local agent state
+.serena/
