@@ -718,7 +718,7 @@ mod tests {
     use super::*;
     use crate::cube_sphere::cube_to_sphere;
     use crate::gpu::GpuContext;
-    use crate::plates::{PlateGenParams, generate_plates};
+    use crate::plates::{generate_plates, PlateGenParams};
     use crate::terrain_compute::{TectonicTerrain, TerrainComputePipeline, WindFieldPipeline};
     use crate::weather::{WeatherFieldPipeline, WeatherSnapshot};
 
@@ -1585,13 +1585,11 @@ mod tests {
             percentile(samples, 0.50)
         };
         let zero = std::array::from_fn(|_| vec![0.0; (resolution * resolution * 4) as usize]);
-        assert!(
-            render(&zero)
-                .iter()
-                .enumerate()
-                .filter(|(index, _)| sphere_mask(size, *index))
-                .all(|(_, value)| *value == 0.0)
-        );
+        assert!(render(&zero)
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| sphere_mask(size, *index))
+            .all(|(_, value)| *value == 0.0));
         let tau_01 = mean_tau(0.01);
         let tau_02 = mean_tau(0.02);
         let tau_04 = mean_tau(0.04);
@@ -1995,11 +1993,9 @@ fn layer_profile_oracle() {
             .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
             .collect();
         readback.unmap();
-        assert!(
-            values[..68]
-                .iter()
-                .all(|value| value.is_finite() && *value >= 0.0 && *value <= 0.62)
-        );
+        assert!(values[..68]
+            .iter()
+            .all(|value| value.is_finite() && *value >= 0.0 && *value <= 0.62));
         assert!(values[2] > values[1] && values[1] > values[0]);
         let integral = values[78];
         assert!((integral - 1.0).abs() <= 0.02, "integral={integral}");
@@ -2290,19 +2286,15 @@ fn layer_profile_oracle() {
             thick_metrics.3,
         );
         assert!(low_metrics.4 > 0.0);
-        assert!(high_metrics.0.0 < low_metrics.0.0);
+        assert!(high_metrics.0 .0 < low_metrics.0 .0);
         assert!(thick_metrics.5 > thin_metrics.5);
         assert_eq!(thick_metrics.3, 1);
         assert_eq!(zero_shadow, clear);
-        assert!(
-            clear
-                .chunks_exact(4)
-                .zip(low_shadow.chunks_exact(4))
-                .enumerate()
-                .all(|(index, (clear, shadowed))| {
-                    sphere_mask(size, index) || clear == shadowed
-                })
-        );
+        assert!(clear
+            .chunks_exact(4)
+            .zip(low_shadow.chunks_exact(4))
+            .enumerate()
+            .all(|(index, (clear, shadowed))| { sphere_mask(size, index) || clear == shadowed }));
     }
 
     #[test]
@@ -2357,11 +2349,9 @@ fn layer_profile_oracle() {
         assert!((translated - tall).abs() / tall.max(f32::EPSILON) <= 0.02);
         assert_eq!(ocean_tall, 0.0);
         assert!(coast.windows(2).all(|values| values[0] <= values[1]));
-        assert!(
-            coast
-                .iter()
-                .all(|value| value.is_finite() && *value <= tall)
-        );
+        assert!(coast
+            .iter()
+            .all(|value| value.is_finite() && *value <= tall));
     }
 
     #[test]
@@ -2415,15 +2405,13 @@ fn layer_profile_oracle() {
             })
             .unwrap();
         assert!(support.iter().any(|supported| *supported));
-        assert!(
-            density
-                .iter()
-                .zip(&support)
-                .enumerate()
-                .all(|(index, (density, supported))| !sphere_mask(size, index)
-                    || *supported
-                    || *density == 0.0)
-        );
+        assert!(density
+            .iter()
+            .zip(&support)
+            .enumerate()
+            .all(|(index, (density, supported))| !sphere_mask(size, index)
+                || *supported
+                || *density == 0.0));
     }
 
     #[test]
@@ -2803,6 +2791,188 @@ fn layer_profile_oracle() {
     }
 
     #[test]
+    fn polar_cap_previews_are_deterministic_and_respect_the_ice_toggle() {
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let compute = TerrainComputePipeline::new(&gpu);
+        let renderer = PreviewRenderer::new(&gpu);
+        let mut coverage_counts = Vec::new();
+        let cases = [
+            ("earth_seed42", 42, 15.0, 0.41, 0.7),
+            ("ice_world_seed7777", 7777, -28.0, 0.41, 0.8),
+            ("mars_like_seed42", 42, -42.0, 0.44, 0.1),
+            ("warm_high_tilt_seed42", 42, 25.0, 0.85, 0.7),
+        ];
+
+        for (name, seed, base_temp_c, axial_tilt_rad, ocean_fraction) in cases {
+            let plates = generate_plates(&PlateGenParams {
+                seed,
+                mass_earth: 1.0,
+                ocean_fraction,
+                tectonics_factor: 0.85,
+                continental_scale: 1.0,
+                num_plates_override: 0,
+                num_continents: 0,
+                continent_size_variety: 0.0,
+            });
+            let terrain = compute.generate(
+                &gpu, &plates, 64, seed, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0, 9.81, 0.85,
+                0.2, 1.0,
+            );
+            let terrain_view = renderer.upload_terrain(&gpu, &terrain);
+            let settings = PreviewUniforms {
+                base_temp_c,
+                axial_tilt_rad,
+                ocean_fraction,
+                view_mode: 12,
+                show_clouds: 0.0,
+                show_atmosphere_layer: 0.0,
+                ..uniforms()
+            };
+            let first = renderer.render(&gpu, &settings, &terrain_view, None, None, 128);
+            assert_eq!(
+                first,
+                renderer.render(&gpu, &settings, &terrain_view, None, None, 128),
+                "{name}"
+            );
+            let covered: Vec<_> = first
+                .chunks_exact(4)
+                .enumerate()
+                .filter(|(index, pixel)| sphere_mask(128, *index) && pixel[0] > 8)
+                .map(|(index, _)| index)
+                .collect();
+            assert!(
+                !covered.is_empty(),
+                "{name}: qualifying climate must form a cap"
+            );
+            let polar_covered = covered
+                .iter()
+                .filter(|index| {
+                    let y = **index / 128;
+                    y < 32 || y >= 96
+                })
+                .count();
+            assert!(
+                polar_covered * 2 > covered.len(),
+                "{name}: coverage must remain in the polar thermal domain"
+            );
+            coverage_counts.push((name, covered.len()));
+
+            let no_ice = PreviewUniforms {
+                show_ice: 0.0,
+                ..settings
+            };
+            let hidden = renderer.render(&gpu, &no_ice, &terrain_view, None, None, 128);
+            assert!(
+                hidden
+                    .chunks_exact(4)
+                    .enumerate()
+                    .all(|(index, pixel)| { !sphere_mask(128, index) || pixel[0..3] == [0, 0, 0] }),
+                "{name}: show_ice=false must retain base materials"
+            );
+
+            let material_settings = PreviewUniforms {
+                view_mode: 0,
+                ..settings
+            };
+            let material =
+                renderer.render(&gpu, &material_settings, &terrain_view, None, None, 128);
+            let base_material = renderer.render(
+                &gpu,
+                &PreviewUniforms {
+                    show_ice: 0.0,
+                    ..material_settings
+                },
+                &terrain_view,
+                None,
+                None,
+                128,
+            );
+            assert_eq!(
+                base_material,
+                renderer.render(
+                    &gpu,
+                    &PreviewUniforms {
+                        show_ice: 0.0,
+                        ..material_settings
+                    },
+                    &terrain_view,
+                    None,
+                    None,
+                    128,
+                ),
+                "{name}: show_ice=false material must be deterministic"
+            );
+            assert_ne!(
+                material, base_material,
+                "{name}: cap must affect normal materials"
+            );
+
+            let elevation = PreviewUniforms {
+                show_biomes: 0.0,
+                show_water: 0.0,
+                ..material_settings
+            };
+            assert_eq!(
+                renderer.render(&gpu, &elevation, &terrain_view, None, None, 128),
+                renderer.render(
+                    &gpu,
+                    &PreviewUniforms {
+                        show_ice: 0.0,
+                        ..elevation
+                    },
+                    &terrain_view,
+                    None,
+                    None,
+                    128,
+                ),
+                "{name}: pure elevation must ignore polar ice albedo"
+            );
+
+            if let Ok(output_dir) = std::env::var("POLAR_CAP_CAPTURE_OUTPUT_DIR") {
+                std::fs::create_dir_all(&output_dir).expect("create polar-cap capture directory");
+                let preview = renderer.render(
+                    &gpu,
+                    &PreviewUniforms {
+                        view_mode: 0,
+                        ..settings
+                    },
+                    &terrain_view,
+                    None,
+                    None,
+                    512,
+                );
+                image::save_buffer(
+                    std::path::Path::new(&output_dir).join(format!("{name}.png")),
+                    &preview,
+                    512,
+                    512,
+                    image::ColorType::Rgba8,
+                )
+                .expect("save polar-cap preview");
+                let coverage = renderer.render(&gpu, &settings, &terrain_view, None, None, 512);
+                image::save_buffer(
+                    std::path::Path::new(&output_dir).join(format!("{name}_ice_coverage.png")),
+                    &coverage,
+                    512,
+                    512,
+                    image::ColorType::Rgba8,
+                )
+                .expect("save polar-cap coverage");
+            }
+        }
+
+        let coverage_for = |name| {
+            coverage_counts
+                .iter()
+                .find_map(|(case, count)| (*case == name).then_some(*count))
+                .expect("known polar-cap scenario")
+        };
+        assert!(coverage_for("ice_world_seed7777") > coverage_for("earth_seed42"));
+        assert!(coverage_for("mars_like_seed42") < coverage_for("ice_world_seed7777"));
+        assert!(coverage_for("warm_high_tilt_seed42") < coverage_for("earth_seed42"));
+    }
+
+    #[test]
     fn cloud_visibility_and_shadow_toggle_plumbing_are_independent() {
         let gpu = GpuContext::new().expect("GPU init failed");
         let terrain = TectonicTerrain {
@@ -2914,20 +3084,16 @@ fn layer_profile_oracle() {
             Some((&dense_weather.mass, &dense_weather.geometry)),
             64,
         );
-        assert!(
-            hidden_shadow
-                .chunks_exact(4)
-                .zip(expected.chunks_exact(4))
-                .enumerate()
-                .any(|(index, (shadowed, clear))| sphere_mask(64, index) && shadowed != clear)
-        );
-        assert!(
-            hidden_shadow
-                .chunks_exact(4)
-                .zip(expected.chunks_exact(4))
-                .enumerate()
-                .all(|(index, (shadowed, clear))| sphere_mask(64, index) || shadowed == clear)
-        );
+        assert!(hidden_shadow
+            .chunks_exact(4)
+            .zip(expected.chunks_exact(4))
+            .enumerate()
+            .any(|(index, (shadowed, clear))| sphere_mask(64, index) && shadowed != clear));
+        assert!(hidden_shadow
+            .chunks_exact(4)
+            .zip(expected.chunks_exact(4))
+            .enumerate()
+            .all(|(index, (shadowed, clear))| sphere_mask(64, index) || shadowed == clear));
 
         assert_eq!(
             renderer.render(
@@ -3349,13 +3515,11 @@ fn layer_profile_oracle() {
             "U4 shadow p95 difference={shadow_p95_difference:.6}"
         );
         assert!(atmosphere_difference > 0.000_01);
-        assert!(
-            shadow_on_pixels
-                .chunks_exact(4)
-                .zip(shadow_off_pixels.chunks_exact(4))
-                .enumerate()
-                .all(|(index, (on, off))| sphere_mask(size, index) || on == off)
-        );
+        assert!(shadow_on_pixels
+            .chunks_exact(4)
+            .zip(shadow_off_pixels.chunks_exact(4))
+            .enumerate()
+            .all(|(index, (on, off))| sphere_mask(size, index) || on == off));
 
         let artifact_dir = std::path::Path::new("/tmp/planet-gen-u4-corrected-768");
         let _ = std::fs::remove_dir_all(artifact_dir);

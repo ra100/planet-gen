@@ -413,6 +413,51 @@ fn compute_temperature(sphere_pos: vec3<f32>, height: f32, season: f32) -> f32 {
     return base_temp + lapse + temp_noise + region_temp_bias + current_temp;
 }
 
+fn thermal_latitude(sphere_pos: vec3<f32>, season: f32) -> f32 {
+    let tilt = uniforms.axial_tilt_rad;
+    let tilted_y = sphere_pos.y * cos(tilt) + sphere_pos.z * sin(tilt);
+    let effective_lat = asin(clamp(tilted_y, -1.0, 1.0));
+    let sub_solar_lat = tilt * ((season - 0.5) * 2.0);
+    return effective_lat - sub_solar_lat;
+}
+
+fn compute_sea_level_temperature(sphere_pos: vec3<f32>, season: f32) -> f32 {
+    let thermal_deg = min(abs(thermal_latitude(sphere_pos, season)) * 180.0 / 3.14159, 90.0);
+    let lat_normalized = thermal_deg / 90.0;
+    let temp_drop = 50.0 * (0.4 * lat_normalized + 0.6 * lat_normalized * lat_normalized);
+    let temp_offset = uniforms.base_temp_c - 15.0;
+    let temp_noise = snoise(sphere_pos * 2.0) * 2.0;
+    let region_temp_bias = snoise(sphere_pos * 0.6 + vec3<f32>(0.0, 400.0, 0.0)) * 4.0;
+    return 30.0 - temp_drop + temp_offset + temp_noise + region_temp_bias;
+}
+
+// Polar caps are a sea-level climate feature. Keeping altitude out of this
+// mask leaves mountain snow to its separate altitude treatment.
+fn polar_ice_coverage(sphere_pos: vec3<f32>, is_ocean: bool) -> f32 {
+    let annual_temp = compute_sea_level_temperature(sphere_pos, 0.5);
+    let seasonal_temp = compute_sea_level_temperature(sphere_pos, uniforms.season);
+    let climate_temp = mix(annual_temp, seasonal_temp, 0.35);
+    let thermal_lat = abs(thermal_latitude(sphere_pos, uniforms.season));
+    let polar_domain = smooth_step(0.80, 1.00, thermal_lat);
+    // Low-frequency breakup only; this is bounded to ±0.55°C at the edge.
+    let edge_temp = 0.5 + snoise(sphere_pos * 0.7 + vec3<f32>(31.0, 0.0, 0.0)) * 0.55;
+    var coverage = polar_domain * smooth_step(edge_temp, edge_temp - 5.0, climate_temp);
+
+    if (!is_ocean) {
+        let height = textureSample(height_tex, height_sampler, sphere_pos).r;
+        let land_height = clamp(
+            (height - uniforms.ocean_level) / max(1.0 - uniforms.ocean_level, 0.01),
+            0.0,
+            1.0,
+        );
+        let lowland = 1.0 - smooth_step(0.15, 0.45, land_height);
+        let moisture = compute_moisture(sphere_pos, height, 0.5);
+        // Dry lowlands remain polar desert/rock instead of becoming a white cap.
+        coverage *= mix(1.0, smooth_step(25.0, 65.0, moisture), lowland);
+    }
+    return coverage;
+}
+
 fn wind_height_sample(direction: vec3<f32>) -> f32 {
     return textureSample(height_tex, height_sampler, direction).r;
 }
@@ -946,16 +991,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let tilted_y_main = rotated.y * cos(tilt_main) + rotated.z * sin(tilt_main);
     let effective_lat = asin(clamp(tilted_y_main, -1.0, 1.0));
 
+    let pure_elevation = uniforms.show_biomes < 0.5 && uniforms.show_water < 0.5;
     var surface_color: vec3<f32>;
-    var ice_amount = 0.0; // tracks ice coverage for HDR override
+    let polar_ice = select(0.0, polar_ice_coverage(rotated, is_ocean), uniforms.show_ice > 0.5);
 
     // Base layer: when biomes OFF, always show clean grayscale elevation for everything
-    if (uniforms.show_biomes < 0.5 && uniforms.show_water < 0.5) {
+    if (pure_elevation) {
         // Pure elevation mode — no ocean/land distinction, just height
         surface_color = height_color(height, uniforms.ocean_level);
     } else if (is_ocean && uniforms.show_water > 0.5) {
         // Smooth ocean gradient: shallow → deep with continuous depth color
-        let ocean_temp = compute_temperature(rotated, height, uniforms.season);
         let raw_depth = (uniforms.ocean_level - height) / max(uniforms.ocean_level + 1.0, 0.5);
         let depth = clamp(raw_depth, 0.0, 1.0);
         let depth_noise = snoise(rotated * 8.0) * 0.02;
@@ -968,22 +1013,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         var ocean_color = mix(near_shore, mix(mid_ocean, deep_ocean, abyss), shelf);
         ocean_color += vec3<f32>(0.0, 0.015, 0.02) * color_var;
 
-        // Polar sea ice (gated by show_ice)
-        if (uniforms.show_ice > 0.5) {
-            let ice_edge_noise = snoise(rotated * 12.0) * 1.5;
-            let ice_temp_threshold = 3.0 + ice_edge_noise;
-            let ice_blend = smooth_step(ice_temp_threshold, ice_temp_threshold - 5.0, ocean_temp);
-            ice_amount = ice_blend;
-
-            let ice_thickness = smooth_step(ice_temp_threshold - 1.0, ice_temp_threshold - 8.0, ocean_temp);
-            let thin_ice = vec3<f32>(0.85, 0.92, 1.05);
-            let thick_ice = vec3<f32>(1.15, 1.18, 1.22);
-            var ice_color = mix(thin_ice, thick_ice, ice_thickness);
-            let ridge_noise = snoise(rotated * 25.0) * 0.06 + snoise(rotated * 50.0) * 0.03;
-            ice_color += vec3<f32>(ridge_noise) * ice_thickness;
-            ice_color += vec3<f32>(0.015) * color_var;
-            ocean_color = mix(ocean_color, ice_color, ice_blend);
-        }
         surface_color = ocean_color;
     } else if (is_ocean) {
         // Water OFF but biomes ON: show height-based grayscale for below-sea-level
@@ -1027,8 +1056,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let altitude_bonus = smooth_step(0.3, 0.6, land_height) * smooth_step(5.0, -5.0, seasonal_temp);
             var ice_blend = max(cold_snow, altitude_bonus);
             ice_blend *= slope_factor * altitude_dryness;
-            ice_amount = max(ice_amount, ice_blend);
-
             let glacier_blue = vec3<f32>(1.05, 1.15, 1.25);
             let fresh_snow = vec3<f32>(1.20, 1.22, 1.25) + vec3<f32>(0.015) * color_var;
             let land_ice_color = mix(fresh_snow, glacier_blue, land_height * cold_snow);
@@ -1097,15 +1124,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
 
+    // One blue-white albedo for the shared ocean/land polar cap boundary.
+    if (!pure_elevation && polar_ice > 0.0) {
+        let polar_ice_albedo = vec3<f32>(0.72, 0.82, 0.89) + vec3<f32>(color_var * 0.015);
+        surface_color = mix(surface_color, polar_ice_albedo, polar_ice);
+    }
+
     // Polar coastline softening (gated by show_ice)
-    if (uniforms.show_ice > 0.5 && ice_amount > 0.3 && is_ocean == false) {
-        let coast_temp = compute_temperature(rotated, uniforms.ocean_level, uniforms.season);
-        if (coast_temp < 0.0) { // only if the ocean here would also be frozen
-            let coast_dist = abs(height - uniforms.ocean_level);
-            let coast_soften = 1.0 - smooth_step(0.0, 0.06, coast_dist);
-            let uniform_ice = vec3<f32>(1.12, 1.16, 1.22);
-            surface_color = mix(surface_color, uniform_ice, coast_soften * ice_amount * 0.8);
-        }
+    if (!pure_elevation && uniforms.show_ice > 0.5 && polar_ice > 0.3 && is_ocean == false) {
+        let coast_dist = abs(height - uniforms.ocean_level);
+        let coast_soften = 1.0 - smooth_step(0.0, 0.06, coast_dist);
+        let uniform_ice = vec3<f32>(0.72, 0.82, 0.89);
+        surface_color = mix(surface_color, uniform_ice, coast_soften * polar_ice * 0.8);
     }
 
     // Day-side urban grey patches (gated by show_cities)
@@ -1231,8 +1261,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 debug_color = vec3<f32>(convergent_str, transform_str, divergent_str);
             }
             case 12u: {
-                // Snow/ice coverage — show ice_amount as grayscale
-                debug_color = vec3<f32>(ice_amount, ice_amount, ice_amount);
+                // Unified climate-driven polar coverage; altitude snow is separate.
+                debug_color = vec3<f32>(polar_ice, polar_ice, polar_ice);
             }
             case 13u: {
                 // Terrain normals — visualize shading_normal as RGB (normal map style)
@@ -1335,8 +1365,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let h_dot_v = max(dot(half_vec, view_dir), 0.0);
 
     // Roughness and Fresnel base reflectance
-    let ocean_temp = compute_temperature(rotated, height, uniforms.season);
-    let ocean_ice = is_ocean && ocean_temp < -2.0;
+    let ocean_ice = is_ocean && !pure_elevation && polar_ice > 0.01;
     let temp_for_rough = compute_temperature(rotated, height, uniforms.season);
     let moist_for_rough = compute_moisture(rotated, height, uniforms.season);
     let roughness = compute_roughness(temp_for_rough, moist_for_rough, is_ocean, ocean_ice);
@@ -1385,19 +1414,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     // ---- Ocean sun glint (specular highlight on water) ----
-    if (is_ocean && !ocean_ice) {
+    if (is_ocean && (pure_elevation || polar_ice < 0.01)) {
         // Blinn-Phong sun glint: tight specular on smooth water
         let glint_power = 256.0; // very tight highlight
         let glint_spec = pow(max(dot(normal, half_vec), 0.0), glint_power);
         let glint_fresnel = fresnel_schlick(max(dot(half_vec, view_dir), 0.0), 0.04);
         let glint = glint_spec * glint_fresnel * n_dot_l * 8.0; // HDR bright
         lit_color += s_color * glint;
-    }
-
-    // Ice/snow brightness override (gated by show_ice)
-    if (uniforms.show_ice > 0.5 && ice_amount > 0.01) {
-        let ice_lit = s_color * (n_dot_l * 3.5 + 1.0); // HDR bright → tonemaps to white
-        lit_color = mix(lit_color, ice_lit, ice_amount);
     }
 
     // ---- Night-side city lights (gated by show_cities) ----
