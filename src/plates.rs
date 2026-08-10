@@ -6,6 +6,8 @@ use bytemuck::{Pod, Zeroable};
 pub struct PlateGpu {
     pub center: [f32; 3],
     pub plate_type: f32, // 1.0 = continental, 0.0 = oceanic
+    /// Euler angular velocity (ω), not a velocity sampled at `center`.
+    /// Shaders derive local tangential velocity with `cross(ω, position)`.
     pub velocity: [f32; 3],
     pub _pad: f32,
 }
@@ -46,7 +48,7 @@ pub fn generate_plates(params: &PlateGenParams) -> Vec<PlateGpu> {
     // Ensure enough total plates: at least num_continents + 3 oceanic plates for ocean coverage
     let n = base_n.max(continental_count + 3);
     let centers = fibonacci_sphere(n, params.seed);
-    let velocities = generate_velocities(n, params.seed, params.tectonics_factor, &centers);
+    let velocities = generate_angular_velocities(n, params.seed, params.tectonics_factor);
 
     // Assign continental/oceanic by seed-based scoring, not index order.
     // This prevents continental plates from clustering at one pole.
@@ -85,19 +87,12 @@ pub fn generate_plates(params: &PlateGenParams) -> Vec<PlateGpu> {
         }
     }
 
-    // Recompute velocities with the (possibly shifted) centers
-    let final_velocities = if params.continent_size_variety > 0.0 {
-        generate_velocities(n, params.seed, params.tectonics_factor, &final_centers)
-    } else {
-        velocities
-    };
-
     let mut plates = Vec::with_capacity(n);
     for i in 0..n {
         plates.push(PlateGpu {
             center: final_centers[i],
             plate_type: if continental_indices[i] { 1.0 } else { 0.0 },
-            velocity: final_velocities[i],
+            velocity: velocities[i],
             _pad: 0.0,
         });
     }
@@ -145,21 +140,17 @@ fn fibonacci_sphere(n: usize, seed: u32) -> Vec<[f32; 3]> {
     points
 }
 
-/// Generate velocity vectors for each plate, tangent to the sphere surface.
-/// Uses an Euler pole rotation model: each plate rotates around a seed-derived
-/// pole axis, giving velocity = cross(pole, center) * speed.
-/// The radial component is explicitly projected out to guarantee tangency.
-/// Requires the actual plate centers so the projection is accurate.
-fn generate_velocities(
-    n: usize,
-    seed: u32,
-    tectonics_factor: f32,
-    centers: &[[f32; 3]],
-) -> Vec<[f32; 3]> {
+/// Generate seed-derived Euler angular velocities for each plate.
+/// Local tangential velocity is derived in the shader as `cross(ω, position)`.
+fn generate_angular_velocities(n: usize, seed: u32, tectonics_factor: f32) -> Vec<[f32; 3]> {
+    if tectonics_factor == 0.0 {
+        return vec![[0.0; 3]; n];
+    }
+
     let mut velocities = Vec::with_capacity(n);
     let speed = tectonics_factor * 0.5;
 
-    for (i, &center) in centers.iter().take(n).enumerate() {
+    for i in 0..n {
         // Each plate gets a unique Euler rotation pole derived from its index + seed
         let pole_seed = seed.wrapping_add(1000);
         let px = hash_f32(pole_seed, i as u32, 0);
@@ -168,24 +159,7 @@ fn generate_velocities(
         let pole_len = (px * px + py * py + pz * pz).sqrt().max(1e-6);
         let pole = [px / pole_len, py / pole_len, pz / pole_len];
 
-        // cross(pole, center) — nominally tangent to sphere at center
-        let vx = pole[1] * center[2] - pole[2] * center[1];
-        let vy = pole[2] * center[0] - pole[0] * center[2];
-        let vz = pole[0] * center[1] - pole[1] * center[0];
-
-        // Project out radial component: v_tangent = v - dot(v, center) * center
-        // (center is already a unit vector since it's on the unit sphere)
-        let dot_vc = vx * center[0] + vy * center[1] + vz * center[2];
-        let tx = vx - dot_vc * center[0];
-        let ty = vy - dot_vc * center[1];
-        let tz = vz - dot_vc * center[2];
-
-        let t_len = (tx * tx + ty * ty + tz * tz).sqrt().max(1e-6);
-        velocities.push([
-            (tx / t_len) * speed,
-            (ty / t_len) * speed,
-            (tz / t_len) * speed,
-        ]);
+        velocities.push([pole[0] * speed, pole[1] * speed, pole[2] * speed]);
     }
     velocities
 }
@@ -205,6 +179,37 @@ fn hash_f32(seed: u32, index: u32, channel: u32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn local_velocity(omega: [f32; 3], position: [f32; 3]) -> [f32; 3] {
+        [
+            omega[1] * position[2] - omega[2] * position[1],
+            omega[2] * position[0] - omega[0] * position[2],
+            omega[0] * position[1] - omega[1] * position[0],
+        ]
+    }
+
+    fn magnitude(vector: [f32; 3]) -> f32 {
+        (vector[0].powi(2) + vector[1].powi(2) + vector[2].powi(2)).sqrt()
+    }
+
+    fn boundary_classification_and_stress(
+        velocity_a: [f32; 3],
+        velocity_b: [f32; 3],
+        boundary_normal: [f32; 3],
+    ) -> (f32, f32) {
+        let approach_speed = (velocity_a[0] - velocity_b[0]) * boundary_normal[0]
+            + (velocity_a[1] - velocity_b[1]) * boundary_normal[1]
+            + (velocity_a[2] - velocity_b[2]) * boundary_normal[2];
+        (
+            (-approach_speed * 5.0).clamp(-1.0, 1.0),
+            (approach_speed * 3.0).clamp(0.0, 1.0),
+        )
+    }
+
+    #[test]
+    fn plate_gpu_layout_is_32_bytes() {
+        assert_eq!(std::mem::size_of::<PlateGpu>(), 32);
+    }
 
     #[test]
     fn earth_like_plate_count() {
@@ -354,6 +359,46 @@ mod tests {
     }
 
     #[test]
+    fn angular_velocities_are_finite_and_deterministic() {
+        let params = PlateGenParams {
+            seed: 42,
+            mass_earth: 1.0,
+            ocean_fraction: 0.7,
+            tectonics_factor: 0.85,
+            continental_scale: 1.0,
+            num_plates_override: 8,
+            num_continents: 0,
+            continent_size_variety: 0.5,
+        };
+        let first = generate_plates(&params);
+        let second = generate_plates(&params);
+
+        for (first, second) in first.iter().zip(second.iter()) {
+            assert!(first.velocity.iter().all(|component| component.is_finite()));
+            assert_eq!(
+                first.velocity.map(f32::to_bits),
+                second.velocity.map(f32::to_bits)
+            );
+        }
+    }
+
+    #[test]
+    fn zero_tectonics_produces_zero_angular_velocity() {
+        let plates = generate_plates(&PlateGenParams {
+            seed: 42,
+            mass_earth: 1.0,
+            ocean_fraction: 0.7,
+            tectonics_factor: 0.0,
+            continental_scale: 1.0,
+            num_plates_override: 8,
+            num_continents: 0,
+            continent_size_variety: 0.5,
+        });
+
+        assert!(plates.iter().all(|plate| plate.velocity == [0.0, 0.0, 0.0]));
+    }
+
+    #[test]
     fn velocities_scale_with_tectonics_factor() {
         let plates_low = generate_plates(&PlateGenParams {
             seed: 42,
@@ -394,7 +439,7 @@ mod tests {
     }
 
     #[test]
-    fn velocities_tangent_to_sphere() {
+    fn local_euler_velocities_are_tangent_to_sphere() {
         let params = PlateGenParams {
             seed: 42,
             mass_earth: 1.0,
@@ -407,25 +452,68 @@ mod tests {
         };
         let plates = generate_plates(&params);
         for (i, p) in plates.iter().enumerate() {
-            // dot(velocity, center) should be ~0 for tangent vectors
-            let dot = p.velocity[0] * p.center[0]
-                + p.velocity[1] * p.center[1]
-                + p.velocity[2] * p.center[2];
-            let v_mag =
-                (p.velocity[0].powi(2) + p.velocity[1].powi(2) + p.velocity[2].powi(2)).sqrt();
-            // Normalize dot by velocity magnitude; should be small
-            let normalized_dot = if v_mag > 1e-6 {
-                (dot / v_mag).abs()
-            } else {
-                0.0
-            };
+            let velocity = local_velocity(p.velocity, p.center);
+            let dot =
+                velocity[0] * p.center[0] + velocity[1] * p.center[1] + velocity[2] * p.center[2];
             assert!(
-                normalized_dot < 0.1,
-                "Plate {} velocity not tangent to sphere: normalized dot = {:.4}",
+                dot.abs() < 1e-6,
+                "Plate {} local velocity not tangent to sphere: dot = {:.4}",
                 i,
-                normalized_dot
+                dot
             );
         }
+    }
+
+    #[test]
+    fn euler_pole_has_near_zero_local_velocity() {
+        let omega = [0.3, -0.4, 0.0];
+        let omega_magnitude = magnitude(omega);
+        let pole = [
+            omega[0] / omega_magnitude,
+            omega[1] / omega_magnitude,
+            omega[2] / omega_magnitude,
+        ];
+
+        assert!(magnitude(local_velocity(omega, pole)) < 1e-6);
+    }
+
+    #[test]
+    fn euler_velocity_matches_90_degree_magnitude() {
+        let omega = [0.0, 0.0, 0.5];
+        let equatorial_position = [1.0, 0.0, 0.0];
+
+        assert!(
+            (magnitude(local_velocity(omega, equatorial_position)) - magnitude(omega)).abs() < 1e-6
+        );
+    }
+
+    #[test]
+    fn local_motion_classifies_convergence_and_stress_deterministically() {
+        let position = [0.0, 0.0, 1.0];
+        let boundary_normal_a_to_b = [1.0, 0.0, 0.0];
+        let convergent_a = local_velocity([0.0, 1.0, 0.0], position);
+        let convergent_b = local_velocity([0.0, -1.0, 0.0], position);
+        let divergent_a = local_velocity([0.0, -1.0, 0.0], position);
+        let divergent_b = local_velocity([0.0, 1.0, 0.0], position);
+
+        let convergent =
+            boundary_classification_and_stress(convergent_a, convergent_b, boundary_normal_a_to_b);
+        let divergent =
+            boundary_classification_and_stress(divergent_a, divergent_b, boundary_normal_a_to_b);
+
+        assert!(
+            convergent.0 < 0.0,
+            "convergent boundary must classify negative"
+        );
+        assert!(
+            convergent.1 > 0.0,
+            "convergent boundary must have positive stress"
+        );
+        assert!(
+            divergent.0 > 0.0,
+            "divergent boundary must classify positive"
+        );
+        assert_eq!(divergent.1, 0.0, "divergent boundary must have zero stress");
     }
 
     #[test]

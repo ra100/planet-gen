@@ -177,7 +177,7 @@ Three-tier tectonic simulation with UI toggle between modes.
 |------|------|-----|---------|--------|
 | 9a.1 | Research: survey tectonic plate simulation techniques | Research doc in docs/research/ | - | cc:TODO |
 
-(8a.2-8a.6 completed: Euler pole velocities, boundary classification, subduction/rift terrain, perf benchmark)
+(FE-054: local Euler plate velocities, boundary classification, subduction/rift terrain, and perf benchmark verified; cc:完了)
 
 ### Phase 9b: Plate Motion Simulation (continental drift)
 

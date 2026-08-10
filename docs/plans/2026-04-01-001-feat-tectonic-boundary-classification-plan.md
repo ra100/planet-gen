@@ -49,6 +49,7 @@ All plate boundaries currently produce mountains regardless of geological contex
 - **Classify on CPU, encode for GPU**: Compute velocity vectors and boundary types on CPU in `plates.rs`. Encode boundary type into the plate data buffer passed to the GPU. The GPU shader reads the type and generates terrain accordingly.
 - **Boundary type as per-pixel computation**: At each pixel, the shader already knows the two nearest plates. It can look up their velocity vectors and determine the boundary type on-the-fly. This avoids storing a separate boundary type buffer.
 - **Velocity from physics**: `speed ∝ sqrt(Ra)` where Rayleigh number Ra ∝ mass × rotation_factor. Direction is Euler pole rotation derived from seed. This reuses the existing `tectonics_factor` from `DerivedProperties`.
+- **FE-054 verified local Euler velocities**: `PlateGpu` remains 32 bytes and stores Euler angular velocity `ω`, not a center-sampled linear velocity. Both terrain shaders derive each local tangential velocity as `ω × position`, then use the relative local velocity with the corrected boundary-stress sign convention. Fold ridges skip normalization when the local velocity is near zero at an Euler pole.
 
 ## Open Questions
 
@@ -64,7 +65,7 @@ All plate boundaries currently produce mountains regardless of geological contex
 
 ## Implementation Units
 
-- [ ] **Unit 1: Add plate velocities to PlateData**
+- [x] **Unit 1: Add plate velocities to PlateData** (FE-054, verified)
 
   **Goal:** Generate physics-derived velocity vectors for each plate on CPU.
 
@@ -76,20 +77,21 @@ All plate boundaries currently produce mountains regardless of geological contex
   - Modify: `src/plates.rs` (PlateData struct, generate_plates fn)
 
   **Approach:**
-  - Add `velocity: [f32; 3]` to `PlateData`
+  - Keep the 32-byte `PlateGpu` layout and store `velocity: [f32; 3]` as Euler angular velocity `ω`
   - Velocity magnitude: `base_speed * tectonics_factor * (rotation_period_factor)`
-  - Direction: Euler pole rotation — cross product of plate center with a seed-derived axis, giving tangential motion on sphere surface
+  - Derive local velocity in shaders as `cross(ω, position)`, giving tangential motion at each sampled sphere position
   - Each plate gets a unique direction from `fract(sin(plate_index * hash) * large_prime)`
 
   **Patterns to follow:**
   - Existing `PlateData` struct fields and generation logic in `plates.rs`
 
   **Test scenarios:**
-  - Happy path: `generate_plates()` returns plates with non-zero velocity vectors
+  - Happy path: `generate_plates()` returns finite, deterministic Euler angular velocities
   - Happy path: Velocity magnitudes scale with `tectonics_factor`
-  - Edge case: All velocity vectors are tangent to the sphere (dot(velocity, center) ≈ 0)
+  - Edge case: Local `ω × position` velocity is tangent to the sphere and approaches zero at the Euler pole
+  - Boundary convention: convergent classification is negative and has positive collision stress; divergent classification is positive and has zero collision stress
 
-  **Verification:** Plates have velocity vectors, tests pass.
+  **Verification:** `PlateGpu` is 32 bytes; local Euler velocity, boundary-stress convention, and pole fold guard tests pass; `cargo test --lib` and `cargo build` pass. No debug view, geological time stepping, or collision/rift history was added.
 
 - [ ] **Unit 2: UI dropdown for Tectonics Mode**
 

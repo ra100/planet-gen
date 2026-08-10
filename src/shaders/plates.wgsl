@@ -6,7 +6,7 @@
 struct Plate {
     center: vec3<f32>,
     plate_type: f32, // 1.0 = continental, 0.0 = oceanic
-    velocity: vec3<f32>,
+    velocity: vec3<f32>, // Euler angular velocity (ω)
     _pad: f32,
 }
 
@@ -162,14 +162,13 @@ fn find_nearest_plates(sphere_pos: vec3<f32>) -> PlateInfo {
 // Classify boundary type from relative plate motion
 // Returns: -1 = convergent, 0 = transform, 1 = divergent
 fn classify_boundary(sphere_pos: vec3<f32>, plate_a: u32, plate_b: u32) -> f32 {
-    let rel_velocity = plates[plate_a].velocity - plates[plate_b].velocity;
+    let velocity_a = cross(plates[plate_a].velocity, sphere_pos);
+    let velocity_b = cross(plates[plate_b].velocity, sphere_pos);
+    let rel_velocity = velocity_a - velocity_b;
     // Boundary normal: direction from one plate center to the other
     let boundary_normal = normalize(plates[plate_b].center - plates[plate_a].center);
-    let convergence = dot(rel_velocity, boundary_normal);
-
-    // Positive = plates moving apart (divergent)
-    // Negative = plates moving together (convergent)
-    return clamp(convergence * 5.0, -1.0, 1.0);
+    let approach_speed = dot(rel_velocity, boundary_normal);
+    return -clamp(approach_speed * 5.0, -1.0, 1.0);
 }
 
 // Gaussian-like falloff from boundary

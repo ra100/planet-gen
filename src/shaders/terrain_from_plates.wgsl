@@ -5,7 +5,7 @@
 struct Plate {
     center: vec3<f32>,
     plate_type: f32,
-    velocity: vec3<f32>,
+    velocity: vec3<f32>, // Euler angular velocity (ω)
     _pad: f32,
 }
 
@@ -107,19 +107,27 @@ fn warp_position(pos: vec3<f32>) -> vec3<f32> {
     return normalize(pos + (warp1 + warp2) * w);
 }
 
+fn local_velocity(angular_velocity: vec3<f32>, pos: vec3<f32>) -> vec3<f32> {
+    return cross(angular_velocity, pos);
+}
+
 // Classify boundary: convergent (-1), transform (0), divergent (+1)
 fn classify_boundary(pos: vec3<f32>, plate_a_idx: u32, plate_b_idx: u32) -> f32 {
-    let rel_velocity = plates[plate_a_idx].velocity - plates[plate_b_idx].velocity;
+    let velocity_a = local_velocity(plates[plate_a_idx].velocity, pos);
+    let velocity_b = local_velocity(plates[plate_b_idx].velocity, pos);
+    let rel_velocity = velocity_a - velocity_b;
     let boundary_normal = normalize(plates[plate_b_idx].center - plates[plate_a_idx].center);
-    let convergence = dot(rel_velocity, boundary_normal);
-    return clamp(convergence * 5.0, -1.0, 1.0);
+    let approach_speed = dot(rel_velocity, boundary_normal);
+    return -clamp(approach_speed * 5.0, -1.0, 1.0);
 }
 
 // Compute collision stress magnitude (0 = no stress, 1 = max collision)
-fn compute_stress(plate_a_idx: u32, plate_b_idx: u32) -> f32 {
-    let rel_vel = plates[plate_a_idx].velocity - plates[plate_b_idx].velocity;
+fn compute_stress(pos: vec3<f32>, plate_a_idx: u32, plate_b_idx: u32) -> f32 {
+    let velocity_a = local_velocity(plates[plate_a_idx].velocity, pos);
+    let velocity_b = local_velocity(plates[plate_b_idx].velocity, pos);
+    let rel_vel = velocity_a - velocity_b;
     let boundary_normal = normalize(plates[plate_b_idx].center - plates[plate_a_idx].center);
-    let approach_speed = -dot(rel_vel, boundary_normal); // positive when converging
+    let approach_speed = dot(rel_vel, boundary_normal); // positive when converging
     return clamp(approach_speed * 3.0, 0.0, 1.0);
 }
 
@@ -196,7 +204,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         let pa = u32(jfa.plate_a);
         let pb = u32(jfa.plate_b);
         let btype = classify_boundary(wpos, pa, pb);
-        let stress = compute_stress(pa, pb);
+        let stress = compute_stress(wpos, pa, pb);
         let sf = compute_subduction_factor(pa, pb);
 
         // Convergent: mountains
@@ -219,13 +227,15 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             height -= trench_zone * stress * 0.15 * tect;
 
             // R7: Fold ridges parallel to plate motion (Euler pole direction)
-            let plate_vel = plates[my_plate].velocity;
-            let vel_dir = normalize(plate_vel + vec3<f32>(0.001, 0.001, 0.001)); // avoid zero
-            let fold_freq = 45.0;
-            let fold_alignment = abs(dot(normalize(wpos), vel_dir));
-            let fold_ridges = snoise(wpos * fold_freq + seed_offset(params.seed + 7000u));
-            let fold_val = abs(fold_ridges) * fold_alignment;
-            height += fold_val * mountain_falloff * convergence * stress * 0.08 * tect;
+            let plate_vel = local_velocity(plates[my_plate].velocity, wpos);
+            if (length(plate_vel) > 1e-5) {
+                let vel_dir = normalize(plate_vel);
+                let fold_freq = 45.0;
+                let fold_alignment = abs(dot(normalize(wpos), vel_dir));
+                let fold_ridges = snoise(wpos * fold_freq + seed_offset(params.seed + 7000u));
+                let fold_val = abs(fold_ridges) * fold_alignment;
+                height += fold_val * mountain_falloff * convergence * stress * 0.08 * tect;
+            }
         }
 
         // R8: Divergent boundaries — mid-ocean ridges and rift valleys
@@ -251,7 +261,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     // Compute local stress for detail amplitude scaling
     var local_stress = 0.0;
     if (jfa.plate_b >= 0 && jfa.seed_x >= 0) {
-        local_stress = compute_stress(u32(jfa.plate_a), u32(jfa.plate_b));
+        local_stress = compute_stress(wpos, u32(jfa.plate_a), u32(jfa.plate_b));
         // Stress decays with distance from boundary
         let stress_reach = 0.15;
         local_stress *= exp(-norm_dist / stress_reach);
