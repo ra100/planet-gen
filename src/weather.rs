@@ -8,6 +8,9 @@ use wgpu::util::DeviceExt;
 /// Preview weather stays independent of viewport and export resolution.
 pub const DEFAULT_WEATHER_RESOLUTION: u32 = 384;
 pub const WEATHER_DIAGNOSTIC_NO_SOURCE: u32 = 1;
+/// Validation-only: continue transport without converting vapor into cloud phases.
+#[cfg(any(test, feature = "validation"))]
+const WEATHER_DIAGNOSTIC_NO_PHASE_CHANGE: u32 = 4;
 
 /// Each `Rgba16Float` cubemap uses `6 * resolution^2 * 8` bytes.
 /// Mass channels are low, deep, high, occupancy. Geometry channels are
@@ -118,6 +121,17 @@ pub struct WeatherTextures {
     pub mass: wgpu::TextureView,
     pub geometry: wgpu::TextureView,
     pub resolution: u32,
+}
+
+/// Paired validation-only continuations from one immutable spin-up state.
+///
+/// This deliberately has no production call site: preview and export continue to use
+/// [`WeatherFieldPipeline::generate`].
+#[cfg(any(test, feature = "validation"))]
+#[doc(hidden)]
+pub struct ValidationContinuation {
+    pub advected_mass: Vec<f32>,
+    pub full_mass: Vec<f32>,
 }
 
 fn read_weather_cube_texture(
@@ -949,6 +963,331 @@ impl WeatherFieldPipeline {
         }
         gpu.queue.submit(Some(encoder.finish()));
     }
+
+    #[cfg(feature = "validation")]
+    #[doc(hidden)]
+    pub fn validation_paired_continuation_for_sweep(
+        &self,
+        gpu: &GpuContext,
+        source_snapshot: WeatherSnapshot,
+        source_terrain: &TectonicTerrain,
+        source_dynamics: &DynamicsTextures,
+        continuation_snapshot: WeatherSnapshot,
+        continuation_terrain: &TectonicTerrain,
+        continuation_dynamics: &DynamicsTextures,
+    ) -> ValidationContinuation {
+        self.paired_validation_continuation(
+            gpu,
+            source_snapshot,
+            source_terrain,
+            source_dynamics,
+            continuation_snapshot,
+            continuation_terrain,
+            continuation_dynamics,
+        )
+    }
+
+    /// Validation/test-only paired continuations from a single upstream front.
+    #[cfg(any(test, feature = "validation"))]
+    fn paired_validation_continuation(
+        &self,
+        gpu: &GpuContext,
+        source_snapshot: WeatherSnapshot,
+        source_terrain: &TectonicTerrain,
+        source_dynamics: &DynamicsTextures,
+        continuation_snapshot: WeatherSnapshot,
+        continuation_terrain: &TectonicTerrain,
+        continuation_dynamics: &DynamicsTextures,
+    ) -> ValidationContinuation {
+        let (source_state, _) = self.validation_spinup_state(
+            gpu,
+            source_snapshot,
+            source_terrain,
+            source_dynamics,
+            None,
+            0,
+            self.spinup_iterations,
+        );
+        let advected_mass = self.validation_spinup_state(
+            gpu,
+            continuation_snapshot,
+            continuation_terrain,
+            continuation_dynamics,
+            Some(&source_state),
+            WEATHER_DIAGNOSTIC_NO_PHASE_CHANGE,
+            1,
+        );
+        let full_mass = self.validation_spinup_state(
+            gpu,
+            continuation_snapshot,
+            continuation_terrain,
+            continuation_dynamics,
+            Some(&source_state),
+            0,
+            1,
+        );
+        ValidationContinuation {
+            advected_mass: advected_mass.1,
+            full_mass: full_mass.1,
+        }
+    }
+
+    #[cfg(any(test, feature = "validation"))]
+    fn validation_spinup_state(
+        &self,
+        gpu: &GpuContext,
+        snapshot: WeatherSnapshot,
+        terrain: &TectonicTerrain,
+        dynamics: &DynamicsTextures,
+        initial_state: Option<&[f32]>,
+        diagnostic_flags: u32,
+        iterations: usize,
+    ) -> (Vec<f32>, Vec<f32>) {
+        assert_eq!(snapshot.resolution, terrain.resolution);
+        let output = self.create_textures(gpu, snapshot.resolution);
+        let spin_resolution = snapshot.resolution.clamp(2, SPINUP_RESOLUTION);
+        let expected_state_values = spin_resolution as usize * spin_resolution as usize * 6 * 4;
+        if let Some(state) = initial_state {
+            assert_eq!(state.len(), expected_state_values);
+        }
+        let params = SpinupParams {
+            spin_resolution,
+            output_resolution: snapshot.resolution,
+            seed: snapshot.seed,
+            storm_count: snapshot.storm_count,
+            coverage: snapshot.coverage,
+            moisture: snapshot.moisture,
+            surface_pressure_bar: snapshot.surface_pressure_bar,
+            base_temp_c: snapshot.base_temp_c,
+            ocean_level: snapshot.ocean_level,
+            axial_tilt_rad: snapshot.axial_tilt_rad,
+            season: snapshot.season,
+            storm_size: snapshot.storm_size,
+            radius_km: snapshot.radius_km,
+            rotation_rate_rad_s: snapshot.rotation_rate_rad_s,
+            diagnostic_flags,
+            wind_scale: snapshot.wind_scale,
+        };
+        let uniform = gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("validation weather spin-up params"),
+                contents: bytemuck::bytes_of(&params),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let heights: Vec<_> = terrain
+            .faces
+            .iter()
+            .flat_map(|face| {
+                (0..snapshot.resolution).flat_map(move |y| {
+                    (0..snapshot.resolution).map(move |x| {
+                        let source_resolution = (face.len() as f32).sqrt() as u32;
+                        face[(y * source_resolution / snapshot.resolution * source_resolution
+                            + x * source_resolution / snapshot.resolution)
+                            as usize]
+                    })
+                })
+            })
+            .collect();
+        let height = gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("validation weather height"),
+                contents: bytemuck::cast_slice(&heights),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+        let state = |label| {
+            let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width: spin_resolution,
+                    height: spin_resolution,
+                    depth_or_array_layers: 6,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsages::STORAGE_BINDING
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            SpinupTexture {
+                sampled: texture.create_view(&wgpu::TextureViewDescriptor {
+                    dimension: Some(wgpu::TextureViewDimension::Cube),
+                    ..Default::default()
+                }),
+                array: texture.create_view(&wgpu::TextureViewDescriptor {
+                    dimension: Some(wgpu::TextureViewDimension::D2Array),
+                    ..Default::default()
+                }),
+                storage: texture.create_view(&wgpu::TextureViewDescriptor {
+                    dimension: Some(wgpu::TextureViewDimension::D2Array),
+                    ..Default::default()
+                }),
+                _texture: texture,
+            }
+        };
+        let state_a = state("validation weather state A");
+        let state_b = state("validation weather state B");
+        if let Some(values) = initial_state {
+            write_validation_state(gpu, &state_a._texture, spin_resolution, values);
+        }
+        let init = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("validation weather init"),
+            layout: &self.spinup_init_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&dynamics.wind_continentality),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: height.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::TextureView(&state_a.storage),
+                },
+            ],
+        });
+        let transport = |source: &SpinupTexture, target: &SpinupTexture| {
+            gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("validation weather transport"),
+                layout: &self.spinup_transport_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: uniform.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&dynamics.wind_continentality),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&dynamics.pressure),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: height.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: wgpu::BindingResource::TextureView(&source.array),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: wgpu::BindingResource::TextureView(&target.storage),
+                    },
+                ],
+            })
+        };
+        let a_to_b = transport(&state_a, &state_b);
+        let b_to_a = transport(&state_b, &state_a);
+        let passes =
+            iterations * wind_substeps(snapshot.wind_scale, spin_resolution, snapshot.radius_km);
+        let final_state = if passes.is_multiple_of(2) {
+            &state_a
+        } else {
+            &state_b
+        };
+        let finalize = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("validation weather finalize"),
+            layout: &self.spinup_finalize_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(&final_state.array),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: wgpu::BindingResource::TextureView(&output.mass_storage),
+                },
+            ],
+        });
+        let workgroups = spin_resolution.div_ceil(8);
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        if initial_state.is_none() {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&self.spinup_init_pipeline);
+            pass.set_bind_group(0, &init, &[]);
+            pass.dispatch_workgroups(workgroups, workgroups, 6);
+        }
+        for iteration in 0..passes {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&self.spinup_transport_pipeline);
+            pass.set_bind_group(0, if iteration % 2 == 0 { &a_to_b } else { &b_to_a }, &[]);
+            pass.dispatch_workgroups(workgroups, workgroups, 6);
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&self.spinup_finalize_pipeline);
+            pass.set_bind_group(0, &finalize, &[]);
+            pass.dispatch_workgroups(
+                snapshot.resolution.div_ceil(8),
+                snapshot.resolution.div_ceil(8),
+                6,
+            );
+        }
+        gpu.queue.submit(Some(encoder.finish()));
+        (
+            read_weather_cube_texture(gpu, &final_state._texture, spin_resolution),
+            output.read_mass(gpu),
+        )
+    }
+}
+
+#[cfg(any(test, feature = "validation"))]
+fn write_validation_state(
+    gpu: &GpuContext,
+    texture: &wgpu::Texture,
+    resolution: u32,
+    values: &[f32],
+) {
+    let row_bytes = resolution as usize * 8;
+    let padded_row_bytes = row_bytes.div_ceil(256) * 256;
+    let mut bytes = vec![0; padded_row_bytes * resolution as usize * 6];
+    for (row, values) in values.chunks_exact(resolution as usize * 4).enumerate() {
+        for (value, target) in values
+            .iter()
+            .zip(bytes[row * padded_row_bytes..][..row_bytes].chunks_exact_mut(2))
+        {
+            target.copy_from_slice(&f16::from_f32(*value).to_bits().to_le_bytes());
+        }
+    }
+    gpu.queue.write_texture(
+        texture.as_image_copy(),
+        &bytes,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(padded_row_bytes as u32),
+            rows_per_image: Some(resolution),
+        },
+        wgpu::Extent3d {
+            width: resolution,
+            height: resolution,
+            depth_or_array_layers: 6,
+        },
+    );
 }
 
 #[cfg(test)]
@@ -2938,6 +3277,70 @@ mod tests {
         assert!(no_phase.mass.iter().all(|value| *value == 0.0));
     }
 
+    #[test]
+    fn validation_paired_continuations_share_one_front_and_preserve_total_condensate() {
+        let resolution = 16;
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let wind = WindFieldPipeline::new(&gpu).expect("dynamics unavailable");
+        let terrain = terrain_from(resolution, |_| -0.1);
+        let dynamics = wind.create_test_textures(&gpu, resolution, |pos| {
+            let tangent = [pos[2], 0.0, -pos[0]];
+            let length = (tangent[0] * tangent[0] + tangent[2] * tangent[2])
+                .sqrt()
+                .max(0.0001);
+            ([tangent[0] / length, 0.0, tangent[2] / length, 0.0], 1013.0)
+        });
+        let pipeline = WeatherFieldPipeline::new(&gpu).expect("weather unavailable");
+        let first = pipeline.paired_validation_continuation(
+            &gpu,
+            snapshot(resolution),
+            &terrain,
+            &dynamics,
+            snapshot(resolution),
+            &terrain,
+            &dynamics,
+        );
+        let second = pipeline.paired_validation_continuation(
+            &gpu,
+            snapshot(resolution),
+            &terrain,
+            &dynamics,
+            snapshot(resolution),
+            &terrain,
+            &dynamics,
+        );
+        assert_eq!(first.advected_mass, second.advected_mass);
+        assert_eq!(first.full_mass, second.full_mass);
+        let total = |mass: &[f32]| {
+            mass.chunks_exact(4)
+                .map(|pixel| pixel[0] + pixel[1] + pixel[2])
+                .sum::<f32>()
+        };
+        assert!(total(&first.full_mass) >= total(&first.advected_mass));
+    }
+
+    #[test]
+    fn land_only_zero_front_cannot_form_condensate() {
+        let resolution = 16;
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let wind = WindFieldPipeline::new(&gpu).expect("dynamics unavailable");
+        let terrain = terrain_from(resolution, |_| -0.1);
+        let dynamics =
+            wind.create_test_textures(&gpu, resolution, |_| ([0.0, 0.0, 0.0, 1.0], 1013.0));
+        let pipeline = WeatherFieldPipeline::new(&gpu).expect("weather unavailable");
+        let state = vec![0.0; resolution as usize * resolution as usize * 6 * 4];
+        let (_, mass) = pipeline.validation_spinup_state(
+            &gpu,
+            snapshot(resolution),
+            &terrain,
+            &dynamics,
+            Some(&state),
+            0,
+            1,
+        );
+        assert!(mass.iter().all(|value| *value == 0.0));
+    }
+
     #[derive(Clone, Copy)]
     struct PhaseBudgetFixture {
         q_sat: f32,
@@ -2982,6 +3385,23 @@ mod tests {
     fn smooth_step(edge0: f32, edge1: f32, value: f32) -> f32 {
         let t = ((value - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
         t * t * (3.0 - 2.0 * t)
+    }
+
+    fn inland_phase_provenance(vapor: f32, q_sat: f32, marine: f32, rain_shadow: f32) -> f32 {
+        let transported = smooth_step(0.30, 0.70, vapor / q_sat.max(0.0001));
+        (transported * (1.0 - marine) + marine)
+            * (1.0 - (1.0 - marine) * smooth_step(0.0001, 0.01, rain_shadow))
+    }
+
+    #[test]
+    fn lee_gate_preserves_transport_supported_windward_land_and_suppresses_lee_phase_creation() {
+        let windward = inland_phase_provenance(0.60, 0.68, 0.0, 0.0);
+        let lee = inland_phase_provenance(0.60, 0.68, 0.0, 0.20);
+        let marine_lee = inland_phase_provenance(0.60, 0.68, 1.0, 0.20);
+
+        assert!(windward > 0.99, "windward={windward}");
+        assert_eq!(lee, 0.0, "lee={lee}");
+        assert_eq!(marine_lee, 1.0, "marine_lee={marine_lee}");
     }
 
     fn phase_budget_fixture(input: PhaseBudgetFixture) -> PhaseBudgetTransfer {
@@ -3030,9 +3450,15 @@ mod tests {
         let q_lcl = (input.q_sat * (1.0 - (0.08 + (0.42 - 0.08) * convection)))
             .min(input.q_target * 0.70)
             * (1.0 - input.lift * 0.65);
-        let condensed =
-            ((vapor - q_lcl).max(0.0) * (0.16 + (0.56 - 0.16) * convection) * input.phase_budget)
-                .min(vapor);
+        let inland_provenance = (smooth_step(0.30, 0.70, vapor / input.q_sat.max(0.0001))
+            * (1.0 - input.marine)
+            + input.marine)
+            .clamp(0.0, 1.0);
+        let condensed = ((vapor - q_lcl).max(0.0)
+            * (0.16 + (0.56 - 0.16) * convection)
+            * input.phase_budget
+            * inland_provenance)
+            .min(vapor);
         let physical_eligibility = warm_gate * smooth_step(0.12, 0.75, lcl_lift) * humidity;
         let final_eligibility = input.source_envelope * physical_eligibility;
         let deep_fraction =
@@ -3270,6 +3696,12 @@ mod tests {
         });
         assert_eq!(sources_disabled.recharge, 0.0);
         assert_eq!(sources_disabled.storm_recharge, 0.0);
+        assert!(
+            ((sources_disabled.after_rainout + sources_disabled.rainout) - sources_disabled.before)
+                .abs()
+                <= 0.000_001,
+            "catalyst changed no-source column mass"
+        );
 
         let physically_ineligible = phase_budget_fixture(PhaseBudgetFixture {
             q_sat: 0.68,

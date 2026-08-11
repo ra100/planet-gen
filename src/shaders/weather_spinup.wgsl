@@ -219,7 +219,7 @@ fn source_budgets(
         0.0,
         1.0,
     );
-    let center = 0.88 - 0.32 * c;
+    let center = 0.88 - 0.40 * c;
     let logit = clamp((phase_rank - center) / 0.02, -8.0, 8.0);
     let eligibility = 1.0 / (1.0 + exp(-logit));
     let ranked_phase = 1.0 - exp(-8.0 * c * pow(phase_rank, 4.0));
@@ -539,7 +539,14 @@ fn transport(@builtin(global_invocation_id) id: vec3<u32>) {
         let physical_lift = smooth_step(0.12, 0.75, max(convergence, max(frontal_lift, max(warm_marine_lift, terrain_lift))));
         // Land has no vapor source. Its phase changes require humid vapor that
         // was carried in state.x; catalysts only repartition existing mass.
-        let inland_provenance = mix(humidity_gate, 1.0, marine_fraction);
+        // Inland air has no local vapor source. Once maritime vapor has been
+        // transported near saturation, allow lowland/uplift conversion instead
+        // of applying the humidity gate a second time.
+        let inland_provenance = mix(
+            smoothstep(0.05, 0.70, state.x / max(q_sat, 0.0001)),
+            1.0,
+            marine_fraction,
+        ) * (1.0 - (1.0 - marine_fraction) * smoothstep(0.0001, 0.01, rain_shadow));
         let convective_lift = clamp(
             lcl_lift + catalyst * humidity_gate * warm_gate * 0.40,
             0.0,
@@ -631,6 +638,7 @@ fn transport(@builtin(global_invocation_id) id: vec3<u32>) {
         );
         state.z -= detrainment;
         state.w += detrainment;
+
     }
 
     if ((params.diagnostic_flags & DIAGNOSTIC_NO_SINK) == 0u) {

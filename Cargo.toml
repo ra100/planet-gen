@@ -5,6 +5,14 @@ edition = "2024"
 description = "GPU-accelerated procedural planet generator for VFX"
 license = "MIT"
 
+[features]
+validation = []
+
+[[bin]]
+name = "sweep"
+path = "src/bin/sweep.rs"
+required-features = ["validation"]
+
 [dependencies]
 # GPU compute
 wgpu = "27"

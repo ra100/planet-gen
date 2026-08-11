@@ -1,5 +1,5 @@
 //! Parameter sweep: generates a grid of planet previews as PNG files.
-//! Usage: cargo run --bin sweep [--output-dir <dir>] [--size <pixels>]
+//! Usage: cargo run --features validation --bin sweep [--output-dir <dir>] [--size <pixels>]
 
 use bytemuck::Zeroable;
 use planet_gen::gpu::GpuContext;
@@ -471,6 +471,46 @@ fn save_field_views(
         .expect("save weather field view");
         println!("  {name}");
     }
+}
+
+fn save_u14_total_density_view(
+    output_dir: &str,
+    label: &str,
+    resolution: u32,
+    mass: &[f32],
+    max_density: f32,
+) {
+    let width = resolution as usize * 3;
+    let height = resolution as usize * 2;
+    let mut pixels = vec![0; width * height * 4];
+    for face in 0..6 {
+        for y in 0..resolution as usize {
+            for x in 0..resolution as usize {
+                let source = (face * resolution as usize * resolution as usize
+                    + y * resolution as usize
+                    + x)
+                    * 4;
+                let target = ((face / 3 * resolution as usize + y) * width
+                    + face % 3 * resolution as usize
+                    + x)
+                    * 4;
+                let value = ((mass[source] + mass[source + 1] + mass[source + 2]) / max_density)
+                    .clamp(0.0, 1.0);
+                let byte = (value * 255.0).round() as u8;
+                pixels[target..target + 4].copy_from_slice(&[byte, byte, byte, 255]);
+            }
+        }
+    }
+    let name = format!("{label}_density.png");
+    image::save_buffer(
+        Path::new(output_dir).join(&name),
+        &pixels,
+        width as u32,
+        height as u32,
+        image::ColorType::Rgba8,
+    )
+    .expect("save U14 validation density view");
+    println!("  {name}");
 }
 
 fn generate_validation_weather(
@@ -2151,19 +2191,6 @@ fn u14_masked_quantile(values: &[f32], channel: usize, mask: &[bool], quantile: 
     samples.get(index).copied().unwrap_or(0.0)
 }
 
-fn u14_masked_tau_quantile(values: &[f32], mask: &[bool], quantile: f32) -> f32 {
-    let mut samples: Vec<_> = values
-        .chunks_exact(4)
-        .zip(mask)
-        .filter(|(_, selected)| **selected)
-        .map(|(pixel, _)| u14_column_tau(pixel))
-        .collect();
-    samples.sort_by(f32::total_cmp);
-    let index = ((samples.len().saturating_sub(1) as f32 * quantile).round() as usize)
-        .min(samples.len().saturating_sub(1));
-    samples.get(index).copied().unwrap_or(0.0)
-}
-
 fn u14_geometry_metrics(mass: &[f32], geometry: &[f32]) -> (usize, usize) {
     mass.chunks_exact(4).zip(geometry.chunks_exact(4)).fold(
         (0, 0),
@@ -2469,6 +2496,87 @@ const U14_MOUNTAIN_LEE_MASK: &str = "mountain_lee";
 const U14_COAST_BAND_MASK: &str = "coast_band";
 const U14_LOW_COVERAGE_CORE: f32 = 0.25;
 
+#[derive(Debug, Clone, Copy)]
+struct U14SourceFlowMetrics {
+    maritime_low_p90: f32,
+    downwind_land_low_p90: f32,
+    coastline_crossing_component: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct U14LeeContinuationMetrics {
+    advected_total_p90: f32,
+    full_total_p90: f32,
+    retention_ratio: f32,
+    new_phase_total_p90: f32,
+    new_phase_fraction: f32,
+    channel_delta_p90: [f32; 3],
+}
+
+fn u14_total_field(values: &[f32]) -> Vec<f32> {
+    values
+        .chunks_exact(4)
+        .flat_map(|pixel| [pixel[0] + pixel[1] + pixel[2], 0.0, 0.0, 0.0])
+        .collect()
+}
+
+fn u14_lee_continuation_metrics(
+    advected: &[f32],
+    full: &[f32],
+    lee_mask: &[bool],
+) -> U14LeeContinuationMetrics {
+    let advected_total = u14_total_field(advected);
+    let full_total = u14_total_field(full);
+    let advected_total_p90 = u14_masked_quantile(&advected_total, 0, lee_mask, 0.9);
+    let full_total_p90 = u14_masked_quantile(&full_total, 0, lee_mask, 0.9);
+    let increment: Vec<_> = advected
+        .chunks_exact(4)
+        .zip(full.chunks_exact(4))
+        .map(|(advected, full)| {
+            [
+                ((full[0] + full[1] + full[2] - advected[0] - advected[1] - advected[2]).max(0.0)),
+                0.0,
+                0.0,
+                0.0,
+            ]
+        })
+        .flatten()
+        .collect();
+    let new_phase_total_p90 = u14_masked_quantile(&increment, 0, lee_mask, 0.9);
+    U14LeeContinuationMetrics {
+        advected_total_p90,
+        full_total_p90,
+        retention_ratio: full_total_p90 / advected_total_p90.max(0.0001),
+        new_phase_total_p90,
+        new_phase_fraction: new_phase_total_p90 / full_total_p90.max(0.0001),
+        channel_delta_p90: std::array::from_fn(|channel| {
+            let delta: Vec<_> = advected
+                .chunks_exact(4)
+                .zip(full.chunks_exact(4))
+                .flat_map(|(advected, full)| {
+                    [(full[channel] - advected[channel]).max(0.0), 0.0, 0.0, 0.0]
+                })
+                .collect();
+            u14_masked_quantile(&delta, 0, lee_mask, 0.9)
+        }),
+    }
+}
+
+fn u14_total_increment(full: &[f32], advected: &[f32]) -> Vec<f32> {
+    full.chunks_exact(4)
+        .zip(advected.chunks_exact(4))
+        .flat_map(|(full, advected)| {
+            [
+                ((full[0] + full[1] + full[2]) - (advected[0] + advected[1] + advected[2]))
+                    .max(0.0),
+                0.0,
+                0.0,
+                0.0,
+            ]
+        })
+        .collect()
+}
+
 struct U14OrographicMasks {
     windward: Vec<bool>,
     lee: Vec<bool>,
@@ -2583,6 +2691,46 @@ fn u14_mixed_coast_land_support(values: &[f32], resolution: u32) -> (f32, f32) {
     low_mass.sort_by(f32::total_cmp);
     let p90 = low_mass[(low_mass.len() * 9 / 10).min(low_mass.len() - 1)];
     (occupied as f32 / low_mass.len() as f32, p90)
+}
+
+fn u14_source_flow_metrics(values: &[f32], resolution: u32) -> U14SourceFlowMetrics {
+    let mut maritime_low = Vec::new();
+    let mut downwind_land_low = Vec::new();
+    for (index, pixel) in values.chunks_exact(4).enumerate() {
+        let position = u15_pixel_position(index, resolution);
+        if position[0] <= 0.8 {
+            continue;
+        }
+        if position[2] > 0.04 && position[2] < 0.12 {
+            maritime_low.push(pixel[0]);
+        } else if position[2] < -0.04 && position[2] > -0.12 {
+            downwind_land_low.push(pixel[0]);
+        }
+    }
+    let p90 = |samples: &mut Vec<f32>| {
+        samples.sort_by(f32::total_cmp);
+        samples
+            .get((samples.len() * 9 / 10).min(samples.len().saturating_sub(1)))
+            .copied()
+            .unwrap_or(0.0)
+    };
+    let coastline_crossing_component = u14_significant_occupied_components(values, resolution)
+        .into_iter()
+        .any(|component| {
+            let mut maritime = false;
+            let mut land = false;
+            for pixel in component.pixels {
+                let position = u15_pixel_position(pixel, resolution);
+                maritime |= position[0] > 0.8 && position[2] > 0.01;
+                land |= position[0] > 0.8 && position[2] < -0.01;
+            }
+            maritime && land
+        });
+    U14SourceFlowMetrics {
+        maritime_low_p90: p90(&mut maritime_low),
+        downwind_land_low_p90: p90(&mut downwind_land_low),
+        coastline_crossing_component,
+    }
 }
 
 fn u14_flat_terrain(resolution: u32, height: impl Fn([f32; 3]) -> f32) -> TectonicTerrain {
@@ -2723,8 +2871,12 @@ fn run_u14_field_validation(
     let mut cool_deck_p90_min = f32::INFINITY;
     let mut trade_p90_min = f32::INFINITY;
     let mut windward_low_p90_min = f32::INFINITY;
-    let mut windward_lee_delta_min = f32::INFINITY;
-    let mut lee_clearing_tau_delta_max = f32::NEG_INFINITY;
+    let mut windward_lee_low_p90_delta_min = f32::INFINITY;
+    let mut lee_advected_low_p90_min = f32::INFINITY;
+    let mut lee_full_low_p90_min = f32::INFINITY;
+    let mut lee_retention_ratio_min = f32::INFINITY;
+    let mut lee_new_phase_low_p90_max = 0.0_f32;
+    let mut lee_new_phase_fraction_max = 0.0_f32;
     let mut gaps_min = f32::INFINITY;
     let mut gaps_max = 0.0_f32;
     let mut coast_terrain_localization_ratio_max = 0.0_f32;
@@ -2751,7 +2903,11 @@ fn run_u14_field_validation(
     let mut coverage_seed_rows = Vec::new();
     let mut inland_occupied_min = f32::INFINITY;
     let mut inland_low_p90_min = f32::INFINITY;
+    let mut maritime_low_p90_min = f32::INFINITY;
+    let mut downwind_land_maritime_p90_ratio_min = f32::INFINITY;
+    let mut coastline_crossing_component = true;
     let mut inland_no_source_exact = true;
+    let mut paired_lee_rows = Vec::new();
     for seed in SEEDS {
         let (cool_ocean, cool_geometry) = weather(&terrain, |_| 0.0, 5.0, 0.75, 1.0, seed, 0.0);
         let (cool_inland, inland_geometry) = weather(&terrain, |_| 1.0, 5.0, 0.75, 1.0, seed, 0.0);
@@ -2828,7 +2984,16 @@ fn run_u14_field_validation(
         gaps_max = gaps_max.max(gaps);
 
         let (mixed_coast_mass, mixed_coast_geometry) = weather(
-            &ridge,
+            &terrain,
+            u14_marine_to_land_continentality,
+            15.0,
+            1.0,
+            1.0,
+            seed,
+            0.8,
+        );
+        let (mixed_coast_repeat, mixed_coast_repeat_geometry) = weather(
+            &terrain,
             u14_marine_to_land_continentality,
             15.0,
             1.0,
@@ -2843,6 +3008,25 @@ fn run_u14_field_validation(
             u14_mixed_coast_land_support(&mixed_coast_mass, resolution);
         inland_occupied_min = inland_occupied_min.min(coast_land_occupied);
         inland_low_p90_min = inland_low_p90_min.min(coast_land_low_p90);
+        let source_flow = u14_source_flow_metrics(&mixed_coast_mass, resolution);
+        let source_flow_repeat = u14_source_flow_metrics(&mixed_coast_repeat, resolution);
+        let mixed_coast_deterministic = mixed_coast_mass == mixed_coast_repeat
+            && mixed_coast_geometry == mixed_coast_repeat_geometry
+            && source_flow.maritime_low_p90 == source_flow_repeat.maritime_low_p90
+            && source_flow.downwind_land_low_p90 == source_flow_repeat.downwind_land_low_p90
+            && source_flow.coastline_crossing_component
+                == source_flow_repeat.coastline_crossing_component;
+        deterministic &= mixed_coast_deterministic;
+        if !mixed_coast_deterministic {
+            failures.push(format!(
+                "U14 mixed-coast source-flow was non-deterministic for seed {seed}"
+            ));
+        }
+        maritime_low_p90_min = maritime_low_p90_min.min(source_flow.maritime_low_p90);
+        downwind_land_maritime_p90_ratio_min = downwind_land_maritime_p90_ratio_min.min(
+            source_flow.downwind_land_low_p90 / source_flow.maritime_low_p90.max(f32::EPSILON),
+        );
+        coastline_crossing_component &= source_flow.coastline_crossing_component;
 
         let (coast_mass, coast_geometry) = weather(
             &coast,
@@ -3002,12 +3186,178 @@ fn run_u14_field_validation(
             plateau_near_max[channel] = plateau_near_max[channel].max(near);
         }
 
-        // This is a marine ridge: vapor comes from the fixture's declared ocean,
-        // then terrain redistributes that causal mass across windward and lee sides.
-        let (calm, calm_geometry) = weather(&ridge, |_| 0.0, 5.0, 1.0, 1.0, seed, 0.0);
-        let (whisper, whisper_geometry) = weather(&ridge, |_| 0.0, 5.0, 1.0, 1.0, seed, 0.01);
-        let (forward, forward_geometry) = weather(&ridge, |_| 0.0, 5.0, 1.0, 1.0, seed, 1.0);
-        let (reverse, reverse_geometry) = weather(&ridge, |_| 0.0, 5.0, 1.0, 1.0, seed, -1.0);
+        // This ridge crosses the declared ocean/land boundary: vapor enters only
+        // on the marine side, then the windward lowland can convert transported mass.
+        let (calm, calm_geometry) = weather(
+            &ridge,
+            u14_marine_to_land_continentality,
+            5.0,
+            1.0,
+            1.0,
+            seed,
+            0.0,
+        );
+        let (whisper, whisper_geometry) = weather(
+            &ridge,
+            u14_marine_to_land_continentality,
+            5.0,
+            1.0,
+            1.0,
+            seed,
+            0.01,
+        );
+        let (forward, forward_geometry) = weather(
+            &ridge,
+            u14_marine_to_land_continentality,
+            5.0,
+            1.0,
+            1.0,
+            seed,
+            1.0,
+        );
+        let (reverse, reverse_geometry) = weather(
+            &ridge,
+            u14_marine_to_land_continentality,
+            5.0,
+            1.0,
+            1.0,
+            seed,
+            -1.0,
+        );
+        let ridge_dynamics = wind.create_test_textures(gpu, resolution, |pos| {
+            let tangent = [pos[2], 0.0, -pos[0]];
+            let length = (tangent[0] * tangent[0] + tangent[2] * tangent[2])
+                .sqrt()
+                .max(0.0001);
+            (
+                [
+                    tangent[0] / length,
+                    0.0,
+                    tangent[2] / length,
+                    u14_marine_to_land_continentality(pos),
+                ],
+                1025.0,
+            )
+        });
+        let ridge_snapshot = WeatherSnapshot {
+            face: 0,
+            resolution,
+            seed,
+            storm_count: 0,
+            coverage: 1.0,
+            moisture: 1.0,
+            surface_pressure_bar: 1.0,
+            base_temp_c: 5.0,
+            ocean_level: 0.0,
+            axial_tilt_rad: 0.0,
+            season: 0.5,
+            storm_size: 1.0,
+            radius_km: 6371.0,
+            rotation_rate_rad_s: std::f32::consts::TAU / 86400.0,
+            wind_scale: 1.0,
+        };
+        let paired = pipeline.validation_paired_continuation_for_sweep(
+            gpu,
+            ridge_snapshot,
+            &ridge,
+            &ridge_dynamics,
+            ridge_snapshot,
+            &ridge,
+            &ridge_dynamics,
+        );
+        let paired_repeat = pipeline.validation_paired_continuation_for_sweep(
+            gpu,
+            ridge_snapshot,
+            &ridge,
+            &ridge_dynamics,
+            ridge_snapshot,
+            &ridge,
+            &ridge_dynamics,
+        );
+        let lee_pair = u14_lee_continuation_metrics(
+            &paired.advected_mass,
+            &paired.full_mass,
+            &orographic_masks.lee,
+        );
+        let lee_pair_repeat = u14_lee_continuation_metrics(
+            &paired_repeat.advected_mass,
+            &paired_repeat.full_mass,
+            &orographic_masks.lee,
+        );
+        let paired_deterministic = paired.advected_mass == paired_repeat.advected_mass
+            && paired.full_mass == paired_repeat.full_mass
+            && lee_pair.advected_total_p90 == lee_pair_repeat.advected_total_p90
+            && lee_pair.full_total_p90 == lee_pair_repeat.full_total_p90
+            && lee_pair.new_phase_total_p90 == lee_pair_repeat.new_phase_total_p90;
+        deterministic &= paired_deterministic;
+        if !paired_deterministic {
+            failures.push(format!(
+                "U14 paired source-flow continuation was non-deterministic for seed {seed}"
+            ));
+        }
+        let paired_windward_total = u14_total_field(&paired.full_mass);
+        let paired_windward_total_p90 =
+            u14_masked_quantile(&paired_windward_total, 0, &orographic_masks.windward, 0.9);
+        let paired_reverse_windward =
+            u14_masked_quantile(&reverse, 0, &orographic_masks.windward, 0.9);
+        let paired_reverse_lee = u14_masked_quantile(&reverse, 0, &orographic_masks.lee, 0.9);
+        lee_advected_low_p90_min = lee_advected_low_p90_min.min(lee_pair.advected_total_p90);
+        lee_full_low_p90_min = lee_full_low_p90_min.min(lee_pair.full_total_p90);
+        lee_retention_ratio_min = lee_retention_ratio_min.min(lee_pair.retention_ratio);
+        lee_new_phase_low_p90_max = lee_new_phase_low_p90_max.max(lee_pair.new_phase_total_p90);
+        lee_new_phase_fraction_max = lee_new_phase_fraction_max.max(lee_pair.new_phase_fraction);
+        windward_low_p90_min = windward_low_p90_min.min(paired_windward_total_p90);
+        windward_lee_low_p90_delta_min =
+            windward_lee_low_p90_delta_min.min(paired_windward_total_p90 - lee_pair.full_total_p90);
+        let paired_increment = u14_total_increment(&paired.full_mass, &paired.advected_mass);
+        save_u14_total_density_view(
+            output_dir,
+            &format!("u14_seed_{seed}_coast_to_interior"),
+            resolution,
+            &mixed_coast_mass,
+            0.16,
+        );
+        save_u14_total_density_view(
+            output_dir,
+            &format!("u14_seed_{seed}_mountain_forward_windward_lee"),
+            resolution,
+            &paired.full_mass,
+            0.16,
+        );
+        save_u14_total_density_view(
+            output_dir,
+            &format!("u14_seed_{seed}_mountain_forward_lee_advected_reference"),
+            resolution,
+            &paired.advected_mass,
+            0.16,
+        );
+        save_u14_total_density_view(
+            output_dir,
+            &format!("u14_seed_{seed}_mountain_forward_lee_new_phase_increment"),
+            resolution,
+            &paired_increment,
+            0.01,
+        );
+        save_u14_total_density_view(
+            output_dir,
+            &format!("u14_seed_{seed}_mountain_reverse_windward_lee"),
+            resolution,
+            &reverse,
+            0.16,
+        );
+        paired_lee_rows.push(format!(
+            "seed={seed} lee_advected_total_p90={:.5} lee_full_total_p90={:.5} lee_retention_ratio={:.5} lee_new_phase_total_p90={:.5} lee_new_phase_fraction={:.5} channel_delta_p90={:?} windward_total_p90={paired_windward_total_p90:.5} reverse_windward_low_p90={paired_reverse_windward:.5} reverse_lee_low_p90={paired_reverse_lee:.5}",
+            lee_pair.advected_total_p90, lee_pair.full_total_p90, lee_pair.retention_ratio, lee_pair.new_phase_total_p90, lee_pair.new_phase_fraction, lee_pair.channel_delta_p90,
+        ));
+        if lee_pair.advected_total_p90 < 0.03
+            || lee_pair.retention_ratio < 0.75
+            || lee_pair.full_total_p90 >= paired_windward_total_p90
+            || lee_pair.new_phase_total_p90 > 0.003
+            || lee_pair.new_phase_fraction > 0.05
+            || paired_reverse_lee <= paired_reverse_windward
+        {
+            failures.push(format!("U14 paired lee continuation seed {seed}: {lee_pair:?}, windward_total={paired_windward_total_p90:.3}, reverse windward/lee={paired_reverse_windward:.3}/{paired_reverse_lee:.3}"));
+        }
         if seed == SEEDS[0] {
             save_field_views(
                 output_dir,
@@ -3025,24 +3375,10 @@ fn run_u14_field_validation(
             );
             save_field_views(
                 output_dir,
-                "u14_seed_7_coast_to_interior",
+                "u14_seed_7_mixed_coast_source_flow",
                 resolution,
-                &coast_mass,
-                &coast_geometry,
-            );
-            save_field_views(
-                output_dir,
-                "u14_seed_7_mountain_forward_windward_lee",
-                resolution,
-                &forward,
-                &forward_geometry,
-            );
-            save_field_views(
-                output_dir,
-                "u14_seed_7_mountain_reverse_windward_lee",
-                resolution,
-                &reverse,
-                &reverse_geometry,
+                &mixed_coast_mass,
+                &mixed_coast_geometry,
             );
         }
         for (mass, geometry) in [
@@ -3067,32 +3403,14 @@ fn run_u14_field_validation(
         let reverse_delta = reverse_asymmetry - calm_asymmetry;
         let span = forward_asymmetry - reverse_asymmetry;
         let whisper_delta = (whisper_asymmetry - calm_asymmetry).abs();
-        let windward_tau_delta =
-            u14_masked_tau_quantile(&forward, &orographic_masks.windward, 0.75)
-                - u14_masked_tau_quantile(&reverse, &orographic_masks.windward, 0.75);
-        let lee_tau_delta = u14_masked_tau_quantile(&forward, &orographic_masks.lee, 0.25)
-            - u14_masked_tau_quantile(&reverse, &orographic_masks.lee, 0.25);
-        windward_lee_delta_min = windward_lee_delta_min.min(forward_delta);
-        lee_clearing_tau_delta_max = lee_clearing_tau_delta_max.max(lee_tau_delta);
-        windward_low_p90_min = windward_low_p90_min.min(u14_masked_quantile(
-            &forward,
-            0,
-            &orographic_masks.windward,
-            0.9,
-        ));
+        let windward_low_p90 = u14_masked_quantile(&forward, 0, &orographic_masks.windward, 0.9);
+        let lee_low_p90 = u14_masked_quantile(&forward, 0, &orographic_masks.lee, 0.9);
         orography_rows.push(format!(
-            "seed={seed} A_calm={calm_asymmetry:.5} A_whisper={whisper_asymmetry:.5} A_forward={forward_asymmetry:.5} A_reverse={reverse_asymmetry:.5} Df={forward_delta:.5} Dr={reverse_delta:.5} span={span:.5} whisper_delta={whisper_delta:.5} tau_windward_p75_delta={windward_tau_delta:.5} tau_lee_p25_delta={lee_tau_delta:.5}",
+            "seed={seed} A_calm={calm_asymmetry:.5} A_whisper={whisper_asymmetry:.5} A_forward={forward_asymmetry:.5} A_reverse={reverse_asymmetry:.5} Df={forward_delta:.5} Dr={reverse_delta:.5} span={span:.5} whisper_delta={whisper_delta:.5} low_windward_p90={windward_low_p90:.5} low_lee_p90={lee_low_p90:.5}",
         ));
-        if calm_asymmetry.abs() > 0.02
-            || whisper_delta > 0.01
-            || forward_delta < 0.005
-            || reverse_delta > -0.005
-            || span < 0.025
-            || windward_tau_delta < 0.01
-            || lee_tau_delta > -0.005
-        {
+        if calm_asymmetry.abs() > 0.02 || whisper_delta > 0.01 || windward_low_p90 < 0.10 {
             failures.push(format!(
-                "U14 frozen orography seed {seed}: Df={forward_delta:.3}, Dr={reverse_delta:.3}, span={span:.3}, calm={calm_asymmetry:.3}, whisper={whisper_delta:.3}, tau_p75/p25={windward_tau_delta:.3}/{lee_tau_delta:.3}",
+                "U14 source-flow orography seed {seed}: windward_p90={windward_low_p90:.3}, lee_p90={lee_low_p90:.3}, calm={calm_asymmetry:.3}, whisper={whisper_delta:.3}",
             ));
         }
     }
@@ -3105,12 +3423,13 @@ fn run_u14_field_validation(
     let windward_retention_p90_min = 0.0;
     let cool_deep_min = 0.0;
     let feedback = format!(
-        "\nfeedback_u14_coverage_threshold=tau>=.01; tau=1.2*(.5*low+1.2*deep+.35*high)\nfeedback_u14_significant_component_area>={:.2}% face\nfeedback_u14_component_growth=.25_frozen_to_.75_significant,max_positive_pixel_overlap,deterministic_lowest_label_tie,all_frozen_overlap,conservative_lower_median_ratio>=1.30,merges_reported\nfeedback_u14_coverage_seed_tuples=\n{}\nfeedback_u14_land_support_fixture=mixed_coast_marine_source_flow=1\nfeedback_u14_land_occupied_min={inland_occupied_min:.3}\nfeedback_u14_land_low_p90_min={inland_low_p90_min:.3}\nsource_flow_scenarios=inland_no_source_exact,humid_marine_ridge_windward,lee_drying\nfeedback_u14_inland_no_source_exact={inland_no_source_exact}\nfeedback_u14_humid_marine_windward_low_p90={windward_low_p90_min:.3}\nfeedback_u14_humid_marine_windward_lee_delta_min={windward_lee_delta_min:.3}\n",
+        "\nfeedback_u14_coverage_threshold=tau>=.01; tau=1.2*(.5*low+1.2*deep+.35*high)\nfeedback_u14_significant_component_area>={:.2}% face\nfeedback_u14_component_growth=.25_frozen_to_.75_significant,max_positive_pixel_overlap,deterministic_lowest_label_tie,all_frozen_overlap,conservative_lower_median_ratio>=1.30,merges_reported\nfeedback_u14_coverage_seed_tuples=\n{}\nsource_flow_scenarios=inland_no_source_exact,marine_to_land_lowland,humid_marine_ridge_windward,lee_drying\ncoast_inland_low_p90={inland_low_p90_min:.3}\ncoast_inland_to_marine_ratio={downwind_land_maritime_p90_ratio_min:.3}\ncoast_inland_component_crosses_shore={coastline_crossing_component}\nwindward_low_p90={windward_low_p90_min:.3}\nlee_full_low_p90={lee_full_low_p90_min:.3}\nlee_advected_low_p90={lee_advected_low_p90_min:.3}\nlee_retention_ratio={lee_retention_ratio_min:.3}\nlee_new_phase_low_p90={lee_new_phase_low_p90_max:.3}\nlee_new_phase_fraction={lee_new_phase_fraction_max:.3}\ninland_no_source_exact={inland_no_source_exact}\npaired_lee_continuations=\n{}\n",
         U14_MINIMUM_COMPONENT_FACE_AREA * 100.0,
         coverage_seed_rows.join("\n"),
+        paired_lee_rows.join("\n"),
     );
     let mut values = format!(
-        "command=cargo run --release --bin sweep -- --weather-validation --size 512 --output-dir {output_dir}\nseeds={SEEDS:?}\nmasks={U14_FLAT_COOL_OCEAN_MASK},{U14_FLAT_INLAND_MASK},{U14_MOUNTAIN_WINDWARD_MASK},{U14_MOUNTAIN_LEE_MASK},{U14_COAST_BAND_MASK}\ncool_ocean_inland_min={cool_ratio:.3}\nbackground_retention_q50_max={background_retention_q50_max:.3}\ncool_retention_p90_min={cool_retention_p90_min:.3}\ntrade_retention_p90_min={trade_retention_p90_min:.3}\nwindward_retention_p90_min={windward_retention_p90_min:.3}\ncool_deck_low_p90_min={cool_deck_p90_min:.3}\ntrade_low_p90_min={trade_p90_min:.3}\nwindward_low_p90_min={windward_low_p90_min:.3}\nwindward_lee_delta_min={windward_lee_delta_min:.3}\nlee_clearing_tau_delta_max={lee_clearing_tau_delta_max:.3}\ncool_deep_min={cool_deep_min:.3}\nlow_deep_min={low_deep:.3}\ndeck_thickness=[{deck_min:.3},{deck_max:.3}] km\ntrade_top=[{trade_min:.3},{trade_max:.3}] km\ntrade_clear_gap=[{gaps_min:.3},{gaps_max:.3}]\ncoast_terrain_localization_ratio_max={coast_terrain_localization_ratio_max:.3}\ncoverage_samples=[0,.125,.25,.375,.5,.625,.75,.875,1]\ncoverage_increment_min={coverage_increment_min:?}\ncoverage_increment_max_by_step={coverage_increment_max_by_step:?}\ncoverage_increment_max={coverage_increment_max:.5}\ncoverage_increment_median_min={coverage_increment_median_min:.5}\ncoverage_zero_exact={zero_exact}\ndeterministic={deterministic}\ngeometry_occupied_texels={geometry_occupied_texels}\ngeometry_invalid_texels={geometry_invalid_texels}\nmass_seam_edge_max={mass_seam_edge_max:?}\nmass_seam_edge_p99={mass_seam_edge_p99:?}\nmass_seam_corner_max={mass_seam_corner_max:?}\nmass_seam_corner_p99={mass_seam_corner_p99:?}\ngeometry_seam_edge_max={geometry_seam_edge_max:?}\ngeometry_seam_edge_p99={geometry_seam_edge_p99:?}\ngeometry_seam_corner_max={geometry_seam_corner_max:?}\ngeometry_seam_corner_p99={geometry_seam_corner_p99:?}\nlow_plateau_exact_max={:.5}\ndeep_plateau_exact_max={:.5}\nlow_plateau_near_max={:.5}\ndeep_plateau_near_max={:.5}\nfixture_generation_n={}\nfixture_generation_p95_ms={:.3}\n",
+        "command=cargo run --release --features validation --bin sweep -- --weather-validation --size 512 --output-dir {output_dir}\nseeds={SEEDS:?}\nmasks={U14_FLAT_COOL_OCEAN_MASK},{U14_FLAT_INLAND_MASK},{U14_MOUNTAIN_WINDWARD_MASK},{U14_MOUNTAIN_LEE_MASK},{U14_COAST_BAND_MASK}\ncool_ocean_inland_min={cool_ratio:.3}\nbackground_retention_q50_max={background_retention_q50_max:.3}\ncool_retention_p90_min={cool_retention_p90_min:.3}\ntrade_retention_p90_min={trade_retention_p90_min:.3}\nwindward_retention_p90_min={windward_retention_p90_min:.3}\ncool_deck_low_p90_min={cool_deck_p90_min:.3}\ntrade_low_p90_min={trade_p90_min:.3}\nwindward_lee_low_p90_delta_min={windward_lee_low_p90_delta_min:.3}\ncool_deep_min={cool_deep_min:.3}\nlow_deep_min={low_deep:.3}\ndeck_thickness=[{deck_min:.3},{deck_max:.3}] km\ntrade_top=[{trade_min:.3},{trade_max:.3}] km\ntrade_clear_gap=[{gaps_min:.3},{gaps_max:.3}]\ncoast_terrain_localization_ratio_max={coast_terrain_localization_ratio_max:.3}\ncoverage_samples=[0,.125,.25,.375,.5,.625,.75,.875,1]\ncoverage_increment_min={coverage_increment_min:?}\ncoverage_increment_max_by_step={coverage_increment_max_by_step:?}\ncoverage_increment_max={coverage_increment_max:.5}\ncoverage_increment_median_min={coverage_increment_median_min:.5}\ncoverage_zero_exact={zero_exact}\ndeterministic={deterministic}\ngeometry_occupied_texels={geometry_occupied_texels}\ngeometry_invalid_texels={geometry_invalid_texels}\nmass_seam_edge_max={mass_seam_edge_max:?}\nmass_seam_edge_p99={mass_seam_edge_p99:?}\nmass_seam_corner_max={mass_seam_corner_max:?}\nmass_seam_corner_p99={mass_seam_corner_p99:?}\ngeometry_seam_edge_max={geometry_seam_edge_max:?}\ngeometry_seam_edge_p99={geometry_seam_edge_p99:?}\ngeometry_seam_corner_max={geometry_seam_corner_max:?}\ngeometry_seam_corner_p99={geometry_seam_corner_p99:?}\nlow_plateau_exact_max={:.5}\ndeep_plateau_exact_max={:.5}\nlow_plateau_near_max={:.5}\ndeep_plateau_near_max={:.5}\nfixture_generation_n={}\nfixture_generation_p95_ms={:.3}\n",
         plateau_exact_max[0],
         plateau_exact_max[1],
         plateau_near_max[0],
@@ -3119,6 +3438,9 @@ fn run_u14_field_validation(
         generation_stats.p95_ms,
     );
     values.push_str(&feedback);
+    values.push_str(&format!(
+        "lee_advected_total_p90={lee_advected_low_p90_min:.3}\nlee_full_total_p90={lee_full_low_p90_min:.3}\nlee_new_phase_total_p90={lee_new_phase_low_p90_max:.3}\n"
+    ));
     values.push_str("orography_masks=frozen_projected_world_space\norography_metrics=\n");
     values.push_str(&orography_rows.join("\n"));
     values.push('\n');
@@ -3128,22 +3450,26 @@ fn run_u14_field_validation(
     if cool_ratio < 1.5 {
         failures.push(format!("U14 cool ocean/inland ratio {cool_ratio:.3} < 1.5"));
     }
-    if inland_occupied_min < 0.05 || inland_low_p90_min < 0.02 {
+    if inland_occupied_min < 0.05
+        || inland_low_p90_min < 0.06
+        || downwind_land_maritime_p90_ratio_min < 0.35
+        || !coastline_crossing_component
+    {
         failures.push(format!(
-            "U14 causal land support occupied={inland_occupied_min:.3}, low_p90={inland_low_p90_min:.3}"
+            "U14 source-flow land occupied={inland_occupied_min:.3}, land_p90={inland_low_p90_min:.3}, maritime_p90={maritime_low_p90_min:.3}, ratio={downwind_land_maritime_p90_ratio_min:.3}, coastline_component={coastline_crossing_component}"
         ));
     }
     if !inland_no_source_exact {
         failures.push("U14 inland no-source field was not exact zero".to_string());
     }
-    if cool_deck_p90_min < 0.02 || trade_p90_min < 0.02 || windward_low_p90_min < 0.02 {
+    if cool_deck_p90_min < 0.02 || trade_p90_min < 0.02 || windward_low_p90_min < 0.10 {
         failures.push(format!(
             "U14 frozen feature p90 cool/trade/windward={cool_deck_p90_min:.3}/{trade_p90_min:.3}/{windward_low_p90_min:.3} < 0.02"
         ));
     }
-    if windward_lee_delta_min < 0.005 || lee_clearing_tau_delta_max > -0.005 {
+    if windward_lee_low_p90_delta_min < 0.01 {
         failures.push(format!(
-            "U14 terrain response windward/lee={windward_lee_delta_min:.3}, lee_tau_delta={lee_clearing_tau_delta_max:.3}"
+            "U14 paired terrain response windward/lee_p90_delta={windward_lee_low_p90_delta_min:.3}"
         ));
     }
     if low_deep < 4.0 || deck_min < 0.3 || deck_max > 1.2 {
@@ -5101,7 +5427,7 @@ fn run_u15_field_validation(
         }
     }
     let values = format!(
-        "command=cargo run --release --bin sweep -- --{validation_flag} --size 512 --output-dir {output_dir}\nshear_plume_fixture=source:{U15_TRAIL_SOURCE:?},zonal_axis:{U15_TRAIL_EAST:?},Y:{U15_TRAIL_NORTH:?};wind=((1+{U15_TRAIL_SHEAR:.2}*tanh(y/.08))/(1+{U15_TRAIL_SHEAR:.2}))*cross(Y,p); tangent_divergence_free; speed_bound=[{:.5},1]; snapshot.wind_scale=1/2; source=ocean_patch; control=matched_exterior_land_and_continentality; coverage:.65,moisture:1,temp_c:15,pressure_hpa:1013,tilt:0,season:.5,earth_radius_rotation,storms:0,diagnostics:0; MUSCL/Hancock active; CFL substeps use active `transport_substeps`; shape_corridor={U15_TRAIL_SHAPE_ROI_RADIUS:.8},physical_support={U15_TRAIL_OUTER_SUPPORT_RADIUS:.8},boundary_shell={U15_TRAIL_BOUNDARY_SHELL_INNER_RADIUS:.6}..{U15_TRAIL_SHAPE_ROI_RADIUS:.6}; response=max(total_mass_source-total_mass_control,0); morphology=all_counterfactual_response>=.02_within_frozen_corridor_own_centroid_log_map_wind_frame_weighted_Q90_Q10_L_alongwind_B_crosswind; Gperp=weighted_normalized_crosswind_geodesic_derivative; S=B*Gperp; gates=each:p95>=.04,Neff>=32,axis<=30deg,outside_corridor<=5%,beyond_physical_support<=5%,boundary_shell<=1%; ratios:L2/L1=1.50..2.50,B2/B1=.80..1.25,S2/S1=.75..1.25,deterministic; mass/area/isotropic_edge/components/centroid=telemetry_only; seeds={SEEDS:?}\nfixture={U15_ELIGIBLE_MASK}; fixture_flow={U15_FIXTURE_FLOW:?}; source_guard=actual_GPU_weather_pipeline; size_deterministic={size_deterministic}; qualified_organization_seed_count={qualified_organization_seed_count}/{}; qualified_organization=outside_high>=.10,downwind_centroid>=.5texels,pca<=20deg\n{}\n",
+        "command=cargo run --release --features validation --bin sweep -- --{validation_flag} --size 512 --output-dir {output_dir}\nshear_plume_fixture=source:{U15_TRAIL_SOURCE:?},zonal_axis:{U15_TRAIL_EAST:?},Y:{U15_TRAIL_NORTH:?};wind=((1+{U15_TRAIL_SHEAR:.2}*tanh(y/.08))/(1+{U15_TRAIL_SHEAR:.2}))*cross(Y,p); tangent_divergence_free; speed_bound=[{:.5},1]; snapshot.wind_scale=1/2; source=ocean_patch; control=matched_exterior_land_and_continentality; coverage:.65,moisture:1,temp_c:15,pressure_hpa:1013,tilt:0,season:.5,earth_radius_rotation,storms:0,diagnostics:0; MUSCL/Hancock active; CFL substeps use active `transport_substeps`; shape_corridor={U15_TRAIL_SHAPE_ROI_RADIUS:.8},physical_support={U15_TRAIL_OUTER_SUPPORT_RADIUS:.8},boundary_shell={U15_TRAIL_BOUNDARY_SHELL_INNER_RADIUS:.6}..{U15_TRAIL_SHAPE_ROI_RADIUS:.6}; response=max(total_mass_source-total_mass_control,0); morphology=all_counterfactual_response>=.02_within_frozen_corridor_own_centroid_log_map_wind_frame_weighted_Q90_Q10_L_alongwind_B_crosswind; Gperp=weighted_normalized_crosswind_geodesic_derivative; S=B*Gperp; gates=each:p95>=.04,Neff>=32,axis<=30deg,outside_corridor<=5%,beyond_physical_support<=5%,boundary_shell<=1%; ratios:L2/L1=1.50..2.50,B2/B1=.80..1.25,S2/S1=.75..1.25,deterministic; mass/area/isotropic_edge/components/centroid=telemetry_only; seeds={SEEDS:?}\nfixture={U15_ELIGIBLE_MASK}; fixture_flow={U15_FIXTURE_FLOW:?}; source_guard=actual_GPU_weather_pipeline; size_deterministic={size_deterministic}; qualified_organization_seed_count={qualified_organization_seed_count}/{}; qualified_organization=outside_high>=.10,downwind_centroid>=.5texels,pca<=20deg\n{}\n",
         (1.0 - U15_TRAIL_SHEAR) / (1.0 + U15_TRAIL_SHEAR),
         SEEDS.len(),
         rows.join("\n"),
@@ -6596,7 +6922,7 @@ fn run_native_default_cloud_validation(
     std::fs::write(
         Path::new(output_dir).join("native_default_metrics.txt"),
         format!(
-            "command=cargo run --release --bin sweep -- --native-default-cloud-validation --size {render_size} --output-dir {output_dir}\nseed=42\ncloud_seed=1042\ncoverage=0.5\nmoisture=1\nstorm_count=2\nstorm_size=1\nwind_scale=1\nwater_loss=0.5\ncontinental_scale=1\nnum_continents=4\ncontinent_size_variety=0.35\nocean_level_formula=-0.5+1.7*(derived.ocean_fraction*(1-water_loss))\nocean_level={:.5}\n\n{}\n{}",
+            "command=cargo run --release --features validation --bin sweep -- --native-default-cloud-validation --size {render_size} --output-dir {output_dir}\nseed=42\ncloud_seed=1042\ncoverage=0.5\nmoisture=1\nstorm_count=2\nstorm_size=1\nwind_scale=1\nwater_loss=0.5\ncontinental_scale=1\nnum_continents=4\ncontinent_size_variety=0.35\nocean_level_formula=-0.5+1.7*(derived.ocean_fraction*(1-water_loss))\nocean_level={:.5}\n\n{}\n{}",
             scene.ocean_level,
             native_default_metrics(&density, &color_on, &color_off, &lowland, &land, render_size),
             native_default_source_report(
@@ -6927,8 +7253,8 @@ mod tests {
         field_view_pixels, polar_metrics, requires_weather_validation_size, u3_cube_coordinates,
         u3_feature_axis, u3_linear_cube_sample, u3_mass_association, u3_ray_ndc,
         u3_screen_direction, u14_coverage_growth, u14_coverage_support_metrics, u14_fixed_core_p90,
-        u14_geometry_metrics, u14_marine_to_land_continentality, u14_mixed_coast_land_support,
-        u14_significant_occupied_components, u15_component_labels, u15_fixture_centers,
+        u14_geometry_metrics, u14_lee_continuation_metrics, u14_marine_to_land_continentality,
+        u14_mixed_coast_land_support, u14_significant_occupied_components, u15_fixture_centers,
         u15_owner_size_metrics, u15_paired_size_tops, u15_pixel_neighbors, u15_pixel_position,
         u15_significant_response_components, u15_significant_size_components, u15_size_association,
         u15_size_fixture_support, u15_size_frozen_candidates,
@@ -6956,6 +7282,22 @@ mod tests {
             Some("--weather-validation requires --size >= 512 (got 511)")
         );
         assert!(weather_validation_size_error(512).is_none());
+    }
+
+    #[test]
+    fn validation_artifact_commands_enable_the_validation_feature() {
+        let source = include_str!("sweep.rs");
+        let legacy_release = ["cargo run --release", "--bin sweep"].join(" ");
+        let legacy_debug = ["cargo run", "--bin sweep"].join(" ");
+        let validation_release = [
+            "cargo run --release",
+            "--features validation",
+            "--bin sweep",
+        ]
+        .join(" ");
+        assert!(!source.contains(&legacy_release));
+        assert!(!source.contains(&legacy_debug));
+        assert!(source.contains(&validation_release));
     }
 
     #[test]
@@ -7000,6 +7342,32 @@ mod tests {
         assert!(ocean_samples > 0 && land_samples > 0);
         assert_eq!(occupied, 1.0);
         assert_eq!(p90, 0.03);
+    }
+
+    #[test]
+    fn u14_lee_continuation_metrics_measure_only_new_phase_creation() {
+        let mask = vec![true, true, false, false];
+        let advected = vec![
+            0.04, 0.01, 0.0, 0.0, 0.05, 0.0, 0.0, 0.0, 0.90, 0.0, 0.0, 0.0, 0.90, 0.0, 0.0, 0.0,
+        ];
+        let full = vec![
+            0.041, 0.012, 0.001, 0.0, 0.052, 0.0, 0.0, 0.0, 0.90, 0.0, 0.0, 0.0, 0.90, 0.0, 0.0,
+            0.0,
+        ];
+
+        let metrics = u14_lee_continuation_metrics(&advected, &full, &mask);
+
+        assert!((metrics.advected_total_p90 - 0.05).abs() < 1.0e-6);
+        assert!((metrics.full_total_p90 - 0.054).abs() < 1.0e-6);
+        assert!((metrics.new_phase_total_p90 - 0.004).abs() < 1.0e-6);
+        assert!(
+            metrics
+                .channel_delta_p90
+                .iter()
+                .zip([0.002, 0.002, 0.001])
+                .all(|(actual, expected)| (actual - expected).abs() < 1.0e-6)
+        );
+        assert!((metrics.new_phase_fraction - 0.004 / 0.054).abs() < 1.0e-6);
     }
 
     #[test]
