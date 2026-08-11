@@ -7628,7 +7628,7 @@ mod tests {
     fn rainout_uses_the_relative_humidity_threshold() {
         let shader = include_str!("../shaders/weather_spinup.wgsl");
         assert!(shader.contains("max(condensate - q_sat * relative_humidity_target, 0.0) * 0.22"));
-        assert!(shader.contains("state.y * marine_fraction * cold * 0.055"));
+        assert!(shader.contains("state.y * marine_climate * cold * 0.055"));
         assert!(!shader.contains("max(condensate - q_target, 0.0) * 0.22"));
     }
 

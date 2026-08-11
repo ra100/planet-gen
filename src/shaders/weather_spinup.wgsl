@@ -196,6 +196,13 @@ fn source_potential(
     return marine_fraction * mix(0.42, 0.68, thermal);
 }
 
+// Continentality describes climate and fetch; the terrain/ocean boundary owns
+// the vapor source. Every ice-free water cell therefore replenishes after its
+// vapor is advected away, including transitional coastal cells.
+fn open_ocean_fraction(pos: vec3<f32>) -> f32 {
+    return select(1.0, 0.0, sample_height(pos) > params.ocean_level);
+}
+
 // A sphere-space, low-frequency perturbation only changes conservative phase
 // partitioning. Clamping keeps it within the stated ±12% range.
 fn phase_rainout_modulation(pos: vec3<f32>) -> f32 {
@@ -413,19 +420,22 @@ fn init(@builtin(global_invocation_id) id: vec3<u32>) {
     let pressure = smooth_step(0.05, 0.3, params.surface_pressure_bar);
     let continentality = textureSampleLevel(wind_tex, spinup_sampler, pos, 0.0).a;
     let marine_fraction = 1.0 - smooth_step(0.15, 0.85, continentality);
-    let marine_supply = smooth_step(0.92, 1.0, marine_fraction);
+    let open_ocean = open_ocean_fraction(pos);
+    let marine_climate = max(marine_fraction, open_ocean);
     let thermal_stability = smooth_step(-25.0, 30.0, temperature_at(pos));
-    let persistent_ice = marine_fraction * (1.0 - smoothstep(-15.0, -6.0, temperature_at(pos)));
+    let ice_fraction = 1.0 - smoothstep(-15.0, -6.0, temperature_at(pos));
+    let persistent_ice = marine_fraction * ice_fraction;
+    let source_ice = open_ocean * ice_fraction;
     let budgets = source_budgets(
         params.coverage,
-        marine_fraction,
+        marine_climate,
         0.0,
         thermal_stability,
         persistent_ice,
     );
-    let surface_supply_factor = 1.0 - 0.25 * persistent_ice;
+    let surface_supply_factor = 1.0 - 0.25 * source_ice;
     let marine_vapor = select(
-        budgets.supply * marine_supply * surface_supply_factor * clamp(params.moisture, 0.0, 1.0)
+        budgets.supply * open_ocean * surface_supply_factor * clamp(params.moisture, 0.0, 1.0)
             * pressure * 0.42,
         0.0,
         (params.diagnostic_flags & DIAGNOSTIC_NO_SOURCE) != 0u,
@@ -513,24 +523,27 @@ fn transport(@builtin(global_invocation_id) id: vec3<u32>) {
     let pressure_factor = smooth_step(0.05, 0.3, params.surface_pressure_bar);
     let local_pressure = clamp(textureSampleLevel(pressure_tex, spinup_sampler, pos, 0.0).r / 1013.0, 0.8, 1.2);
     let marine_fraction = 1.0 - smooth_step(0.15, 0.85, wind.a);
-    let marine_supply = smooth_step(0.92, 1.0, marine_fraction);
+    let open_ocean = open_ocean_fraction(pos);
+    let marine_climate = max(marine_fraction, open_ocean);
     let cold = 1.0 - thermal;
     let q_sat = mix(0.16, 0.68, thermal) * pressure_factor * local_pressure;
-    let persistent_ice = marine_fraction * (1.0 - smoothstep(-15.0, -6.0, temperature_at(pos)));
+    let ice_fraction = 1.0 - smoothstep(-15.0, -6.0, temperature_at(pos));
+    let persistent_ice = marine_fraction * ice_fraction;
+    let source_ice = open_ocean * ice_fraction;
     let budgets = source_budgets(
         params.coverage,
-        marine_fraction,
+        marine_climate,
         convergence,
         thermal,
         persistent_ice,
     );
-    let surface_supply_factor = 1.0 - 0.25 * persistent_ice;
-    // Transitional land gets only the init seed; continuous recharge belongs
-    // exclusively to cells with full marine supply.
-    let supply_budget = budgets.supply * marine_supply * surface_supply_factor;
+    let surface_supply_factor = 1.0 - 0.25 * source_ice;
+    // Land gets only its init seed. Ice-free ocean continuously replenishes
+    // vapor toward its local climate target after each transport substep.
+    let supply_budget = budgets.supply * open_ocean * surface_supply_factor;
     let phase_budget = budgets.phase;
     let relative_humidity_target = clamp(
-        mix(0.45, 0.72, marine_fraction) + marine_fraction * cold * 0.18,
+        mix(0.45, 0.72, marine_climate) + marine_climate * cold * 0.18,
         0.0,
         0.92,
     );
@@ -570,7 +583,7 @@ fn transport(@builtin(global_invocation_id) id: vec3<u32>) {
             * smooth_step(1.0, 12.0, temperature_gradient)
             * smooth_step(-0.45, 0.45, frontal_alignment)
             * convergence;
-        let warm_marine_lift = marine_fraction * thermal * smooth_step(0.05, 0.30, 1.0 - cold);
+        let warm_marine_lift = marine_climate * thermal * smooth_step(0.05, 0.30, 1.0 - cold);
         let lcl_lift = clamp(
             convergence * 0.70 + terrain_lift * 1.75 + frontal_lift * 0.35
                 + warm_marine_lift - rain_shadow * 0.55,
@@ -588,8 +601,8 @@ fn transport(@builtin(global_invocation_id) id: vec3<u32>) {
         let inland_provenance = mix(
             smoothstep(0.05, 0.70, state.x / max(q_sat, 0.0001)),
             1.0,
-            marine_fraction,
-        ) * (1.0 - (1.0 - marine_fraction) * smoothstep(0.0001, 0.01, rain_shadow));
+            marine_climate,
+        ) * (1.0 - (1.0 - marine_climate) * smoothstep(0.0001, 0.01, rain_shadow));
         let convective_lift = clamp(
             lcl_lift + catalyst * humidity_gate * warm_gate * 0.40,
             0.0,
@@ -691,7 +704,7 @@ fn transport(@builtin(global_invocation_id) id: vec3<u32>) {
             condensate,
             (max(condensate - q_sat * relative_humidity_target, 0.0) * 0.22
                 + state.z * (0.01 + 0.08 * thermal)
-                + state.y * marine_fraction * cold * 0.055) * step_fraction,
+                + state.y * marine_climate * cold * 0.055) * step_fraction,
         );
         let rainout_scale = rainout / max(condensate, 0.0001);
         state.y *= 1.0 - rainout_scale;

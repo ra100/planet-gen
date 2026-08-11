@@ -2246,28 +2246,30 @@ mod tests {
     fn marine_forcing_drives_cool_decks_warm_trades_and_continuous_coverage() {
         let resolution = 32;
         let gpu = GpuContext::new().expect("GPU init failed");
-        let terrain = terrain_from(resolution, |_| -0.1);
+        let ocean_terrain = terrain_from(resolution, |_| -0.1);
+        let inland_terrain = terrain_from(resolution, |_| 0.1);
         let coverage_terrain = terrain_from(resolution, |pos| pos[2].max(0.0) * 0.45 - 0.1);
         let wind_pipeline = WindFieldPipeline::new(&gpu).expect("dynamics unavailable");
         let pipeline = WeatherFieldPipeline::new(&gpu).expect("weather unavailable");
-        let generate = |continentality: f32, base_temp_c: f32, coverage: f32| {
-            let dynamics = wind_pipeline.create_test_textures(&gpu, resolution, |_| {
-                ([0.0, 0.0, 0.0, continentality], 1025.0)
-            });
-            let weather = generate_weather(
-                &gpu,
-                &pipeline,
-                &dynamics,
-                &terrain,
-                WeatherSnapshot {
-                    storm_count: 0,
-                    base_temp_c,
-                    coverage,
-                    ..snapshot(resolution)
-                },
-            );
-            (weather.read_mass(&gpu), weather.read_geometry(&gpu))
-        };
+        let generate =
+            |terrain: &TectonicTerrain, continentality: f32, base_temp_c: f32, coverage: f32| {
+                let dynamics = wind_pipeline.create_test_textures(&gpu, resolution, |_| {
+                    ([0.0, 0.0, 0.0, continentality], 1025.0)
+                });
+                let weather = generate_weather(
+                    &gpu,
+                    &pipeline,
+                    &dynamics,
+                    terrain,
+                    WeatherSnapshot {
+                        storm_count: 0,
+                        base_temp_c,
+                        coverage,
+                        ..snapshot(resolution)
+                    },
+                );
+                (weather.read_mass(&gpu), weather.read_geometry(&gpu))
+            };
         let mean = |values: &[f32], channel: usize| {
             values
                 .chunks_exact(4)
@@ -2276,8 +2278,8 @@ mod tests {
                 / (values.len() / 4) as f32
         };
 
-        let (cool_ocean, cool_geometry) = generate(0.0, 5.0, 0.75);
-        let (cool_inland, _) = generate(1.0, 5.0, 0.75);
+        let (cool_ocean, cool_geometry) = generate(&ocean_terrain, 0.0, 5.0, 0.75);
+        let (cool_inland, _) = generate(&inland_terrain, 1.0, 5.0, 0.75);
         let cool_low = mean(&cool_ocean, 0);
         let inland_low = mean(&cool_inland, 0);
         let cool_deep = mean(&cool_ocean, 1);
@@ -2299,7 +2301,7 @@ mod tests {
             "deck thickness={deck_thickness}km"
         );
 
-        let (warm_ocean, warm_geometry) = generate(0.0, 28.0, 0.75);
+        let (warm_ocean, warm_geometry) = generate(&ocean_terrain, 0.0, 28.0, 0.75);
         let warm_top = mean(&warm_geometry, 1);
         let clear_gaps = warm_ocean
             .chunks_exact(4)
@@ -2521,7 +2523,7 @@ mod tests {
     fn storm_controls_do_not_inject_deep_clouds_without_source_eligibility() {
         let resolution = 32;
         let gpu = GpuContext::new().expect("GPU init failed");
-        let terrain = terrain_from(resolution, |_| -0.1);
+        let terrain = terrain_from(resolution, |_| 0.1);
         let wind_pipeline = WindFieldPipeline::new(&gpu).expect("dynamics unavailable");
         let pipeline = WeatherFieldPipeline::new(&gpu).expect("weather unavailable");
         let dynamics = wind_pipeline.create_test_textures(&gpu, resolution, |pos| {
@@ -2638,9 +2640,7 @@ mod tests {
     fn inland_clouds_require_upstream_marine_transport() {
         let resolution = 64;
         let gpu = GpuContext::new().expect("GPU init failed");
-        let terrain = terrain_from(resolution, |pos| {
-            -0.15 + (-(pos[2] / 0.14).powi(2)).exp() * pos[0].max(0.0).powi(8) * 0.45
-        });
+        let terrain = terrain_from(resolution, |pos| if pos[2] > 0.0 { -0.15 } else { 0.12 });
         let wind = WindFieldPipeline::new(&gpu).expect("dynamics unavailable");
         let pipeline = WeatherFieldPipeline::new(&gpu).expect("weather unavailable");
         let run = |wind_scale, diagnostic_flags| {
@@ -3559,7 +3559,7 @@ mod tests {
     fn land_humidity_seed_is_vapor_only_finite_and_respects_zero_controls() {
         let resolution = 16;
         let gpu = GpuContext::new().expect("GPU init failed");
-        let terrain = terrain_from(resolution, |_| -0.1);
+        let terrain = terrain_from(resolution, |_| 0.1);
         let wind = WindFieldPipeline::new(&gpu).expect("dynamics unavailable");
         let dynamics =
             wind.create_test_textures(&gpu, resolution, |_| ([0.0, 0.0, 0.0, 0.65], 1013.0));
@@ -3663,37 +3663,233 @@ mod tests {
     }
 
     #[test]
-    fn fractional_maritime_land_does_not_recharge_after_twenty_iterations() {
-        let resolution = 16;
+    fn open_ocean_recharges_across_wind_strengths_while_coastal_land_does_not() {
+        let resolution = 32;
         let gpu = GpuContext::new().expect("GPU init failed");
-        let terrain = terrain_from(resolution, |_| -0.1);
         let wind = WindFieldPipeline::new(&gpu).expect("dynamics unavailable");
-        let dynamics =
-            wind.create_test_textures(&gpu, resolution, |_| ([0.0, 0.0, 0.0, 0.65], 1013.0));
         let pipeline = WeatherFieldPipeline::new(&gpu).expect("weather unavailable");
-        let weather = pipeline.create_textures(&gpu, resolution);
-        let pass = run_spinup_pass_with_config(
-            &gpu,
-            &pipeline,
-            &terrain,
-            &dynamics,
-            snapshot(resolution),
-            &weather,
-            SpinupTestConfig {
-                iterations: SPINUP_ITERATIONS,
-                diagnostic_flags: SPINUP_DIAGNOSTIC_NO_PHASE_CHANGE
-                    | SPINUP_DIAGNOSTIC_NO_SINK
-                    | SPINUP_DIAGNOSTIC_NO_RELAXATION,
-                initial_state: Some([0.01, 0.0, 0.0, 0.0]),
-                ..Default::default()
-            },
+        let ocean = terrain_from(resolution, |_| -0.1);
+        let dynamics = wind.create_test_textures(&gpu, resolution, |pos| {
+            let tangent = [pos[2], 0.0, -pos[0]];
+            let length = (tangent[0] * tangent[0] + tangent[2] * tangent[2])
+                .sqrt()
+                .max(0.0001);
+            (
+                [tangent[0] / length, 0.0, tangent[2] / length, 0.65],
+                1013.0,
+            )
+        });
+        let flags = SPINUP_DIAGNOSTIC_NO_PHASE_CHANGE
+            | SPINUP_DIAGNOSTIC_NO_SINK
+            | SPINUP_DIAGNOSTIC_NO_RELAXATION;
+        let run = |terrain: &TectonicTerrain, wind_scale: f32| {
+            let weather = pipeline.create_textures(&gpu, resolution);
+            let mut params = snapshot(resolution);
+            params.seed = 31;
+            params.wind_scale = wind_scale;
+            run_spinup_pass_with_config(
+                &gpu,
+                &pipeline,
+                terrain,
+                &dynamics,
+                params,
+                &weather,
+                SpinupTestConfig {
+                    iterations: SPINUP_ITERATIONS,
+                    diagnostic_flags: flags,
+                    initial_state: Some([0.01, 0.0, 0.0, 0.0]),
+                    ..Default::default()
+                },
+            )
+            .state
+        };
+        let mean_vapor = |values: &[f32], include: fn([f32; 3]) -> bool| {
+            let (sum, count) = values
+                .chunks_exact(4)
+                .enumerate()
+                .filter_map(|(index, state)| {
+                    let face = index / (resolution * resolution) as usize;
+                    let pixel = index % (resolution * resolution) as usize;
+                    let pos = crate::cube_sphere::cube_to_sphere(
+                        face as u32,
+                        (pixel % resolution as usize) as f32 / (resolution - 1) as f32,
+                        (pixel / resolution as usize) as f32 / (resolution - 1) as f32,
+                    );
+                    include(pos).then_some(state[0])
+                })
+                .fold((0.0, 0usize), |(sum, count), vapor| {
+                    (sum + vapor, count + 1)
+                });
+            sum / count.max(1) as f32
+        };
+        let fields = [0.0, 1.0, 2.0].map(|scale| run(&ocean, scale));
+        let ocean_mean = fields.each_ref().map(|field| mean_vapor(field, |_| true));
+        assert!(
+            ocean_mean.iter().all(|mean| *mean > 0.03),
+            "open-ocean vapor did not replenish: {ocean_mean:?}"
         );
-        assert!(pass.state.chunks_exact(4).all(|state| {
-            (state[0] - 0.01).abs() <= 0.0001
-                && state[1] == 0.0
-                && state[2] == 0.0
-                && state[3] == 0.0
-        }));
+        assert!(
+            ocean_mean
+                .iter()
+                .all(|mean| (mean - ocean_mean[0]).abs() <= 0.02),
+            "wind left an ocean-wide source gap: {ocean_mean:?}"
+        );
+        let coast = terrain_from(resolution, |pos| if pos[2] < 0.0 { -0.1 } else { 0.1 });
+        let coastal = run(&coast, 0.0);
+        let ocean_vapor = mean_vapor(&coastal, |pos| pos[2] < -0.1);
+        let land_vapor = mean_vapor(&coastal, |pos| pos[2] > 0.1);
+        assert!(ocean_vapor > 0.03, "transitional ocean vapor={ocean_vapor}");
+        assert!(
+            (land_vapor - 0.01).abs() <= 0.0001,
+            "nearby land recharged instead of relying on transport: {land_vapor}"
+        );
+
+        // Central angular spread is invariant under a rigid translation/rotation
+        // of the whole vapor field; wind must change its organization instead.
+        let organization = |values: &[f32]| {
+            let (center, total) = values.chunks_exact(4).enumerate().fold(
+                ([0.0; 3], 0.0),
+                |(mut center, total), (index, state)| {
+                    let face = index / (resolution * resolution) as usize;
+                    let pixel = index % (resolution * resolution) as usize;
+                    let pos = crate::cube_sphere::cube_to_sphere(
+                        face as u32,
+                        (pixel % resolution as usize) as f32 / (resolution - 1) as f32,
+                        (pixel / resolution as usize) as f32 / (resolution - 1) as f32,
+                    );
+                    for axis in 0..3 {
+                        center[axis] += pos[axis] * state[0];
+                    }
+                    (center, total + state[0])
+                },
+            );
+            let length = center.iter().map(|value| value * value).sum::<f32>().sqrt();
+            let direction = center.map(|value| value / length.max(0.0001));
+            values
+                .chunks_exact(4)
+                .enumerate()
+                .map(|(index, state)| {
+                    let face = index / (resolution * resolution) as usize;
+                    let pixel = index % (resolution * resolution) as usize;
+                    let pos = crate::cube_sphere::cube_to_sphere(
+                        face as u32,
+                        (pixel % resolution as usize) as f32 / (resolution - 1) as f32,
+                        (pixel / resolution as usize) as f32 / (resolution - 1) as f32,
+                    );
+                    let alignment = pos
+                        .iter()
+                        .zip(direction)
+                        .map(|(position, direction)| position * direction)
+                        .sum::<f32>();
+                    state[0] * (1.0 - alignment)
+                })
+                .sum::<f32>()
+                / total.max(0.0001)
+        };
+        let coastal_wind = [1.0, 2.0].map(|scale| run(&coast, scale));
+        let organization_delta =
+            (organization(&coastal_wind[0]) - organization(&coastal_wind[1])).abs();
+        assert!(
+            organization_delta > 0.0005,
+            "wind only translated vapor instead of changing coastal organization: {organization_delta}"
+        );
+    }
+
+    #[test]
+    fn coastal_ocean_source_is_local_and_land_vapor_is_transport_traced() {
+        let resolution = 32;
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let wind = WindFieldPipeline::new(&gpu).expect("dynamics unavailable");
+        let pipeline = WeatherFieldPipeline::new(&gpu).expect("weather unavailable");
+        let coast = terrain_from(resolution, |pos| if pos[2] < 0.0 { -0.1 } else { 0.1 });
+        let land = terrain_from(resolution, |_| 0.1);
+        let dynamics = wind.create_test_textures(&gpu, resolution, |pos| {
+            let target = [0.0, 0.0, 1.0];
+            let projection = pos[2];
+            (
+                [
+                    (target[0] - pos[0] * projection) * 0.8,
+                    (target[1] - pos[1] * projection) * 0.8,
+                    (target[2] - pos[2] * projection) * 0.8,
+                    0.65,
+                ],
+                1013.0,
+            )
+        });
+        let flags = SPINUP_DIAGNOSTIC_NO_PHASE_CHANGE
+            | SPINUP_DIAGNOSTIC_NO_SINK
+            | SPINUP_DIAGNOSTIC_NO_RELAXATION;
+        fn zero(_: [f32; 3]) -> [f32; 4] {
+            [0.0; 4]
+        }
+        fn ocean_tracer(pos: [f32; 3]) -> [f32; 4] {
+            if pos[2] < -0.15 {
+                [0.25, 0.0, 0.0, 0.0]
+            } else {
+                [0.0; 4]
+            }
+        }
+        let run = |terrain: &TectonicTerrain, diagnostic_flags, initial_state_at| {
+            let weather = pipeline.create_textures(&gpu, resolution);
+            let mut params = snapshot(resolution);
+            params.seed = 31;
+            params.wind_scale = 1.0;
+            run_spinup_pass_with_config(
+                &gpu,
+                &pipeline,
+                terrain,
+                &dynamics,
+                params,
+                &weather,
+                SpinupTestConfig {
+                    iterations: SPINUP_ITERATIONS,
+                    diagnostic_flags,
+                    initial_state_at: Some(initial_state_at),
+                    ..Default::default()
+                },
+            )
+            .state
+        };
+        let mean_vapor = |values: &[f32], include: fn([f32; 3]) -> bool| {
+            let (sum, count) = values
+                .chunks_exact(4)
+                .enumerate()
+                .filter_map(|(index, state)| {
+                    let face = index / (resolution * resolution) as usize;
+                    let pixel = index % (resolution * resolution) as usize;
+                    let pos = crate::cube_sphere::cube_to_sphere(
+                        face as u32,
+                        (pixel % resolution as usize) as f32 / (resolution - 1) as f32,
+                        (pixel / resolution as usize) as f32 / (resolution - 1) as f32,
+                    );
+                    include(pos).then_some(state[0])
+                })
+                .fold((0.0, 0usize), |(sum, count), vapor| {
+                    (sum + vapor, count + 1)
+                });
+            sum / count.max(1) as f32
+        };
+        let sourced = run(&coast, flags, zero);
+        let no_source = run(&coast, flags | SPINUP_DIAGNOSTIC_NO_SOURCE, zero);
+        // This control carries pre-existing ocean vapor only: any land vapor is
+        // transport, never a local source.
+        let traced = run(&coast, flags | SPINUP_DIAGNOSTIC_NO_SOURCE, ocean_tracer);
+        let land_only = run(&land, flags, zero);
+        let ocean_source = mean_vapor(&sourced, |pos| pos[2] < -0.15);
+        let downwind_land = mean_vapor(&sourced, |pos| pos[2] > 0.15);
+        let traced_land = mean_vapor(&traced, |pos| pos[2] > 0.15);
+
+        assert!(ocean_source > 0.03, "coastal ocean source={ocean_source}");
+        assert!(downwind_land > 0.0001, "source did not reach downwind land");
+        assert!(
+            traced_land > 0.0001,
+            "ocean tracer did not cross onto downwind land: {traced_land}"
+        );
+        assert!(no_source.iter().all(|value| *value == 0.0));
+        assert!(
+            land_only.iter().all(|value| *value == 0.0),
+            "land recharged without an ocean source"
+        );
     }
 
     #[test]

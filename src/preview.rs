@@ -3282,25 +3282,46 @@ fn layer_profile_oracle() {
             assert_eq!(actual, expected, "moisture={moisture}, coverage={coverage}");
         }
 
+        // This is a plumbing fixture: use a physically sourced marine deck rather
+        // than relying on vapor generation over the flat land render surface.
+        let dense_terrain = TectonicTerrain {
+            faces: std::array::from_fn(|_| vec![-0.1; 16 * 16]),
+            resolution: 16,
+        };
+        let dense_dynamics =
+            wind.create_test_textures(&gpu, 16, |_| ([0.0, 0.0, 0.0, 0.0], 1025.0));
         let dense_snapshot = WeatherSnapshot {
             face: 0,
             resolution: 16,
             seed: 42,
-            storm_count: 8,
-            coverage: 1.0,
+            storm_count: 0,
+            coverage: 0.75,
             moisture: 1.0,
             surface_pressure_bar: 1.0,
-            base_temp_c: 15.0,
-            ocean_level: -0.1,
+            base_temp_c: 5.0,
+            ocean_level: 0.0,
             axial_tilt_rad: 0.4,
             season: 0.5,
-            storm_size: 2.0,
-            radius_km: 500.0,
+            storm_size: 1.0,
+            radius_km: 6371.0,
             rotation_rate_rad_s: std::f32::consts::TAU / 86400.0,
-            wind_scale: 1.0,
+            wind_scale: 0.0,
         };
         let dense_weather = weather_pipeline.create_textures(&gpu, 16);
-        weather_pipeline.generate(&gpu, dense_snapshot, &terrain, &dynamics, &dense_weather);
+        weather_pipeline.generate(
+            &gpu,
+            dense_snapshot,
+            &dense_terrain,
+            &dense_dynamics,
+            &dense_weather,
+        );
+        assert!(
+            dense_weather
+                .read_mass(&gpu)
+                .chunks_exact(4)
+                .any(|mass| mass[0] > 0.01),
+            "dense shadow fixture must contain low cloud mass"
+        );
 
         let mut hidden_cloud_shadows = cloud_off;
         hidden_cloud_shadows.show_cloud_shadows = 1.0;
