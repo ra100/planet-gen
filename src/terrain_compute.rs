@@ -1521,6 +1521,21 @@ pub struct DynamicsTextures {
     pub wind_continentality: wgpu::TextureView,
     pub pressure: wgpu::TextureView,
     pub resolution: u32,
+    nearly_all_ocean: std::cell::Cell<bool>,
+}
+
+impl DynamicsTextures {
+    pub(crate) fn is_nearly_all_ocean(&self) -> bool {
+        self.nearly_all_ocean.get()
+    }
+}
+
+fn terrain_is_nearly_all_ocean(terrain: &TectonicTerrain, ocean_level: f32) -> bool {
+    terrain
+        .faces
+        .iter()
+        .flatten()
+        .all(|height| *height <= ocean_level)
 }
 
 impl WindFieldPipeline {
@@ -1630,7 +1645,21 @@ impl WindFieldPipeline {
         })
     }
 
-    pub fn create_textures(&self, gpu: &GpuContext, resolution: u32) -> DynamicsTextures {
+    pub fn create_textures(
+        &self,
+        gpu: &GpuContext,
+        resolution: u32,
+        terrain: &TectonicTerrain,
+        ocean_level: f32,
+    ) -> DynamicsTextures {
+        let textures = self.create_empty_textures(gpu, resolution);
+        textures
+            .nearly_all_ocean
+            .set(terrain_is_nearly_all_ocean(terrain, ocean_level));
+        textures
+    }
+
+    fn create_empty_textures(&self, gpu: &GpuContext, resolution: u32) -> DynamicsTextures {
         let create = |label| {
             gpu.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
@@ -1672,6 +1701,7 @@ impl WindFieldPipeline {
             _wind_continentality: wind,
             _pressure: pressure,
             resolution,
+            nearly_all_ocean: std::cell::Cell::new(false),
         }
     }
 
@@ -1682,7 +1712,8 @@ impl WindFieldPipeline {
         resolution: u32,
         field: impl Fn([f32; 3]) -> ([f32; 4], f32),
     ) -> DynamicsTextures {
-        let textures = self.create_textures(gpu, resolution);
+        let textures = self.create_empty_textures(gpu, resolution);
+        let mut nearly_all_ocean = true;
         for face in 0..6 {
             let mut wind = Vec::with_capacity((resolution * resolution * 4) as usize);
             let mut pressure = Vec::with_capacity((resolution * resolution * 4) as usize);
@@ -1694,6 +1725,7 @@ impl WindFieldPipeline {
                         y as f32 / (resolution - 1) as f32,
                     );
                     let (wind_value, pressure_value) = field(pos);
+                    nearly_all_ocean &= wind_value[3] <= 0.01;
                     wind.extend(wind_value.map(|value| half::f16::from_f32(value).to_bits()));
                     pressure.extend(
                         [pressure_value, 0.0, 0.0, 0.0]
@@ -1730,6 +1762,7 @@ impl WindFieldPipeline {
                 );
             }
         }
+        textures.nearly_all_ocean.set(nearly_all_ocean);
         textures
     }
 
@@ -1828,7 +1861,7 @@ impl WindFieldPipeline {
         let ppf = (resolution * resolution) as usize;
         let total_1c = 6 * ppf; // 1-component buffer (continentality, pressure)
         let total_3c = 3 * total_1c; // 3-component buffer (wind vectors)
-        let textures = self.create_textures(gpu, resolution);
+        let textures = self.create_textures(gpu, resolution, terrain, ocean_level);
 
         // Pack all 6 faces of height into one buffer
         let mut all_height = vec![0.0f32; total_1c];
@@ -2017,6 +2050,9 @@ impl WindFieldPipeline {
         base_temp_c: f32,
         atm_pressure: f32,
     ) {
+        textures
+            .nearly_all_ocean
+            .set(terrain_is_nearly_all_ocean(terrain, ocean_level));
         let resolution = textures.resolution;
         let ppf = (resolution * resolution) as usize;
         let total = 6 * ppf;
@@ -2179,7 +2215,7 @@ impl WindFieldPipeline {
 mod tests {
     use super::*;
     use crate::gpu::GpuContext;
-    use crate::plates::{PlateGenParams, generate_plates};
+    use crate::plates::{generate_plates, PlateGenParams};
 
     fn flat_terrain(resolution: u32) -> TectonicTerrain {
         TectonicTerrain {
@@ -2211,11 +2247,9 @@ mod tests {
             tiles.iter().map(|tile| tile.interior_rows).sum::<u32>(),
             8192
         );
-        assert!(
-            tiles.iter().all(|tile| {
-                u64::from(8192_u32) * u64::from(tile.interior_rows + 2) * 4 <= limit
-            })
-        );
+        assert!(tiles
+            .iter()
+            .all(|tile| { u64::from(8192_u32) * u64::from(tile.interior_rows + 2) * 4 <= limit }));
 
         let mut limits = wgpu::Limits::default();
         limits.max_storage_buffer_binding_size = limit as u32;
@@ -2261,14 +2295,12 @@ mod tests {
         pipeline.erode(&gpu, &mut twice, 2, -1.0).unwrap();
 
         assert_ne!(once.faces, twice.faces);
-        assert!(
-            twice
-                .faces
-                .iter()
-                .flatten()
-                .zip(sloped_terrain(16).faces.iter().flatten())
-                .any(|(eroded, original)| eroded != original)
-        );
+        assert!(twice
+            .faces
+            .iter()
+            .flatten()
+            .zip(sloped_terrain(16).faces.iter().flatten())
+            .any(|(eroded, original)| eroded != original));
     }
 
     #[test]
@@ -2339,8 +2371,8 @@ mod tests {
         let generate = |textures: &DynamicsTextures| {
             pipeline.generate_gpu(&gpu, &terrain, textures, 42, 0.0, 0.4, 0.5, 1.0, 15.0, 1.0);
         };
-        let first = pipeline.create_textures(&gpu, 16);
-        let second = pipeline.create_textures(&gpu, 16);
+        let first = pipeline.create_textures(&gpu, 16, &terrain, 0.0);
+        let second = pipeline.create_textures(&gpu, 16, &terrain, 0.0);
         generate(&first);
         generate(&second);
 
@@ -2350,16 +2382,12 @@ mod tests {
         assert_eq!(first_wind, second_wind);
         assert!(first_wind.iter().all(|value| value.is_finite()));
         assert!(pressure.iter().all(|value| value.is_finite()));
-        assert!(
-            first_wind
-                .chunks_exact(4)
-                .all(|pixel| (0.0..=1.0).contains(&pixel[3]))
-        );
-        assert!(
-            pressure
-                .chunks_exact(4)
-                .all(|pixel| (900.0..1100.0).contains(&pixel[0]))
-        );
+        assert!(first_wind
+            .chunks_exact(4)
+            .all(|pixel| (0.0..=1.0).contains(&pixel[3])));
+        assert!(pressure
+            .chunks_exact(4)
+            .all(|pixel| (900.0..1100.0).contains(&pixel[0])));
     }
 
     #[test]

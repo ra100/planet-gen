@@ -17,7 +17,7 @@ use crate::export_staging::{
 use crate::gpu::GpuContext;
 use crate::openexr_writer::AtomicScanlineExrWriter;
 use crate::planet::{DerivedProperties, PlanetParams};
-use crate::plates::{PlateGenParams, generate_plates};
+use crate::plates::{generate_plates, PlateGenParams};
 use crate::png_writer::{AtomicScanlinePngWriter, PngRowFormat};
 use crate::preview::PreviewUniforms;
 use crate::terrain_compute::{
@@ -2414,9 +2414,8 @@ fn materialize_staged_equirect<F>(
     channels: u32,
     output_dir: &Path,
     cancel: &AtomicBool,
-    checkpoints: &mut (
-             dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String> + '_
-         ),
+    checkpoints: &mut (dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String>
+              + '_),
     finish: F,
 ) -> Result<(EquirectStage, StagedIoMetrics), StagedExportFailure>
 where
@@ -2448,9 +2447,8 @@ fn materialize_staged_equirect_with_worker_cap<F>(
     channels: u32,
     output_dir: &Path,
     cancel: &AtomicBool,
-    checkpoints: &mut (
-             dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String> + '_
-         ),
+    checkpoints: &mut (dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String>
+              + '_),
     worker_cap: usize,
     finish: F,
 ) -> Result<(EquirectStage, StagedIoMetrics), StagedExportFailure>
@@ -2508,9 +2506,8 @@ fn consume_staged_equirect_rows_with_worker_cap<F, G>(
     height: u32,
     channels: u32,
     cancel: &AtomicBool,
-    checkpoints: &mut (
-             dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String> + '_
-         ),
+    checkpoints: &mut (dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String>
+              + '_),
     worker_cap: usize,
     store_intermediate: bool,
     bytes_per_value: u64,
@@ -2772,9 +2769,8 @@ where
 }
 
 fn emit_materialization_checkpoint(
-    checkpoints: &mut (
-             dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String> + '_
-         ),
+    checkpoints: &mut (dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String>
+              + '_),
     layer: &'static str,
     metrics: &StagedIoMetrics,
     rows_completed: u32,
@@ -2810,9 +2806,8 @@ fn export_staged_equirect_exr(
     channels: u32,
     path: &Path,
     cancel: &AtomicBool,
-    checkpoints: &mut (
-             dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String> + '_
-         ),
+    checkpoints: &mut (dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String>
+              + '_),
 ) -> Result<StagedIoMetrics, StagedExportFailure> {
     if channels != 1 && channels != 4 {
         return Err(StagedExportFailure {
@@ -2885,9 +2880,8 @@ fn export_staged_cloud_exr(
     width: u32,
     height: u32,
     cancel: &AtomicBool,
-    checkpoints: &mut (
-             dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String> + '_
-         ),
+    checkpoints: &mut (dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String>
+              + '_),
 ) -> Result<StagedIoMetrics, Box<StagedExportFailure>> {
     let writer = RefCell::new(Some(
         AtomicScanlineExrWriter::create(path, width, height, &CLOUD_EXR_CHANNELS).map_err(
@@ -2959,9 +2953,8 @@ fn export_staged_equirect_png(
     output_layer: QuantizedLayer,
     path: &Path,
     cancel: &AtomicBool,
-    checkpoints: &mut (
-             dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String> + '_
-         ),
+    checkpoints: &mut (dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String>
+              + '_),
 ) -> Result<StagedIoMetrics, StagedExportFailure> {
     let channels = output_layer.channels();
     let output_dir = path.parent().ok_or_else(|| StagedExportFailure {
@@ -3208,9 +3201,8 @@ pub fn run_export_with_timings_and_checkpoints(
     progress_tx: &Sender<ExportProgress>,
     cancel: &AtomicBool,
     timings: &mut ExportTimings,
-    checkpoints: &mut (
-             dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String> + '_
-         ),
+    checkpoints: &mut (dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String>
+              + '_),
 ) -> Result<PathBuf, String> {
     *timings = ExportTimings::default();
     let total_started = Instant::now();
@@ -3647,7 +3639,8 @@ pub fn run_export_with_timings_and_checkpoints(
         let snapshot = export_weather_snapshot(config.weather, weather_resolution);
         let wind_pipeline = WindFieldPipeline::new(gpu)
             .map_err(|error| format!("export wind pipeline unavailable: {error}"))?;
-        let dynamics = wind_pipeline.create_textures(gpu, weather_resolution);
+        let dynamics =
+            wind_pipeline.create_textures(gpu, weather_resolution, &terrain, snapshot.ocean_level);
         wind_pipeline.generate_gpu(
             gpu,
             &weather_terrain,
@@ -4227,7 +4220,8 @@ mod tests {
         tile_size: u32,
     ) -> [Vec<f32>; 6] {
         let wind = WindFieldPipeline::new(gpu).expect("U5 wind pipeline unavailable");
-        let dynamics = wind.create_textures(gpu, snapshot.resolution);
+        let dynamics =
+            wind.create_textures(gpu, snapshot.resolution, terrain, snapshot.ocean_level);
         wind.generate_gpu(
             gpu,
             terrain,
@@ -4385,9 +4379,7 @@ mod tests {
         // world-space rays before tiled staging changes their output ownership.
         let shared_density = include_str!("shaders/cloud_density.wgsl");
         assert!(shared_density.contains("fn weather_cloud_sample"));
-        assert!(
-            include_str!("preview.rs").contains("include_str!(\"shaders/cloud_density.wgsl\")")
-        );
+        assert!(include_str!("preview.rs").contains("include_str!(\"shaders/cloud_density.wgsl\")"));
         assert!(include_str!("export.rs").contains("include_str!(\"shaders/cloud_density.wgsl\")"));
         assert!(include_str!("shaders/cloud_export.wgsl").contains("weather_cloud_sample"));
 
@@ -4524,12 +4516,10 @@ mod tests {
         let meso = directional_terrain(2);
         let reconstructed = reconstruct_8k_from_meso_delta(&full, &meso, &meso).unwrap();
         for (actual, expected) in reconstructed.faces.iter().zip(&full.faces) {
-            assert!(
-                actual
-                    .iter()
-                    .zip(expected)
-                    .all(|(actual, expected)| (actual - expected).abs() < 1e-6)
-            );
+            assert!(actual
+                .iter()
+                .zip(expected)
+                .all(|(actual, expected)| (actual - expected).abs() < 1e-6));
         }
         for direction in [[1.0, 0.0, 1.0], [1.0, 1.0, 0.0], [0.0, 1.0, 1.0]] {
             let before = sample_cubemap_height(&full, direction);
@@ -5295,11 +5285,9 @@ mod tests {
         assert!(!height_staged.with_extension("exr.part").exists());
         assert!(!normal_staged.with_extension("exr.part").exists());
         assert_eq!(recorded.len(), 4);
-        assert!(
-            recorded
-                .chunks_exact(2)
-                .all(|pair| !pair[0].completed && pair[1].completed)
-        );
+        assert!(recorded
+            .chunks_exact(2)
+            .all(|pair| !pair[0].completed && pair[1].completed));
         assert!(recorded.iter().all(|checkpoint| {
             checkpoint.rows_completed == height_px
                 && checkpoint.rows_total == height_px

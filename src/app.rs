@@ -401,7 +401,12 @@ impl PlanetGenApp {
             let t_wind = std::time::Instant::now();
 
             if self.dynamics.as_ref().map(|textures| textures.resolution) != Some(cloud_res) {
-                self.dynamics = Some(self.wind_pipeline.create_textures(&self.gpu, cloud_res));
+                self.dynamics = Some(self.wind_pipeline.create_textures(
+                    &self.gpu,
+                    cloud_res,
+                    &terrain,
+                    ocean_level,
+                ));
             }
             let dynamics = self.dynamics.as_ref().unwrap();
             let weather = self.weather_snapshot(cloud_res, ocean_level);

@@ -59,10 +59,37 @@ impl Default for WeatherSnapshot {
 }
 
 const SPINUP_RESOLUTION: u32 = 128;
-const SPINUP_ITERATIONS: usize = 16;
-const PHYSICAL_INTERVAL_SECONDS: f32 = 1600.0;
+// Keep the 25,600 s spin-up horizon while giving transport more bounded steps.
+const SPINUP_ITERATIONS: usize = 20;
+const PHYSICAL_INTERVAL_SECONDS: f32 = 1280.0;
+const ALL_OCEAN_SPINUP_ITERATIONS: usize = 16;
+const ALL_OCEAN_PHYSICAL_INTERVAL_SECONDS: f32 = 1600.0;
+const WEATHER_DIAGNOSTIC_ALL_OCEAN_COMPAT: u32 = 32;
 const MAX_WIND_MPS: f32 = 50.0;
 const MAX_SUBSTEP_TEXELS: f32 = 0.85;
+
+#[derive(Clone, Copy)]
+struct SpinupSchedule {
+    iterations: usize,
+    physical_interval_seconds: f32,
+    diagnostic_flags: u32,
+}
+
+fn spinup_schedule(nearly_all_ocean: bool) -> SpinupSchedule {
+    if nearly_all_ocean {
+        SpinupSchedule {
+            iterations: ALL_OCEAN_SPINUP_ITERATIONS,
+            physical_interval_seconds: ALL_OCEAN_PHYSICAL_INTERVAL_SECONDS,
+            diagnostic_flags: WEATHER_DIAGNOSTIC_ALL_OCEAN_COMPAT,
+        }
+    } else {
+        SpinupSchedule {
+            iterations: SPINUP_ITERATIONS,
+            physical_interval_seconds: PHYSICAL_INTERVAL_SECONDS,
+            diagnostic_flags: 0,
+        }
+    }
+}
 
 fn min_face_angle(resolution: u32) -> f32 {
     let step = 2.0 / (resolution - 1) as f32;
@@ -73,14 +100,45 @@ fn min_face_angle(resolution: u32) -> f32 {
 }
 
 fn outgoing_cfl(wind_scale: f32, resolution: u32, radius_km: f32, substeps: usize) -> f32 {
-    2.0 * MAX_WIND_MPS * wind_scale.clamp(0.0, 2.0) * PHYSICAL_INTERVAL_SECONDS
+    outgoing_cfl_with_interval(
+        wind_scale,
+        resolution,
+        radius_km,
+        substeps,
+        PHYSICAL_INTERVAL_SECONDS,
+    )
+}
+
+fn outgoing_cfl_with_interval(
+    wind_scale: f32,
+    resolution: u32,
+    radius_km: f32,
+    substeps: usize,
+    physical_interval_seconds: f32,
+) -> f32 {
+    2.0 * MAX_WIND_MPS * wind_scale.clamp(0.0, 2.0) * physical_interval_seconds
         / (radius_km.max(1.0) * 1000.0)
         / min_face_angle(resolution)
         / substeps as f32
 }
 
 fn wind_substeps(wind_scale: f32, resolution: u32, radius_km: f32) -> usize {
-    let outgoing = outgoing_cfl(wind_scale, resolution, radius_km, 1);
+    wind_substeps_with_interval(wind_scale, resolution, radius_km, PHYSICAL_INTERVAL_SECONDS)
+}
+
+fn wind_substeps_with_interval(
+    wind_scale: f32,
+    resolution: u32,
+    radius_km: f32,
+    physical_interval_seconds: f32,
+) -> usize {
+    let outgoing = outgoing_cfl_with_interval(
+        wind_scale,
+        resolution,
+        radius_km,
+        1,
+        physical_interval_seconds,
+    );
     (outgoing / MAX_SUBSTEP_TEXELS).ceil().max(1.0) as usize
 }
 
@@ -736,6 +794,14 @@ impl WeatherFieldPipeline {
             }
         }
 
+        let schedule = spinup_schedule(dynamics.is_nearly_all_ocean());
+        let all_ocean_compat =
+            schedule.diagnostic_flags != 0 && self.spinup_iterations == SPINUP_ITERATIONS;
+        let spinup_iterations = if all_ocean_compat {
+            schedule.iterations
+        } else {
+            self.spinup_iterations
+        };
         let spin_resolution = weather.resolution.clamp(2, SPINUP_RESOLUTION);
         let spinup_params = SpinupParams {
             spin_resolution,
@@ -752,7 +818,12 @@ impl WeatherFieldPipeline {
             storm_size: snapshot.storm_size,
             radius_km: snapshot.radius_km,
             rotation_rate_rad_s: snapshot.rotation_rate_rad_s,
-            diagnostic_flags,
+            diagnostic_flags: diagnostic_flags
+                | if all_ocean_compat {
+                    schedule.diagnostic_flags
+                } else {
+                    0
+                },
             wind_scale: snapshot.wind_scale,
         };
         let spinup_uniform = gpu
@@ -859,8 +930,17 @@ impl WeatherFieldPipeline {
         };
         let a_to_b = transport_bind_group("weather spin-up A to B", &state_a, &state_b);
         let b_to_a = transport_bind_group("weather spin-up B to A", &state_b, &state_a);
-        let transport_passes = self.spinup_iterations
-            * wind_substeps(snapshot.wind_scale, spin_resolution, snapshot.radius_km);
+        let transport_passes = spinup_iterations
+            * wind_substeps_with_interval(
+                snapshot.wind_scale,
+                spin_resolution,
+                snapshot.radius_km,
+                if all_ocean_compat {
+                    schedule.physical_interval_seconds
+                } else {
+                    PHYSICAL_INTERVAL_SECONDS
+                },
+            );
         let final_state = if transport_passes.is_multiple_of(2) {
             &state_a
         } else {
@@ -1345,6 +1425,88 @@ mod tests {
         }
     }
 
+    fn condensate_centroid(state: &[f32], resolution: u32) -> Option<[f32; 3]> {
+        let mut weighted = [0.0; 3];
+        let mut total = 0.0;
+        for face in 0..6 {
+            for y in 0..resolution {
+                for x in 0..resolution {
+                    let pos = crate::cube_sphere::cube_to_sphere(
+                        face,
+                        x as f32 / (resolution - 1) as f32,
+                        y as f32 / (resolution - 1) as f32,
+                    );
+                    let index =
+                        ((face * resolution * resolution + y * resolution + x) * 4) as usize;
+                    let u = x as f32 / (resolution - 1) as f32 * 2.0 - 1.0;
+                    let v = y as f32 / (resolution - 1) as f32 * 2.0 - 1.0;
+                    let mass =
+                        (state[index + 1] + state[index + 2]) * (1.0 + u * u + v * v).powf(-1.5);
+                    for axis in 0..3 {
+                        weighted[axis] += pos[axis] * mass;
+                    }
+                    total += mass;
+                }
+            }
+        }
+        let length = weighted
+            .iter()
+            .map(|value| value * value)
+            .sum::<f32>()
+            .sqrt();
+        (total > 0.0 && length > f32::EPSILON).then(|| weighted.map(|value| value / length))
+    }
+
+    fn condensate_core_fraction(state: &[f32], resolution: u32, radius_rad: f32) -> f32 {
+        let Some(center) = condensate_centroid(state, resolution) else {
+            return 0.0;
+        };
+        let mut core = 0.0;
+        let mut total = 0.0;
+        for face in 0..6 {
+            for y in 0..resolution {
+                for x in 0..resolution {
+                    let pos = crate::cube_sphere::cube_to_sphere(
+                        face,
+                        x as f32 / (resolution - 1) as f32,
+                        y as f32 / (resolution - 1) as f32,
+                    );
+                    let index =
+                        ((face * resolution * resolution + y * resolution + x) * 4) as usize;
+                    let u = x as f32 / (resolution - 1) as f32 * 2.0 - 1.0;
+                    let v = y as f32 / (resolution - 1) as f32 * 2.0 - 1.0;
+                    let mass =
+                        (state[index + 1] + state[index + 2]) * (1.0 + u * u + v * v).powf(-1.5);
+                    let in_core = center
+                        .iter()
+                        .zip(pos)
+                        .map(|(left, right)| left * right)
+                        .sum::<f32>()
+                        .clamp(-1.0, 1.0)
+                        .acos()
+                        <= radius_rad;
+                    if in_core {
+                        core += mass;
+                    }
+                    total += mass;
+                }
+            }
+        }
+        core / total.max(f32::EPSILON)
+    }
+
+    #[test]
+    fn condensate_core_fraction_rejects_uniform_diffusion() {
+        let resolution = 16;
+        let uniform = vec![0.0, 1.0, 0.0, 0.0]
+            .into_iter()
+            .cycle()
+            .take(6 * resolution as usize * resolution as usize * 4)
+            .collect::<Vec<_>>();
+
+        assert!(condensate_core_fraction(&uniform, resolution, 0.25) < 0.05);
+    }
+
     #[test]
     fn weather_snapshot_and_spinup_params_preserve_wgsl_layout() {
         use std::mem::{offset_of, size_of};
@@ -1357,6 +1519,21 @@ mod tests {
         let spinup_wgsl = include_str!("shaders/weather_spinup.wgsl");
         assert!(weather_wgsl.contains("wind_scale: f32,"));
         assert!(spinup_wgsl.contains("diagnostic_flags: u32,\n    wind_scale: f32,"));
+    }
+
+    #[test]
+    fn spinup_keeps_the_bounded_25600_second_horizon() {
+        assert_eq!(SPINUP_ITERATIONS, 20);
+        assert_eq!(PHYSICAL_INTERVAL_SECONDS, 1280.0);
+        assert_eq!(
+            SPINUP_ITERATIONS as f32 * PHYSICAL_INTERVAL_SECONDS,
+            25_600.0
+        );
+        let spinup_wgsl = include_str!("shaders/weather_spinup.wgsl");
+        assert!(spinup_wgsl.contains(&format!(
+            "const PHYSICAL_INTERVAL_SECONDS: f32 = {PHYSICAL_INTERVAL_SECONDS:.1};"
+        )));
+        assert!(spinup_wgsl.contains("0.88,") && spinup_wgsl.contains("1.12,"));
     }
 
     fn read_texture(gpu: &GpuContext, texture: &wgpu::Texture, resolution: u32) -> Vec<f32> {
@@ -1640,8 +1817,19 @@ mod tests {
         };
         let a_to_b = transport_bind_group("weather spin-up A to B", &state_a, &state_b);
         let b_to_a = transport_bind_group("weather spin-up B to A", &state_b, &state_a);
+        let physical_interval_seconds =
+            if config.diagnostic_flags & WEATHER_DIAGNOSTIC_ALL_OCEAN_COMPAT != 0 {
+                ALL_OCEAN_PHYSICAL_INTERVAL_SECONDS
+            } else {
+                PHYSICAL_INTERVAL_SECONDS
+            };
         let transport_passes = config.iterations
-            * wind_substeps(snapshot.wind_scale, spin_resolution, snapshot.radius_km);
+            * wind_substeps_with_interval(
+                snapshot.wind_scale,
+                spin_resolution,
+                snapshot.radius_km,
+                physical_interval_seconds,
+            );
         for iteration in 0..transport_passes {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_pipeline(&pipeline.spinup_transport_pipeline);
@@ -1701,6 +1889,63 @@ mod tests {
         weather
     }
 
+    #[test]
+    fn all_ocean_compatibility_matches_the_legacy_spinup_fixture() {
+        let resolution = 16;
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let terrain = terrain_from(resolution, |_| -0.1);
+        let wind = WindFieldPipeline::new(&gpu).expect("dynamics unavailable");
+        let dynamics =
+            wind.create_test_textures(&gpu, resolution, |_| ([0.25, 0.0, -0.15, 0.0], 1013.0));
+        let pipeline = WeatherFieldPipeline::new(&gpu).expect("weather unavailable");
+        let selected = generate_weather(&gpu, &pipeline, &dynamics, &terrain, snapshot(resolution));
+        let schedule = spinup_schedule(dynamics.is_nearly_all_ocean());
+        let fingerprint = selected
+            .read_mass(&gpu)
+            .iter()
+            .fold(0xcbf2_9ce4_8422_2325_u64, |hash, value| {
+                (hash ^ u64::from(value.to_bits())).wrapping_mul(0x100_0000_01b3)
+            });
+
+        assert_eq!(schedule.iterations, 16);
+        assert_eq!(schedule.physical_interval_seconds, 1600.0);
+        assert_eq!(fingerprint, 3_332_750_774_506_193_701);
+    }
+
+    #[test]
+    fn land_dynamics_retains_the_20_by_1280_spinup_schedule() {
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let wind = WindFieldPipeline::new(&gpu).expect("dynamics unavailable");
+        let dynamics = wind.create_test_textures(&gpu, 16, |_| ([0.0, 0.0, 0.0, 0.65], 1013.0));
+        let schedule = spinup_schedule(dynamics.is_nearly_all_ocean());
+
+        assert_eq!(schedule.iterations, 20);
+        assert_eq!(schedule.physical_interval_seconds, 1280.0);
+        assert_eq!(schedule.diagnostic_flags, 0);
+    }
+
+    #[test]
+    fn production_dynamics_selects_spinup_from_terrain_and_ocean_level() {
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let wind = WindFieldPipeline::new(&gpu).expect("dynamics unavailable");
+        let ocean = terrain_from(16, |_| -0.1);
+        let land = terrain_from(16, |position| if position[0] > 0.0 { 0.1 } else { -0.1 });
+
+        let all_ocean = wind.create_textures(&gpu, 16, &ocean, 0.0);
+        let land_bearing = wind.create_textures(&gpu, 16, &land, 0.0);
+
+        assert!(all_ocean.is_nearly_all_ocean());
+        assert_eq!(
+            spinup_schedule(all_ocean.is_nearly_all_ocean()).iterations,
+            16
+        );
+        assert!(!land_bearing.is_nearly_all_ocean());
+        assert_eq!(
+            spinup_schedule(land_bearing.is_nearly_all_ocean()).iterations,
+            20
+        );
+    }
+
     fn channel_sum_where(
         values: &[f32],
         resolution: u32,
@@ -1732,7 +1977,7 @@ mod tests {
         let gpu = GpuContext::new().expect("GPU init failed");
         let terrain = terrain(16);
         let wind = WindFieldPipeline::new(&gpu).expect("dynamics unavailable");
-        let dynamics = wind.create_textures(&gpu, 16);
+        let dynamics = wind.create_textures(&gpu, 16, &terrain, 0.0);
         wind.generate_gpu(&gpu, &terrain, &dynamics, 42, 0.0, 0.4, 0.5, 1.0, 15.0, 1.0);
         let pipeline = WeatherFieldPipeline::new(&gpu).expect("weather unavailable");
         let first = generate_weather(&gpu, &pipeline, &dynamics, &terrain, snapshot(16));
@@ -1753,10 +1998,9 @@ mod tests {
         assert_eq!(geometry_a, geometry_b);
         assert!(a.iter().all(|value| value.is_finite()));
         assert!(geometry_a.iter().all(|value| value.is_finite()));
-        assert!(
-            a.chunks_exact(4)
-                .all(|pixel| pixel.iter().all(|value| (0.0..=1.0).contains(value)))
-        );
+        assert!(a
+            .chunks_exact(4)
+            .all(|pixel| pixel.iter().all(|value| (0.0..=1.0).contains(value))));
         assert!(a.chunks_exact(4).all(|pixel| {
             pixel[3] + 0.002 >= pixel[0]
                 && pixel[3] + 0.002 >= pixel[1]
@@ -1815,20 +2059,16 @@ mod tests {
         let mut clear = snapshot(16);
         clear.moisture = 0.0;
         let clear = generate_weather(&gpu, &pipeline, &dynamics, &terrain, clear);
-        assert!(
-            read_texture(&gpu, &clear._mass_texture, 16)
-                .chunks_exact(4)
-                .all(|pixel| pixel == [0.0; 4])
-        );
+        assert!(read_texture(&gpu, &clear._mass_texture, 16)
+            .chunks_exact(4)
+            .all(|pixel| pixel == [0.0; 4]));
 
         let mut clear = snapshot(16);
         clear.coverage = 0.0;
         let clear = generate_weather(&gpu, &pipeline, &dynamics, &terrain, clear);
-        assert!(
-            read_texture(&gpu, &clear._mass_texture, 16)
-                .chunks_exact(4)
-                .all(|pixel| pixel == [0.0; 4])
-        );
+        assert!(read_texture(&gpu, &clear._mass_texture, 16)
+            .chunks_exact(4)
+            .all(|pixel| pixel == [0.0; 4]));
     }
 
     #[test]
@@ -1836,7 +2076,7 @@ mod tests {
         let gpu = GpuContext::new().expect("GPU init failed");
         let terrain = terrain(16);
         let wind = WindFieldPipeline::new(&gpu).expect("dynamics unavailable");
-        let dynamics = wind.create_textures(&gpu, 16);
+        let dynamics = wind.create_textures(&gpu, 16, &terrain, 0.0);
         wind.generate_gpu(&gpu, &terrain, &dynamics, 42, 0.0, 0.4, 0.5, 1.0, 15.0, 1.0);
         let pipeline = WeatherFieldPipeline::new(&gpu).expect("weather unavailable");
         let baseline = read_texture(
@@ -1884,7 +2124,7 @@ mod tests {
         let gpu = GpuContext::new().expect("GPU init failed");
         let terrain = terrain(resolution);
         let wind = WindFieldPipeline::new(&gpu).expect("dynamics unavailable");
-        let dynamics = wind.create_textures(&gpu, resolution);
+        let dynamics = wind.create_textures(&gpu, resolution, &terrain, 0.0);
         wind.generate_gpu(&gpu, &terrain, &dynamics, 42, 0.0, 0.4, 0.5, 1.0, 15.0, 1.0);
         let pipeline = WeatherFieldPipeline::new(&gpu).expect("weather unavailable");
 
@@ -1907,7 +2147,7 @@ mod tests {
         let gpu = GpuContext::new().expect("GPU init failed");
         let terrain = terrain(16);
         let wind = WindFieldPipeline::new(&gpu).expect("dynamics unavailable");
-        let dynamics = wind.create_textures(&gpu, 16);
+        let dynamics = wind.create_textures(&gpu, 16, &terrain, 0.0);
         wind.generate_gpu(&gpu, &terrain, &dynamics, 42, 0.0, 0.4, 0.5, 1.0, 15.0, 1.0);
         let pipeline = WeatherFieldPipeline::new(&gpu).expect("weather unavailable");
         let mut totals = Vec::new();
@@ -2896,38 +3136,9 @@ mod tests {
             .state
         };
         let centroid = |state: &[f32]| {
-            let mut weighted = [0.0; 3];
-            let mut total = 0.0;
-            for face in 0..6 {
-                for y in 0..resolution {
-                    for x in 0..resolution {
-                        let pos = crate::cube_sphere::cube_to_sphere(
-                            face,
-                            x as f32 / (resolution - 1) as f32,
-                            y as f32 / (resolution - 1) as f32,
-                        );
-                        let index =
-                            ((face * resolution * resolution + y * resolution + x) * 4) as usize;
-                        let u = x as f32 / (resolution - 1) as f32 * 2.0 - 1.0;
-                        let v = y as f32 / (resolution - 1) as f32 * 2.0 - 1.0;
-                        let mass = (state[index + 1] + state[index + 2])
-                            * (1.0 + u * u + v * v).powf(-1.5);
-                        for axis in 0..3 {
-                            weighted[axis] += pos[axis] * mass;
-                        }
-                        total += mass;
-                    }
-                }
-            }
-            let length = weighted
-                .iter()
-                .map(|value| value * value)
-                .sum::<f32>()
-                .sqrt();
-            assert!(total > 0.0 && length > 0.0);
-            weighted.map(|value| value / length)
+            condensate_centroid(state, resolution).expect("condensate centroid is defined")
         };
-        let initial = centroid(&run(0.0, 5));
+        let initial = centroid(&run(0.0, SPINUP_ITERATIONS));
         let distance_texels = |state: &[f32]| {
             let end = centroid(state);
             let dot = initial
@@ -2938,10 +3149,10 @@ mod tests {
                 .clamp(-1.0, 1.0);
             dot.acos() / (std::f32::consts::FRAC_PI_2 / resolution as f32)
         };
-        let states = [0.0, 0.5, 1.0, 2.0].map(|scale| run(scale, 5));
+        let states = [0.0, 0.5, 1.0, 2.0].map(|scale| run(scale, SPINUP_ITERATIONS));
         let distances = states.each_ref().map(|state| distance_texels(state));
         let substeps = [0.0, 0.5, 1.0, 2.0].map(|scale| wind_substeps(scale, resolution, 6371.0));
-        assert_eq!(substeps, [1, 2, 4, 8]);
+        assert_eq!(substeps, [1, 2, 4, 7]);
         let total_mass = |state: &[f32]| {
             let mut total = 0.0;
             for face in 0..6 {
@@ -3095,8 +3306,9 @@ mod tests {
         let mass_delta = (total_mass(&states[3]) - total_mass(&states[2])).abs()
             / total_mass(&states[2]).max(f32::EPSILON);
         let edge_ratio = edge_energy(&states[3]) / edge_energy(&states[2]).max(f32::EPSILON);
+        let core_fraction = condensate_core_fraction(&states[3], resolution, 0.25);
         println!(
-            "U15 wind transport texels={distances:?}, substeps={substeps:?}, mass_delta={mass_delta:.5}, edge_ratio={edge_ratio:.5}"
+            "U15 20x1280s transport texels={distances:?}, substeps={substeps:?}, mass_delta={mass_delta:.5}, core_fraction={core_fraction:.5}, edge_gradient_ratio={edge_ratio:.5}"
         );
         assert!(
             distances[0] <= 1.0 / resolution as f32,
@@ -3112,7 +3324,11 @@ mod tests {
             "{distances:?}"
         );
         assert!(mass_delta <= 0.20, "mass_delta={mass_delta:.5}");
-        assert!(edge_ratio >= 0.70, "edge_ratio={edge_ratio:.5}");
+        assert!(
+            core_fraction >= 0.10,
+            "core_fraction={core_fraction:.5}; uniform diffusion must fail this concentration gate"
+        );
+        assert!(edge_ratio >= 0.70, "edge_gradient_ratio={edge_ratio:.5}");
         for scale in [0.5, 1.0, 2.0] {
             let per_substep = outgoing_cfl(
                 scale,
@@ -3132,9 +3348,9 @@ mod tests {
         for (resolution, expected) in [
             (32, [1, 1, 2]),
             (64, [1, 2, 4]),
-            (128, [2, 4, 8]),
-            (256, [4, 8, 16]),
-            (384, [7, 13, 25]),
+            (128, [2, 4, 7]),
+            (256, [4, 7, 13]),
+            (384, [5, 10, 20]),
         ] {
             assert_eq!(
                 [0.5, 1.0, 2.0].map(|scale| wind_substeps(scale, resolution, 6371.0)),
@@ -3268,12 +3484,10 @@ mod tests {
             },
         );
         assert!(no_phase.state.chunks_exact(4).any(|state| state[0] > 0.0));
-        assert!(
-            no_phase
-                .state
-                .chunks_exact(4)
-                .all(|state| state[1] == 0.0 && state[2] == 0.0 && state[3] == 0.0)
-        );
+        assert!(no_phase
+            .state
+            .chunks_exact(4)
+            .all(|state| state[1] == 0.0 && state[2] == 0.0 && state[3] == 0.0));
         assert!(no_phase.mass.iter().all(|value| *value == 0.0));
     }
 
@@ -3339,6 +3553,225 @@ mod tests {
             1,
         );
         assert!(mass.iter().all(|value| *value == 0.0));
+    }
+
+    #[test]
+    fn land_humidity_seed_is_vapor_only_finite_and_respects_zero_controls() {
+        let resolution = 16;
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let terrain = terrain_from(resolution, |_| -0.1);
+        let wind = WindFieldPipeline::new(&gpu).expect("dynamics unavailable");
+        let dynamics =
+            wind.create_test_textures(&gpu, resolution, |_| ([0.0, 0.0, 0.0, 0.65], 1013.0));
+        let pipeline = WeatherFieldPipeline::new(&gpu).expect("weather unavailable");
+        let run = |snapshot, flags, iterations| {
+            let weather = pipeline.create_textures(&gpu, resolution);
+            run_spinup_pass_with_config(
+                &gpu,
+                &pipeline,
+                &terrain,
+                &dynamics,
+                snapshot,
+                &weather,
+                SpinupTestConfig {
+                    iterations,
+                    diagnostic_flags: flags,
+                    ..Default::default()
+                },
+            )
+        };
+
+        let seeded = run(snapshot(resolution), 0, 0);
+        assert!(seeded.state.chunks_exact(4).all(|state| {
+            state[0].is_finite()
+                && state[0] > 0.0
+                && state[0] < 0.68
+                && state[1] == 0.0
+                && state[2] == 0.0
+                && state[3] == 0.0
+        }));
+        assert!(seeded.mass.iter().all(|value| *value == 0.0));
+
+        let mut dry = snapshot(resolution);
+        dry.moisture = 0.0;
+        assert!(run(dry, 0, 0).state.iter().all(|value| *value == 0.0));
+        assert!(run(snapshot(resolution), SPINUP_DIAGNOSTIC_NO_SOURCE, 0)
+            .state
+            .iter()
+            .all(|value| *value == 0.0));
+
+        let mut cold = snapshot(resolution);
+        cold.base_temp_c = -30.0;
+        let inland_dynamics =
+            wind.create_test_textures(&gpu, resolution, |_| ([0.0, 0.0, 0.0, 1.0], 1013.0));
+        let weather = pipeline.create_textures(&gpu, resolution);
+        let cold_inland = run_spinup_pass_with_config(
+            &gpu,
+            &pipeline,
+            &terrain,
+            &inland_dynamics,
+            cold,
+            &weather,
+            SpinupTestConfig::default(),
+        );
+        assert!(cold_inland.state.iter().all(|value| *value == 0.0));
+    }
+
+    #[test]
+    fn finite_land_vapor_depletes_without_a_marine_source() {
+        let resolution = 16;
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let terrain = terrain_from(resolution, |_| -0.1);
+        let wind = WindFieldPipeline::new(&gpu).expect("dynamics unavailable");
+        let dynamics = wind.create_test_textures(&gpu, resolution, |pos| {
+            let projection = pos[0];
+            (
+                [
+                    (1.0 - pos[0] * projection) * 0.8,
+                    -pos[1] * projection * 0.8,
+                    -pos[2] * projection * 0.8,
+                    1.0,
+                ],
+                1013.0,
+            )
+        });
+        let pipeline = WeatherFieldPipeline::new(&gpu).expect("weather unavailable");
+        let weather = pipeline.create_textures(&gpu, resolution);
+        let pass = run_spinup_pass_with_config(
+            &gpu,
+            &pipeline,
+            &terrain,
+            &dynamics,
+            snapshot(resolution),
+            &weather,
+            SpinupTestConfig {
+                iterations: SPINUP_ITERATIONS,
+                diagnostic_flags: SPINUP_DIAGNOSTIC_NO_SOURCE,
+                initial_state: Some([0.50, 0.0, 0.0, 0.0]),
+                ..Default::default()
+            },
+        );
+        assert!(pass.state.iter().all(|value| value.is_finite()));
+        assert!(
+            pass.state
+                .chunks_exact(4)
+                .map(|state| state[0])
+                .sum::<f32>()
+                < 0.50 * (resolution * resolution * 6) as f32,
+            "land vapor did not deplete without marine supply"
+        );
+    }
+
+    #[test]
+    fn fractional_maritime_land_does_not_recharge_after_twenty_iterations() {
+        let resolution = 16;
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let terrain = terrain_from(resolution, |_| -0.1);
+        let wind = WindFieldPipeline::new(&gpu).expect("dynamics unavailable");
+        let dynamics =
+            wind.create_test_textures(&gpu, resolution, |_| ([0.0, 0.0, 0.0, 0.65], 1013.0));
+        let pipeline = WeatherFieldPipeline::new(&gpu).expect("weather unavailable");
+        let weather = pipeline.create_textures(&gpu, resolution);
+        let pass = run_spinup_pass_with_config(
+            &gpu,
+            &pipeline,
+            &terrain,
+            &dynamics,
+            snapshot(resolution),
+            &weather,
+            SpinupTestConfig {
+                iterations: SPINUP_ITERATIONS,
+                diagnostic_flags: SPINUP_DIAGNOSTIC_NO_PHASE_CHANGE
+                    | SPINUP_DIAGNOSTIC_NO_SINK
+                    | SPINUP_DIAGNOSTIC_NO_RELAXATION,
+                initial_state: Some([0.01, 0.0, 0.0, 0.0]),
+                ..Default::default()
+            },
+        );
+        assert!(pass.state.chunks_exact(4).all(|state| {
+            (state[0] - 0.01).abs() <= 0.0001
+                && state[1] == 0.0
+                && state[2] == 0.0
+                && state[3] == 0.0
+        }));
+    }
+
+    #[test]
+    fn phase_partition_turbulence_is_deterministic_and_area_mass_neutral() {
+        let resolution = 32;
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let terrain = terrain_from(resolution, |_| -0.1);
+        let wind = WindFieldPipeline::new(&gpu).expect("dynamics unavailable");
+        let dynamics = wind.create_test_textures(&gpu, resolution, |pos| {
+            let projection = pos[0];
+            (
+                [
+                    (1.0 - pos[0] * projection) * 0.8,
+                    -pos[1] * projection * 0.8,
+                    -pos[2] * projection * 0.8,
+                    1.0,
+                ],
+                1013.0,
+            )
+        });
+        let pipeline = WeatherFieldPipeline::new(&gpu).expect("weather unavailable");
+        let run = || {
+            let weather = pipeline.create_textures(&gpu, resolution);
+            run_spinup_pass_with_config(
+                &gpu,
+                &pipeline,
+                &terrain,
+                &dynamics,
+                snapshot(resolution),
+                &weather,
+                SpinupTestConfig {
+                    iterations: SPINUP_ITERATIONS,
+                    diagnostic_flags: SPINUP_DIAGNOSTIC_NO_SOURCE
+                        | SPINUP_DIAGNOSTIC_NO_SINK
+                        | SPINUP_DIAGNOSTIC_NO_RELAXATION,
+                    initial_state: Some([0.50, 0.0, 0.0, 0.0]),
+                    ..Default::default()
+                },
+            )
+            .state
+        };
+        let first = run();
+        let second = run();
+        assert_eq!(first, second);
+        assert!(
+            first
+                .chunks_exact(4)
+                .any(|state| state[1] > 0.0 || state[2] > 0.0),
+            "fixture did not exercise phase partitioning"
+        );
+        let weighted_mass = |state: &[f32]| {
+            state
+                .chunks_exact(4)
+                .enumerate()
+                .map(|(index, pixel)| {
+                    let x =
+                        (index % resolution as usize) as f32 / (resolution - 1) as f32 * 2.0 - 1.0;
+                    let y = ((index / resolution as usize) % resolution as usize) as f32
+                        / (resolution - 1) as f32
+                        * 2.0
+                        - 1.0;
+                    pixel.iter().sum::<f32>() * (1.0 + x * x + y * y).powf(-1.5)
+                })
+                .sum::<f32>()
+        };
+        let initial = 0.50
+            * (0..6)
+                .flat_map(|_| {
+                    (0..resolution).flat_map(move |y| (0..resolution).map(move |x| (x, y)))
+                })
+                .map(|(x, y)| {
+                    let x = x as f32 / (resolution - 1) as f32 * 2.0 - 1.0;
+                    let y = y as f32 / (resolution - 1) as f32 * 2.0 - 1.0;
+                    (1.0 + x * x + y * y).powf(-1.5)
+                })
+                .sum::<f32>();
+        let drift = (weighted_mass(&first) - initial).abs() / initial;
+        assert!(drift <= 0.02, "area-weighted mass drift={drift}");
     }
 
     #[derive(Clone, Copy)]

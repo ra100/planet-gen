@@ -31,7 +31,9 @@ const DIAGNOSTIC_NO_SOURCE: u32 = 1u;
 const DIAGNOSTIC_NO_SINK: u32 = 2u;
 const DIAGNOSTIC_NO_PHASE_CHANGE: u32 = 4u;
 const DIAGNOSTIC_NO_RELAXATION: u32 = 8u;
-const PHYSICAL_INTERVAL_SECONDS: f32 = 1600.0;
+const DIAGNOSTIC_ALL_OCEAN_COMPAT: u32 = 32u;
+const PHYSICAL_INTERVAL_SECONDS: f32 = 1280.0;
+const ALL_OCEAN_PHYSICAL_INTERVAL_SECONDS: f32 = 1600.0;
 const MAX_WIND_MPS: f32 = 50.0;
 const MAX_SUBSTEP_TEXELS: f32 = 0.85;
 const CATALYST_TARGET_SHARE_ALPHA: f32 = 0.70;
@@ -138,8 +140,16 @@ fn convective_catalyst(pos: vec3<f32>) -> f32 {
     return response;
 }
 
+fn all_ocean_compat() -> bool {
+    return (params.diagnostic_flags & DIAGNOSTIC_ALL_OCEAN_COMPAT) != 0u;
+}
+
+fn physical_interval_seconds() -> f32 {
+    return select(PHYSICAL_INTERVAL_SECONDS, ALL_OCEAN_PHYSICAL_INTERVAL_SECONDS, all_ocean_compat());
+}
+
 fn transport_substeps(resolution: u32) -> f32 {
-    let displacement = 2.0 * MAX_WIND_MPS * clamp(params.wind_scale, 0.0, 2.0) * PHYSICAL_INTERVAL_SECONDS
+    let displacement = 2.0 * MAX_WIND_MPS * clamp(params.wind_scale, 0.0, 2.0) * physical_interval_seconds()
         / max(params.radius_km * 1000.0, 1.0);
     return max(ceil(displacement / (min_face_angle(resolution) * MAX_SUBSTEP_TEXELS)), 1.0);
 }
@@ -184,6 +194,19 @@ fn source_potential(
     // Vapor enters this field only over open water. Land can only convert
     // transported vapor already held in state.x.
     return marine_fraction * mix(0.42, 0.68, thermal);
+}
+
+// A sphere-space, low-frequency perturbation only changes conservative phase
+// partitioning. Clamping keeps it within the stated ±12% range.
+fn phase_rainout_modulation(pos: vec3<f32>) -> f32 {
+    if (all_ocean_compat()) {
+        return 1.0;
+    }
+    return clamp(
+        1.0 + 0.12 * snoise(pos * 2.0 + noise_seed_offset(params.seed, 607u)),
+        0.88,
+        1.12,
+    );
 }
 
 struct SourceBudgets {
@@ -332,7 +355,7 @@ fn hancock(center: vec3<f32>) -> Reconstruction {
         - west_flux * 0.5 * (area + cell_area(west_pos)) / max(face_angle(center, west_pos) / param_step, 0.0001))
         + (north_flux * 0.5 * (area + cell_area(north_pos)) / max(face_angle(center, north_pos) / param_step, 0.0001)
         - south_flux * 0.5 * (area + cell_area(south_pos)) / max(face_angle(center, south_pos) / param_step, 0.0001))) / max(area * param_step, 0.0001);
-    let half = reconstructed.center - 0.5 * PHYSICAL_INTERVAL_SECONDS / max(params.radius_km * 1000.0, 1.0) / transport_substeps(params.spin_resolution) * divergence;
+    let half = reconstructed.center - 0.5 * physical_interval_seconds() / max(params.radius_km * 1000.0, 1.0) / transport_substeps(params.spin_resolution) * divergence;
     return Reconstruction(half, half + reconstructed.west - reconstructed.center, half + reconstructed.east - reconstructed.center, half + reconstructed.south - reconstructed.center, half + reconstructed.north - reconstructed.center);
 }
 
@@ -390,6 +413,7 @@ fn init(@builtin(global_invocation_id) id: vec3<u32>) {
     let pressure = smooth_step(0.05, 0.3, params.surface_pressure_bar);
     let continentality = textureSampleLevel(wind_tex, spinup_sampler, pos, 0.0).a;
     let marine_fraction = 1.0 - smooth_step(0.15, 0.85, continentality);
+    let marine_supply = smooth_step(0.92, 1.0, marine_fraction);
     let thermal_stability = smooth_step(-25.0, 30.0, temperature_at(pos));
     let persistent_ice = marine_fraction * (1.0 - smoothstep(-15.0, -6.0, temperature_at(pos)));
     let budgets = source_budgets(
@@ -400,9 +424,25 @@ fn init(@builtin(global_invocation_id) id: vec3<u32>) {
         persistent_ice,
     );
     let surface_supply_factor = 1.0 - 0.25 * persistent_ice;
-    let vapor = select(
-        budgets.supply * surface_supply_factor * clamp(params.moisture, 0.0, 1.0)
+    let marine_vapor = select(
+        budgets.supply * marine_supply * surface_supply_factor * clamp(params.moisture, 0.0, 1.0)
             * pressure * 0.42,
+        0.0,
+        (params.diagnostic_flags & DIAGNOSTIC_NO_SOURCE) != 0u,
+    );
+    // This is a one-time, sub-saturated land seed. Maritime reach is the
+    // existing continuous marine fraction; transport never recharges it on land.
+    let maritime_reach = smooth_step(0.02, 0.38, marine_fraction);
+    let land_seed = (1.0 - marine_fraction) * maritime_reach * thermal_stability
+        * clamp(params.coverage, 0.0, 1.0) * clamp(params.moisture, 0.0, 1.0)
+        * pressure * 0.10;
+    let seeded_vapor = select(
+        min(marine_vapor + land_seed, 0.70 * mix(0.16, 0.68, thermal_stability) * pressure),
+        marine_vapor,
+        all_ocean_compat(),
+    );
+    let vapor = select(
+        seeded_vapor,
         0.0,
         (params.diagnostic_flags & DIAGNOSTIC_NO_SOURCE) != 0u,
     );
@@ -452,7 +492,7 @@ fn transport(@builtin(global_invocation_id) id: vec3<u32>) {
         + north_flux * face_angle(pos, north_pos)
         - south_flux * face_angle(south_pos, pos))
         / max(cell_area(pos) * metric_step * metric_step, 0.000001);
-    var state = predicted.center - PHYSICAL_INTERVAL_SECONDS * step_fraction
+    var state = predicted.center - physical_interval_seconds() * step_fraction
         / max(params.radius_km * 1000.0, 1.0) * transport_divergence;
 
     let diagnostic_step = max(texel_angle * 1.5, 0.01);
@@ -473,6 +513,7 @@ fn transport(@builtin(global_invocation_id) id: vec3<u32>) {
     let pressure_factor = smooth_step(0.05, 0.3, params.surface_pressure_bar);
     let local_pressure = clamp(textureSampleLevel(pressure_tex, spinup_sampler, pos, 0.0).r / 1013.0, 0.8, 1.2);
     let marine_fraction = 1.0 - smooth_step(0.15, 0.85, wind.a);
+    let marine_supply = smooth_step(0.92, 1.0, marine_fraction);
     let cold = 1.0 - thermal;
     let q_sat = mix(0.16, 0.68, thermal) * pressure_factor * local_pressure;
     let persistent_ice = marine_fraction * (1.0 - smoothstep(-15.0, -6.0, temperature_at(pos)));
@@ -484,7 +525,9 @@ fn transport(@builtin(global_invocation_id) id: vec3<u32>) {
         persistent_ice,
     );
     let surface_supply_factor = 1.0 - 0.25 * persistent_ice;
-    let supply_budget = budgets.supply * surface_supply_factor;
+    // Transitional land gets only the init seed; continuous recharge belongs
+    // exclusively to cells with full marine supply.
+    let supply_budget = budgets.supply * marine_supply * surface_supply_factor;
     let phase_budget = budgets.phase;
     let relative_humidity_target = clamp(
         mix(0.45, 0.72, marine_fraction) + marine_fraction * cold * 0.18,
@@ -566,7 +609,8 @@ fn transport(@builtin(global_invocation_id) id: vec3<u32>) {
             * humidity_gate;
         let final_convective_eligibility = budgets.source_envelope * physical_convective_eligibility;
         let deep_fraction = clamp(
-            physical_convective_eligibility * (0.30 + catalyst * 0.45),
+            physical_convective_eligibility * (0.30 + catalyst * 0.45)
+                * phase_rainout_modulation(pos),
             0.0,
             0.75,
         );
