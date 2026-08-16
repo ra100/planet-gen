@@ -17,6 +17,53 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 const WEATHER_GENERATION_QUEUE_STALL_P95_MS: f64 = 36.0;
+const U15_VALIDATION_SEEDS: [u32; 8] = [7, 19, 37, 73, 101, 211, 509, 997];
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum U15ValidationMode {
+    Legacy,
+    Batch,
+    Seed(u32),
+}
+
+fn u15_validation_mode(args: &[String]) -> Result<Option<U15ValidationMode>, String> {
+    let legacy = args.iter().any(|arg| arg == "--u15-validation");
+    let batch = args.iter().any(|arg| arg == "--u15-validation-batch");
+    let seed_flag_count = args
+        .iter()
+        .filter(|arg| arg.as_str() == "--u15-validation-seed")
+        .count();
+    if seed_flag_count > 1 {
+        return Err("--u15-validation-seed may be supplied only once".to_string());
+    }
+    let seed = args
+        .iter()
+        .position(|arg| arg == "--u15-validation-seed")
+        .map(|index| {
+            args.get(index + 1)
+                .ok_or_else(|| "--u15-validation-seed requires a frozen seed".to_string())?
+                .parse::<u32>()
+                .map_err(|_| "--u15-validation-seed requires an unsigned frozen seed".to_string())
+        })
+        .transpose()?;
+    if usize::from(legacy) + usize::from(batch) + usize::from(seed.is_some()) > 1 {
+        return Err(
+            "choose one of --u15-validation, --u15-validation-batch, or --u15-validation-seed"
+                .to_string(),
+        );
+    }
+    if let Some(seed) = seed {
+        if !U15_VALIDATION_SEEDS.contains(&seed) {
+            return Err(format!(
+                "--u15-validation-seed must be one of {U15_VALIDATION_SEEDS:?} (got {seed})"
+            ));
+        }
+        return Ok(Some(U15ValidationMode::Seed(seed)));
+    }
+    Ok(legacy
+        .then_some(U15ValidationMode::Legacy)
+        .or(batch.then_some(U15ValidationMode::Batch)))
+}
 
 struct PlanetPreset {
     name: &'static str,
@@ -279,8 +326,7 @@ fn generate_weather_scene(
         1.0,
     );
     let cubemap = renderer.upload_terrain(gpu, &terrain);
-    let dynamics =
-        wind_pipeline.create_textures(gpu, weather_resolution, &terrain, ocean_level);
+    let dynamics = wind_pipeline.create_textures(gpu, weather_resolution, &terrain, ocean_level);
     wind_pipeline.generate_gpu(
         gpu,
         &terrain,
@@ -347,12 +393,8 @@ fn generate_native_default_scene(
         1.0,
     );
     let cubemap = renderer.upload_terrain(gpu, &terrain);
-    let dynamics = wind_pipeline.create_textures(
-        gpu,
-        (render_size / 2).max(192),
-        &terrain,
-        ocean_level,
-    );
+    let dynamics =
+        wind_pipeline.create_textures(gpu, (render_size / 2).max(192), &terrain, ocean_level);
     wind_pipeline.generate_gpu(
         gpu,
         &terrain,
@@ -4534,6 +4576,143 @@ struct U15PlumeMetrics {
     detached_component_count: usize,
 }
 
+#[derive(Debug, Clone, Default)]
+struct U15SeedDiagnostics {
+    normalized_high_extent: f32,
+    high_deep_centroid_displacement_texels: Option<f32>,
+    high_deep_centroid_angle_degrees: Option<f32>,
+    downwind_near_decay: f32,
+    downwind_mid_decay: f32,
+    downwind_far_decay: f32,
+    cross_along_ratio: f32,
+    edge_variation: f32,
+    face_local_column_mass_delta: f32,
+}
+
+fn u15_weighted_channel_centroid(
+    mass: &[f32],
+    resolution: u32,
+    channel: usize,
+) -> Option<[f32; 3]> {
+    let sum = mass
+        .chunks_exact(4)
+        .enumerate()
+        .fold([0.0; 3], |sum, (pixel, values)| {
+            let local = pixel % (resolution as usize * resolution as usize);
+            let weight = u15_weight(
+                (local % resolution as usize) as u32,
+                (local / resolution as usize) as u32,
+                resolution,
+            );
+            u15_add(
+                sum,
+                u15_scale(
+                    u15_pixel_position(pixel, resolution),
+                    values[channel] * weight,
+                ),
+            )
+        });
+    u15_normalize(sum)
+}
+
+fn u15_downwind_decay(response: &[f32], resolution: u32) -> [f32; 3] {
+    let mut sums = [0.0; 3];
+    let mut weights = [0.0; 3];
+    for (pixel, value) in response.iter().enumerate() {
+        let (distance, zonal, _) = u15_trail_coordinates(u15_pixel_position(pixel, resolution));
+        if zonal <= 0.0
+            || distance < U15_TRAIL_SHORE_RADIUS
+            || distance > U15_TRAIL_SHAPE_ROI_RADIUS
+        {
+            continue;
+        }
+        let fraction = (distance - U15_TRAIL_SHORE_RADIUS)
+            / (U15_TRAIL_SHAPE_ROI_RADIUS - U15_TRAIL_SHORE_RADIUS);
+        let bin = (fraction * 3.0).floor().min(2.0) as usize;
+        let local = pixel % (resolution as usize * resolution as usize);
+        let weight = u15_weight(
+            (local % resolution as usize) as u32,
+            (local / resolution as usize) as u32,
+            resolution,
+        );
+        sums[bin] += value * weight;
+        weights[bin] += weight;
+    }
+    std::array::from_fn(|index| sums[index] / weights[index].max(f32::EPSILON))
+}
+
+fn u15_face_local_column_mass_delta(baseline: &[f32], post: &[f32], resolution: u32) -> f32 {
+    let face_pixels = resolution as usize * resolution as usize;
+    (0..6)
+        .map(|face| {
+            let range = face * face_pixels..(face + 1) * face_pixels;
+            let (baseline_total, post_total) = range.fold((0.0, 0.0), |totals, pixel| {
+                let local = pixel % face_pixels;
+                let weight = u15_weight(
+                    (local % resolution as usize) as u32,
+                    (local / resolution as usize) as u32,
+                    resolution,
+                );
+                (
+                    totals.0 + baseline[pixel * 4..pixel * 4 + 3].iter().sum::<f32>() * weight,
+                    totals.1 + post[pixel * 4..pixel * 4 + 3].iter().sum::<f32>() * weight,
+                )
+            });
+            (post_total - baseline_total).abs() / baseline_total.abs().max(f32::EPSILON)
+        })
+        .fold(0.0, f32::max)
+}
+
+fn u15_seed_diagnostics(
+    baseline_mass: &[f32],
+    post_mass: &[f32],
+    plume_response: &[f32],
+    resolution: u32,
+    plume: &U15PlumeMetrics,
+) -> U15SeedDiagnostics {
+    let high_centroid = u15_weighted_channel_centroid(post_mass, resolution, 2);
+    let deep_centroid = u15_weighted_channel_centroid(post_mass, resolution, 1);
+    let centroid_angle = high_centroid
+        .zip(deep_centroid)
+        .map(|(high, deep)| u15_dot(high, deep).clamp(-1.0, 1.0).acos());
+    let decay = u15_downwind_decay(plume_response, resolution);
+    U15SeedDiagnostics {
+        normalized_high_extent: post_mass
+            .chunks_exact(4)
+            .filter(|channels| channels[2] >= U15_DEEP_THRESHOLD)
+            .count() as f32
+            / (post_mass.len() / 4) as f32,
+        high_deep_centroid_displacement_texels: centroid_angle
+            .map(|angle| angle / (std::f32::consts::FRAC_PI_2 / resolution as f32)),
+        high_deep_centroid_angle_degrees: centroid_angle.map(f32::to_degrees),
+        downwind_near_decay: decay[0],
+        downwind_mid_decay: decay[1],
+        downwind_far_decay: decay[2],
+        cross_along_ratio: plume.crosswind_span / plume.alongwind_span.max(f32::EPSILON),
+        edge_variation: plume.isotropic_edge_telemetry / plume.response_mass.max(f32::EPSILON),
+        face_local_column_mass_delta: u15_face_local_column_mass_delta(
+            baseline_mass,
+            post_mass,
+            resolution,
+        ),
+    }
+}
+
+fn u15_seed_diagnostics_report(seed: u32, diagnostics: &U15SeedDiagnostics) -> String {
+    format!(
+        "seed={seed}\nnormalized_high_extent={:.8}\nhigh_deep_centroid_displacement_texels={:?}\nhigh_deep_centroid_angle_degrees={:?}\ndownwind_decay_near={:.8}\ndownwind_decay_mid={:.8}\ndownwind_decay_far={:.8}\ncross_along_ratio={:.8}\nedge_variation={:.8}\nface_local_column_mass_delta={:.8}\n",
+        diagnostics.normalized_high_extent,
+        diagnostics.high_deep_centroid_displacement_texels,
+        diagnostics.high_deep_centroid_angle_degrees,
+        diagnostics.downwind_near_decay,
+        diagnostics.downwind_mid_decay,
+        diagnostics.downwind_far_decay,
+        diagnostics.cross_along_ratio,
+        diagnostics.edge_variation,
+        diagnostics.face_local_column_mass_delta,
+    )
+}
+
 fn u15_weighted_quantile(values: &mut [(f32, f32)], quantile: f32) -> Option<f32> {
     values.sort_by(|left, right| left.0.total_cmp(&right.0));
     let total = values.iter().map(|(_, weight)| weight).sum::<f32>();
@@ -5028,8 +5207,9 @@ fn run_u15_field_validation(
     output_dir: &str,
     resolution: u32,
     validation_flag: &str,
+    seeds: &[u32],
+    persist_per_seed: bool,
 ) -> Vec<String> {
-    const SEEDS: [u32; 8] = [7, 19, 37, 73, 101, 211, 509, 997];
     let wind = WindFieldPipeline::new(gpu).expect("U15 dynamics unavailable");
     u15_assert_size_preconditions();
     let generate = |seed: u32,
@@ -5167,9 +5347,12 @@ fn run_u15_field_validation(
     let mut worst_pca_alignment_degrees = 0.0_f32;
     let mut qualified_organization_seed_count = 0usize;
     let mut size_deterministic = true;
-    for seed in SEEDS {
+    for &seed in seeds {
         let cases = [0, 4, 8].map(|count| generate(seed, count, 1.0, 1.0, 35.0, 1.0, 0.0));
-        let size_seed = U15_SIZE_SEEDS[rows.len()];
+        let size_seed = U15_SIZE_SEEDS[U15_VALIDATION_SEEDS
+            .iter()
+            .position(|candidate| *candidate == seed)
+            .expect("U15 validation seed must be frozen")];
         assert!(
             u15_size_seed_criterion(size_seed),
             "U15 Size seed {size_seed} violates its frozen input criterion"
@@ -5187,7 +5370,7 @@ fn run_u15_field_validation(
         let moisture_zero = [0, 8].map(|count| generate(seed, count, 3.0, 0.0, 35.0, 1.0, 0.0));
         let moist_stable = [0, 8].map(|count| generate(seed, count, 3.0, 1.0, -35.0, 1.0, 0.0));
         let source_disabled = [0, 8].map(|count| generate_without_source(seed, count));
-        if seed == SEEDS[0] {
+        if !persist_per_seed && seed == U15_VALIDATION_SEEDS[0] {
             save_field_views(
                 output_dir,
                 "u15_seed_7_eligible_storms_8",
@@ -5243,6 +5426,13 @@ fn run_u15_field_validation(
             plume[1].isotropic_edge_telemetry / plume[0].isotropic_edge_telemetry.max(f32::EPSILON);
         let plume_deterministic =
             trail_source == trail_source_repeat && trail_control == trail_control_repeat;
+        let diagnostics = u15_seed_diagnostics(
+            &cases[0].0,
+            &cases[2].0,
+            &trail_response[1],
+            resolution,
+            &plume[1],
+        );
         let trail_runtime_ms = trail_started.elapsed().as_secs_f64() * 1000.0;
         let plume_pass = plume.iter().all(|metric| {
             metric.response_p95 >= 0.04
@@ -5336,7 +5526,9 @@ fn run_u15_field_validation(
                 .iter()
                 .chain(&moisture_zero[0].1)
                 .all(|value| *value == 0.0);
-        let source_disabled_deep = source_disabled.map(|(mass, _)| u15_deep_mass_metrics(&mass));
+        let source_disabled_deep = source_disabled
+            .each_ref()
+            .map(|(mass, _)| u15_deep_mass_metrics(mass));
         let source_disabled_deep_exact = source_disabled_deep == [(0.0, 0.0); 2];
         let moist_stable_identical =
             moist_stable[0].0 == moist_stable[1].0 && moist_stable[0].1 == moist_stable[1].1;
@@ -5369,6 +5561,40 @@ fn run_u15_field_validation(
             if anvil_pass { "PASS" } else { "FAIL" },
             u15_anvil_component_report(&anvil),
         ));
+        if persist_per_seed {
+            let prefix = format!("u15_seed_{seed}");
+            save_field_views(
+                output_dir,
+                &format!("{prefix}_eligible_storms_8"),
+                resolution,
+                &cases[2].0,
+                &cases[2].1,
+            );
+            save_field_views(
+                output_dir,
+                &format!("{prefix}_ineligible_dry_stable_storms_8"),
+                resolution,
+                &moisture_zero[1].0,
+                &moisture_zero[1].1,
+            );
+            save_field_views(
+                output_dir,
+                &format!("{prefix}_ineligible_no_source_storms_8"),
+                resolution,
+                &source_disabled[1].0,
+                &source_disabled[1].1,
+            );
+            std::fs::write(
+                Path::new(output_dir).join(format!("{prefix}_metrics.txt")),
+                u15_seed_diagnostics_report(seed, &diagnostics),
+            )
+            .expect("write incremental U15 seed metrics artifact");
+            std::fs::write(
+                Path::new(output_dir).join("u15_field_metrics.partial.txt"),
+                rows.join("\n"),
+            )
+            .expect("write incremental U15 metrics artifact");
+        }
         let row = rows.last().map(String::as_str).unwrap_or("missing metrics");
         worst_outside_high_fraction = worst_outside_high_fraction.min(
             anvil
@@ -5435,9 +5661,9 @@ fn run_u15_field_validation(
         }
     }
     let values = format!(
-        "command=cargo run --release --features validation --bin sweep -- --{validation_flag} --size 512 --output-dir {output_dir}\nshear_plume_fixture=source:{U15_TRAIL_SOURCE:?},zonal_axis:{U15_TRAIL_EAST:?},Y:{U15_TRAIL_NORTH:?};wind=((1+{U15_TRAIL_SHEAR:.2}*tanh(y/.08))/(1+{U15_TRAIL_SHEAR:.2}))*cross(Y,p); tangent_divergence_free; speed_bound=[{:.5},1]; snapshot.wind_scale=1/2; source=ocean_patch; control=matched_exterior_land_and_continentality; coverage:.65,moisture:1,temp_c:15,pressure_hpa:1013,tilt:0,season:.5,earth_radius_rotation,storms:0,diagnostics:0; MUSCL/Hancock active; CFL substeps use active `transport_substeps`; shape_corridor={U15_TRAIL_SHAPE_ROI_RADIUS:.8},physical_support={U15_TRAIL_OUTER_SUPPORT_RADIUS:.8},boundary_shell={U15_TRAIL_BOUNDARY_SHELL_INNER_RADIUS:.6}..{U15_TRAIL_SHAPE_ROI_RADIUS:.6}; response=max(total_mass_source-total_mass_control,0); morphology=all_counterfactual_response>=.02_within_frozen_corridor_own_centroid_log_map_wind_frame_weighted_Q90_Q10_L_alongwind_B_crosswind; Gperp=weighted_normalized_crosswind_geodesic_derivative; S=B*Gperp; gates=each:p95>=.04,Neff>=32,axis<=30deg,outside_corridor<=5%,beyond_physical_support<=5%,boundary_shell<=1%; ratios:L2/L1=1.50..2.50,B2/B1=.80..1.25,S2/S1=.75..1.25,deterministic; mass/area/isotropic_edge/components/centroid=telemetry_only; seeds={SEEDS:?}\nfixture={U15_ELIGIBLE_MASK}; fixture_flow={U15_FIXTURE_FLOW:?}; source_guard=actual_GPU_weather_pipeline; size_deterministic={size_deterministic}; qualified_organization_seed_count={qualified_organization_seed_count}/{}; qualified_organization=outside_high>=.10,downwind_centroid>=.5texels,pca<=20deg\n{}\n",
+        "command=cargo run --release --features validation --bin sweep -- --{validation_flag} --size 512 --output-dir {output_dir}\nshear_plume_fixture=source:{U15_TRAIL_SOURCE:?},zonal_axis:{U15_TRAIL_EAST:?},Y:{U15_TRAIL_NORTH:?};wind=((1+{U15_TRAIL_SHEAR:.2}*tanh(y/.08))/(1+{U15_TRAIL_SHEAR:.2}))*cross(Y,p); tangent_divergence_free; speed_bound=[{:.5},1]; snapshot.wind_scale=1/2; source=ocean_patch; control=matched_exterior_land_and_continentality; coverage:.65,moisture:1,temp_c:15,pressure_hpa:1013,tilt:0,season:.5,earth_radius_rotation,storms:0,diagnostics:0; MUSCL/Hancock active; CFL substeps use active `transport_substeps`; shape_corridor={U15_TRAIL_SHAPE_ROI_RADIUS:.8},physical_support={U15_TRAIL_OUTER_SUPPORT_RADIUS:.8},boundary_shell={U15_TRAIL_BOUNDARY_SHELL_INNER_RADIUS:.6}..{U15_TRAIL_SHAPE_ROI_RADIUS:.6}; response=max(total_mass_source-total_mass_control,0); morphology=all_counterfactual_response>=.02_within_frozen_corridor_own_centroid_log_map_wind_frame_weighted_Q90_Q10_L_alongwind_B_crosswind; Gperp=weighted_normalized_crosswind_geodesic_derivative; S=B*Gperp; gates=each:p95>=.04,Neff>=32,axis<=30deg,outside_corridor<=5%,beyond_physical_support<=5%,boundary_shell<=1%; ratios:L2/L1=1.50..2.50,B2/B1=.80..1.25,S2/S1=.75..1.25,deterministic; mass/area/isotropic_edge/components/centroid=telemetry_only; seeds={seeds:?}\nfixture={U15_ELIGIBLE_MASK}; fixture_flow={U15_FIXTURE_FLOW:?}; source_guard=actual_GPU_weather_pipeline; size_deterministic={size_deterministic}; qualified_organization_seed_count={qualified_organization_seed_count}/{}; qualified_organization=outside_high>=.10,downwind_centroid>=.5texels,pca<=20deg\n{}\n",
         (1.0 - U15_TRAIL_SHEAR) / (1.0 + U15_TRAIL_SHEAR),
-        SEEDS.len(),
+        seeds.len(),
         rows.join("\n"),
     );
     std::fs::write(Path::new(output_dir).join("u15_field_metrics.txt"), values)
@@ -5445,10 +5671,10 @@ fn run_u15_field_validation(
     if !size_deterministic {
         failures.push("U15 Size same-seed generation was not bitwise deterministic".to_string());
     }
-    if qualified_organization_seed_count != SEEDS.len() {
+    if qualified_organization_seed_count != seeds.len() {
         failures.push(format!(
             "U15 qualified storm organization {qualified_organization_seed_count}/{}",
-            SEEDS.len()
+            seeds.len()
         ));
     }
     failures
@@ -6087,6 +6313,8 @@ fn run_weather_validation_with_pipeline(
         output_dir,
         weather_resolution,
         "weather-validation",
+        &U15_VALIDATION_SEEDS,
+        false,
     ));
     let scene = generate_weather_scene(
         gpu,
@@ -6947,22 +7175,34 @@ fn run_native_default_cloud_validation(
 
 fn main() {
     env_logger::init();
+    let args: Vec<String> = std::env::args().collect();
+    let u15_mode = match u15_validation_mode(&args) {
+        Ok(mode) => mode,
+        Err(error) => {
+            eprintln!("error: {error}");
+            std::process::exit(2);
+        }
+    };
 
-    let output_dir = std::env::args()
-        .skip_while(|a| a != "--output-dir")
+    let output_dir = args
+        .iter()
+        .skip_while(|a| a.as_str() != "--output-dir")
         .nth(1)
+        .cloned()
         .unwrap_or_else(|| "output/sweep".to_string());
 
-    let render_size: u32 = std::env::args()
-        .skip_while(|a| a != "--size")
+    let render_size: u32 = args
+        .iter()
+        .skip_while(|a| a.as_str() != "--size")
         .nth(1)
         .and_then(|s| s.parse().ok())
         .unwrap_or(512);
-    let weather_validation = std::env::args().any(|arg| arg == "--weather-validation");
-    let u15_validation = std::env::args().any(|arg| arg == "--u15-validation");
-    let u3_validation = std::env::args().any(|arg| arg == "--u3-validation");
-    let native_default_cloud_validation =
-        std::env::args().any(|arg| arg == "--native-default-cloud-validation");
+    let weather_validation = args.iter().any(|arg| arg == "--weather-validation");
+    let u15_validation = u15_mode.is_some();
+    let u3_validation = args.iter().any(|arg| arg == "--u3-validation");
+    let native_default_cloud_validation = args
+        .iter()
+        .any(|arg| arg == "--native-default-cloud-validation");
     if requires_weather_validation_size(
         weather_validation,
         u15_validation,
@@ -7003,15 +7243,24 @@ fn main() {
         return;
     }
 
-    if u15_validation {
+    if let Some(mode) = u15_mode {
         let weather_pipeline =
             WeatherFieldPipeline::new(&gpu).expect("Rgba16Float weather unsupported");
+        let (validation_flag, selected_seeds, persist_per_seed) = match mode {
+            U15ValidationMode::Legacy => ("u15-validation", U15_VALIDATION_SEEDS.to_vec(), false),
+            U15ValidationMode::Batch => {
+                ("u15-validation-batch", U15_VALIDATION_SEEDS.to_vec(), true)
+            }
+            U15ValidationMode::Seed(seed) => ("u15-validation-seed", vec![seed], true),
+        };
         let failures = run_u15_field_validation(
             &gpu,
             &weather_pipeline,
             &output_dir,
             render_size.clamp(64, 512),
-            "u15-validation",
+            validation_flag,
+            &selected_seeds,
+            persist_per_seed,
         );
         assert!(failures.is_empty(), "U15 validation failed: {failures:?}");
         println!("U15 focused fixture passed.");
@@ -7257,19 +7506,19 @@ fn main() {
 mod tests {
     use super::{
         TopologyMetrics, U14CoverageComponent, U15_DEEP_THRESHOLD, U15_SIZE_FULL_SUPPORT_RADIUS,
-        U15_SIZE_SEEDS, U15_SIZE_SUPPORT_RADIUS, U15ResponseComponent,
-        WEATHER_GENERATION_QUEUE_STALL_P95_MS, cube_edge_pairs, field_view_pixels, polar_metrics,
-        requires_weather_validation_size, u3_cube_coordinates, u3_feature_axis,
-        u3_linear_cube_sample, u3_mass_association, u3_ray_ndc, u3_screen_direction,
-        u14_coverage_growth, u14_coverage_support_metrics, u14_fixed_core_p90,
+        U15_SIZE_SEEDS, U15_SIZE_SUPPORT_RADIUS, U15PlumeMetrics, U15ResponseComponent,
+        U15ValidationMode, WEATHER_GENERATION_QUEUE_STALL_P95_MS, cube_edge_pairs,
+        field_view_pixels, polar_metrics, requires_weather_validation_size, u3_cube_coordinates,
+        u3_feature_axis, u3_linear_cube_sample, u3_mass_association, u3_ray_ndc,
+        u3_screen_direction, u14_coverage_growth, u14_coverage_support_metrics, u14_fixed_core_p90,
         u14_geometry_metrics, u14_lee_continuation_metrics, u14_marine_to_land_continentality,
         u14_mixed_coast_land_support, u14_significant_occupied_components, u15_fixture_centers,
         u15_owner_size_metrics, u15_paired_size_tops, u15_pixel_neighbors, u15_pixel_position,
-        u15_significant_response_components, u15_significant_size_components, u15_size_association,
-        u15_size_fixture_support, u15_size_frozen_candidates,
-        u15_size_minimum_physical_eligibility, u15_size_precondition_diagnostics,
-        u15_size_seed_criterion, u15_size_weather_snapshot, validate_seed_topology_metrics,
-        weather_validation_size_error,
+        u15_seed_diagnostics, u15_seed_diagnostics_report, u15_significant_response_components,
+        u15_significant_size_components, u15_size_association, u15_size_fixture_support,
+        u15_size_frozen_candidates, u15_size_minimum_physical_eligibility,
+        u15_size_precondition_diagnostics, u15_size_seed_criterion, u15_size_weather_snapshot,
+        u15_validation_mode, validate_seed_topology_metrics, weather_validation_size_error,
     };
 
     fn response_with_deep_pixels(resolution: u32, pixels: &[usize]) -> Vec<f32> {
@@ -7291,6 +7540,83 @@ mod tests {
             Some("--weather-validation requires --size >= 512 (got 511)")
         );
         assert!(weather_validation_size_error(512).is_none());
+    }
+
+    #[test]
+    fn u15_harness_modes_accept_frozen_seed_and_reject_ambiguous_or_unknown_modes() {
+        let args = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            u15_validation_mode(&args(&["sweep", "--u15-validation-batch"])),
+            Ok(Some(U15ValidationMode::Batch))
+        );
+        assert_eq!(
+            u15_validation_mode(&args(&["sweep", "--u15-validation-seed", "73"])),
+            Ok(Some(U15ValidationMode::Seed(73)))
+        );
+        assert!(u15_validation_mode(&args(&["sweep", "--u15-validation-seed", "8"])).is_err());
+        assert!(
+            u15_validation_mode(&args(&[
+                "sweep",
+                "--u15-validation-seed",
+                "7",
+                "--u15-validation-seed",
+                "19",
+            ]))
+            .is_err()
+        );
+        assert!(
+            u15_validation_mode(&args(&[
+                "sweep",
+                "--u15-validation",
+                "--u15-validation-batch"
+            ]))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn u15_seed_diagnostics_are_normalized_and_report_all_ds_039_metrics() {
+        let resolution = 4;
+        let pixels = resolution as usize * resolution as usize * 6;
+        let mut mass = vec![0.0; pixels * 4];
+        mass[4 + 1] = 0.04;
+        mass[8 + 2] = 0.04;
+        let response = vec![0.01; pixels];
+        let baseline = vec![0.02; pixels * 4];
+        let plume = U15PlumeMetrics {
+            alongwind_span: 2.0,
+            crosswind_span: 1.0,
+            isotropic_edge_telemetry: 0.5,
+            response_mass: 2.0,
+            ..U15PlumeMetrics::default()
+        };
+
+        let diagnostics = u15_seed_diagnostics(&baseline, &mass, &response, resolution, &plume);
+        let report = u15_seed_diagnostics_report(7, &diagnostics);
+
+        assert!((diagnostics.normalized_high_extent - 1.0 / pixels as f32).abs() < 1.0e-6);
+        assert!(diagnostics.high_deep_centroid_displacement_texels.is_some());
+        assert!((diagnostics.cross_along_ratio - 0.5).abs() < f32::EPSILON);
+        assert!((diagnostics.edge_variation - 0.25).abs() < f32::EPSILON);
+        assert!(diagnostics.face_local_column_mass_delta > 0.0);
+        for metric in [
+            "normalized_high_extent",
+            "high_deep_centroid_displacement_texels",
+            "high_deep_centroid_angle_degrees",
+            "downwind_decay_near",
+            "downwind_decay_mid",
+            "downwind_decay_far",
+            "cross_along_ratio",
+            "edge_variation",
+            "face_local_column_mass_delta",
+        ] {
+            assert!(report.contains(metric), "missing {metric}");
+        }
     }
 
     #[test]
