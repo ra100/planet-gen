@@ -8,6 +8,9 @@ use wgpu::util::DeviceExt;
 /// Preview weather stays independent of viewport and export resolution.
 pub const DEFAULT_WEATHER_RESOLUTION: u32 = 384;
 pub const WEATHER_DIAGNOSTIC_NO_SOURCE: u32 = 1;
+/// Validation-only: continue transport without raining condensate out.
+#[cfg(any(test, feature = "validation"))]
+pub const WEATHER_DIAGNOSTIC_NO_SINK: u32 = 2;
 /// Validation-only: continue transport without converting vapor into cloud phases.
 #[cfg(any(test, feature = "validation"))]
 const WEATHER_DIAGNOSTIC_NO_PHASE_CHANGE: u32 = 4;
@@ -171,6 +174,19 @@ struct SpinupTexture {
     storage: wgpu::TextureView,
 }
 
+struct ProvenanceTexture {
+    _texture: wgpu::Texture,
+    array: wgpu::TextureView,
+    storage: wgpu::TextureView,
+}
+
+struct ProvenancePipelines {
+    init: wgpu::ComputePipeline,
+    init_layout: wgpu::BindGroupLayout,
+    transport: wgpu::ComputePipeline,
+    transport_layout: wgpu::BindGroupLayout,
+}
+
 pub struct WeatherTextures {
     _mass_texture: wgpu::Texture,
     _geometry_texture: wgpu::Texture,
@@ -190,6 +206,21 @@ pub struct WeatherTextures {
 pub struct ValidationContinuation {
     pub advected_mass: Vec<f32>,
     pub full_mass: Vec<f32>,
+}
+
+/// Validation-only spin-up state plus owned-vapor tracer, for executable
+/// tracer-contract coverage (P bounds, ownership, rainout proportionality).
+///
+/// This deliberately has no production call site: preview and export continue to use
+/// [`WeatherFieldPipeline::generate`].
+#[cfg(any(test, feature = "validation"))]
+#[doc(hidden)]
+pub struct TracerValidationTrace {
+    /// Final spin-up state (Rgba16 channels) at `spin_resolution`.
+    pub state: Vec<f32>,
+    /// Owned-vapor tracer (R16), `None` when the adapter lacks R16 storage support.
+    pub provenance: Option<Vec<f32>>,
+    pub spin_resolution: u32,
 }
 
 fn read_weather_cube_texture(
@@ -237,6 +268,59 @@ fn read_weather_cube_texture(
     rx.recv()
         .expect("weather texture readback callback dropped")
         .expect("weather texture readback failed");
+    let mapped = slice.get_mapped_range();
+    mapped
+        .chunks_exact(bytes_per_row as usize)
+        .flat_map(|row| row[..unpadded_bytes_per_row as usize].chunks_exact(2))
+        .map(|bytes| f16::from_bits(u16::from_le_bytes([bytes[0], bytes[1]])).to_f32())
+        .collect()
+}
+
+fn read_r16_weather_cube_texture(
+    gpu: &GpuContext,
+    texture: &wgpu::Texture,
+    resolution: u32,
+) -> Vec<f32> {
+    let unpadded_bytes_per_row = resolution * 2;
+    let bytes_per_row = unpadded_bytes_per_row.div_ceil(256) * 256;
+    let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("weather provenance readback"),
+        size: (bytes_per_row * resolution * 6) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = gpu.device.create_command_encoder(&Default::default());
+    encoder.copy_texture_to_buffer(
+        texture.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bytes_per_row),
+                rows_per_image: Some(resolution),
+            },
+        },
+        wgpu::Extent3d {
+            width: resolution,
+            height: resolution,
+            depth_or_array_layers: 6,
+        },
+    );
+    gpu.queue.submit(Some(encoder.finish()));
+    let slice = buffer.slice(..);
+    let (tx, rx) = mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = tx.send(result);
+    });
+    gpu.device
+        .poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        })
+        .expect("weather provenance readback poll failed");
+    rx.recv()
+        .expect("weather provenance readback callback dropped")
+        .expect("weather provenance readback failed");
     let mapped = slice.get_mapped_range();
     mapped
         .chunks_exact(bytes_per_row as usize)
@@ -430,6 +514,7 @@ pub struct WeatherFieldPipeline {
     spinup_finalize_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     spinup_iterations: usize,
+    provenance: Option<ProvenancePipelines>,
 }
 
 impl WeatherFieldPipeline {
@@ -608,6 +693,30 @@ impl WeatherFieldPipeline {
         let spinup_finalize_pipeline =
             create_spinup_pipeline("weather spin-up finalize", "finalize");
         let spinup_finalize_layout = spinup_finalize_pipeline.get_bind_group_layout(0);
+        let provenance_required =
+            wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING;
+        let provenance = (gpu
+            .r16float_features
+            .allowed_usages
+            .contains(provenance_required)
+            && gpu
+                .device
+                .features()
+                .contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES))
+        .then(|| {
+            let init =
+                create_spinup_pipeline("weather spin-up provenance init", "init_with_provenance");
+            let transport = create_spinup_pipeline(
+                "weather spin-up provenance transport",
+                "transport_with_provenance",
+            );
+            ProvenancePipelines {
+                init_layout: init.get_bind_group_layout(0),
+                transport_layout: transport.get_bind_group_layout(0),
+                init,
+                transport,
+            }
+        });
         let sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("weather field sampler"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -626,6 +735,7 @@ impl WeatherFieldPipeline {
             spinup_finalize_layout,
             sampler,
             spinup_iterations: SPINUP_ITERATIONS,
+            provenance,
         })
     }
 
@@ -682,7 +792,9 @@ impl WeatherFieldPipeline {
         dynamics: &DynamicsTextures,
         weather: &WeatherTextures,
     ) {
-        self.generate_with_diagnostic_flags(gpu, snapshot, terrain, dynamics, weather, 0);
+        let _ = self.generate_with_provenance_mode(
+            gpu, snapshot, terrain, dynamics, weather, 0, false, false,
+        );
     }
 
     #[doc(hidden)]
@@ -695,6 +807,80 @@ impl WeatherFieldPipeline {
         weather: &WeatherTextures,
         diagnostic_flags: u32,
     ) {
+        let _ = self.generate_with_provenance_mode(
+            gpu,
+            snapshot,
+            terrain,
+            dynamics,
+            weather,
+            diagnostic_flags,
+            false,
+            false,
+        );
+    }
+
+    #[cfg(any(test, feature = "validation"))]
+    #[doc(hidden)]
+    pub fn generate_with_provenance_for_validation(
+        &self,
+        gpu: &GpuContext,
+        snapshot: WeatherSnapshot,
+        terrain: &TectonicTerrain,
+        dynamics: &DynamicsTextures,
+        weather: &WeatherTextures,
+    ) -> Option<Vec<f32>> {
+        self.generate_with_provenance_mode(
+            gpu, snapshot, terrain, dynamics, weather, 0, true, false,
+        )
+        .0
+    }
+
+    /// Validation-only: run the spin-up with the tracer enabled and read back both
+    /// the final state and the tracer so callers can assert the ownership contract
+    /// per cell (P bounds, P == T over ocean, proportional rainout, determinism).
+    /// `provenance_enabled = false` forces the no-R16 fallback even on capable
+    /// adapters, covering the branch incapable adapters always take.
+    #[cfg(any(test, feature = "validation"))]
+    #[doc(hidden)]
+    pub fn validation_tracer_trace_for_sweep(
+        &self,
+        gpu: &GpuContext,
+        snapshot: WeatherSnapshot,
+        terrain: &TectonicTerrain,
+        dynamics: &DynamicsTextures,
+        weather: &WeatherTextures,
+        diagnostic_flags: u32,
+        provenance_enabled: bool,
+    ) -> TracerValidationTrace {
+        let spin_resolution = weather.resolution.clamp(2, SPINUP_RESOLUTION);
+        let (provenance, state) = self.generate_with_provenance_mode(
+            gpu,
+            snapshot,
+            terrain,
+            dynamics,
+            weather,
+            diagnostic_flags,
+            provenance_enabled,
+            true,
+        );
+        TracerValidationTrace {
+            state: state.expect("tracer trace requests the spin-up state"),
+            provenance,
+            spin_resolution,
+        }
+    }
+
+    fn generate_with_provenance_mode(
+        &self,
+        gpu: &GpuContext,
+        snapshot: WeatherSnapshot,
+        terrain: &TectonicTerrain,
+        dynamics: &DynamicsTextures,
+        weather: &WeatherTextures,
+        diagnostic_flags: u32,
+        provenance_enabled: bool,
+        readback_state: bool,
+    ) -> (Option<Vec<f32>>, Option<Vec<f32>>) {
         assert_eq!(snapshot.resolution, weather.resolution);
         let pixels_per_face = (weather.resolution * weather.resolution) as usize;
         let mut heights = vec![0.0; pixels_per_face * 6];
@@ -845,7 +1031,10 @@ impl WeatherFieldPipeline {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Rgba16Float,
-                usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+                // COPY_SRC: validation-only tracer readbacks (read_weather_cube_texture).
+                usage: wgpu::TextureUsages::STORAGE_BINDING
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
                 view_formats: &[],
             });
             SpinupTexture {
@@ -866,36 +1055,62 @@ impl WeatherFieldPipeline {
         };
         let state_a = create_state("weather spin-up state A");
         let state_b = create_state("weather spin-up state B");
-        let init_bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("weather spin-up init bind group"),
-            layout: &self.spinup_init_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: spinup_uniform.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&dynamics.wind_continentality),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: height.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 7,
-                    resource: wgpu::BindingResource::TextureView(&state_a.storage),
-                },
-            ],
-        });
-        let transport_bind_group = |label, source: &SpinupTexture, target: &SpinupTexture| {
-            gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let create_provenance = |label| {
+            // Tracer VRAM policy: the A/B provenance cubemap pair is capped at
+            // 384 KiB — exactly 2 x R16Float x SPINUP_RESOLUTION^2 x 6 faces x 2 B
+            // today. Fail fast rather than silently doubling GPU memory if the
+            // resolution cap or format ever moves.
+            const PROVENANCE_PAIR_BUDGET_BYTES: usize = 384 * 1024;
+            let pair_bytes = 2 * (spin_resolution * spin_resolution * 6 * 2) as usize;
+            assert!(
+                pair_bytes <= PROVENANCE_PAIR_BUDGET_BYTES,
+                "provenance cubemap pair is {} KiB, over the {} KiB budget; \
+                 raise PROVENANCE_PAIR_BUDGET_BYTES deliberately",
+                pair_bytes / 1024,
+                PROVENANCE_PAIR_BUDGET_BYTES / 1024,
+            );
+            let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
-                layout: &self.spinup_transport_layout,
+                size: wgpu::Extent3d {
+                    width: spin_resolution,
+                    height: spin_resolution,
+                    depth_or_array_layers: 6,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R16Float,
+                usage: wgpu::TextureUsages::STORAGE_BINDING
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            ProvenanceTexture {
+                array: texture.create_view(&wgpu::TextureViewDescriptor {
+                    dimension: Some(wgpu::TextureViewDimension::D2Array),
+                    ..Default::default()
+                }),
+                storage: texture.create_view(&wgpu::TextureViewDescriptor {
+                    dimension: Some(wgpu::TextureViewDimension::D2Array),
+                    ..Default::default()
+                }),
+                _texture: texture,
+            }
+        };
+        let provenance = provenance_enabled
+            .then(|| self.provenance.as_ref())
+            .flatten()
+            .map(|pipelines| {
+                (
+                    pipelines,
+                    create_provenance("weather provenance A"),
+                    create_provenance("weather provenance B"),
+                )
+            });
+        let init_bind_group = if let Some((pipelines, provenance_a, _)) = &provenance {
+            gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("weather spin-up provenance init bind group"),
+                layout: &pipelines.init_layout,
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
@@ -906,8 +1121,35 @@ impl WeatherFieldPipeline {
                         resource: wgpu::BindingResource::TextureView(&dynamics.wind_continentality),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(&dynamics.pressure),
+                        binding: 3,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: height.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: wgpu::BindingResource::TextureView(&state_a.storage),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 10,
+                        resource: wgpu::BindingResource::TextureView(&provenance_a.storage),
+                    },
+                ],
+            })
+        } else {
+            gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("weather spin-up init bind group"),
+                layout: &self.spinup_init_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: spinup_uniform.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&dynamics.wind_continentality),
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
@@ -918,18 +1160,121 @@ impl WeatherFieldPipeline {
                         resource: height.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 6,
-                        resource: wgpu::BindingResource::TextureView(&source.array),
-                    },
-                    wgpu::BindGroupEntry {
                         binding: 7,
-                        resource: wgpu::BindingResource::TextureView(&target.storage),
+                        resource: wgpu::BindingResource::TextureView(&state_a.storage),
                     },
                 ],
             })
         };
-        let a_to_b = transport_bind_group("weather spin-up A to B", &state_a, &state_b);
-        let b_to_a = transport_bind_group("weather spin-up B to A", &state_b, &state_a);
+        let transport_bind_group =
+            |label,
+             source: &SpinupTexture,
+             target: &SpinupTexture,
+             provenance_source: Option<&ProvenanceTexture>,
+             provenance_target: Option<&ProvenanceTexture>| {
+                if let (Some((pipelines, _, _)), Some(provenance_source), Some(provenance_target)) =
+                    (&provenance, provenance_source, provenance_target)
+                {
+                    return gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some(label),
+                        layout: &pipelines.transport_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: spinup_uniform.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &dynamics.wind_continentality,
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu::BindingResource::TextureView(&dynamics.pressure),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: wgpu::BindingResource::Sampler(&self.sampler),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 4,
+                                resource: height.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 6,
+                                resource: wgpu::BindingResource::TextureView(&source.array),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 7,
+                                resource: wgpu::BindingResource::TextureView(&target.storage),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 9,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &provenance_source.array,
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 10,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &provenance_target.storage,
+                                ),
+                            },
+                        ],
+                    });
+                }
+                gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some(label),
+                    layout: &self.spinup_transport_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: spinup_uniform.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(
+                                &dynamics.wind_continentality,
+                            ),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(&dynamics.pressure),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: height.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: wgpu::BindingResource::TextureView(&source.array),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 7,
+                            resource: wgpu::BindingResource::TextureView(&target.storage),
+                        },
+                    ],
+                })
+            };
+        let a_to_b = transport_bind_group(
+            "weather spin-up A to B",
+            &state_a,
+            &state_b,
+            provenance.as_ref().map(|(_, a, _)| a),
+            provenance.as_ref().map(|(_, _, b)| b),
+        );
+        let b_to_a = transport_bind_group(
+            "weather spin-up B to A",
+            &state_b,
+            &state_a,
+            provenance.as_ref().map(|(_, _, b)| b),
+            provenance.as_ref().map(|(_, a, _)| a),
+        );
         let transport_passes = spinup_iterations
             * wind_substeps_with_interval(
                 snapshot.wind_scale,
@@ -946,6 +1291,13 @@ impl WeatherFieldPipeline {
         } else {
             &state_b
         };
+        let final_provenance = provenance.as_ref().map(|(_, a, b)| {
+            if transport_passes.is_multiple_of(2) {
+                a
+            } else {
+                b
+            }
+        });
         let finalize_bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("weather spin-up finalize bind group"),
             layout: &self.spinup_finalize_layout,
@@ -967,13 +1319,25 @@ impl WeatherFieldPipeline {
         let spin_workgroups = spin_resolution.div_ceil(8);
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
-            pass.set_pipeline(&self.spinup_init_pipeline);
+            pass.set_pipeline(
+                provenance
+                    .as_ref()
+                    .map_or(&self.spinup_init_pipeline, |(pipelines, _, _)| {
+                        &pipelines.init
+                    }),
+            );
             pass.set_bind_group(0, &init_bind_group, &[]);
             pass.dispatch_workgroups(spin_workgroups, spin_workgroups, 6);
         }
         for iteration in 0..transport_passes {
             let mut pass = encoder.begin_compute_pass(&Default::default());
-            pass.set_pipeline(&self.spinup_transport_pipeline);
+            pass.set_pipeline(
+                provenance
+                    .as_ref()
+                    .map_or(&self.spinup_transport_pipeline, |(pipelines, _, _)| {
+                        &pipelines.transport
+                    }),
+            );
             pass.set_bind_group(0, if iteration % 2 == 0 { &a_to_b } else { &b_to_a }, &[]);
             pass.dispatch_workgroups(spin_workgroups, spin_workgroups, 6);
         }
@@ -1042,6 +1406,13 @@ impl WeatherFieldPipeline {
             pass.dispatch_workgroups(workgroups, workgroups, 1);
         }
         gpu.queue.submit(Some(encoder.finish()));
+        (
+            final_provenance.map(|provenance| {
+                read_r16_weather_cube_texture(gpu, &provenance._texture, spin_resolution)
+            }),
+            readback_state
+                .then(|| read_weather_cube_texture(gpu, &final_state._texture, spin_resolution)),
+        )
     }
 
     #[cfg(feature = "validation")]
@@ -1887,6 +2258,133 @@ mod tests {
         let weather = pipeline.create_textures(gpu, snapshot.resolution);
         pipeline.generate(gpu, snapshot, terrain, dynamics, &weather);
         weather
+    }
+
+    fn generate_weather_with_provenance(
+        gpu: &GpuContext,
+        pipeline: &WeatherFieldPipeline,
+        dynamics: &DynamicsTextures,
+        terrain: &TectonicTerrain,
+        snapshot: WeatherSnapshot,
+    ) -> (WeatherTextures, Option<Vec<f32>>) {
+        let weather = pipeline.create_textures(gpu, snapshot.resolution);
+        let provenance = pipeline
+            .generate_with_provenance_for_validation(gpu, snapshot, terrain, dynamics, &weather);
+        (weather, provenance)
+    }
+
+    fn provenance_total(values: &[f32], resolution: u32) -> f32 {
+        values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                let pixel = index % (resolution * resolution) as usize;
+                let x = pixel % resolution as usize;
+                let y = pixel / resolution as usize;
+                let u = x as f32 / (resolution - 1) as f32 * 2.0 - 1.0;
+                let v = y as f32 / (resolution - 1) as f32 * 2.0 - 1.0;
+                value * (1.0 + u * u + v * v).powf(-1.5)
+            })
+            .sum()
+    }
+
+    #[test]
+    fn provenance_mode_is_capability_gated_and_off_preserves_the_legacy_fingerprint() {
+        let resolution = 16;
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let terrain = terrain_from(resolution, |_| -0.1);
+        let wind = WindFieldPipeline::new(&gpu).expect("dynamics unavailable");
+        let dynamics =
+            wind.create_test_textures(&gpu, resolution, |_| ([0.2, 0.0, -0.1, 0.0], 1013.0));
+        let pipeline = WeatherFieldPipeline::new(&gpu).expect("weather unavailable");
+        let legacy = generate_weather(&gpu, &pipeline, &dynamics, &terrain, snapshot(resolution));
+        let (off, provenance) = generate_weather_with_provenance(
+            &gpu,
+            &pipeline,
+            &dynamics,
+            &terrain,
+            snapshot(resolution),
+        );
+        assert_eq!(legacy.read_mass(&gpu), off.read_mass(&gpu));
+        assert_eq!(provenance.is_some(), pipeline.provenance.is_some());
+    }
+
+    #[test]
+    fn provenance_ocean_land_and_mixed_sources_obey_bounds_and_transport() {
+        let resolution = 32;
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let wind = WindFieldPipeline::new(&gpu).expect("dynamics unavailable");
+        let pipeline = WeatherFieldPipeline::new(&gpu).expect("weather unavailable");
+        let run = |terrain: TectonicTerrain| {
+            let dynamics = wind.create_test_textures(&gpu, resolution, |pos| {
+                (
+                    [
+                        pos[2] * 0.8,
+                        0.0,
+                        -pos[0] * 0.8,
+                        if pos[2] > 0.0 { 0.0 } else { 1.0 },
+                    ],
+                    1013.0,
+                )
+            });
+            generate_weather_with_provenance(
+                &gpu,
+                &pipeline,
+                &dynamics,
+                &terrain,
+                WeatherSnapshot {
+                    coverage: 1.0,
+                    base_temp_c: 30.0,
+                    ..snapshot(resolution)
+                },
+            )
+        };
+        let ocean = run(terrain_from(resolution, |_| -0.1));
+        let land = run(terrain_from(resolution, |_| 0.1));
+        let mixed = run(terrain_from(resolution, |pos| {
+            if pos[2] > 0.0 {
+                -0.1
+            } else {
+                0.1
+            }
+        }));
+        let Some(ocean_p) = ocean.1 else {
+            return;
+        };
+        let Some(land_p) = land.1 else {
+            return;
+        };
+        let Some(mixed_p) = mixed.1 else {
+            return;
+        };
+        let ocean_mass = ocean.0.read_mass(&gpu);
+        let land_mass = land.0.read_mass(&gpu);
+        let mixed_mass = mixed.0.read_mass(&gpu);
+        assert!(provenance_total(&ocean_p, resolution) > 0.0);
+        assert!(provenance_total(&land_p, resolution) <= 0.001);
+        assert!(mixed_p
+            .iter()
+            .all(|p| p.is_finite() && (0.0..=1.0).contains(p)));
+        assert!(mixed_p
+            .iter()
+            .zip(mixed_mass.chunks_exact(4))
+            .any(|(p, mass)| { *p > 0.001 && mass.iter().sum::<f32>() > 0.001 }));
+        assert!(land_mass.iter().all(|value| value.is_finite()));
+        assert!(ocean_mass.iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn provenance_shader_keeps_phase_and_rainout_conservative_without_new_passes() {
+        let shader = include_str!("shaders/weather_spinup.wgsl");
+        assert!(shader.contains("fn provenance_transport"));
+        assert!(
+            shader.contains("let p_after_source = transported + provenance_source_evaporation;")
+        );
+        assert!(shader
+            .contains("let p_after_rainout = p_after_source * (1.0 - provenance_rainout_scale);"));
+        assert!(shader.contains("bounded_provenance"));
+        assert!(shader.contains("fn transport_with_provenance"));
+        assert!(!shader.contains("provenance_finalize"));
     }
 
     #[test]

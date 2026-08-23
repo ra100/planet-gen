@@ -25,6 +25,8 @@ struct SpinupParams {
 @group(0) @binding(6) var state_in: texture_2d_array<f32>;
 @group(0) @binding(7) var state_out: texture_storage_2d_array<rgba16float, write>;
 @group(0) @binding(8) var mass_out: texture_storage_2d_array<rgba16float, write>;
+@group(0) @binding(9) var provenance_in: texture_2d_array<f32>;
+@group(0) @binding(10) var provenance_out: texture_storage_2d_array<r16float, write>;
 
 const PI: f32 = 3.14159265;
 const DIAGNOSTIC_NO_SOURCE: u32 = 1u;
@@ -407,6 +409,102 @@ fn shared_flux(a: vec3<f32>, a_state: vec4<f32>, b: vec3<f32>, b_state: vec4<f32
     return select(-select(rusanov, average_velocity * upwind, same_sign), select(rusanov, average_velocity * upwind, same_sign), a_is_canonical_minus);
 }
 
+fn provenance_sample(dir: vec3<f32>) -> f32 {
+    let fuv = sphere_to_face_uv(dir);
+    let res = i32(params.spin_resolution - 1u);
+    let texel = vec2<i32>(
+        clamp(i32(round(fuv.y * f32(res))), 0, res),
+        clamp(i32(round(fuv.z * f32(res))), 0, res),
+    );
+    return textureLoad(provenance_in, texel, i32(fuv.x), 0).x;
+}
+
+fn provenance_reconstruct(center: vec3<f32>) -> Reconstruction {
+    let fuv = sphere_to_face_uv(center);
+    let face = u32(fuv.x);
+    let uv = fuv.yz;
+    let step = 1.0 / f32(params.spin_resolution - 1u);
+    let state = provenance_sample(center);
+    let west = provenance_sample(cube_to_sphere(face, uv - vec2<f32>(step, 0.0)));
+    let east = provenance_sample(cube_to_sphere(face, uv + vec2<f32>(step, 0.0)));
+    let south = provenance_sample(cube_to_sphere(face, uv - vec2<f32>(0.0, step)));
+    let north = provenance_sample(cube_to_sphere(face, uv + vec2<f32>(0.0, step)));
+    let slope_s = mc_slope(vec4<f32>(west), vec4<f32>(state), vec4<f32>(east)).x;
+    let slope_t = mc_slope(vec4<f32>(south), vec4<f32>(state), vec4<f32>(north)).x;
+    let raw_west = state - 0.5 * slope_s;
+    let raw_east = state + 0.5 * slope_s;
+    let raw_south = state - 0.5 * slope_t;
+    let raw_north = state + 0.5 * slope_t;
+    let minimum = min(min(raw_west, raw_east), min(raw_south, raw_north));
+    let theta = select(1.0, clamp(state / max(state - minimum, 0.000001), 0.0, 1.0), minimum < 0.0);
+    return Reconstruction(
+        vec4<f32>(state),
+        vec4<f32>(state + theta * (raw_west - state)),
+        vec4<f32>(state + theta * (raw_east - state)),
+        vec4<f32>(state + theta * (raw_south - state)),
+        vec4<f32>(state + theta * (raw_north - state)),
+    );
+}
+
+fn provenance_toward(center: vec3<f32>, toward: vec3<f32>) -> vec4<f32> {
+    let reconstructed = provenance_reconstruct(center);
+    let fuv = sphere_to_face_uv(center);
+    let face = u32(fuv.x);
+    let uv = fuv.yz;
+    let step = 1.0 / f32(params.spin_resolution - 1u);
+    let s_pos = cube_to_sphere(face, uv + vec2<f32>(step, 0.0));
+    let t_pos = cube_to_sphere(face, uv + vec2<f32>(0.0, step));
+    let s = normalize(s_pos - center * dot(s_pos, center));
+    let t = normalize(t_pos - center * dot(t_pos, center));
+    if (abs(dot(toward, s)) >= abs(dot(toward, t))) {
+        return select(reconstructed.west, reconstructed.east, dot(toward, s) > 0.0);
+    }
+    return select(reconstructed.south, reconstructed.north, dot(toward, t) > 0.0);
+}
+
+fn provenance_transport(pos: vec3<f32>) -> f32 {
+    let fuv = sphere_to_face_uv(pos);
+    let face = u32(fuv.x);
+    let uv = fuv.yz;
+    let step = 1.0 / f32(params.spin_resolution - 1u);
+    let metric_step = 2.0 * step;
+    let east_pos = cube_to_sphere(face, uv + vec2<f32>(step, 0.0));
+    let west_pos = cube_to_sphere(face, uv - vec2<f32>(step, 0.0));
+    let north_pos = cube_to_sphere(face, uv + vec2<f32>(0.0, step));
+    let south_pos = cube_to_sphere(face, uv - vec2<f32>(0.0, step));
+    let predicted = provenance_reconstruct(pos);
+    let east_flux = shared_flux(pos, predicted.east, east_pos, provenance_toward(east_pos, pos)).x;
+    let west_flux = shared_flux(west_pos, provenance_toward(west_pos, pos), pos, predicted.west).x;
+    let north_flux = shared_flux(pos, predicted.north, north_pos, provenance_toward(north_pos, pos)).x;
+    let south_flux = shared_flux(south_pos, provenance_toward(south_pos, pos), pos, predicted.south).x;
+    let divergence = (east_flux * face_angle(pos, east_pos)
+        - west_flux * face_angle(west_pos, pos)
+        + north_flux * face_angle(pos, north_pos)
+        - south_flux * face_angle(south_pos, pos))
+        / max(cell_area(pos) * metric_step * metric_step, 0.000001);
+    return predicted.center.x - physical_interval_seconds() / max(params.radius_km * 1000.0, 1.0)
+        / transport_substeps(params.spin_resolution) * divergence;
+}
+
+// Per-invocation record of exactly what advance_state applied to the local
+// budget, so the tracer mirrors the real transition instead of recomputing a
+// second, drift-prone copy of the same terms.
+var<private> provenance_source_evaporation: f32 = 0.0;
+var<private> provenance_rainout_scale: f32 = 0.0;
+
+fn bounded_provenance(value: f32, state: vec4<f32>) -> f32 {
+    // R16 provenance and Rgba16 state round independently to half precision, so
+    // tolerate one relative f16 ULP of storage headroom instead of subtracting
+    // fixed mass: P == T survives pure-ocean init, and T == 0 still forces P == 0.
+    // Headroom derives from total alone — never value — so an empty budget
+    // clamps P to exactly zero even when value is nonzero (keeps 0 <= P <= T).
+    let total = state.x + state.y + state.z + state.w;
+    if (!(total > 0.0)) {
+        return 0.0;
+    }
+    return clamp(value, 0.0, total * 1.0009765625);
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn init(@builtin(global_invocation_id) id: vec3<u32>) {
     let res = params.spin_resolution;
@@ -465,15 +563,50 @@ fn init(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 
 @compute @workgroup_size(8, 8, 1)
-fn transport(@builtin(global_invocation_id) id: vec3<u32>) {
+fn init_with_provenance(@builtin(global_invocation_id) id: vec3<u32>) {
     let res = params.spin_resolution;
     if (id.x >= res || id.y >= res || id.z >= 6u) { return; }
     if (params.coverage <= 0.0 || params.moisture <= 0.0) {
         textureStore(state_out, vec2<i32>(id.xy), i32(id.z), vec4<f32>(0.0));
+        textureStore(provenance_out, vec2<i32>(id.xy), i32(id.z), vec4<f32>(0.0));
         return;
     }
-
     let pos = direction(id, res);
+    let pressure = smooth_step(0.05, 0.3, params.surface_pressure_bar);
+    let continentality = textureSampleLevel(wind_tex, spinup_sampler, pos, 0.0).a;
+    let marine_fraction = 1.0 - smooth_step(0.15, 0.85, continentality);
+    let open_ocean = open_ocean_fraction(pos);
+    let marine_climate = max(marine_fraction, open_ocean);
+    let thermal_stability = smooth_step(-25.0, 30.0, temperature_at(pos));
+    let ice_fraction = 1.0 - smoothstep(-15.0, -6.0, temperature_at(pos));
+    let persistent_ice = marine_fraction * ice_fraction;
+    let source_ice = open_ocean * ice_fraction;
+    let budgets = source_budgets(params.coverage, marine_climate, 0.0, thermal_stability, persistent_ice);
+    let surface_supply_factor = 1.0 - 0.25 * source_ice;
+    let marine_vapor = select(
+        budgets.supply * open_ocean * surface_supply_factor * clamp(params.moisture, 0.0, 1.0)
+            * pressure * 0.42,
+        0.0,
+        (params.diagnostic_flags & DIAGNOSTIC_NO_SOURCE) != 0u,
+    );
+    let maritime_reach = smooth_step(0.02, 0.38, marine_fraction);
+    let land_seed = (1.0 - marine_fraction) * maritime_reach * thermal_stability
+        * clamp(params.coverage, 0.0, 1.0) * clamp(params.moisture, 0.0, 1.0)
+        * pressure * 0.10;
+    let seeded_vapor = select(
+        min(marine_vapor + land_seed, 0.70 * mix(0.16, 0.68, thermal_stability) * pressure),
+        marine_vapor,
+        all_ocean_compat(),
+    );
+    let vapor = select(seeded_vapor, 0.0, (params.diagnostic_flags & DIAGNOSTIC_NO_SOURCE) != 0u);
+    let state = vec4<f32>(vapor, 0.0, 0.0, 0.0);
+    textureStore(state_out, vec2<i32>(id.xy), i32(id.z), state);
+    // Land's finite bootstrap is deliberately unowned; only open-ocean vapor is P.
+    textureStore(provenance_out, vec2<i32>(id.xy), i32(id.z), vec4<f32>(bounded_provenance(marine_vapor, state)));
+}
+
+fn advance_state(pos: vec3<f32>) -> vec4<f32> {
+    let res = params.spin_resolution;
     let wind = textureSampleLevel(wind_tex, spinup_sampler, pos, 0.0);
     let tangent_wind = wind.xyz - pos * dot(wind.xyz, pos);
     let normalized_speed = length(tangent_wind);
@@ -552,6 +685,7 @@ fn transport(@builtin(global_invocation_id) id: vec3<u32>) {
     if ((params.diagnostic_flags & DIAGNOSTIC_NO_SOURCE) == 0u) {
         let evaporation = max(q_target - state.x, 0.0) * 0.030 * step_fraction;
         state.x += evaporation;
+        provenance_source_evaporation = evaporation;
     }
 
     let calm_wet_land = calm_wet_land_mask(
@@ -709,13 +843,50 @@ fn transport(@builtin(global_invocation_id) id: vec3<u32>) {
         let rainout_scale = rainout / max(condensate, 0.0001);
         state.y *= 1.0 - rainout_scale;
         state.z *= 1.0 - rainout_scale;
+        provenance_rainout_scale = rainout_scale;
     }
     if ((params.diagnostic_flags & DIAGNOSTIC_NO_RELAXATION) == 0u) {
         let sublimation = min(state.w * 0.005 * step_fraction, 1.0 - state.x);
         state.w -= sublimation;
         state.x += sublimation;
     }
+    return state;
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn transport(@builtin(global_invocation_id) id: vec3<u32>) {
+    let res = params.spin_resolution;
+    if (id.x >= res || id.y >= res || id.z >= 6u) { return; }
+    if (params.coverage <= 0.0 || params.moisture <= 0.0) {
+        textureStore(state_out, vec2<i32>(id.xy), i32(id.z), vec4<f32>(0.0));
+        return;
+    }
+    textureStore(state_out, vec2<i32>(id.xy), i32(id.z), advance_state(direction(id, res)));
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn transport_with_provenance(@builtin(global_invocation_id) id: vec3<u32>) {
+    let res = params.spin_resolution;
+    if (id.x >= res || id.y >= res || id.z >= 6u) { return; }
+    if (params.coverage <= 0.0 || params.moisture <= 0.0) {
+        textureStore(state_out, vec2<i32>(id.xy), i32(id.z), vec4<f32>(0.0));
+        textureStore(provenance_out, vec2<i32>(id.xy), i32(id.z), vec4<f32>(0.0));
+        return;
+    }
+
+    // The normal state pass is intentionally duplicated by the selected pipeline below.
+    // P follows its own conservative finite-volume flux; source and rainout reuse the
+    // exact amounts advance_state applied to this cell's pre-rainout transition, so
+    // ownership never drifts from the published budget and never feeds weather
+    // production.
+    let pos = direction(id, res);
+    let transported = max(provenance_transport(pos), 0.0);
+    let state = advance_state(pos);
+    // q_target already carries the open-ocean gate; add the recorded evaporation once.
+    let p_after_source = transported + provenance_source_evaporation;
+    let p_after_rainout = p_after_source * (1.0 - provenance_rainout_scale);
     textureStore(state_out, vec2<i32>(id.xy), i32(id.z), state);
+    textureStore(provenance_out, vec2<i32>(id.xy), i32(id.z), vec4<f32>(bounded_provenance(p_after_rainout, state)));
 }
 
 @compute @workgroup_size(8, 8, 1)

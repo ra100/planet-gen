@@ -4425,6 +4425,81 @@ fn u15_solid_angle_total(mass: &[f32], resolution: u32) -> f32 {
     total
 }
 
+fn u15_provenance_total(provenance: &[f32], resolution: u32) -> f32 {
+    provenance
+        .iter()
+        .enumerate()
+        .map(|(pixel, value)| {
+            let local = pixel % (resolution as usize * resolution as usize);
+            value
+                * u15_weight(
+                    (local % resolution as usize) as u32,
+                    (local / resolution as usize) as u32,
+                    resolution,
+                )
+        })
+        .sum()
+}
+
+/// Area-weighted provenance share ΣP/ΣT over an owner's primary storm
+/// component: the fraction of the storm's own water that is marine-owned.
+/// The U15 owner-growth gate only needs "this storm actually carries
+/// marine-origin vapor", not a full per-texel ownership decomposition.
+const U15_MIN_OWNER_PROVENANCE_SHARE: f32 = 0.01;
+
+fn u15_owner_primary_provenance_share(
+    provenance: &[f32],
+    total_water: &[f32],
+    resolution: u32,
+    components: &[U15ResponseComponent],
+    association: &[Option<u32>],
+    owner: u32,
+) -> Option<f32> {
+    let primary = components
+        .iter()
+        .filter(|component| u15_size_component_owner(component, association) == Some(owner))
+        .max_by(|left, right| left.area_fraction.total_cmp(&right.area_fraction))?;
+    // Provenance is written on the spin-up grid (min(resolution, 128) per face)
+    // while components live on the validation grid (`resolution`). Nearest-neighbor
+    // map each component pixel onto the provenance grid before indexing;
+    // ΣP/ΣT keeps area-weighted semantics because both sides use the same
+    // validation-resolution solid-angle weights.
+    let spin_face_pixels = provenance.len() / 6;
+    let spin_resolution_f = (spin_face_pixels as f64).sqrt();
+    if resolution == 0
+        || provenance.len() % 6 != 0
+        || spin_face_pixels == 0
+        || spin_resolution_f.fract() != 0.0
+        || total_water.len() < resolution as usize * resolution as usize * 6 * 4
+    {
+        return None;
+    }
+    let face_pixels = resolution as usize * resolution as usize;
+    let spin_resolution = spin_resolution_f as usize;
+    let mut owned = 0.0f32;
+    let mut total = 0.0f32;
+    for &pixel in &primary.pixels {
+        let face = pixel / face_pixels;
+        let local = pixel % face_pixels;
+        let vx = local % resolution as usize;
+        let vy = local / resolution as usize;
+        let sx = vx * spin_resolution / resolution as usize;
+        let sy = vy * spin_resolution / resolution as usize;
+        let weight = u15_weight(vx as u32, vy as u32, resolution);
+        owned += provenance
+            .get(face * spin_face_pixels + sy * spin_resolution + sx)
+            .copied()
+            .unwrap_or(0.0)
+            * weight;
+        total += total_water
+            .get(pixel * 4..pixel * 4 + 4)
+            .map(|channels| channels.iter().sum::<f32>())
+            .unwrap_or(0.0)
+            * weight;
+    }
+    Some(if total > 0.0 { owned / total } else { 0.0 })
+}
+
 fn u15_deep_mass_metrics(mass: &[f32]) -> (f32, f32) {
     mass.chunks_exact(4)
         .map(|channels| channels[1])
@@ -5260,17 +5335,13 @@ fn run_u15_field_validation(
             ([velocity[0], velocity[1], velocity[2], 0.0], 810.0)
         });
         let field = pipeline.create_textures(gpu, resolution);
-        pipeline.generate(
-            gpu,
-            WeatherSnapshot {
-                storm_count,
-                ..u15_size_weather_snapshot(resolution, seed, storm_size)
-            },
-            &terrain,
-            &dynamics,
-            &field,
-        );
-        (field.read_mass(gpu), field.read_geometry(gpu))
+        let snapshot = WeatherSnapshot {
+            storm_count,
+            ..u15_size_weather_snapshot(resolution, seed, storm_size)
+        };
+        let provenance = pipeline
+            .generate_with_provenance_for_validation(gpu, snapshot, &terrain, &dynamics, &field);
+        (field.read_mass(gpu), field.read_geometry(gpu), provenance)
     };
     let generate_without_source = |seed: u32, storm_count: u32| {
         let terrain = u14_flat_terrain(resolution, |pos| u15_fixture_height(seed, 8, pos));
@@ -5486,9 +5557,45 @@ fn run_u15_field_validation(
             u15_size_top_deltas(&size_owners[0], &size_owners[1]),
             u15_size_top_deltas(&size_owners[0], &size_owners[2]),
         ];
-        let size_area_growth_pass = size_area[0]
+        let legacy_size_area_growth_pass = size_area[0]
             .zip(size_area[2])
             .is_some_and(|(small, large)| large >= small * 1.5);
+        let physical_eligible =
+            u15_size_minimum_physical_eligibility(size_seed) >= U15_SIZE_MIN_PHYSICAL_ELIGIBILITY;
+        // ponytail: only the U15 owner-growth gate consumes transient P; preview/export stay ABI-identical.
+        let size_area_growth_pass = sized[0]
+            .2
+            .as_ref()
+            .zip(sized[2].2.as_ref())
+            .map(|(small_provenance, large_provenance)| {
+                physical_eligible
+                    && u15_provenance_total(small_provenance, resolution).is_finite()
+                    && u15_provenance_total(large_provenance, resolution).is_finite()
+                    && (0..U15_SIZE_STORM_COUNT).all(|owner| {
+                        [
+                            u15_owner_primary_provenance_share(
+                                small_provenance,
+                                &sized[0].0,
+                                resolution,
+                                &size_components[0],
+                                &size_association,
+                                owner,
+                            ),
+                            u15_owner_primary_provenance_share(
+                                large_provenance,
+                                &sized[2].0,
+                                resolution,
+                                &size_components[2],
+                                &size_association,
+                                owner,
+                            ),
+                        ]
+                        .into_iter()
+                        .all(|share| share.is_some_and(|value| value >= U15_MIN_OWNER_PROVENANCE_SHARE))
+                    })
+                    && legacy_size_area_growth_pass
+            })
+            .unwrap_or(legacy_size_area_growth_pass);
         let size_top_growth_pass = size_top_pairs.as_ref().is_some_and(|pairs| {
             pairs
                 .iter()
@@ -5496,7 +5603,7 @@ fn run_u15_field_validation(
         });
         let size_gate = size_area_growth_pass && size_top_growth_pass;
         let size_predicate = format!(
-            "fragmentation(satellite_count<={U15_MAX_SATELLITES_PER_OWNER},satellite_area_ratio<={U15_MAX_SATELLITE_AREA_RATIO:.2})={size_fragmentation_pass} && large_primary_area>=small_primary_area*1.5={size_area_growth_pass} && each_paired_large_top_p95>=small_top_p95+2.0={size_top_growth_pass} => {}",
+            "fragmentation(satellite_count<={U15_MAX_SATELLITES_PER_OWNER},satellite_area_ratio<={U15_MAX_SATELLITE_AREA_RATIO:.2})={size_fragmentation_pass} && large_primary_area>=small_primary_area*1.5&&owner_provenance_share>={U15_MIN_OWNER_PROVENANCE_SHARE:.2}={size_area_growth_pass} && each_paired_large_top_p95>=small_top_p95+2.0={size_top_growth_pass} => {}",
             size_fragmentation_pass && size_gate,
         );
         let mask_deep: [Option<f32>; 3] = std::array::from_fn(|index| {
@@ -7513,9 +7620,11 @@ mod tests {
         u3_screen_direction, u14_coverage_growth, u14_coverage_support_metrics, u14_fixed_core_p90,
         u14_geometry_metrics, u14_lee_continuation_metrics, u14_marine_to_land_continentality,
         u14_mixed_coast_land_support, u14_significant_occupied_components, u15_fixture_centers,
-        u15_owner_size_metrics, u15_paired_size_tops, u15_pixel_neighbors, u15_pixel_position,
+        u15_owner_primary_provenance_share, u15_owner_size_metrics, u15_paired_size_tops,
+        u15_pixel_neighbors, u15_pixel_position,
         u15_seed_diagnostics, u15_seed_diagnostics_report, u15_significant_response_components,
         u15_significant_size_components, u15_size_association, u15_size_fixture_support,
+        u15_weight,
         u15_size_frozen_candidates, u15_size_minimum_physical_eligibility,
         u15_size_precondition_diagnostics, u15_size_seed_criterion, u15_size_weather_snapshot,
         u15_validation_mode, validate_seed_topology_metrics, weather_validation_size_error,
@@ -8399,6 +8508,89 @@ mod tests {
     }
 
     #[test]
+    fn u15_owner_provenance_share_maps_validation_pixels_onto_spin_snapshot() {
+        const RESOLUTION: u32 = 512;
+        const SPIN: usize = 128;
+        let face_pixels = RESOLUTION as usize * RESOLUTION as usize;
+        // Face-symmetric validation patch (mirror pairs x ↔ 511-x straddle the
+        // two halves) so solid-angle weights cancel in the half-ownership case.
+        let mut component_pixels = Vec::new();
+        for y in 128..192usize {
+            for x in 192..320usize {
+                component_pixels.push(y * RESOLUTION as usize + x);
+            }
+        }
+        let mut association: Vec<Option<u32>> = vec![None; face_pixels * 6];
+        for &pixel in &component_pixels {
+            association[pixel] = Some(0);
+        }
+        let component = U15ResponseComponent {
+            pixels: component_pixels.clone(),
+            centroid: [0.0, 0.0, 1.0],
+            area_fraction: 0.0025,
+        };
+        let mut total_water = vec![0.0; face_pixels * 6 * 4];
+        for chunk in total_water.chunks_exact_mut(4) {
+            chunk[0] = 1.0;
+        }
+        let components = [component];
+        // Validation patch 192..320 maps by /4 onto spin texels 48..80.
+        let mut provenance = vec![0.0; SPIN * SPIN * 6];
+        let stamp = |provenance: &mut Vec<f32>, x_range: std::ops::Range<usize>| {
+            for y in 32..48usize {
+                for x in x_range.clone() {
+                    provenance[y * SPIN + x] = 1.0;
+                }
+            }
+        };
+        stamp(&mut provenance, 48..80);
+        let full = u15_owner_primary_provenance_share(
+            &provenance,
+            &total_water,
+            RESOLUTION,
+            &components,
+            &association,
+            0,
+        );
+        assert!((full.unwrap() - 1.0).abs() < 1e-5);
+
+        let mut half_provenance = vec![0.0; SPIN * SPIN * 6];
+        stamp(&mut half_provenance, 48..64);
+        let half = u15_owner_primary_provenance_share(
+            &half_provenance,
+            &total_water,
+            RESOLUTION,
+            &components,
+            &association,
+            0,
+        );
+        assert!((half.unwrap() - 0.5).abs() < 1e-5);
+
+        let empty = u15_owner_primary_provenance_share(
+            &vec![0.0; SPIN * SPIN * 6],
+            &total_water,
+            RESOLUTION,
+            &components,
+            &association,
+            0,
+        );
+        assert_eq!(empty.unwrap(), 0.0);
+
+        // Malformed provenance buffer (not 6·k²) must not panic.
+        assert!(
+            u15_owner_primary_provenance_share(
+                &vec![0.0; 100],
+                &total_water,
+                RESOLUTION,
+                &components,
+                &association,
+                0,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn u15_size_seeds_are_the_first_input_only_production_candidates() {
         let selected = u15_size_frozen_candidates();
         assert_eq!(selected, U15_SIZE_SEEDS);
@@ -8504,5 +8696,386 @@ mod tests {
             super::u15_response(&large, &small),
             super::u15_response(&large, &count_zero)
         );
+    }
+
+    // Executable replacement for the former source-text gate: the following
+    // tests run the real spin-up on the GPU with the owned-vapor tracer and
+    // assert its contract directly.
+    #[cfg(feature = "validation")]
+    use super::{
+        U15_SIZE_MIN_PHYSICAL_ELIGIBILITY, WeatherFieldPipeline, WeatherSnapshot, WeatherTextures,
+        cube_edge_point, u14_flat_terrain,
+    };
+    #[cfg(feature = "validation")]
+    use planet_gen::gpu::GpuContext;
+    #[cfg(feature = "validation")]
+    use planet_gen::terrain_compute::WindFieldPipeline;
+    #[cfg(feature = "validation")]
+    use planet_gen::weather::{TracerValidationTrace, WEATHER_DIAGNOSTIC_NO_SINK};
+
+    #[cfg(feature = "validation")]
+    fn u15_tracer_run(
+        resolution: u32,
+        height: impl Fn([f32; 3]) -> f32,
+        diagnostic_flags: u32,
+    ) -> (
+        GpuContext,
+        WeatherFieldPipeline,
+        WeatherTextures,
+        TracerValidationTrace,
+    ) {
+        u15_tracer_run_with_provenance(resolution, height, diagnostic_flags, true)
+    }
+
+    /// `provenance_enabled = false` forces the no-R16 fallback path so capable
+    /// adapters exercise the branch incapable adapters always take.
+    #[cfg(feature = "validation")]
+    fn u15_tracer_run_with_provenance(
+        resolution: u32,
+        height: impl Fn([f32; 3]) -> f32,
+        diagnostic_flags: u32,
+        provenance_enabled: bool,
+    ) -> (
+        GpuContext,
+        WeatherFieldPipeline,
+        WeatherTextures,
+        TracerValidationTrace,
+    ) {
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let wind = WindFieldPipeline::new(&gpu).expect("U15 dynamics unavailable");
+        let pipeline = WeatherFieldPipeline::new(&gpu).expect("U15 weather unavailable");
+        let terrain = u14_flat_terrain(resolution, height);
+        let dynamics =
+            wind.create_test_textures(&gpu, resolution, |_| ([0.2, 0.0, -0.1, 0.0], 1013.0));
+        let field = pipeline.create_textures(&gpu, resolution);
+        let snapshot = WeatherSnapshot {
+            base_temp_c: 30.0,
+            ..u15_size_weather_snapshot(resolution, U15_SIZE_SEEDS[0], 1.0)
+        };
+        let trace = pipeline.validation_tracer_trace_for_sweep(
+            &gpu,
+            snapshot,
+            &terrain,
+            &dynamics,
+            &field,
+            diagnostic_flags,
+            provenance_enabled,
+        );
+        (gpu, pipeline, field, trace)
+    }
+
+    #[cfg(feature = "validation")]
+    fn u15_total_water(state: &[f32], cell: usize) -> f32 {
+        state[cell * 4..cell * 4 + 4].iter().sum()
+    }
+
+    #[cfg(feature = "validation")]
+    fn u15_skip_without_r16(provenance: &Option<Vec<f32>>) -> Option<&Vec<f32>> {
+        match provenance {
+            Some(provenance) => Some(provenance),
+            None => {
+                eprintln!("adapter lacks R16 storage support; tracer coverage skipped");
+                None
+            }
+        }
+    }
+
+    #[cfg(feature = "validation")]
+    #[test]
+    fn u15_tracer_ocean_tracks_total_water_through_phase_transfer_and_land_stays_unowned() {
+        assert!(
+            u15_size_minimum_physical_eligibility(U15_SIZE_SEEDS[0])
+                >= U15_SIZE_MIN_PHYSICAL_ELIGIBILITY
+        );
+        let resolution = 16;
+        // Pure ocean with the sink off: P must equal total water T per cell even
+        // after phase transfers repartition vapor into condensate reservoirs.
+        let (_, _, _, ocean) = u15_tracer_run(resolution, |_| -0.1, WEATHER_DIAGNOSTIC_NO_SINK);
+        if let Some(p) = u15_skip_without_r16(&ocean.provenance) {
+            assert_eq!(ocean.state.len(), p.len() * 4);
+            // P advects through its own forward-Euler flux pass while T advects
+            // through Hancock's predictor-corrector, so P == T holds only to the
+            // schemes' combined truncation, not to f16 ULPs. Budgets are
+            // measured on the reference adapter (worst per-cell drift 6.3%;
+            // u15_weight-area-weighted global drift 1.17%, small-T cells
+            // exact) with ~1.7x margin. The global conservation gate is what
+            // catches genuine ownership loss.
+            const CELL_DRIFT: f32 = 0.08;
+            const CELL_FLOOR: f32 = 2e-4;
+            const GLOBAL_DRIFT: f32 = 0.02;
+            // Cubemap texels cover unequal solid angles; weight every texel by
+            // its u15_weight area factor so ΣP/ΣT measure surface-integral
+            // conservation, matching u15_provenance_total.
+            let weight = |cell: usize| {
+                let face_pixels = resolution as usize * resolution as usize;
+                let local = cell % face_pixels;
+                u15_weight(
+                    (local % resolution as usize) as u32,
+                    (local / resolution as usize) as u32,
+                    resolution,
+                )
+            };
+            let mut sum_p = 0.0f32;
+            let mut sum_t = 0.0f32;
+            for cell in 0..p.len() {
+                let total = u15_total_water(&ocean.state, cell);
+                assert!(total.is_finite() && total >= 0.0, "cell {cell}: T={total}");
+                let w = weight(cell);
+                sum_p += p[cell] * w;
+                sum_t += total * w;
+                let tolerance = CELL_DRIFT * total + CELL_FLOOR;
+                assert!(
+                    (p[cell] - total).abs() <= tolerance,
+                    "ocean cell {}: P={} T={} exceeds drift budget {tolerance}",
+                    cell,
+                    p[cell],
+                    total
+                );
+            }
+            let global_gap = (sum_p - sum_t).abs();
+            assert!(
+                global_gap <= GLOBAL_DRIFT * sum_t,
+                "ocean ownership lost {global_gap} of {sum_t} ({:.2}% > {}% budget)",
+                100.0 * global_gap / sum_t,
+                100.0 * GLOBAL_DRIFT
+            );
+            // Focused negative check: a distributed 3%-of-T ownership leak
+            // slips past every per-cell budget but must trip the global gate.
+            let leaked_sum: f32 = (0..p.len())
+                .map(|cell| {
+                    (p[cell] - 0.03 * u15_total_water(&ocean.state, cell)) * weight(cell)
+                })
+                .sum();
+            assert!(
+                (leaked_sum - sum_t).abs() > GLOBAL_DRIFT * sum_t,
+                "global gate must catch a 3% distributed provenance leak"
+            );
+        }
+        // All land has no open-ocean source anywhere, so ownership stays empty
+        // down to the storage format: the provenance attachment is never
+        // written on land cells.
+        let (_, _, _, land) = u15_tracer_run(resolution, |_| 0.1, 0);
+        if let Some(p) = u15_skip_without_r16(&land.provenance) {
+            assert!(
+                p.iter().all(|value| *value == 0.0),
+                "land provenance must be exactly empty, max={:?}",
+                p.iter().cloned().fold(f32::NAN, f32::max)
+            );
+        }
+    }
+
+    #[cfg(feature = "validation")]
+    #[test]
+    fn u15_tracer_forced_disable_exercises_the_no_r16_fallback_on_capable_adapters() {
+        // Incapable adapters always take the provenance=None fallback; force
+        // the same branch here so every adapter covers it.
+        let (_, _, _, enabled) = u15_tracer_run(16, |_| -0.1, WEATHER_DIAGNOSTIC_NO_SINK);
+        if u15_skip_without_r16(&enabled.provenance).is_none() {
+            return;
+        }
+        let (_, _, _, trace) =
+            u15_tracer_run_with_provenance(16, |_| -0.1, WEATHER_DIAGNOSTIC_NO_SINK, false);
+        assert!(
+            trace.provenance.is_none(),
+            "forced disable must yield no tracer readback"
+        );
+        assert_eq!(
+            trace.state, enabled.state,
+            "forced disable must leave the state identical to enabled tracing"
+        );
+    }
+
+    #[cfg(feature = "validation")]
+    #[test]
+    fn u15_tracer_mixed_ownership_is_deterministic_fractional_and_bounded_by_total_water() {
+        let resolution = 16;
+        let mixed = |pos: [f32; 3]| if pos[2] > 0.0 { -0.1 } else { 0.1 };
+        let (_, _, _, first) = u15_tracer_run(resolution, mixed, 0);
+        let Some(p) = u15_skip_without_r16(&first.provenance) else {
+            return;
+        };
+        let p = p.clone();
+        let (_, _, _, second) = u15_tracer_run(resolution, mixed, 0);
+        assert_eq!(
+            Some(&p),
+            second.provenance.as_ref(),
+            "tracer ownership must be deterministic"
+        );
+        let mut fractional = false;
+        for cell in 0..p.len() {
+            let total = u15_total_water(&first.state, cell);
+            // The shader clamps P against its pre-storage T; both textures then
+            // round to half precision independently, so allow a couple of
+            // relative f16 ULPs of drift when re-summing T on the host.
+            let headroom = total.max(p[cell]) * 0.001953125 + 1e-5;
+            assert!(
+                p[cell].is_finite() && p[cell] >= 0.0 && p[cell] <= total + headroom,
+                "cell {}: P={} outside [0, T={}+{}]",
+                cell,
+                p[cell],
+                total,
+                headroom
+            );
+            if p[cell] > 0.001 && total - p[cell] > 0.001 {
+                fractional = true;
+            }
+        }
+        assert!(
+            fractional,
+            "mixed planet must contain partially-owned cells"
+        );
+    }
+
+    #[cfg(feature = "validation")]
+    #[test]
+    fn u15_tracer_rainout_only_removes_owned_mass_and_never_adds_it() {
+        let resolution = 16;
+        let (_, _, _, kept) = u15_tracer_run(resolution, |_| -0.1, WEATHER_DIAGNOSTIC_NO_SINK);
+        let (_, _, _, rained) = u15_tracer_run(resolution, |_| -0.1, 0);
+        let Some(kept_p) = u15_skip_without_r16(&kept.provenance) else {
+            return;
+        };
+        let Some(rained_p) = u15_skip_without_r16(&rained.provenance) else {
+            return;
+        };
+        // ponytail: proportionality is asserted as monotone non-increase plus a
+        // strict global removal; per-cell ratios are unobservable from final
+        // states alone and would need an extra readback pass to verify exactly.
+        let mut removed_somewhere = false;
+        for cell in 0..kept_p.len() {
+            assert!(
+                rained_p[cell] <= kept_p[cell] + 0.01,
+                "cell {}: rainout grew P from {} to {}",
+                cell,
+                kept_p[cell],
+                rained_p[cell]
+            );
+            if kept_p[cell] - rained_p[cell] > 0.005 {
+                removed_somewhere = true;
+            }
+        }
+        let kept_total: f32 = kept_p.iter().sum();
+        let rained_total: f32 = rained_p.iter().sum();
+        assert!(
+            removed_somewhere && rained_total < kept_total,
+            "rainout must remove owned provenance somewhere: {kept_total} -> {rained_total}"
+        );
+    }
+
+    #[cfg(feature = "validation")]
+    #[test]
+    fn u15_tracer_provenance_is_continuous_across_cubemap_seams() {
+        let resolution = 16;
+        let (_, _, _, trace) = u15_tracer_run(resolution, |_| -0.1, 0);
+        let Some(p) = u15_skip_without_r16(&trace.provenance) else {
+            return;
+        };
+        let face_len = (resolution * resolution) as usize;
+        let width = resolution as usize;
+        let last = width - 1;
+        let sample = |face: usize, x: usize, y: usize| p[face * face_len + y * width + x];
+        let seam_deltas: Vec<f32> = cube_edge_pairs(resolution)
+            .iter()
+            .flat_map(|(left, right, reversed)| {
+                (0..=last).map(move |index| {
+                    let (left_face, left_x, left_y) = cube_edge_point(*left, index, last);
+                    let right_index = if *reversed { last - index } else { index };
+                    let (right_face, right_x, right_y) =
+                        cube_edge_point(*right, right_index, last);
+                    (sample(left_face, left_x, left_y) - sample(right_face, right_x, right_y))
+                        .abs()
+                })
+            })
+            .collect();
+        let interior_deltas: Vec<f32> = (0..6usize)
+            .flat_map(|face| {
+                (0..last).flat_map(move |y| {
+                    (0..last).flat_map(move |x| {
+                        [
+                            (sample(face, x, y) - sample(face, x + 1, y)).abs(),
+                            (sample(face, x, y) - sample(face, x, y + 1)).abs(),
+                        ]
+                    })
+                })
+            })
+            .collect();
+        let seam_mean = seam_deltas.iter().sum::<f32>() / seam_deltas.len() as f32;
+        let interior_mean = interior_deltas.iter().sum::<f32>() / interior_deltas.len() as f32;
+        assert!(
+            seam_mean <= interior_mean * 8.0 + 1e-4,
+            "seam discontinuity {seam_mean} exceeds interior gradient {interior_mean}"
+        );
+    }
+
+    #[cfg(feature = "validation")]
+    #[test]
+    fn u15_tracer_mode_off_preserves_the_production_fingerprint_and_respects_budget() {
+        // Policy: the A/B provenance cubemap pair stays within 384 KiB — exactly
+        // 2 textures x R16Float x SPINUP_RESOLUTION^2 x 6 faces x 2 bytes today.
+        // weather.rs asserts this at texture creation; restate the arithmetic so
+        // the policy survives refactors of either site.
+        const PROVENANCE_PAIR_BUDGET_BYTES: usize = 384 * 1024;
+        const SPINUP_RESOLUTION_CAP: u32 = 128;
+        let spin_resolution = 16u32.clamp(2, SPINUP_RESOLUTION_CAP);
+        let pair_bytes = 2 * (spin_resolution * spin_resolution * 6 * 2) as usize;
+        assert!(pair_bytes <= PROVENANCE_PAIR_BUDGET_BYTES);
+
+        let resolution = 16;
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let wind = WindFieldPipeline::new(&gpu).expect("U15 dynamics unavailable");
+        let pipeline = WeatherFieldPipeline::new(&gpu).expect("U15 weather unavailable");
+        let terrain = u14_flat_terrain(resolution, |_| -0.1);
+        let dynamics =
+            wind.create_test_textures(&gpu, resolution, |_| ([0.2, 0.0, -0.1, 0.0], 1013.0));
+        let snapshot = WeatherSnapshot {
+            base_temp_c: 30.0,
+            ..u15_size_weather_snapshot(resolution, U15_SIZE_SEEDS[0], 1.0)
+        };
+
+        let field = pipeline.create_textures(&gpu, resolution);
+        pipeline.generate(&gpu, snapshot, &terrain, &dynamics, &field);
+        let baseline_mass = field.read_mass(&gpu);
+        let baseline_geometry = field.read_geometry(&gpu);
+
+        // Re-running with the tracer enabled must not perturb production output:
+        // Mode-Off baseline fingerprints stay bit-identical.
+        let trace = pipeline.validation_tracer_trace_for_sweep(
+            &gpu,
+            snapshot,
+            &terrain,
+            &dynamics,
+            &field,
+            0,
+            true,
+        );
+        assert_eq!(
+            field.read_mass(&gpu),
+            baseline_mass,
+            "tracer perturbed the Mode-Off mass fingerprint"
+        );
+        assert_eq!(
+            field.read_geometry(&gpu),
+            baseline_geometry,
+            "tracer perturbed the Mode-Off geometry fingerprint"
+        );
+
+        let direct = pipeline.generate_with_provenance_for_validation(
+            &gpu,
+            snapshot,
+            &terrain,
+            &dynamics,
+            &field,
+        );
+        assert_eq!(
+            direct.is_some(),
+            trace.provenance.is_some(),
+            "both tracer entry points must agree on R16 capability"
+        );
+        if trace.provenance.is_none() {
+            // Unsupported-R16 adapter fallback: production path still runs and
+            // the state readback stays available without any P channel.
+            assert!(!trace.state.is_empty());
+            assert_eq!(field.read_mass(&gpu), baseline_mass);
+        }
     }
 }

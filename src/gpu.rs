@@ -40,6 +40,7 @@ pub struct GpuContext {
     pub queue: wgpu::Queue,
     pub adapter_info: wgpu::AdapterInfo,
     pub rgba16float_features: wgpu::TextureFormatFeatures,
+    pub r16float_features: wgpu::TextureFormatFeatures,
     // Test-only: Vulkan is not reliable when independent test contexts overlap.
     #[cfg(test)]
     _test_permit: GpuTestPermit,
@@ -66,15 +67,19 @@ impl GpuContext {
         let adapter_info = adapter.get_info();
         let rgba16float_features =
             adapter.get_texture_format_features(wgpu::TextureFormat::Rgba16Float);
+        let r16float_features = adapter.get_texture_format_features(wgpu::TextureFormat::R16Float);
         log::info!(
             "GPU adapter: {} ({:?})",
             adapter_info.name,
             adapter_info.backend
         );
 
+        let required_features =
+            adapter.features() & wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
+
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("planet-gen"),
-            required_features: wgpu::Features::empty(),
+            required_features,
             experimental_features: wgpu::ExperimentalFeatures::disabled(),
             required_limits: wgpu::Limits::default(),
             memory_hints: wgpu::MemoryHints::Performance,
@@ -87,6 +92,7 @@ impl GpuContext {
             queue,
             adapter_info,
             rgba16float_features,
+            r16float_features,
             #[cfg(test)]
             _test_permit: test_permit,
         })
@@ -104,6 +110,9 @@ impl GpuContext {
             rgba16float_features: render_state
                 .adapter
                 .get_texture_format_features(wgpu::TextureFormat::Rgba16Float),
+            r16float_features: render_state
+                .adapter
+                .get_texture_format_features(wgpu::TextureFormat::R16Float),
             #[cfg(test)]
             _test_permit: test_permit,
         }
