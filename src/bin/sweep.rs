@@ -2809,6 +2809,9 @@ fn run_u14_field_validation(
 ) -> Vec<String> {
     const SEEDS: [u32; 8] = [7, 19, 37, 73, 101, 211, 509, 997];
     let terrain = u14_flat_terrain(resolution, |_| -0.1);
+    // Terrain owns the vapor source, so the no-source inland fixture must present
+    // real land (height above ocean_level) or it sources vapor like ocean.
+    let inland_terrain = u14_flat_terrain(resolution, |_| 0.1);
     // The height sign change and the continentality transition share z=0, but only
     // the latter is broad. The fixed mask catches a cloud edge tracing the coast.
     let coast = u14_flat_terrain(resolution, |pos| u14_coast_height(pos[2]));
@@ -2960,7 +2963,8 @@ fn run_u14_field_validation(
     let mut paired_lee_rows = Vec::new();
     for seed in SEEDS {
         let (cool_ocean, cool_geometry) = weather(&terrain, |_| 0.0, 5.0, 0.75, 1.0, seed, 0.0);
-        let (cool_inland, inland_geometry) = weather(&terrain, |_| 1.0, 5.0, 0.75, 1.0, seed, 0.0);
+        let (cool_inland, inland_geometry) =
+            weather(&inland_terrain, |_| 1.0, 5.0, 0.75, 1.0, seed, 0.0);
         let (repeat_mass, repeat_geometry) = weather(&terrain, |_| 0.0, 5.0, 0.75, 1.0, seed, 0.0);
         deterministic &= cool_ocean == repeat_mass && cool_geometry == repeat_geometry;
         for (mass, geometry) in [
@@ -5262,7 +5266,7 @@ fn u15_trail_weather_snapshot(resolution: u32, seed: u32, wind_scale: f32) -> We
         resolution,
         seed,
         storm_count: 0,
-        coverage: 0.65,
+        coverage: 1.0,
         moisture: 1.0,
         surface_pressure_bar: 1.0,
         base_temp_c: 15.0,
@@ -5768,7 +5772,7 @@ fn run_u15_field_validation(
         }
     }
     let values = format!(
-        "command=cargo run --release --features validation --bin sweep -- --{validation_flag} --size 512 --output-dir {output_dir}\nshear_plume_fixture=source:{U15_TRAIL_SOURCE:?},zonal_axis:{U15_TRAIL_EAST:?},Y:{U15_TRAIL_NORTH:?};wind=((1+{U15_TRAIL_SHEAR:.2}*tanh(y/.08))/(1+{U15_TRAIL_SHEAR:.2}))*cross(Y,p); tangent_divergence_free; speed_bound=[{:.5},1]; snapshot.wind_scale=1/2; source=ocean_patch; control=matched_exterior_land_and_continentality; coverage:.65,moisture:1,temp_c:15,pressure_hpa:1013,tilt:0,season:.5,earth_radius_rotation,storms:0,diagnostics:0; MUSCL/Hancock active; CFL substeps use active `transport_substeps`; shape_corridor={U15_TRAIL_SHAPE_ROI_RADIUS:.8},physical_support={U15_TRAIL_OUTER_SUPPORT_RADIUS:.8},boundary_shell={U15_TRAIL_BOUNDARY_SHELL_INNER_RADIUS:.6}..{U15_TRAIL_SHAPE_ROI_RADIUS:.6}; response=max(total_mass_source-total_mass_control,0); morphology=all_counterfactual_response>=.02_within_frozen_corridor_own_centroid_log_map_wind_frame_weighted_Q90_Q10_L_alongwind_B_crosswind; Gperp=weighted_normalized_crosswind_geodesic_derivative; S=B*Gperp; gates=each:p95>=.04,Neff>=32,axis<=30deg,outside_corridor<=5%,beyond_physical_support<=5%,boundary_shell<=1%; ratios:L2/L1=1.50..2.50,B2/B1=.80..1.25,S2/S1=.75..1.25,deterministic; mass/area/isotropic_edge/components/centroid=telemetry_only; seeds={seeds:?}\nfixture={U15_ELIGIBLE_MASK}; fixture_flow={U15_FIXTURE_FLOW:?}; source_guard=actual_GPU_weather_pipeline; size_deterministic={size_deterministic}; qualified_organization_seed_count={qualified_organization_seed_count}/{}; qualified_organization=outside_high>=.10,downwind_centroid>=.5texels,pca<=20deg\n{}\n",
+        "command=cargo run --release --features validation --bin sweep -- --{validation_flag} --size 512 --output-dir {output_dir}\nshear_plume_fixture=source:{U15_TRAIL_SOURCE:?},zonal_axis:{U15_TRAIL_EAST:?},Y:{U15_TRAIL_NORTH:?};wind=((1+{U15_TRAIL_SHEAR:.2}*tanh(y/.08))/(1+{U15_TRAIL_SHEAR:.2}))*cross(Y,p); tangent_divergence_free; speed_bound=[{:.5},1]; snapshot.wind_scale=1/2; source=ocean_patch; control=matched_exterior_land_and_continentality; coverage:1,moisture:1,temp_c:15,pressure_hpa:1013,tilt:0,season:.5,earth_radius_rotation,storms:0,diagnostics:0; MUSCL/Hancock active; CFL substeps use active `transport_substeps`; shape_corridor={U15_TRAIL_SHAPE_ROI_RADIUS:.8},physical_support={U15_TRAIL_OUTER_SUPPORT_RADIUS:.8},boundary_shell={U15_TRAIL_BOUNDARY_SHELL_INNER_RADIUS:.6}..{U15_TRAIL_SHAPE_ROI_RADIUS:.6}; response=max(total_mass_source-total_mass_control,0); morphology=all_counterfactual_response>=.02_within_frozen_corridor_own_centroid_log_map_wind_frame_weighted_Q90_Q10_L_alongwind_B_crosswind; Gperp=weighted_normalized_crosswind_geodesic_derivative; S=B*Gperp; gates=each:p95>=.04,Neff>=32,axis<=30deg,outside_corridor<=5%,beyond_physical_support<=5%,boundary_shell<=1%; ratios:L2/L1=1.50..2.50,B2/B1=.80..1.25,S2/S1=.75..1.25,deterministic; mass/area/isotropic_edge/components/centroid=telemetry_only; seeds={seeds:?}\nfixture={U15_ELIGIBLE_MASK}; fixture_flow={U15_FIXTURE_FLOW:?}; source_guard=actual_GPU_weather_pipeline; size_deterministic={size_deterministic}; qualified_organization_seed_count={qualified_organization_seed_count}/{}; qualified_organization=outside_high>=.10,downwind_centroid>=.5texels,pca<=20deg\n{}\n",
         (1.0 - U15_TRAIL_SHEAR) / (1.0 + U15_TRAIL_SHEAR),
         seeds.len(),
         rows.join("\n"),
@@ -8062,7 +8066,12 @@ mod tests {
     #[test]
     fn rainout_uses_the_relative_humidity_threshold() {
         let shader = include_str!("../shaders/weather_spinup.wgsl");
-        assert!(shader.contains("max(condensate - q_sat * relative_humidity_target, 0.0) * 0.22"));
+        assert!(
+            shader.contains(
+                "max(condensate - q_sat * effective_relative_humidity_target, 0.0) * 0.22"
+            )
+        );
+        assert!(shader.contains("max(marine_climate, provenance_share)"));
         assert!(shader.contains("state.y * marine_climate * cold * 0.055"));
         assert!(!shader.contains("max(condensate - q_target, 0.0) * 0.22"));
     }
@@ -8724,17 +8733,20 @@ mod tests {
         WeatherTextures,
         TracerValidationTrace,
     ) {
-        u15_tracer_run_with_provenance(resolution, height, diagnostic_flags, true)
+        u15_tracer_run_with_provenance(resolution, height, diagnostic_flags, true, 0.0)
     }
 
     /// `provenance_enabled = false` forces the no-R16 fallback path so capable
     /// adapters exercise the branch incapable adapters always take.
+    /// `continentality` sets the dynamics `.a` channel uniformly; 0.0 keeps
+    /// marine_fraction ≡ 1 (all fixtures' default), 1.0 drives it to 0.
     #[cfg(feature = "validation")]
     fn u15_tracer_run_with_provenance(
         resolution: u32,
         height: impl Fn([f32; 3]) -> f32,
         diagnostic_flags: u32,
         provenance_enabled: bool,
+        continentality: f32,
     ) -> (
         GpuContext,
         WeatherFieldPipeline,
@@ -8745,8 +8757,11 @@ mod tests {
         let wind = WindFieldPipeline::new(&gpu).expect("U15 dynamics unavailable");
         let pipeline = WeatherFieldPipeline::new(&gpu).expect("U15 weather unavailable");
         let terrain = u14_flat_terrain(resolution, height);
-        let dynamics =
-            wind.create_test_textures(&gpu, resolution, |_| ([0.2, 0.0, -0.1, 0.0], 1013.0));
+        let dynamics = wind.create_test_textures(
+            &gpu,
+            resolution,
+            |_| ([0.2, 0.0, -0.1, continentality], 1013.0),
+        );
         let field = pipeline.create_textures(&gpu, resolution);
         let snapshot = WeatherSnapshot {
             base_temp_c: 30.0,
@@ -8864,6 +8879,50 @@ mod tests {
         }
     }
 
+    /// FE-079: transitional water (open_ocean=1, marine_fraction=0) must mint
+    /// full-evaporation provenance — the ownership gate mirrors supply_budget's
+    /// open_ocean factor, not marine_fraction. With maximal continentality on an
+    /// all-ocean warm tilt-0 planet every other continentality coupling
+    /// neutralizes (marine_climate stays 1, ice terms vanish, land_seed is 0),
+    /// so a marine_fraction multiplier would freeze provenance at its init
+    /// value while total water grows unowned each source step.
+    #[cfg(feature = "validation")]
+    #[test]
+    fn u15_tracer_transitional_water_mints_full_evaporation_provenance() {
+        let resolution = 16;
+        let (_, _, _, trace) =
+            u15_tracer_run_with_provenance(resolution, |_| -0.1, WEATHER_DIAGNOSTIC_NO_SINK, true, 1.0);
+        if let Some(p) = u15_skip_without_r16(&trace.provenance) {
+            assert_eq!(trace.state.len(), p.len() * 4);
+            // Same per-cell budget as the marine-fraction≡1 ocean tracer test:
+            // with minting gated by open_ocean this cell class behaves exactly
+            // like pure ocean, P ≈ T within the schemes' combined truncation.
+            const CELL_DRIFT: f32 = 0.08;
+            const CELL_FLOOR: f32 = 2e-4;
+            for cell in 0..p.len() {
+                let total = u15_total_water(&trace.state, cell);
+                assert!(total.is_finite() && total >= 0.0, "cell {cell}: T={total}");
+                let tolerance = CELL_DRIFT * total + CELL_FLOOR;
+                assert!(
+                    (p[cell] - total).abs() <= tolerance,
+                    "transitional water cell {}: P={} T={} exceeds drift budget {tolerance}",
+                    cell,
+                    p[cell],
+                    total
+                );
+            }
+        }
+        // Land mints nothing: provenance stays exactly empty everywhere.
+        let (_, _, _, land) = u15_tracer_run(resolution, |_| 0.1, 0);
+        if let Some(p) = u15_skip_without_r16(&land.provenance) {
+            assert!(
+                p.iter().all(|value| *value == 0.0),
+                "land provenance must be exactly empty, max={:?}",
+                p.iter().cloned().fold(f32::NAN, f32::max)
+            );
+        }
+    }
+
     #[cfg(feature = "validation")]
     #[test]
     fn u15_tracer_forced_disable_exercises_the_no_r16_fallback_on_capable_adapters() {
@@ -8874,7 +8933,7 @@ mod tests {
             return;
         }
         let (_, _, _, trace) =
-            u15_tracer_run_with_provenance(16, |_| -0.1, WEATHER_DIAGNOSTIC_NO_SINK, false);
+            u15_tracer_run_with_provenance(16, |_| -0.1, WEATHER_DIAGNOSTIC_NO_SINK, false, 0.0);
         assert!(
             trace.provenance.is_none(),
             "forced disable must yield no tracer readback"

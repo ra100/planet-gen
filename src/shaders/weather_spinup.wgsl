@@ -605,7 +605,7 @@ fn init_with_provenance(@builtin(global_invocation_id) id: vec3<u32>) {
     textureStore(provenance_out, vec2<i32>(id.xy), i32(id.z), vec4<f32>(bounded_provenance(marine_vapor, state)));
 }
 
-fn advance_state(pos: vec3<f32>) -> vec4<f32> {
+fn advance_state(pos: vec3<f32>, provenance_mass: f32) -> vec4<f32> {
     let res = params.spin_resolution;
     let wind = textureSampleLevel(wind_tex, spinup_sampler, pos, 0.0);
     let tangent_wind = wind.xyz - pos * dot(wind.xyz, pos);
@@ -675,17 +675,31 @@ fn advance_state(pos: vec3<f32>) -> vec4<f32> {
     // vapor toward its local climate target after each transport substep.
     let supply_budget = budgets.supply * open_ocean * surface_supply_factor;
     let phase_budget = budgets.phase;
-    let relative_humidity_target = clamp(
-        mix(0.45, 0.72, marine_climate) + marine_climate * cold * 0.18,
+    // FE-078 (DS-043): advected maritime provenance raises the inland humidity
+    // ceiling toward the marine value so wind-aligned plumes survive farther
+    // inland. Pure-ocean cells keep marine_climate=1 (bit-identical); continental
+    // cells with no marine provenance stay on the local blend.
+    let provenance_share = clamp(
+        provenance_mass / max(state.x + state.y + state.z + state.w, 0.0001),
+        0.0,
+        1.0,
+    );
+    let effective_relative_humidity_target = clamp(
+        mix(0.45, 0.72, max(marine_climate, provenance_share)) + marine_climate * cold * 0.18,
         0.0,
         0.92,
     );
     let q_target = q_sat * supply_budget * clamp(params.moisture, 0.0, 1.0)
-        * relative_humidity_target;
+        * effective_relative_humidity_target;
     if ((params.diagnostic_flags & DIAGNOSTIC_NO_SOURCE) == 0u) {
         let evaporation = max(q_target - state.x, 0.0) * 0.030 * step_fraction;
         state.x += evaporation;
-        provenance_source_evaporation = evaporation;
+        // Ownership rule: only open-ocean-origin vapor mints provenance. The
+        // gate mirrors supply_budget's open_ocean factor exactly: transitional
+        // water (open ocean, high continentality) evaporates via marine_climate
+        // and must mint fully, matching init's marine_vapor assignment; land
+        // mints nothing.
+        provenance_source_evaporation = evaporation * open_ocean;
     }
 
     let calm_wet_land = calm_wet_land_mask(
@@ -836,7 +850,7 @@ fn advance_state(pos: vec3<f32>) -> vec4<f32> {
         let condensate = state.y + state.z;
         let rainout = min(
             condensate,
-            (max(condensate - q_sat * relative_humidity_target, 0.0) * 0.22
+            (max(condensate - q_sat * effective_relative_humidity_target, 0.0) * 0.22
                 + state.z * (0.01 + 0.08 * thermal)
                 + state.y * marine_climate * cold * 0.055) * step_fraction,
         );
@@ -861,7 +875,9 @@ fn transport(@builtin(global_invocation_id) id: vec3<u32>) {
         textureStore(state_out, vec2<i32>(id.xy), i32(id.z), vec4<f32>(0.0));
         return;
     }
-    textureStore(state_out, vec2<i32>(id.xy), i32(id.z), advance_state(direction(id, res)));
+    // Provenance texture may be unbound in this pass: neutral mass keeps the
+    // local humidity target (0 share → no blend).
+    textureStore(state_out, vec2<i32>(id.xy), i32(id.z), advance_state(direction(id, res), 0.0));
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -881,7 +897,7 @@ fn transport_with_provenance(@builtin(global_invocation_id) id: vec3<u32>) {
     // production.
     let pos = direction(id, res);
     let transported = max(provenance_transport(pos), 0.0);
-    let state = advance_state(pos);
+    let state = advance_state(pos, transported);
     // q_target already carries the open-ocean gate; add the recorded evaporation once.
     let p_after_source = transported + provenance_source_evaporation;
     let p_after_rainout = p_after_source * (1.0 - provenance_rainout_scale);

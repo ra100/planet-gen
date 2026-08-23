@@ -12,6 +12,7 @@ Thumbs.db
 # Rust
 target/
 *.rs.bk
+__pycache__/
 
 # C++
 build/
