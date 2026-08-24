@@ -278,6 +278,11 @@ fn weather_cloud_layers_land_segment(
 ) -> WeatherCloudSample {
     let direction = normalize(dir);
     var sample = weather_cloud_sample(direction, altitude_km, angular_pixel_footprint);
+    // NOTE(FE-081/DS-045): land_factor keys low-cloud profile integration to
+    // the static height boundary and this land-segment path is preview-only —
+    // cloud_export integrates weather_cloud_sample without it, so preview and
+    // export diverge over land. Left as-is for leader/designer decision; the
+    // spin-up side no longer classifies coastlines.
     let land_factor = smooth_step(0.01, 0.05, sample.height - uniforms.ocean_level);
     if (land_factor <= 0.0) { return sample; }
 

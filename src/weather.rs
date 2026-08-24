@@ -102,6 +102,7 @@ fn min_face_angle(resolution: u32) -> f32 {
         .acos()
 }
 
+#[cfg(any(test, feature = "validation"))]
 fn outgoing_cfl(wind_scale: f32, resolution: u32, radius_km: f32, substeps: usize) -> f32 {
     outgoing_cfl_with_interval(
         wind_scale,
@@ -125,6 +126,7 @@ fn outgoing_cfl_with_interval(
         / substeps as f32
 }
 
+#[cfg(any(test, feature = "validation"))]
 fn wind_substeps(wind_scale: f32, resolution: u32, radius_km: f32) -> usize {
     wind_substeps_with_interval(wind_scale, resolution, radius_km, PHYSICAL_INTERVAL_SECONDS)
 }
@@ -2248,6 +2250,16 @@ mod tests {
         }
     }
 
+    /// FNV-1a over the exact f32 bit patterns of a mass readback. Pins are
+    /// strict bit-equality: any GPU output change flips the hash.
+    fn mass_fingerprint(values: &[f32]) -> u64 {
+        values
+            .iter()
+            .fold(0xcbf2_9ce4_8422_2325_u64, |hash, value| {
+                (hash ^ u64::from(value.to_bits())).wrapping_mul(0x100_0000_01b3)
+            })
+    }
+
     fn generate_weather(
         gpu: &GpuContext,
         pipeline: &WeatherFieldPipeline,
@@ -2305,7 +2317,20 @@ mod tests {
             &terrain,
             snapshot(resolution),
         );
-        assert_eq!(legacy.read_mass(&gpu), off.read_mass(&gpu));
+        // FE-081 de-classification couples provenance into mass (warm_marine_lift
+        // and inland_provenance read provenance_share), so capture-on and
+        // capture-off are intentionally different fields now. Each path is pinned
+        // bit-exactly instead of compared to each other; baseline moved
+        // 3011d61→FE-081. Pins regenerated from a clean deterministic build
+        // (cargo test --lib run twice, identical hashes).
+        assert_eq!(
+            mass_fingerprint(&legacy.read_mass(&gpu)),
+            8_178_768_856_964_432_677
+        );
+        assert_eq!(
+            mass_fingerprint(&off.read_mass(&gpu)),
+            4_657_217_969_856_119_589
+        );
         assert_eq!(provenance.is_some(), pipeline.provenance.is_some());
     }
 
@@ -2398,16 +2423,14 @@ mod tests {
         let pipeline = WeatherFieldPipeline::new(&gpu).expect("weather unavailable");
         let selected = generate_weather(&gpu, &pipeline, &dynamics, &terrain, snapshot(resolution));
         let schedule = spinup_schedule(dynamics.is_nearly_all_ocean());
-        let fingerprint = selected
-            .read_mass(&gpu)
-            .iter()
-            .fold(0xcbf2_9ce4_8422_2325_u64, |hash, value| {
-                (hash ^ u64::from(value.to_bits())).wrapping_mul(0x100_0000_01b3)
-            });
+        // FE-081 de-classification removed marine_climate conversion inflation;
+        // baseline moved 3011d61→FE-081. Pin regenerated from a clean
+        // deterministic build (cargo test --lib run twice, identical hash).
+        let fingerprint = mass_fingerprint(&selected.read_mass(&gpu));
 
         assert_eq!(schedule.iterations, 16);
         assert_eq!(schedule.physical_interval_seconds, 1600.0);
-        assert_eq!(fingerprint, 3_332_750_774_506_193_701);
+        assert_eq!(fingerprint, 5_688_443_436_753_117_989);
     }
 
     #[test]
@@ -2649,7 +2672,15 @@ mod tests {
         wind.generate_gpu(&gpu, &terrain, &dynamics, 42, 0.0, 0.4, 0.5, 1.0, 15.0, 1.0);
         let pipeline = WeatherFieldPipeline::new(&gpu).expect("weather unavailable");
         let mut totals = Vec::new();
-        for coverage in [0.0, half::f16::EPSILON.to_f32(), 0.25, 0.5, 0.75, 1.0] {
+        // FE-081 de-classification (DS-045c): f16::EPSILON sat inside the
+        // round-to-zero lottery of the Rgba16Float mass storage — the per-texel
+        // result sometimes quantized back to 0.0, failing strict monotonicity at
+        // the first nonzero step only. Start the chain at 2^-6 instead — note
+        // 16× f16::MIN_POSITIVE equals EPSILON itself (2^-10), which stays in
+        // the lottery — so every device rounds it to strictly positive mass and
+        // the zero-exact and strict-increase checks keep their intent.
+        let first_nonzero_coverage = 2.0_f32.powi(-6);
+        for coverage in [0.0, first_nonzero_coverage, 0.25, 0.5, 0.75, 1.0] {
             let mut params = snapshot(16);
             params.coverage = coverage;
             let values = read_texture(
@@ -4946,6 +4977,439 @@ mod tests {
         for pixel in state.chunks_exact(4) {
             assert!(((pixel[0] + pixel[3]) - initial).abs() <= 0.001);
             assert!(pixel[0] > 0.3 && pixel[3] < 0.4, "state={pixel:?}");
+        }
+    }
+
+    // === DS-045 A1 metrics: cloud boundaries must emerge from flow/history,
+    // not static per-cell land classification. ===
+
+    fn sphere_to_face_uv_test(dir: [f32; 3]) -> (u32, f32, f32) {
+        let a = [dir[0].abs(), dir[1].abs(), dir[2].abs()];
+        if a[0] >= a[1] && a[0] >= a[2] {
+            return if dir[0] > 0.0 {
+                (0, -dir[2] / a[0] * 0.5 + 0.5, -dir[1] / a[0] * 0.5 + 0.5)
+            } else {
+                (1, dir[2] / a[0] * 0.5 + 0.5, -dir[1] / a[0] * 0.5 + 0.5)
+            };
+        }
+        if a[1] >= a[0] && a[1] >= a[2] {
+            return if dir[1] > 0.0 {
+                (2, dir[0] / a[1] * 0.5 + 0.5, dir[2] / a[1] * 0.5 + 0.5)
+            } else {
+                (3, dir[0] / a[1] * 0.5 + 0.5, -dir[2] / a[1] * 0.5 + 0.5)
+            };
+        }
+        if dir[2] > 0.0 {
+            (4, dir[0] / a[2] * 0.5 + 0.5, -dir[1] / a[2] * 0.5 + 0.5)
+        } else {
+            (5, -dir[0] / a[2] * 0.5 + 0.5, -dir[1] / a[2] * 0.5 + 0.5)
+        }
+    }
+
+    fn state_at(state: &[f32], res: u32, dir: [f32; 3]) -> [f32; 4] {
+        let (face, u, v) = sphere_to_face_uv_test(dir);
+        let x = ((u * (res - 1) as f32).round() as u32).min(res - 1);
+        let y = ((v * (res - 1) as f32).round() as u32).min(res - 1);
+        let index = ((face * res * res + y * res + x) * 4) as usize;
+        [
+            state[index],
+            state[index + 1],
+            state[index + 2],
+            state[index + 3],
+        ]
+    }
+
+    fn condensate_at(state: &[f32], res: u32, dir: [f32; 3]) -> f32 {
+        let s = state_at(state, res, dir);
+        s[1] + s[2] + s[3]
+    }
+
+    fn angle_between(a: [f32; 3], b: [f32; 3]) -> f32 {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| x * y)
+            .sum::<f32>()
+            .clamp(-1.0, 1.0)
+            .acos()
+    }
+
+    fn normalize_dir(dir: [f32; 3]) -> [f32; 3] {
+        let length = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+        [dir[0] / length, dir[1] / length, dir[2] / length]
+    }
+
+    /// Zonal dynamics shared by the DS-045 fixtures (mirrors the coastal gates).
+    fn ds045_dynamics(
+        wind: &WindFieldPipeline,
+        gpu: &GpuContext,
+        resolution: u32,
+    ) -> DynamicsTextures {
+        wind.create_test_textures(gpu, resolution, |pos| {
+            let tangent = [pos[2], 0.0, -pos[0]];
+            let length = (tangent[0] * tangent[0] + tangent[2] * tangent[2])
+                .sqrt()
+                .max(0.0001);
+            (
+                [tangent[0] / length, 0.0, tangent[2] / length, 0.65],
+                1013.0,
+            )
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn ds045_run(
+        gpu: &GpuContext,
+        pipeline: &WeatherFieldPipeline,
+        dynamics: &DynamicsTextures,
+        resolution: u32,
+        seed: u32,
+        wind_scale: f32,
+        storm_count: u32,
+        height: impl Fn([f32; 3]) -> f32,
+    ) -> Vec<f32> {
+        let terrain = terrain_from(resolution, height);
+        let weather = pipeline.create_textures(gpu, resolution);
+        let mut params = snapshot(resolution);
+        params.seed = seed;
+        params.wind_scale = wind_scale;
+        params.storm_count = storm_count;
+        run_spinup_pass_with_config(
+            gpu,
+            pipeline,
+            &terrain,
+            dynamics,
+            params,
+            &weather,
+            SpinupTestConfig {
+                iterations: SPINUP_ITERATIONS,
+                ..Default::default()
+            },
+        )
+        .state
+    }
+
+    /// Near-flat coast shared by DS-045 fixtures: any large height structure
+    /// would add its own orographic edge and pollute the boundary metrics.
+    fn ds045_shelf_coast(pos: [f32; 3]) -> f32 {
+        if pos[2] < 0.0 {
+            -0.05
+        } else {
+            0.01
+        }
+    }
+
+    #[test]
+    fn ds045_coast_crossing_boundary_gradient_spans_many_texels() {
+        let resolution = 64;
+        let texel_angle = (std::f32::consts::FRAC_PI_2) / resolution as f32;
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let wind = WindFieldPipeline::new(&gpu).expect("dynamics unavailable");
+        let pipeline = WeatherFieldPipeline::new(&gpu).expect("weather unavailable");
+        let dynamics = ds045_dynamics(&wind, &gpu, resolution);
+        let state = ds045_run(
+            &gpu,
+            &pipeline,
+            &dynamics,
+            resolution,
+            42,
+            2.0,
+            2,
+            ds045_shelf_coast,
+        );
+        assert!(state.iter().all(|value| value.is_finite()));
+        // Transect across the ONSHORE coast at ~15°N: zonal flow carries marine
+        // air onto land at phi=pi, so any coastline-hugging artifact would live
+        // on this crossing.
+        let latitude = 15.0_f32.to_radians();
+        let span = 40.0 * texel_angle;
+        let samples = 161;
+        let values: Vec<f32> = (0..samples)
+            .map(|index| {
+                let phi =
+                    std::f32::consts::PI + span - 2.0 * span * index as f32 / (samples - 1) as f32;
+                let dir = normalize_dir([
+                    phi.cos() * latitude.cos(),
+                    latitude.sin(),
+                    phi.sin() * latitude.cos(),
+                ]);
+                condensate_at(&state, resolution, dir)
+            })
+            .collect();
+        let vmax = values.iter().cloned().fold(f32::MIN, f32::max);
+        let vmin = values.iter().cloned().fold(f32::MAX, f32::min);
+        assert!(
+            vmax - vmin > 0.002,
+            "transect shows no cloud contrast across the coast: [{vmin}, {vmax}]"
+        );
+        // Effective gradient width of the dominant cross-coast transition
+        // (marine deck falling to its termination): span between the 90% and
+        // 10% crossings of the observed range. A coastline-hugging edge would
+        // collapse this toward a couple of texels; flow-boundaries stay broad.
+        let hi = vmin + 0.9 * (vmax - vmin);
+        let lo = vmin + 0.1 * (vmax - vmin);
+        let mut last_hi: Option<usize> = None;
+        let mut termination: Option<usize> = None;
+        for (index, value) in values.iter().enumerate() {
+            if *value < lo {
+                if last_hi.is_some() {
+                    termination = Some(index);
+                    break;
+                }
+            } else if *value >= hi {
+                last_hi = Some(index);
+            }
+        }
+        let arc_per_sample_texels = 2.0 * span / (samples - 1) as f32 / texel_angle;
+        let width_texels = match (last_hi, termination) {
+            (Some(a), Some(b)) => (b - a) as f32 * arc_per_sample_texels,
+            _ => panic!("transect lacks a deck-to-clear transition to measure"),
+        };
+        assert!(
+            width_texels >= 16.0,
+            "coast-crossing gradient width {width_texels:.1} texels < 16 at max wind"
+        );
+    }
+
+    #[test]
+    fn ds045_lake_has_no_static_outline_beyond_wind_scaled_plume() {
+        let resolution = 64;
+        let texel_angle = (std::f32::consts::FRAC_PI_2) / resolution as f32;
+        let lake_center = [0.0, 0.0, 1.0];
+        let lake_radius = 10.0 * texel_angle;
+        let height = |pos: [f32; 3]| {
+            if angle_between(pos, lake_center) < lake_radius {
+                -0.08
+            } else {
+                0.08
+            }
+        };
+        let upwind = [-1.0_f32, 0.0, 0.0];
+        let plume_extent = |values: &[f32]| -> f32 {
+            let background: f32 = {
+                let mut sum = 0.0;
+                let mut count = 0;
+                for face in 0..6u32 {
+                    for y in 0..resolution {
+                        for x in 0..resolution {
+                            let pos = crate::cube_sphere::cube_to_sphere(
+                                face,
+                                x as f32 / (resolution - 1) as f32,
+                                y as f32 / (resolution - 1) as f32,
+                            );
+                            if angle_between(pos, lake_center) > lake_radius + 30.0 * texel_angle {
+                                let index = ((face * resolution * resolution + y * resolution + x)
+                                    * 4) as usize;
+                                sum += values[index + 1] + values[index + 2] + values[index + 3];
+                                count += 1;
+                            }
+                        }
+                    }
+                }
+                sum / count.max(1) as f32
+            };
+            let mut extent = 0.0_f32;
+            let ring_count = 40;
+            for ring in 1..=ring_count {
+                let distance = lake_radius + ring as f32 * texel_angle;
+                let mut sector_sum = 0.0;
+                let mut sector_count = 0u32;
+                for spoke in 0..36u32 {
+                    let angle = spoke as f32 * std::f32::consts::TAU / 36.0;
+                    let lateral = normalize_dir([angle.cos(), angle.sin(), 0.0]);
+                    let dir = normalize_dir([
+                        lake_center[0] * distance.cos() + lateral[0] * distance.sin(),
+                        lake_center[1] * distance.cos() + lateral[1] * distance.sin(),
+                        lake_center[2] * distance.cos() + lateral[2] * distance.sin(),
+                    ]);
+                    let alignment = dir.iter().zip(upwind).map(|(a, b)| a * b).sum::<f32>();
+                    if alignment > 0.35 {
+                        continue; // measure only the downwind/crosswind sectors
+                    }
+                    sector_sum += condensate_at(values, resolution, dir);
+                    sector_count += 1;
+                }
+                if sector_count > 0
+                    && sector_sum / sector_count as f32 > background + 0.35 * background.max(0.002)
+                {
+                    extent = ring as f32;
+                }
+            }
+            extent
+        };
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let wind = WindFieldPipeline::new(&gpu).expect("dynamics unavailable");
+        let pipeline = WeatherFieldPipeline::new(&gpu).expect("weather unavailable");
+        let dynamics = ds045_dynamics(&wind, &gpu, resolution);
+        let runs = [1.0_f32, 2.0]
+            .map(|scale| ds045_run(&gpu, &pipeline, &dynamics, resolution, 42, scale, 2, height));
+        // No static outline: the annulus immediately upwind of the rim must sit
+        // at background level for both wind strengths.
+        for (scale, state) in [1.0_f32, 2.0].iter().zip(&runs) {
+            let mut halo = 0.0;
+            let mut count = 0u32;
+            for spoke in 0..24u32 {
+                let angle = spoke as f32 * std::f32::consts::TAU / 24.0;
+                let offset = normalize_dir([angle.cos(), angle.sin(), 0.0]);
+                let dir = normalize_dir([
+                    lake_center[0] * (lake_radius + 3.0 * texel_angle).cos()
+                        + offset[0] * (lake_radius + 3.0 * texel_angle).sin(),
+                    lake_center[1] * (lake_radius + 3.0 * texel_angle).cos()
+                        + offset[1] * (lake_radius + 3.0 * texel_angle).sin(),
+                    lake_center[2] * (lake_radius + 3.0 * texel_angle).cos(),
+                ]);
+                if dir.iter().zip(upwind).map(|(a, b)| a * b).sum::<f32>() < 0.5 {
+                    continue;
+                }
+                halo += condensate_at(state, resolution, dir);
+                count += 1;
+            }
+            let background = 0.004; // conservative floor; outline means far above this
+            let mean_halo = halo / count.max(1) as f32;
+            assert!(
+                mean_halo <= 4.0 * background,
+                "wind {scale}: upwind lake-halo outline {mean_halo:.5} exceeds background bound"
+            );
+        }
+        let extent_low = plume_extent(&runs[0]);
+        let extent_high = plume_extent(&runs[1]);
+        assert!(
+            extent_high >= extent_low + 2.0,
+            "downwind plume does not scale with wind: {extent_low:.0} vs {extent_high:.0} rings"
+        );
+    }
+
+    fn ds045_boundary_set(state: &[f32], resolution: u32, channel: usize) -> Vec<bool> {
+        // Boundary strength = face-space |grad| of the selected state channel,
+        // top decile. Deep convection (channel 2) carries the storm-seed
+        // signature; total condensate carries coastline artifacts.
+        let mut strength = vec![0.0_f32; state.len() / 4];
+        for face in 0..6u32 {
+            for y in 0..resolution {
+                for x in 0..resolution {
+                    let index =
+                        ((face * resolution * resolution + y * resolution + x) * 4) as usize;
+                    let c = |dx: i32, dy: i32| {
+                        let nx = (x as i32 + dx).clamp(0, resolution as i32 - 1) as u32;
+                        let ny = (y as i32 + dy).clamp(0, resolution as i32 - 1) as u32;
+                        let j =
+                            ((face * resolution * resolution + ny * resolution + nx) * 4) as usize;
+                        if channel == 4 {
+                            state[j + 1] + state[j + 2] + state[j + 3]
+                        } else {
+                            state[j + channel]
+                        }
+                    };
+                    strength[index / 4] = (c(1, 0) - c(-1, 0)).abs() + (c(0, 1) - c(0, -1)).abs();
+                }
+            }
+        }
+        let mut sorted = strength.clone();
+        sorted.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+        let threshold = sorted[sorted.len() / 10];
+        strength
+            .iter()
+            .map(|s| *s >= threshold && *s > 0.0)
+            .collect()
+    }
+
+    #[test]
+    fn ds045_storm_seed_permutation_changes_boundary_geometry() {
+        let resolution = 32;
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let wind = WindFieldPipeline::new(&gpu).expect("dynamics unavailable");
+        let pipeline = WeatherFieldPipeline::new(&gpu).expect("weather unavailable");
+        let dynamics = ds045_dynamics(&wind, &gpu, resolution);
+        let a = ds045_boundary_set(
+            &ds045_run(
+                &gpu,
+                &pipeline,
+                &dynamics,
+                resolution,
+                42,
+                1.0,
+                8,
+                ds045_shelf_coast,
+            ),
+            resolution,
+            2,
+        );
+        let b = ds045_boundary_set(
+            &ds045_run(
+                &gpu,
+                &pipeline,
+                &dynamics,
+                resolution,
+                997,
+                1.0,
+                8,
+                ds045_shelf_coast,
+            ),
+            resolution,
+            2,
+        );
+        let intersection = a.iter().zip(&b).filter(|(x, y)| **x && **y).count();
+        let union = a.iter().zip(&b).filter(|(x, y)| **x || **y).count();
+        let jaccard = intersection as f32 / union.max(1) as f32;
+        assert!(
+            a.iter().filter(|x| **x).count() > 16 && b.iter().filter(|x| **x).count() > 16,
+            "boundary sets degenerate"
+        );
+        assert!(
+            jaccard < 0.85,
+            "storm-seed permutation left boundary geometry geography-locked: jaccard={jaccard:.3}"
+        );
+    }
+
+    #[test]
+    fn ds045_no_coastline_correlated_boundary_across_wind_sweep() {
+        let resolution = 32;
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let wind = WindFieldPipeline::new(&gpu).expect("dynamics unavailable");
+        let pipeline = WeatherFieldPipeline::new(&gpu).expect("weather unavailable");
+        let dynamics = ds045_dynamics(&wind, &gpu, resolution);
+        for scale in [0.5_f32, 1.0, 2.0] {
+            let state = ds045_run(
+                &gpu,
+                &pipeline,
+                &dynamics,
+                resolution,
+                42,
+                scale,
+                2,
+                ds045_shelf_coast,
+            );
+            let boundary = ds045_boundary_set(&state, resolution, 4);
+            let mut xs = Vec::new();
+            let mut ys = Vec::new();
+            for face in 0..6u32 {
+                for y in 0..resolution {
+                    for x in 0..resolution {
+                        let pos = crate::cube_sphere::cube_to_sphere(
+                            face,
+                            x as f32 / (resolution - 1) as f32,
+                            y as f32 / (resolution - 1) as f32,
+                        );
+                        let index =
+                            ((face * resolution * resolution + y * resolution + x) * 4) as usize;
+                        xs.push(if boundary[index / 4] { 1.0 } else { 0.0 });
+                        ys.push(1.0 - (pos[2].abs() / 0.05).min(1.0));
+                    }
+                }
+            }
+            let mean_x = xs.iter().sum::<f32>() / xs.len() as f32;
+            let mean_y = ys.iter().sum::<f32>() / ys.len() as f32;
+            let covariance: f32 = xs
+                .iter()
+                .zip(&ys)
+                .map(|(x, y)| (x - mean_x) * (y - mean_y))
+                .sum();
+            let var_x: f32 = xs.iter().map(|x| (x - mean_x) * (x - mean_x)).sum();
+            let var_y: f32 = ys.iter().map(|y| (y - mean_y) * (y - mean_y)).sum();
+            let correlation = covariance / (var_x * var_y).sqrt().max(0.000001);
+            assert!(
+                correlation.abs() < 0.35,
+                "wind {scale}: coastline-correlated boundary r={correlation:.3}"
+            );
         }
     }
 }

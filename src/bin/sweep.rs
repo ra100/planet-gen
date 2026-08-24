@@ -2961,6 +2961,9 @@ fn run_u14_field_validation(
     let mut coastline_crossing_component = true;
     let mut inland_no_source_exact = true;
     let mut paired_lee_rows = Vec::new();
+    // DS-045a: per-seed source-flow land support, logged so the U14 land_p90
+    // gate rebaseline (median − k·σ across the frozen seeds) stays auditable.
+    let mut source_flow_land_rows = Vec::new();
     for seed in SEEDS {
         let (cool_ocean, cool_geometry) = weather(&terrain, |_| 0.0, 5.0, 0.75, 1.0, seed, 0.0);
         let (cool_inland, inland_geometry) =
@@ -3060,6 +3063,9 @@ fn run_u14_field_validation(
         geometry_invalid_texels += invalid;
         let (coast_land_occupied, coast_land_low_p90) =
             u14_mixed_coast_land_support(&mixed_coast_mass, resolution);
+        source_flow_land_rows.push(format!(
+            "seed={seed} occupied={coast_land_occupied:.5} land_p90={coast_land_low_p90:.5}"
+        ));
         inland_occupied_min = inland_occupied_min.min(coast_land_occupied);
         inland_low_p90_min = inland_low_p90_min.min(coast_land_low_p90);
         let source_flow = u14_source_flow_metrics(&mixed_coast_mass, resolution);
@@ -3462,7 +3468,11 @@ fn run_u14_field_validation(
         orography_rows.push(format!(
             "seed={seed} A_calm={calm_asymmetry:.5} A_whisper={whisper_asymmetry:.5} A_forward={forward_asymmetry:.5} A_reverse={reverse_asymmetry:.5} Df={forward_delta:.5} Dr={reverse_delta:.5} span={span:.5} whisper_delta={whisper_delta:.5} low_windward_p90={windward_low_p90:.5} low_lee_p90={lee_low_p90:.5}",
         ));
-        if calm_asymmetry.abs() > 0.02 || whisper_delta > 0.01 || windward_low_p90 < 0.10 {
+        // FE-081 de-classification removed marine_climate conversion inflation;
+        // baseline moved 3011d61→FE-081. Gate rebaselined from the multi-seed
+        // distribution, not a single-seed floor: median − 2σ over the 8 frozen
+        // seeds (median 0.1171, σ_pop 0.0115 → 0.0941). Do not loosen further.
+        if calm_asymmetry.abs() > 0.02 || whisper_delta > 0.01 || windward_low_p90 < 0.094 {
             failures.push(format!(
                 "U14 source-flow orography seed {seed}: windward_p90={windward_low_p90:.3}, lee_p90={lee_low_p90:.3}, calm={calm_asymmetry:.3}, whisper={whisper_delta:.3}",
             ));
@@ -3498,14 +3508,21 @@ fn run_u14_field_validation(
     values.push_str("orography_masks=frozen_projected_world_space\norography_metrics=\n");
     values.push_str(&orography_rows.join("\n"));
     values.push('\n');
+    values.push_str("source_flow_land_metrics=\n");
+    values.push_str(&source_flow_land_rows.join("\n"));
+    values.push('\n');
     let artifact = Path::new(output_dir).join("u14_field_metrics.txt");
     std::fs::write(&artifact, values).expect("write U14 metrics artifact");
     println!("U14 field metrics: {}", artifact.display());
     if cool_ratio < 1.5 {
         failures.push(format!("U14 cool ocean/inland ratio {cool_ratio:.3} < 1.5"));
     }
+    // FE-081 de-classification removed marine_climate conversion inflation;
+    // baseline moved 3011d61→FE-081. Gate rebaselined from the multi-seed
+    // distribution: median − 2σ over the 8 frozen seeds (median 0.0676,
+    // σ_pop 0.0058 → 0.0560). Do not loosen further.
     if inland_occupied_min < 0.05
-        || inland_low_p90_min < 0.06
+        || inland_low_p90_min < 0.056
         || downwind_land_maritime_p90_ratio_min < 0.35
         || !coastline_crossing_component
     {
@@ -3516,7 +3533,11 @@ fn run_u14_field_validation(
     if !inland_no_source_exact {
         failures.push("U14 inland no-source field was not exact zero".to_string());
     }
-    if cool_deck_p90_min < 0.02 || trade_p90_min < 0.02 || windward_low_p90_min < 0.10 {
+    // FE-081 de-classification removed marine_climate conversion inflation;
+    // baseline moved 3011d61→FE-081. Gate rebaselined from the multi-seed
+    // distribution: median − 2σ over the 8 frozen seeds (median 0.1171,
+    // σ_pop 0.0115 → 0.0941). Do not loosen further.
+    if cool_deck_p90_min < 0.02 || trade_p90_min < 0.02 || windward_low_p90_min < 0.094 {
         failures.push(format!(
             "U14 frozen feature p90 cool/trade/windward={cool_deck_p90_min:.3}/{trade_p90_min:.3}/{windward_low_p90_min:.3} < 0.02"
         ));
@@ -5595,7 +5616,9 @@ fn run_u15_field_validation(
                             ),
                         ]
                         .into_iter()
-                        .all(|share| share.is_some_and(|value| value >= U15_MIN_OWNER_PROVENANCE_SHARE))
+                        .all(|share| {
+                            share.is_some_and(|value| value >= U15_MIN_OWNER_PROVENANCE_SHARE)
+                        })
                     })
                     && legacy_size_area_growth_pass
             })
@@ -7625,13 +7648,12 @@ mod tests {
         u14_geometry_metrics, u14_lee_continuation_metrics, u14_marine_to_land_continentality,
         u14_mixed_coast_land_support, u14_significant_occupied_components, u15_fixture_centers,
         u15_owner_primary_provenance_share, u15_owner_size_metrics, u15_paired_size_tops,
-        u15_pixel_neighbors, u15_pixel_position,
-        u15_seed_diagnostics, u15_seed_diagnostics_report, u15_significant_response_components,
-        u15_significant_size_components, u15_size_association, u15_size_fixture_support,
-        u15_weight,
-        u15_size_frozen_candidates, u15_size_minimum_physical_eligibility,
-        u15_size_precondition_diagnostics, u15_size_seed_criterion, u15_size_weather_snapshot,
-        u15_validation_mode, validate_seed_topology_metrics, weather_validation_size_error,
+        u15_pixel_neighbors, u15_pixel_position, u15_seed_diagnostics, u15_seed_diagnostics_report,
+        u15_significant_response_components, u15_significant_size_components, u15_size_association,
+        u15_size_fixture_support, u15_size_frozen_candidates,
+        u15_size_minimum_physical_eligibility, u15_size_precondition_diagnostics,
+        u15_size_seed_criterion, u15_size_weather_snapshot, u15_validation_mode, u15_weight,
+        validate_seed_topology_metrics, weather_validation_size_error,
     };
 
     fn response_with_deep_pixels(resolution: u32, pixels: &[usize]) -> Vec<f32> {
@@ -8072,7 +8094,9 @@ mod tests {
             )
         );
         assert!(shader.contains("max(marine_climate, provenance_share)"));
-        assert!(shader.contains("state.y * marine_climate * cold * 0.055"));
+        // DS-045 de-classification: low-cloud dissipation follows wind-driven
+        // entrainment instead of the static marine class.
+        assert!(shader.contains("state.y * low_dissipation"));
         assert!(!shader.contains("max(condensate - q_target, 0.0) * 0.22"));
     }
 
@@ -8757,11 +8781,9 @@ mod tests {
         let wind = WindFieldPipeline::new(&gpu).expect("U15 dynamics unavailable");
         let pipeline = WeatherFieldPipeline::new(&gpu).expect("U15 weather unavailable");
         let terrain = u14_flat_terrain(resolution, height);
-        let dynamics = wind.create_test_textures(
-            &gpu,
-            resolution,
-            |_| ([0.2, 0.0, -0.1, continentality], 1013.0),
-        );
+        let dynamics = wind.create_test_textures(&gpu, resolution, |_| {
+            ([0.2, 0.0, -0.1, continentality], 1013.0)
+        });
         let field = pipeline.create_textures(&gpu, resolution);
         let snapshot = WeatherSnapshot {
             base_temp_c: 30.0,
@@ -8857,9 +8879,7 @@ mod tests {
             // Focused negative check: a distributed 3%-of-T ownership leak
             // slips past every per-cell budget but must trip the global gate.
             let leaked_sum: f32 = (0..p.len())
-                .map(|cell| {
-                    (p[cell] - 0.03 * u15_total_water(&ocean.state, cell)) * weight(cell)
-                })
+                .map(|cell| (p[cell] - 0.03 * u15_total_water(&ocean.state, cell)) * weight(cell))
                 .sum();
             assert!(
                 (leaked_sum - sum_t).abs() > GLOBAL_DRIFT * sum_t,
@@ -8880,23 +8900,31 @@ mod tests {
     }
 
     /// FE-079: transitional water (open_ocean=1, marine_fraction=0) must mint
-    /// full-evaporation provenance — the ownership gate mirrors supply_budget's
-    /// open_ocean factor, not marine_fraction. With maximal continentality on an
-    /// all-ocean warm tilt-0 planet every other continentality coupling
-    /// neutralizes (marine_climate stays 1, ice terms vanish, land_seed is 0),
-    /// so a marine_fraction multiplier would freeze provenance at its init
-    /// value while total water grows unowned each source step.
+    /// full-evaporation provenance — provenance_source_evaporation is the
+    /// unmodified source-step evaporation, with water extent encoded exactly
+    /// once via supply_budget's water.local * fetch factors. With maximal
+    /// continentality on an all-ocean warm tilt-0 planet every other
+    /// continentality coupling neutralizes (marine_climate stays 1, ice terms
+    /// vanish, land_seed is 0), so any extra marine_fraction scaling would
+    /// freeze provenance at its init value while total water grows unowned each
+    /// source step.
     #[cfg(feature = "validation")]
     #[test]
     fn u15_tracer_transitional_water_mints_full_evaporation_provenance() {
         let resolution = 16;
-        let (_, _, _, trace) =
-            u15_tracer_run_with_provenance(resolution, |_| -0.1, WEATHER_DIAGNOSTIC_NO_SINK, true, 1.0);
+        let (_, _, _, trace) = u15_tracer_run_with_provenance(
+            resolution,
+            |_| -0.1,
+            WEATHER_DIAGNOSTIC_NO_SINK,
+            true,
+            1.0,
+        );
         if let Some(p) = u15_skip_without_r16(&trace.provenance) {
             assert_eq!(trace.state.len(), p.len() * 4);
             // Same per-cell budget as the marine-fraction≡1 ocean tracer test:
-            // with minting gated by open_ocean this cell class behaves exactly
-            // like pure ocean, P ≈ T within the schemes' combined truncation.
+            // with water.local ≡ 1 here the unmodified evaporation mint makes
+            // this cell class behave exactly like pure ocean, P ≈ T within the
+            // schemes' combined truncation.
             const CELL_DRIFT: f32 = 0.08;
             const CELL_FLOOR: f32 = 2e-4;
             for cell in 0..p.len() {
@@ -8932,15 +8960,38 @@ mod tests {
         if u15_skip_without_r16(&enabled.provenance).is_none() {
             return;
         }
-        let (_, _, _, trace) =
+        let (gpu, pipeline, field, trace) =
             u15_tracer_run_with_provenance(16, |_| -0.1, WEATHER_DIAGNOSTIC_NO_SINK, false, 0.0);
         assert!(
             trace.provenance.is_none(),
             "forced disable must yield no tracer readback"
         );
+        // FE-081 couples provenance_share into phase partitioning, so the
+        // enabled and disabled runs are intentionally different fields (see
+        // the weather.rs fingerprint pins). Pin the forced disable to plain
+        // generation instead: the branch incapable adapters always take must
+        // stay bit-identical to the Mode-Off production path.
+        let wind = WindFieldPipeline::new(&gpu).expect("U15 dynamics unavailable");
+        let terrain = u14_flat_terrain(16, |_| -0.1);
+        let dynamics =
+            wind.create_test_textures(&gpu, 16, |_| ([0.2, 0.0, -0.1, 0.0], 1013.0));
+        let snapshot = WeatherSnapshot {
+            base_temp_c: 30.0,
+            ..u15_size_weather_snapshot(16, U15_SIZE_SEEDS[0], 1.0)
+        };
+        let reference = pipeline.create_textures(&gpu, 16);
+        pipeline.generate_with_diagnostic_flags(
+            &gpu,
+            snapshot,
+            &terrain,
+            &dynamics,
+            &reference,
+            WEATHER_DIAGNOSTIC_NO_SINK,
+        );
         assert_eq!(
-            trace.state, enabled.state,
-            "forced disable must leave the state identical to enabled tracing"
+            field.read_mass(&gpu),
+            reference.read_mass(&gpu),
+            "forced disable must stay bit-identical to plain generation"
         );
     }
 
@@ -9039,10 +9090,8 @@ mod tests {
                 (0..=last).map(move |index| {
                     let (left_face, left_x, left_y) = cube_edge_point(*left, index, last);
                     let right_index = if *reversed { last - index } else { index };
-                    let (right_face, right_x, right_y) =
-                        cube_edge_point(*right, right_index, last);
-                    (sample(left_face, left_x, left_y) - sample(right_face, right_x, right_y))
-                        .abs()
+                    let (right_face, right_x, right_y) = cube_edge_point(*right, right_index, last);
+                    (sample(left_face, left_x, left_y) - sample(right_face, right_x, right_y)).abs()
                 })
             })
             .collect();
@@ -9096,17 +9145,15 @@ mod tests {
         let baseline_mass = field.read_mass(&gpu);
         let baseline_geometry = field.read_geometry(&gpu);
 
-        // Re-running with the tracer enabled must not perturb production output:
-        // Mode-Off baseline fingerprints stay bit-identical.
-        let trace = pipeline.validation_tracer_trace_for_sweep(
-            &gpu,
-            snapshot,
-            &terrain,
-            &dynamics,
-            &field,
-            0,
-            true,
+        // FE-081 couples provenance_share into phase partitioning, so a
+        // tracer-enabled rerun is intentionally a different field. Pin the
+        // infrastructure-neutrality policy through the Mode-Off branch
+        // instead: a forced-disable rerun must reproduce production output
+        // bit-exactly (this is also the branch incapable adapters take).
+        let disabled = pipeline.validation_tracer_trace_for_sweep(
+            &gpu, snapshot, &terrain, &dynamics, &field, 0, false,
         );
+        assert!(disabled.provenance.is_none());
         assert_eq!(
             field.read_mass(&gpu),
             baseline_mass,
@@ -9118,22 +9165,21 @@ mod tests {
             "tracer perturbed the Mode-Off geometry fingerprint"
         );
 
-        let direct = pipeline.generate_with_provenance_for_validation(
-            &gpu,
-            snapshot,
-            &terrain,
-            &dynamics,
-            &field,
+        // Both tracer entry points must agree on R16 capability.
+        let enabled = pipeline.validation_tracer_trace_for_sweep(
+            &gpu, snapshot, &terrain, &dynamics, &field, 0, true,
         );
+        let direct = pipeline
+            .generate_with_provenance_for_validation(&gpu, snapshot, &terrain, &dynamics, &field);
         assert_eq!(
             direct.is_some(),
-            trace.provenance.is_some(),
+            enabled.provenance.is_some(),
             "both tracer entry points must agree on R16 capability"
         );
-        if trace.provenance.is_none() {
+        if enabled.provenance.is_none() {
             // Unsupported-R16 adapter fallback: production path still runs and
             // the state readback stays available without any P channel.
-            assert!(!trace.state.is_empty());
+            assert!(!enabled.state.is_empty());
             assert_eq!(field.read_mass(&gpu), baseline_mass);
         }
     }

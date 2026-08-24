@@ -112,8 +112,11 @@ Plan: [docs/plans/2026-07-10-001-feat-shallow-volumetric-clouds-plan.md](docs/pl
 | Task | 内容 | Status |
 |------|------|--------|
 | FE-034–047 | Clean-slate storm organization experiment | blocked/deferred; reverted to accepted checkpoint [0e2b044] |
+| U15 size/anvil/organization gates | 21 per-seed size / compliant-anvil / shear-driven-plume gate failures across the frozen seeds remain known-blocked after FE-081 de-classification | known-blocked; do not mark green. Diagnose with the per-seed cloud organization validation harness added in [da390a7] (`cargo run --release --features validation --bin sweep -- --weather-validation`) |
 
 The experiment corrected its selection and harness, but the bounded organizer with conservative coupling did not form qualifying U15 deep cores. Safe parameter sweeps found no viable parameter-only path. The user chose to park the work and revert; retain the terrain-driven and marine/sea-cloud gains already present at `0e2b044`. Next priority: diagnose the polar-cap cloud behavior before reopening storm organization.
+
+FE-081 (uncommitted on top of `3011d61`) removed marine_climate conversion inflation in the spin-up; the two affected U14 source-flow gates (windward_p90, land_p90) were rebaselined from the multi-seed distribution (median − 2σ over the 8 frozen seeds) rather than single-seed floors. The U15 size/anvil/organization failures listed above are pre-existing known-blockers, unrelated to FE-081.
 
 ---
 

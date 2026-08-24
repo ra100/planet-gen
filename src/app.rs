@@ -422,7 +422,7 @@ impl PlanetGenApp {
                 weather.base_temp_c,
                 weather.surface_pressure_bar,
             );
-            eprintln!(
+            log::info!(
                 "[wind {}px] {:.0}ms",
                 cloud_res,
                 t_wind.elapsed().as_secs_f64() * 1000.0
@@ -448,7 +448,7 @@ impl PlanetGenApp {
             self.erosion_remaining = 0;
         }
 
-        eprintln!(
+        log::info!(
             "[terrain {}px] plates+compute: {:.0}ms, {} plates ({}c/{}o), continents={}, variety={:.2}, scheduling {} erosion iters",
             self.preview_resolution,
             t0.elapsed().as_secs_f64() * 1000.0,
@@ -486,7 +486,7 @@ impl PlanetGenApp {
                 Some(self.preview_renderer.upload_terrain(&self.gpu, terrain));
             self.erosion_remaining -= iters;
 
-            eprintln!(
+            log::info!(
                 "[erosion batch] {} iters in {:.0}ms, {} remaining",
                 iters,
                 t.elapsed().as_secs_f64() * 1000.0,

@@ -198,11 +198,44 @@ fn source_potential(
     return marine_fraction * mix(0.42, 0.68, thermal);
 }
 
-// Continentality describes climate and fetch; the terrain/ocean boundary owns
-// the vapor source. Every ice-free water cell therefore replenishes after its
-// vapor is advected away, including transitional coastal cells.
-fn open_ocean_fraction(pos: vec3<f32>) -> f32 {
-    return select(1.0, 0.0, sample_height(pos) > params.ocean_level);
+// DS-045 A1: water presence is a blurred proximity field, not per-cell
+// classification. The ring stencil mirrors wind_field's continentality
+// diffusion (bounded iterations, cheap) so sourcing strength fades over
+// hundreds of texels instead of tracing the coastline.
+const WATER_EDGE_SOFTNESS: f32 = 0.004;
+// Residual bootstrap humidity so purely-land worlds still seed sub-saturated
+// vapor; the shore-keyed fetch ramp dominates wherever water exists.
+const SEED_RESIDUAL_FRACTION: f32 = 0.05;
+
+struct WaterField {
+    local: f32,
+    fetch: f32,
+}
+
+fn water_indicator(pos: vec3<f32>) -> f32 {
+    return 1.0 - smooth_step(
+        params.ocean_level - WATER_EDGE_SOFTNESS,
+        params.ocean_level + WATER_EDGE_SOFTNESS,
+        sample_height(pos),
+    );
+}
+
+fn water_field(pos: vec3<f32>) -> WaterField {
+    let basis = tangent_basis(pos);
+    // Maritime-fetch rings: influence fades over ~10³ km, i.e. tens of texels
+    // at preview resolutions, so sourcing never traces individual coastlines.
+    let near = clamp(500.0 / max(params.radius_km, 1.0), 0.01, 0.12);
+    let far = clamp(2000.0 / max(params.radius_km, 1.0), 0.04, 0.45);
+    var blurred_extent = 0.0;
+    for (var index = 0u; index < 8u; index++) {
+        let angle = f32(index) * 0.7853981633974483;
+        let offset = basis[0] * cos(angle) + basis[1] * sin(angle);
+        blurred_extent += water_indicator(normalize(pos + offset * near));
+        blurred_extent += water_indicator(normalize(pos + offset * far));
+    }
+    // Mean of the 16 spoke samples (the center feeds `local` instead), clamped
+    // as the fetch proxy: small lakes source weaker than open ocean.
+    return WaterField(water_indicator(pos), min(blurred_extent * 0.0625, 1.0));
 }
 
 // A sphere-space, low-frequency perturbation only changes conservative phase
@@ -518,12 +551,12 @@ fn init(@builtin(global_invocation_id) id: vec3<u32>) {
     let pressure = smooth_step(0.05, 0.3, params.surface_pressure_bar);
     let continentality = textureSampleLevel(wind_tex, spinup_sampler, pos, 0.0).a;
     let marine_fraction = 1.0 - smooth_step(0.15, 0.85, continentality);
-    let open_ocean = open_ocean_fraction(pos);
-    let marine_climate = max(marine_fraction, open_ocean);
+    let water = water_field(pos);
+    let marine_climate = max(marine_fraction, water.local);
     let thermal_stability = smooth_step(-25.0, 30.0, temperature_at(pos));
     let ice_fraction = 1.0 - smoothstep(-15.0, -6.0, temperature_at(pos));
     let persistent_ice = marine_fraction * ice_fraction;
-    let source_ice = open_ocean * ice_fraction;
+    let source_ice = water.local * ice_fraction;
     let budgets = source_budgets(
         params.coverage,
         marine_climate,
@@ -533,15 +566,17 @@ fn init(@builtin(global_invocation_id) id: vec3<u32>) {
     );
     let surface_supply_factor = 1.0 - 0.25 * source_ice;
     let marine_vapor = select(
-        budgets.supply * open_ocean * surface_supply_factor * clamp(params.moisture, 0.0, 1.0)
-            * pressure * 0.42,
+        budgets.supply * water.local * water.fetch * surface_supply_factor
+            * clamp(params.moisture, 0.0, 1.0) * pressure * 0.42,
         0.0,
         (params.diagnostic_flags & DIAGNOSTIC_NO_SOURCE) != 0u,
     );
-    // This is a one-time, sub-saturated land seed. Maritime reach is the
-    // existing continuous marine fraction; transport never recharges it on land.
-    let maritime_reach = smooth_step(0.02, 0.38, marine_fraction);
-    let land_seed = (1.0 - marine_fraction) * maritime_reach * thermal_stability
+    // DS-045: one-time sub-saturated bootstrap with a monotonic shore-anchored
+    // decay keyed to blurred water proximity — no coastal band. Transport never
+    // recharges it on land.
+    let land_seed = (1.0 - water.local)
+        * (SEED_RESIDUAL_FRACTION + (1.0 - SEED_RESIDUAL_FRACTION) * water.fetch)
+        * thermal_stability
         * clamp(params.coverage, 0.0, 1.0) * clamp(params.moisture, 0.0, 1.0)
         * pressure * 0.10;
     let seeded_vapor = select(
@@ -575,22 +610,24 @@ fn init_with_provenance(@builtin(global_invocation_id) id: vec3<u32>) {
     let pressure = smooth_step(0.05, 0.3, params.surface_pressure_bar);
     let continentality = textureSampleLevel(wind_tex, spinup_sampler, pos, 0.0).a;
     let marine_fraction = 1.0 - smooth_step(0.15, 0.85, continentality);
-    let open_ocean = open_ocean_fraction(pos);
-    let marine_climate = max(marine_fraction, open_ocean);
+    let water = water_field(pos);
+    let marine_climate = max(marine_fraction, water.local);
     let thermal_stability = smooth_step(-25.0, 30.0, temperature_at(pos));
     let ice_fraction = 1.0 - smoothstep(-15.0, -6.0, temperature_at(pos));
     let persistent_ice = marine_fraction * ice_fraction;
-    let source_ice = open_ocean * ice_fraction;
+    let source_ice = water.local * ice_fraction;
     let budgets = source_budgets(params.coverage, marine_climate, 0.0, thermal_stability, persistent_ice);
     let surface_supply_factor = 1.0 - 0.25 * source_ice;
     let marine_vapor = select(
-        budgets.supply * open_ocean * surface_supply_factor * clamp(params.moisture, 0.0, 1.0)
-            * pressure * 0.42,
+        budgets.supply * water.local * water.fetch * surface_supply_factor
+            * clamp(params.moisture, 0.0, 1.0) * pressure * 0.42,
         0.0,
         (params.diagnostic_flags & DIAGNOSTIC_NO_SOURCE) != 0u,
     );
-    let maritime_reach = smooth_step(0.02, 0.38, marine_fraction);
-    let land_seed = (1.0 - marine_fraction) * maritime_reach * thermal_stability
+    // DS-045: monotonic shore-anchored bootstrap decay — no coastal band.
+    let land_seed = (1.0 - water.local)
+        * (SEED_RESIDUAL_FRACTION + (1.0 - SEED_RESIDUAL_FRACTION) * water.fetch)
+        * thermal_stability
         * clamp(params.coverage, 0.0, 1.0) * clamp(params.moisture, 0.0, 1.0)
         * pressure * 0.10;
     let seeded_vapor = select(
@@ -656,13 +693,13 @@ fn advance_state(pos: vec3<f32>, provenance_mass: f32) -> vec4<f32> {
     let pressure_factor = smooth_step(0.05, 0.3, params.surface_pressure_bar);
     let local_pressure = clamp(textureSampleLevel(pressure_tex, spinup_sampler, pos, 0.0).r / 1013.0, 0.8, 1.2);
     let marine_fraction = 1.0 - smooth_step(0.15, 0.85, wind.a);
-    let open_ocean = open_ocean_fraction(pos);
-    let marine_climate = max(marine_fraction, open_ocean);
+    let water = water_field(pos);
+    let marine_climate = max(marine_fraction, water.local);
     let cold = 1.0 - thermal;
     let q_sat = mix(0.16, 0.68, thermal) * pressure_factor * local_pressure;
     let ice_fraction = 1.0 - smoothstep(-15.0, -6.0, temperature_at(pos));
     let persistent_ice = marine_fraction * ice_fraction;
-    let source_ice = open_ocean * ice_fraction;
+    let source_ice = water.local * ice_fraction;
     let budgets = source_budgets(
         params.coverage,
         marine_climate,
@@ -671,9 +708,10 @@ fn advance_state(pos: vec3<f32>, provenance_mass: f32) -> vec4<f32> {
         persistent_ice,
     );
     let surface_supply_factor = 1.0 - 0.25 * source_ice;
-    // Land gets only its init seed. Ice-free ocean continuously replenishes
-    // vapor toward its local climate target after each transport substep.
-    let supply_budget = budgets.supply * open_ocean * surface_supply_factor;
+    // Land gets only its init seed. Water continuously replenishes vapor
+    // toward its local climate target after each transport substep; fetch
+    // scales small lakes below open-ocean minting.
+    let supply_budget = budgets.supply * water.local * water.fetch * surface_supply_factor;
     let phase_budget = budgets.phase;
     // FE-078 (DS-043): advected maritime provenance raises the inland humidity
     // ceiling toward the marine value so wind-aligned plumes survive farther
@@ -691,15 +729,24 @@ fn advance_state(pos: vec3<f32>, provenance_mass: f32) -> vec4<f32> {
     );
     let q_target = q_sat * supply_budget * clamp(params.moisture, 0.0, 1.0)
         * effective_relative_humidity_target;
+    // DS-045: flow/history signals replace static marine classification.
+    // Saturation of transported vapor relative to its climate target is smooth
+    // by advection; provenance share carries the maritime history directly.
+    let saturation_ratio = state.x / max(q_sat, 0.0001);
+    let transported_saturation = clamp(
+        saturation_ratio / max(0.88 * effective_relative_humidity_target, 0.0001),
+        0.0,
+        1.0,
+    );
     if ((params.diagnostic_flags & DIAGNOSTIC_NO_SOURCE) == 0u) {
         let evaporation = max(q_target - state.x, 0.0) * 0.030 * step_fraction;
         state.x += evaporation;
-        // Ownership rule: only open-ocean-origin vapor mints provenance. The
-        // gate mirrors supply_budget's open_ocean factor exactly: transitional
-        // water (open ocean, high continentality) evaporates via marine_climate
-        // and must mint fully, matching init's marine_vapor assignment; land
-        // mints nothing.
-        provenance_source_evaporation = evaporation * open_ocean;
+        // Ownership rule: provenance mints the full source-step evaporation.
+        // The supply gate above already encodes water extent exactly once
+        // (supply_budget ∝ water.local * fetch), so land never evaporates and
+        // transitional cells under-supply proportionally; scaling by water.local
+        // here again would double-gate and under-mint them (FE-079).
+        provenance_source_evaporation = evaporation;
     }
 
     let calm_wet_land = calm_wet_land_mask(
@@ -731,7 +778,8 @@ fn advance_state(pos: vec3<f32>, provenance_mass: f32) -> vec4<f32> {
             * smooth_step(1.0, 12.0, temperature_gradient)
             * smooth_step(-0.45, 0.45, frontal_alignment)
             * convergence;
-        let warm_marine_lift = marine_climate * thermal * smooth_step(0.05, 0.30, 1.0 - cold);
+        let warm_marine_lift = max(transported_saturation, provenance_share) * thermal
+            * smooth_step(0.05, 0.30, 1.0 - cold);
         let lcl_lift = clamp(
             convergence * 0.70 + terrain_lift * 1.75 + frontal_lift * 0.35
                 + warm_marine_lift - rain_shadow * 0.55,
@@ -744,13 +792,13 @@ fn advance_state(pos: vec3<f32>, provenance_mass: f32) -> vec4<f32> {
         // Land has no vapor source. Its phase changes require humid vapor that
         // was carried in state.x; catalysts only repartition existing mass.
         // Inland air has no local vapor source. Once maritime vapor has been
-        // transported near saturation, allow lowland/uplift conversion instead
-        // of applying the humidity gate a second time.
-        let inland_provenance = mix(
-            smoothstep(0.05, 0.70, state.x / max(q_sat, 0.0001)),
-            1.0,
-            marine_climate,
-        ) * (1.0 - (1.0 - marine_climate) * smoothstep(0.0001, 0.01, rain_shadow));
+        // transported near saturation — or its provenance share is high —
+        // allow lowland/uplift conversion instead of applying the humidity gate
+        // a second time.
+        let inland_provenance = max(
+            smoothstep(0.03, 0.60, saturation_ratio),
+            provenance_share,
+        ) * (1.0 - (1.0 - provenance_share) * smoothstep(0.0001, 0.01, rain_shadow));
         let convective_lift = clamp(
             lcl_lift + catalyst * humidity_gate * warm_gate * 0.40,
             0.0,
@@ -848,11 +896,15 @@ fn advance_state(pos: vec3<f32>, provenance_mass: f32) -> vec4<f32> {
 
     if ((params.diagnostic_flags & DIAGNOSTIC_NO_SINK) == 0u) {
         let condensate = state.y + state.z;
+        // DS-045: low-cloud dissipation follows physical proxies in scope —
+        // cold air and wind-driven entrainment — never the static marine class.
+        let low_dissipation = cold
+            * (0.025 + 0.055 * smooth_step(0.15, 0.70, effective_speed));
         let rainout = min(
             condensate,
             (max(condensate - q_sat * effective_relative_humidity_target, 0.0) * 0.22
                 + state.z * (0.01 + 0.08 * thermal)
-                + state.y * marine_climate * cold * 0.055) * step_fraction,
+                + state.y * low_dissipation) * step_fraction,
         );
         let rainout_scale = rainout / max(condensate, 0.0001);
         state.y *= 1.0 - rainout_scale;

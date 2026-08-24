@@ -376,14 +376,32 @@ fn diagnose(@builtin(global_invocation_id) id: vec3<u32>) {
     let high = clamp(max(frontal_high, anvil_high), 0.0, 1.0);
     let occupancy = max(low, max(deep, high));
 
-    let deck_base_km = 0.35 + (1.0 - marine_stability) * 0.2;
-    let deck_thickness_km = 0.3 + 0.9 * (1.0 - thermal) * marine_fraction;
-    let trade_top_km = mix(1.0, 3.0, thermal) * marine_fraction;
-    let base_altitude_km = mix(0.75, deck_base_km, marine_stability);
+    // DS-045 A1: vertical structure follows transported-vapor history, not the
+    // static coastline. Saturation of advected vapor is smooth by transport;
+    // the residual climate keying spans the whole continentality domain so
+    // edges vary over hundreds of texels instead of coastline bands.
+    let pressure_factor_diag = smooth_step(0.05, 0.3, params.surface_pressure_bar);
+    let local_pressure_diag = clamp(
+        textureSampleLevel(pressure_tex, weather_sampler, pos, 0.0).r / 1013.0,
+        0.8,
+        1.2,
+    );
+    let q_sat_diag = mix(0.16, 0.68, thermal) * pressure_factor_diag * local_pressure_diag;
+    let transported_saturation = clamp(state.x / max(q_sat_diag, 0.0001), 0.0, 1.0);
+    let marine_air = max(
+        transported_saturation,
+        1.0 - smooth_step(-0.30, 1.30, continentality),
+    );
+    let stability_air = marine_air * smooth_step(0.05, 0.8, 1.0 - thermal);
+
+    let deck_base_km = 0.35 + (1.0 - stability_air) * 0.2;
+    let deck_thickness_km = 0.3 + 0.9 * (1.0 - thermal) * marine_air;
+    let trade_top_km = mix(1.0, 3.0, thermal) * marine_air;
+    let base_altitude_km = mix(0.75, deck_base_km, stability_air);
     let low_top_km = mix(
         base_altitude_km + 0.8 + terrain_lift * 0.3,
         mix(base_altitude_km + deck_thickness_km, trade_top_km, trade_cumulus),
-        marine_fraction,
+        marine_air,
     );
     let storm_size_response = clamp((params.storm_size - 0.3) / 2.7, 0.0, 1.0);
     let deep_top_km = max(
