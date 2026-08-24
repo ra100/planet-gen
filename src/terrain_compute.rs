@@ -2215,7 +2215,7 @@ impl WindFieldPipeline {
 mod tests {
     use super::*;
     use crate::gpu::GpuContext;
-    use crate::plates::{generate_plates, PlateGenParams};
+    use crate::plates::{PlateGenParams, generate_plates};
 
     fn flat_terrain(resolution: u32) -> TectonicTerrain {
         TectonicTerrain {
@@ -2247,9 +2247,11 @@ mod tests {
             tiles.iter().map(|tile| tile.interior_rows).sum::<u32>(),
             8192
         );
-        assert!(tiles
-            .iter()
-            .all(|tile| { u64::from(8192_u32) * u64::from(tile.interior_rows + 2) * 4 <= limit }));
+        assert!(
+            tiles.iter().all(|tile| {
+                u64::from(8192_u32) * u64::from(tile.interior_rows + 2) * 4 <= limit
+            })
+        );
 
         let mut limits = wgpu::Limits::default();
         limits.max_storage_buffer_binding_size = limit as u32;
@@ -2295,12 +2297,14 @@ mod tests {
         pipeline.erode(&gpu, &mut twice, 2, -1.0).unwrap();
 
         assert_ne!(once.faces, twice.faces);
-        assert!(twice
-            .faces
-            .iter()
-            .flatten()
-            .zip(sloped_terrain(16).faces.iter().flatten())
-            .any(|(eroded, original)| eroded != original));
+        assert!(
+            twice
+                .faces
+                .iter()
+                .flatten()
+                .zip(sloped_terrain(16).faces.iter().flatten())
+                .any(|(eroded, original)| eroded != original)
+        );
     }
 
     #[test]
@@ -2382,12 +2386,16 @@ mod tests {
         assert_eq!(first_wind, second_wind);
         assert!(first_wind.iter().all(|value| value.is_finite()));
         assert!(pressure.iter().all(|value| value.is_finite()));
-        assert!(first_wind
-            .chunks_exact(4)
-            .all(|pixel| (0.0..=1.0).contains(&pixel[3])));
-        assert!(pressure
-            .chunks_exact(4)
-            .all(|pixel| (900.0..1100.0).contains(&pixel[0])));
+        assert!(
+            first_wind
+                .chunks_exact(4)
+                .all(|pixel| (0.0..=1.0).contains(&pixel[3]))
+        );
+        assert!(
+            pressure
+                .chunks_exact(4)
+                .all(|pixel| (900.0..1100.0).contains(&pixel[0]))
+        );
     }
 
     #[test]
