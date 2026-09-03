@@ -421,6 +421,7 @@ impl PlanetGenApp {
                 weather.rotation_rate_rad_s,
                 weather.base_temp_c,
                 weather.surface_pressure_bar,
+                weather.wind_scale,
             );
             log::info!(
                 "[wind {}px] {:.0}ms",
@@ -969,9 +970,9 @@ impl eframe::App for PlanetGenApp {
                 {
                     self.invalidate_weather();
                 }
-                if ui.add(egui::Slider::new(&mut self.wind_scale, 0.0..=2.0)
+                if ui.add(egui::Slider::new(&mut self.wind_scale, 0.0..=4.0)
                     .text("Wind Strength"))
-                    .on_hover_text("0 = calm, 1 = physical baseline, 2 = strong transport. Changing this regenerates weather transport.")
+                    .on_hover_text("0 = calm, 1 = physical baseline, 2 = strong transport, 4 = extreme (RV-003: cap raised). Changing this regenerates weather transport.")
                     .changed()
                 {
                     self.invalidate_weather();

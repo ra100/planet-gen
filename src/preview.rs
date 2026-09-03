@@ -3223,7 +3223,9 @@ fn layer_profile_oracle() {
         let terrain_view = renderer.upload_terrain(&gpu, &terrain);
         let wind = WindFieldPipeline::new(&gpu).expect("dynamics unavailable");
         let dynamics = wind.create_textures(&gpu, 16, &terrain, 0.0);
-        wind.generate_gpu(&gpu, &terrain, &dynamics, 42, 0.0, 0.4, 0.5, 1.0, 15.0, 1.0);
+        wind.generate_gpu(
+            &gpu, &terrain, &dynamics, 42, 0.0, 0.4, 0.5, 1.0, 15.0, 1.0, 1.0,
+        );
         let weather_pipeline = WeatherFieldPipeline::new(&gpu).expect("weather unavailable");
 
         let mut cloud_off = uniforms();
@@ -3579,6 +3581,7 @@ fn layer_profile_oracle() {
             std::f32::consts::TAU / 86_400.0,
             15.0,
             0.7,
+            1.0,
         );
         let weather_pipeline = WeatherFieldPipeline::new(&gpu).expect("weather init failed");
         let weather = weather_pipeline.create_textures(&gpu, WEATHER_RESOLUTION);

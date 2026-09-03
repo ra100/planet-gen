@@ -3660,6 +3660,7 @@ pub fn run_export_with_timings_and_checkpoints(
             snapshot.rotation_rate_rad_s,
             snapshot.base_temp_c,
             snapshot.surface_pressure_bar,
+            snapshot.wind_scale,
         );
         let weather_pipeline = WeatherFieldPipeline::new(gpu)
             .map_err(|error| format!("export weather pipeline unavailable: {error}"))?;
@@ -4241,6 +4242,7 @@ mod tests {
             snapshot.rotation_rate_rad_s,
             snapshot.base_temp_c,
             snapshot.surface_pressure_bar,
+            snapshot.wind_scale,
         );
         let weather_pipeline =
             WeatherFieldPipeline::new(gpu).expect("U5 weather pipeline unavailable");

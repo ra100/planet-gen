@@ -1498,7 +1498,8 @@ pub struct WindFieldParams {
     pub rotation_rate: f32, // relative to Earth (1.0 = 24h)
     pub base_temp_c: f32,   // planet mean temperature °C
     pub atm_pressure: f32,  // atmospheric pressure in bar (1.0 = Earth)
-    pub _pad0: u32,
+    /// FE-084: wind speed multiplier; scales mesoscale steering above ws=1.
+    pub wind_scale: f32,
 }
 
 pub struct WindField {
@@ -1781,6 +1782,7 @@ impl WindFieldPipeline {
         rotation_rate: f32,
         base_temp_c: f32,
         atm_pressure: f32,
+        wind_scale: f32,
         src_buf: &wgpu::Buffer,
         dst_buf: &wgpu::Buffer,
         height_buf: &wgpu::Buffer,
@@ -1798,7 +1800,7 @@ impl WindFieldPipeline {
             rotation_rate,
             base_temp_c,
             atm_pressure,
-            _pad0: 0,
+            wind_scale,
         };
         let p_buf = gpu
             .device
@@ -1857,6 +1859,7 @@ impl WindFieldPipeline {
         rotation_rate: f32,
         base_temp_c: f32,
         atm_pressure: f32,
+        wind_scale: f32,
     ) -> WindField {
         let ppf = (resolution * resolution) as usize;
         let total_1c = 6 * ppf; // 1-component buffer (continentality, pressure)
@@ -1924,6 +1927,7 @@ impl WindFieldPipeline {
                 rotation_rate,
                 base_temp_c,
                 atm_pressure,
+                wind_scale,
                 &buf_b,
                 &buf_a,
                 &height_buf,
@@ -1955,6 +1959,7 @@ impl WindFieldPipeline {
                     rotation_rate,
                     base_temp_c,
                     atm_pressure,
+                    wind_scale,
                     s,
                     d,
                     &height_buf,
@@ -1985,6 +1990,7 @@ impl WindFieldPipeline {
                 rotation_rate,
                 base_temp_c,
                 atm_pressure,
+                wind_scale,
                 cont_result,
                 pressure_dst,
                 &height_buf,
@@ -2010,6 +2016,7 @@ impl WindFieldPipeline {
                 rotation_rate,
                 base_temp_c,
                 atm_pressure,
+                wind_scale,
                 cont_result,
                 &wind_buf,
                 &height_buf,
@@ -2049,6 +2056,7 @@ impl WindFieldPipeline {
         rotation_rate: f32,
         base_temp_c: f32,
         atm_pressure: f32,
+        wind_scale: f32,
     ) {
         textures
             .nearly_all_ocean
@@ -2106,6 +2114,7 @@ impl WindFieldPipeline {
                 rotation_rate,
                 base_temp_c,
                 atm_pressure,
+                wind_scale,
                 &b,
                 &a,
                 &height,
@@ -2129,6 +2138,7 @@ impl WindFieldPipeline {
                     rotation_rate,
                     base_temp_c,
                     atm_pressure,
+                    wind_scale,
                     source,
                     destination,
                     &height,
@@ -2153,6 +2163,7 @@ impl WindFieldPipeline {
                 rotation_rate,
                 base_temp_c,
                 atm_pressure,
+                wind_scale,
                 continentality,
                 pressure,
                 &height,
@@ -2171,6 +2182,7 @@ impl WindFieldPipeline {
                 rotation_rate,
                 base_temp_c,
                 atm_pressure,
+                wind_scale,
                 continentality,
                 &wind,
                 &height,
@@ -2373,7 +2385,9 @@ mod tests {
         let pipeline = WindFieldPipeline::new(&gpu).expect("Rgba16Float dynamics unsupported");
         let terrain = flat_terrain(16);
         let generate = |textures: &DynamicsTextures| {
-            pipeline.generate_gpu(&gpu, &terrain, textures, 42, 0.0, 0.4, 0.5, 1.0, 15.0, 1.0);
+            pipeline.generate_gpu(
+                &gpu, &terrain, textures, 42, 0.0, 0.4, 0.5, 1.0, 15.0, 1.0, 1.0,
+            );
         };
         let first = pipeline.create_textures(&gpu, 16, &terrain, 0.0);
         let second = pipeline.create_textures(&gpu, 16, &terrain, 0.0);
@@ -2406,7 +2420,7 @@ mod tests {
         let fields: Vec<_> = [0.49, 0.50, 0.51]
             .into_iter()
             .map(|season| {
-                pipeline.generate(&gpu, &terrain, 8, 42, 0.0, 0.4, season, 1.0, 15.0, 1.0)
+                pipeline.generate(&gpu, &terrain, 8, 42, 0.0, 0.4, season, 1.0, 15.0, 1.0, 1.0)
             })
             .collect();
         let mean_delta = |a: &WindField, b: &WindField| {

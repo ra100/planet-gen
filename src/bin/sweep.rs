@@ -338,6 +338,7 @@ fn generate_weather_scene(
         24.0 / params.rotation_period_h,
         derived.base_temperature_c,
         derived.surface_pressure_bar,
+        1.0,
     );
     WeatherScene {
         terrain,
@@ -406,6 +407,7 @@ fn generate_native_default_scene(
         24.0 / params.rotation_period_h,
         derived.base_temperature_c,
         derived.atmosphere_strength,
+        1.0,
     );
     WeatherScene {
         terrain,
@@ -839,6 +841,7 @@ fn native_default_source_report(
         24.0 / params.rotation_period_h,
         scene.derived.base_temperature_c,
         scene.derived.atmosphere_strength,
+        1.0,
     );
     let wind_data = native_default_wind_data(&wind);
     let height_data = native_default_height_data(&scene.terrain);
@@ -880,7 +883,8 @@ fn native_default_source_report(
             ];
             let normalized_speed = native_default_dot(tangent_wind, tangent_wind).sqrt();
             let wind_scale: f32 = 1.0;
-            let forcing_scale = wind_scale.max(0.0).powf(0.3);
+            // DS-046 #3 mirror of weather_spinup.wgsl forcing_scale.
+            let forcing_scale = wind_scale.max(0.0).powf(0.85);
             let effective_speed = normalized_speed * forcing_scale;
             let effective_speed = if effective_speed >= 0.01 {
                 effective_speed
@@ -4466,10 +4470,11 @@ fn u15_provenance_total(provenance: &[f32], resolution: u32) -> f32 {
         .sum()
 }
 
-/// Area-weighted provenance share ΣP/ΣT over an owner's primary storm
-/// component: the fraction of the storm's own water that is marine-owned.
-/// The U15 owner-growth gate only needs "this storm actually carries
-/// marine-origin vapor", not a full per-texel ownership decomposition.
+/// Area-weighted source-owned share ΣP/ΣT over an owner's primary storm
+/// component. Ocean sources mint at 1.0 and land ET at 0.3, so this is
+/// ocean-dominant provenance rather than marine-origin evidence.
+/// The U15 owner-growth gate only needs nonzero tracked source ownership, not
+/// a full per-texel source decomposition.
 const U15_MIN_OWNER_PROVENANCE_SHARE: f32 = 0.01;
 
 fn u15_owner_primary_provenance_share(
@@ -6411,6 +6416,733 @@ fn run_u3_local_validation(
     failures
 }
 
+// DS-046 A1–A3: interior-spread, micro-texture, and streak-anisotropy gates on
+// the real validation scene.
+//   A1 (re-specified per the DS-046 ruling, 2026-08-24):
+//     A1a: coastline-correlation score of the largest connected cloud-free
+//          region < T_COAST at wind_scale {0.25, 2.0} (detector promoted from
+//          advisory to gating; threshold calibrated once on the FE-081-era
+//          build 882b7cb).
+//     A1b: land cloud fraction ≥25% at every tested wind_scale.
+//     A1c: raw largest connected cloud-free region ≤35% of sphere at
+//          wind_scale 2 (catastrophe backstop, zero exclusions).
+//     The legacy habitable-band raw-area metric is telemetry only.
+//   A2: high-pass (<~1500 km removed) condensate RMS ≥15% of the total, with
+//       the next octave carrying ≥25% of that energy (≥2 octaves of texture).
+//   A3: along-wind/cross-wind condensate autocorrelation ratio ≤3:1 at
+//       wind_scale 2 (lags ≈300 km and ≈800 km).
+// DS-046 ruling (2026-08-24) T_coast calibration, measured once on the
+// FE-081-era build (commit 882b7cb), same eval points as the gate (seed-42
+// validation scene, equirect grid, wind_scale 0.25 and 2.0): baseline
+// coastline-correlation scores were −0.068 (ws=min) / +0.135 (ws=max);
+// T_coast = 50% × max(−0.068, +0.135) = 0.068.
+const DS046_A1A_T_COAST: f32 = 0.068;
+// RV-002 A1b re-specification (measured, validation run 6): the warm-land
+// occupied fraction at ws=0.25 is FLAT with distance from coast (≤2 texels
+// 20.7% → all land 17.5%) — low-wind land cloud is local physics (stratiform
+// decks + orographic condensation), not fetch-delivered, so no coastal
+// restriction can raise it to the full target within the pinned horizon
+// (FE-088 falsified horizon extension; RV-002 #3 falsified ET strength).
+// Re-spec: full 0.25 target at ws ≥ 1.0, where transport reach within the
+// horizon is sufficient; at ws=0.25 a 0.15 FLOOR — "land not structurally
+// cloud-free" — catches collapse of the local physics without pretending the
+// pinned horizon delivers marine vapor at low wind.
+const DS046_A1B_T_LOW_WIND: f32 = 0.15;
+fn ds046_equirect_direction(width: usize, height: usize, x: usize, y: usize) -> [f32; 3] {
+    let lon = std::f32::consts::TAU * (x as f32 + 0.5) / width as f32;
+    let lat = std::f32::consts::PI * ((y as f32 + 0.5) / height as f32 - 0.5);
+    let cos_lat = lat.cos();
+    [cos_lat * lon.cos(), lat.sin(), cos_lat * lon.sin()]
+}
+
+struct Ds046Grid {
+    width: usize,
+    height: usize,
+    occupied: Vec<bool>,
+    condensate: Vec<f32>,
+    land: Vec<bool>,
+    // Habitable-band mask: the A1 defect is dry WARM interiors
+    // (geography-through-absence); polar/cold aridity is correct physics and
+    // must not inflate the cloud-free region.
+    warm: Vec<bool>,
+    // RV-002 A1a re-specification: subtropical subsidence belt (|lat| in
+    // [20°, 35°], same tilt-corrected latitude as `warm`). Hadley dry belts
+    // are modeled physics, not the coastline-tracing defect A1a detects; they
+    // are excluded from A1a free-region growth only. A1c keeps zero exclusions.
+    subsidence: Vec<bool>,
+}
+
+impl Ds046Grid {
+    fn weight(&self, index: usize) -> f64 {
+        let lat =
+            std::f32::consts::PI * (((index / self.width) as f32 + 0.5) / self.height as f32 - 0.5);
+        lat.cos().max(0.0) as f64
+    }
+}
+
+// RV-003: equirect cloud-map dump (condensate low+deep, land warm-tinted,
+// ocean blue) so wind_scale excursions beyond the gated range can be compared
+// visually. Diagnostic output only; not consumed by any gate.
+fn ds046_dump_cloud_map_ppm(grid: &Ds046Grid, path: &str) {
+    let max_c = grid.condensate.iter().cloned().fold(0.0_f32, f32::max).max(1e-6);
+    let v = |x: f32| (x.clamp(0.0, 1.0) * 255.0) as u8;
+    let mut buf = Vec::with_capacity(grid.width * grid.height * 3 + 32);
+    buf.extend_from_slice(format!("P6\n{} {}\n255\n", grid.width, grid.height).as_bytes());
+    for i in 0..grid.width * grid.height {
+        let c = (grid.condensate[i] / max_c).clamp(0.0, 1.0);
+        if grid.land[i] {
+            buf.extend_from_slice(&[v(0.30 + 0.70 * c), v(0.22 + 0.60 * c), v(0.12 + 0.30 * c)]);
+        } else {
+            buf.extend_from_slice(&[v(0.75 + 0.25 * c), v(0.85 + 0.15 * c), v(0.95 + 0.05 * c)]);
+        }
+    }
+    if let Ok(mut f) = std::fs::File::create(path) {
+        use std::io::Write;
+        let _ = f.write_all(&buf);
+    }
+}
+
+fn ds046_sample_grid(scene: &WeatherScene, mass: &[f32], resolution: u32) -> Ds046Grid {
+    // Flat terrain at weather resolution for land classification (rgba stride,
+    // matching the u3_linear_cube_sample layout).
+    let source_resolution = scene.terrain.resolution;
+    let mut heights = vec![0.0_f32; 4 * (resolution * resolution * 6) as usize];
+    for face in 0..6usize {
+        for y in 0..resolution as usize {
+            for x in 0..resolution as usize {
+                let sx = x * source_resolution as usize / resolution as usize;
+                let sy = y * source_resolution as usize / resolution as usize;
+                let index =
+                    (face * (resolution * resolution) as usize + y * resolution as usize + x) * 4;
+                heights[index] = scene.terrain.faces[face][sy * source_resolution as usize + sx];
+            }
+        }
+    }
+    let width = (resolution.max(128) as usize).next_power_of_two();
+    let height = width / 2;
+    let mut grid = Ds046Grid {
+        width,
+        height,
+        occupied: Vec::with_capacity(width * height),
+        condensate: Vec::with_capacity(width * height),
+        land: vec![false; width * height],
+        warm: vec![false; width * height],
+        subsidence: vec![false; width * height],
+    };
+    for y in 0..height {
+        for x in 0..width {
+            let pos = ds046_equirect_direction(width, height, x, y);
+            let occupancy = u3_linear_cube_sample(mass, resolution, pos, 3);
+            grid.occupied.push(occupancy > 0.05);
+            grid.condensate.push(
+                u3_linear_cube_sample(mass, resolution, pos, 0)
+                    + u3_linear_cube_sample(mass, resolution, pos, 1),
+            );
+            let height_value =
+                u3_linear_cube_sample(&heights, resolution, pos, 0) - scene.ocean_level;
+            grid.land[y * width + x] = height_value > 0.0;
+            // Mirror weather_spinup temperature_at (season = 0.5 → no seasonal
+            // term): base − latitude·35 − elevation·6.5.
+            let tilted_y = pos[1] * scene.tilt_rad.cos() + pos[2] * scene.tilt_rad.sin();
+            let latitude = tilted_y.clamp(-1.0, 1.0).asin().abs() / std::f32::consts::FRAC_PI_2;
+            let elevation_km = height_value.max(0.0) * 5.0;
+            grid.warm[y * width + x] =
+                scene.derived.base_temperature_c - latitude * 35.0 - elevation_km * 6.5 >= 0.0;
+            // RV-002: subsidence belt from the same tilt-corrected latitude
+            // (latitude is normalized 0..1 → ×90 for degrees).
+            grid.subsidence[y * width + x] = (20.0_f32..=35.0_f32).contains(&(latitude * 90.0));
+        }
+    }
+    grid
+}
+
+// Weighted largest connected cloud-free component as a sphere fraction, plus
+// its member mask for downstream boundary analysis. With `restrict_to_warm`
+// this keeps the legacy habitable-band semantics (the A1 defect is dry WARM
+// interiors): non-warm free cells act as bridges but carry no weight. With
+// `restrict_to_warm = false` it measures the raw sphere with zero exclusions
+// (A1c backstop semantics). With `exclude_subsidence` the subtropical
+// subsidence belt is treated as occupied for region growth (RV-002 A1a
+// re-specification: Hadley dry belts are modeled physics, not the
+// coastline-tracing defect; A1c must never set this). Longitude wraps;
+// latitude clamps at the poles.
+fn ds046_largest_free_region(
+    grid: &Ds046Grid,
+    restrict_to_warm: bool,
+    exclude_subsidence: bool,
+) -> (f32, Vec<bool>) {
+    let width = grid.width;
+    let height = grid.height;
+    let total_weight: f64 = (0..width * height)
+        .filter(|&i| !restrict_to_warm || grid.warm[i])
+        .map(|i| grid.weight(i))
+        .sum();
+    let mut visited = vec![false; width * height];
+    let mut largest = 0.0_f64;
+    let mut largest_members: Vec<bool> = vec![false; width * height];
+    for start in 0..width * height {
+        if visited[start]
+            || grid.occupied[start]
+            || (restrict_to_warm && !grid.warm[start])
+            || (exclude_subsidence && grid.subsidence[start])
+        {
+            continue;
+        }
+        let mut stack = vec![start];
+        visited[start] = true;
+        let mut members = vec![start];
+        let mut weight_sum = 0.0_f64;
+        while let Some(index) = stack.pop() {
+            if !restrict_to_warm || grid.warm[index] {
+                weight_sum += grid.weight(index);
+            }
+            let x = index % width;
+            let y = index / width;
+            for (nx, ny) in [
+                ((x + width - 1) % width, y),
+                ((x + 1) % width, y),
+                (x, y.saturating_sub(1)),
+                (x, (y + 1).min(height - 1)),
+            ] {
+                let next = ny * width + nx;
+                if !visited[next]
+                    && !grid.occupied[next]
+                    && !(exclude_subsidence && grid.subsidence[next])
+                {
+                    visited[next] = true;
+                    stack.push(next);
+                    members.push(next);
+                }
+            }
+        }
+        if weight_sum > largest {
+            largest = weight_sum;
+            largest_members = vec![false; width * height];
+            for &member in &members {
+                largest_members[member] = true;
+            }
+        }
+    }
+    (
+        (largest / total_weight.max(f64::EPSILON)) as f32,
+        largest_members,
+    )
+}
+
+// FE-088 telemetry only: the reported max-wind void was concentrated in the
+// lower hemisphere. Keep this independent of the A1 gates so it catches a
+// regression without changing their calibrated thresholds.
+fn ds046_lower_hemisphere_telemetry(grid: &Ds046Grid) -> (f32, f32) {
+    let mut total_weight = 0.0_f64;
+    let mut occupied_weight = 0.0_f64;
+    let mut condensate_sum = 0.0_f64;
+    for y in grid.height / 2..grid.height {
+        for x in 0..grid.width {
+            let index = y * grid.width + x;
+            let weight = grid.weight(index);
+            total_weight += weight;
+            if grid.occupied[index] {
+                occupied_weight += weight;
+            }
+            condensate_sum += grid.condensate[index] as f64 * weight;
+        }
+    }
+    (
+        (occupied_weight / total_weight.max(f64::EPSILON)) as f32,
+        (condensate_sum / total_weight.max(f64::EPSILON)) as f32,
+    )
+}
+
+// Multi-source texel BFS distance to the nearest coastline (land/ocean
+// 4-neighbor transition), in equirect grid texels.
+fn ds046_coast_distances(grid: &Ds046Grid) -> Vec<u32> {
+    let width = grid.width;
+    let height = grid.height;
+    let neighbors = |index: usize| -> [usize; 4] {
+        let x = index % width;
+        let y = index / width;
+        [
+            y * width + (x + width - 1) % width,
+            y * width + (x + 1) % width,
+            y.saturating_sub(1) * width + x,
+            (y + 1).min(height - 1) * width + x,
+        ]
+    };
+    let mut dist = vec![u32::MAX; width * height];
+    let mut queue = std::collections::VecDeque::new();
+    for index in 0..width * height {
+        if neighbors(index)
+            .iter()
+            .any(|&next| grid.land[next] != grid.land[index])
+        {
+            dist[index] = 0;
+            queue.push_back(index);
+        }
+    }
+    while let Some(index) = queue.pop_front() {
+        for next in neighbors(index) {
+            if dist[next] > dist[index] + 1 {
+                dist[next] = dist[index] + 1;
+                queue.push_back(next);
+            }
+        }
+    }
+    dist
+}
+
+// DS-046 A1a coastline-correlation score (DS-046 ruling, 2026-08-24): Pearson
+// r between the cloudy-facing boundary indicator of the largest connected
+// cloud-free region and coast proximity 1/(1+dist_texels), over the full
+// equirect grid. Promotes the DS-045 synthetic-fixture detector
+// (`ds045_no_coastline_correlated_boundary_across_wind_sweep`) from advisory
+// unit-test scope to this gating real-scene metric. A cloud-free region whose
+// edge traces the coastline scores near 1; flow-decoupled boundaries score
+// near 0. Degenerate fields (no boundary or no coast contrast) score 0.
+fn ds046_coastline_correlation(grid: &Ds046Grid, members: &[bool]) -> f32 {
+    let width = grid.width;
+    let height = grid.height;
+    let dist = ds046_coast_distances(grid);
+    let neighbor_indices = |index: usize| -> [usize; 4] {
+        let x = index % width;
+        let y = index / width;
+        [
+            y * width + (x + width - 1) % width,
+            y * width + (x + 1) % width,
+            y.saturating_sub(1) * width + x,
+            (y + 1).min(height - 1) * width + x,
+        ]
+    };
+    let mut sum_x = 0.0_f64;
+    let mut sum_y = 0.0_f64;
+    let mut xs = vec![0.0_f64; width * height];
+    let mut ys = vec![0.0_f64; width * height];
+    for index in 0..width * height {
+        let boundary = members[index]
+            && neighbor_indices(index)
+                .iter()
+                .any(|&next| grid.occupied[next]);
+        xs[index] = if boundary { 1.0 } else { 0.0 };
+        ys[index] = 1.0 / (1.0 + dist[index] as f64);
+        sum_x += xs[index];
+        sum_y += ys[index];
+    }
+    let count = (width * height) as f64;
+    let mean_x = sum_x / count;
+    let mean_y = sum_y / count;
+    let mut covariance = 0.0_f64;
+    let mut var_x = 0.0_f64;
+    let mut var_y = 0.0_f64;
+    for index in 0..width * height {
+        covariance += (xs[index] - mean_x) * (ys[index] - mean_y);
+        var_x += (xs[index] - mean_x) * (xs[index] - mean_x);
+        var_y += (ys[index] - mean_y) * (ys[index] - mean_y);
+    }
+    let denom = (var_x * var_y).sqrt();
+    if denom < 1e-9 {
+        return 0.0;
+    }
+    (covariance / denom) as f32
+}
+
+fn ds046_rms(values: &[f32]) -> f32 {
+    (values.iter().map(|v| v * v).sum::<f32>() / values.len().max(1) as f32).sqrt()
+}
+
+// Block-average low-pass on the equirect grid; block size k in grid texels.
+fn ds046_low_pass(grid_condensate: &[f32], width: usize, height: usize, k: usize) -> Vec<f32> {
+    if k <= 1 {
+        return grid_condensate.to_vec();
+    }
+    let mut result = vec![0.0; width * height];
+    for y in 0..height {
+        for x in 0..width {
+            let mut sum = 0.0;
+            let mut count = 0u32;
+            for dy in 0..k {
+                let sy = (y + dy).min(height - 1);
+                for dx in 0..k {
+                    let sx = (x + dx) % width;
+                    sum += grid_condensate[sy * width + sx];
+                    count += 1;
+                }
+            }
+            result[y * width + x] = sum / count as f32;
+        }
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_ds046_a_metrics(
+    gpu: &GpuContext,
+    weather_pipeline: &WeatherFieldPipeline,
+    wind_pipeline: &WindFieldPipeline,
+    scene: &WeatherScene,
+    seed: u32,
+    generation_samples_ms: &mut Vec<f64>,
+    output_dir: &str,
+) -> Vec<String> {
+    let mut failures = Vec::new();
+    let resolution = scene.dynamics.resolution;
+    let radius_km = scene.derived.radius_km.max(1.0);
+
+    // === DS-046 A1, re-specified per the DS-046 ruling (2026-08-24). The
+    // pre-re-specification raw-area gate (largest habitable-band cloud-free
+    // region ≤10% of sphere) is demoted to telemetry; it failed for
+    // physics-correct reasons (Hadley subtropical dry belts are modeled
+    // physics, not the continent-mask defect). The new PASS set:
+    //   A1a coastline decoupling: coastline-correlation score of the largest
+    //       connected cloud-free region < T_COAST at wind_scale min (0.25) and
+    //       max (2.0). Promotes the existing DS-045 detector
+    //       (`ds045_no_coastline_correlated_boundary_across_wind_sweep`) from
+    //       advisory unit-test scope to this gating real-scene metric.
+    //       RV-002 re-specification: the free region is grown with the
+    //       subtropical subsidence belt (|lat| 20..=35°) excluded — Hadley dry
+    //       belts are modeled physics, not the coastline-tracing defect.
+    //       T_COAST calibrated once as 50% of the measured score on the
+    //       FE-081-era build (commit 882b7cb) at these same eval points
+    //       (see the constant's calibration note below).
+    //   A1b land-cell cloud fraction ≥0.25 at ws ≥ 1.0 and ≥ DS046_A1B_T_LOW_WIND
+    //       (0.15 floor) at ws=0.25 — RV-002 re-specification: low-wind land
+    //       cloud is local physics, flat with coastal distance (measured run 6),
+    //       so the full target is only physical where transport reach within the
+    //       pinned horizon suffices. See DS046_A1B_T_LOW_WIND comment.
+    //   A1c catastrophe backstop: largest connected cloud-free region over the
+    //       RAW sphere (no warm-band or any exclusions) ≤0.35 of surface at
+    //       wind_scale max.
+    println!(
+        "DS-046 A1 structure gates (A1a coast decoupling / A1b land cloud / A1c raw backstop):"
+    );
+    let mut ws2_mass = None;
+    let mut max_wind_void_telemetry = None;
+    // wind_field.wgsl does not consume wind_scale. Reuse the scene dynamics;
+    // WeatherSnapshot.wind_scale changes transport and forcing only.
+    // RV-003: ws=4.0 is a telemetry-only excursion beyond the validated
+    // [0,2] gate range (transport cap raised to 4.0; no gates apply above 2.0).
+    for wind_scale in [0.25_f32, 1.0, 2.0, 4.0] {
+        let (weather, generation_ms) = time_gpu_call(gpu, || {
+            generate_validation_weather_at_wind_scale(
+                weather_pipeline,
+                gpu,
+                scene,
+                &scene.dynamics,
+                seed,
+                wind_scale,
+            )
+        });
+        generation_samples_ms.push(generation_ms);
+        let mass = weather.read_mass(gpu);
+        if wind_scale == 2.0 {
+            ws2_mass = Some(mass.clone());
+        }
+        let grid = ds046_sample_grid(scene, &mass, resolution);
+        // RV-002: A1a excludes the subtropical subsidence belt from free-region
+        // growth (Hadley dry belts are modeled physics, not the defect).
+        let (free_fraction, free_members) = ds046_largest_free_region(&grid, true, true);
+        let coast_score = ds046_coastline_correlation(&grid, &free_members);
+        // RV-003: dump equirect cloud maps at the high-wind points so the
+        // extended range can be compared visually.
+        if wind_scale >= 2.0 {
+            ds046_dump_cloud_map_ppm(
+                &grid,
+                &format!("{output_dir}/ds046_cloud_map_ws{wind_scale:.0}.ppm"),
+            );
+        }
+        let land_total: f64 = (0..grid.width * grid.height)
+            .filter(|&i| grid.land[i] && grid.warm[i])
+            .map(|i| grid.weight(i))
+            .sum();
+        let land_cloud: f64 = (0..grid.width * grid.height)
+            .filter(|&i| grid.land[i] && grid.warm[i] && grid.occupied[i])
+            .map(|i| grid.weight(i))
+            .sum();
+        let land_cloud_fraction = (land_cloud / land_total.max(f64::EPSILON)) as f32;
+        println!(
+            "  wind_scale={wind_scale:.2}: largest_free(habitable)={:.1}% land_cloud(warm)={:.1}% coast_corr={coast_score:.3} (telemetry / A1b ≥ target / A1a <{DS046_A1A_T_COAST:.3} at ws=min,max)",
+            free_fraction * 100.0,
+            land_cloud_fraction * 100.0,
+        );
+        if (wind_scale == 0.25 || wind_scale == 2.0) && coast_score >= DS046_A1A_T_COAST {
+            failures.push(format!(
+                "DS-046 A1a wind_scale={wind_scale}: coastline-correlation score {coast_score:.3} >= T_coast {DS046_A1A_T_COAST:.3}"
+            ));
+        }
+        // RV-002 A1b re-specification: wind-dependent target (see
+        // DS046_A1B_T_LOW_WIND for the measured rationale). RV-003: ws > 2.0
+        // is telemetry-only — no gates beyond the validated range.
+        let a1b_target = if wind_scale < 0.75 { DS046_A1B_T_LOW_WIND } else { 0.25 };
+        if wind_scale <= 2.0 && land_cloud_fraction < a1b_target {
+            failures.push(format!(
+                "DS-046 A1b wind_scale={wind_scale}: land cloud fraction {land_cloud_fraction:.3} < target {a1b_target:.2}"
+            ));
+        }
+        if wind_scale == 2.0 {
+            let (raw_free_fraction, _) = ds046_largest_free_region(&grid, false, false);
+            let (lower_hemisphere_occupancy, lower_hemisphere_condensate_mean) =
+                ds046_lower_hemisphere_telemetry(&grid);
+            max_wind_void_telemetry = Some(format!(
+                "wind_scale=2 lower_hemisphere_occupancy={lower_hemisphere_occupancy:.5}\nlower_hemisphere_condensate_mean={lower_hemisphere_condensate_mean:.5}"
+            ));
+            println!(
+                "  DS-046 A1c raw cloud-free region at wind_scale=2: {:.1}% of sphere (backstop ≤35%)",
+                raw_free_fraction * 100.0
+            );
+            if raw_free_fraction > 0.35 {
+                failures.push(format!(
+                    "DS-046 A1c: raw largest cloud-free region {raw_free_fraction:.3} > 0.35 of sphere at wind_scale=2"
+                ));
+            }
+        }
+    }
+
+    if let Some(metrics) = max_wind_void_telemetry {
+        std::fs::write(
+            Path::new(output_dir).join("ds046_max_wind_void_metrics.txt"),
+            metrics,
+        )
+        .expect("write DS-046 max-wind void telemetry");
+    }
+
+    // A2 micro-texture on the wind_scale=2 field.
+    if let Some(mass) = &ws2_mass {
+        let grid = ds046_sample_grid(scene, mass, resolution);
+        let mean = grid.condensate.iter().sum::<f32>() / grid.condensate.len() as f32;
+        let centered: Vec<f32> = grid.condensate.iter().map(|v| v - mean).collect();
+        let rms_total = ds046_rms(&centered);
+        let texel_km = radius_km * std::f32::consts::PI / grid.width as f32;
+        let k = ((1500.0 / texel_km).round() as usize).max(1);
+        let low = ds046_low_pass(&grid.condensate, grid.width, grid.height, k);
+        let high_pass: Vec<f32> = grid
+            .condensate
+            .iter()
+            .zip(&low)
+            .map(|(c, l)| c - l)
+            .collect();
+        let rms_high = ds046_rms(&high_pass);
+        let k2 = (k / 2).max(1);
+        let octave_low = ds046_low_pass(&high_pass, grid.width, grid.height, k2);
+        let octave_band: Vec<f32> = high_pass
+            .iter()
+            .zip(&octave_low)
+            .map(|(c, l)| c - l)
+            .collect();
+        let rms_octave = ds046_rms(&octave_band);
+        println!(
+            "DS-046 A2 micro-texture (wind_scale=2): high-pass(<{:.0}km) RMS={rms_high:.4} vs total {rms_total:.4} ({:.1}%); sub-octave share {:.1}%",
+            k as f32 * texel_km,
+            100.0 * rms_high / rms_total.max(f32::EPSILON),
+            100.0 * rms_octave / rms_high.max(f32::EPSILON),
+        );
+        if rms_high < 0.15 * rms_total {
+            failures.push(format!(
+                "DS-046 A2: high-pass condensate RMS {rms_high:.4} < 15% of total {rms_total:.4}"
+            ));
+        }
+        if rms_octave < 0.25 * rms_high {
+            failures.push(format!(
+                "DS-046 A2: sub-octave energy {rms_octave:.4} < 25% of high-pass {rms_high:.4} (single-scale texture)"
+            ));
+        }
+
+        // A3 anisotropy at wind_scale=2 using the CPU dynamics readback.
+        let wind_cpu = wind_pipeline.generate(
+            gpu,
+            &scene.terrain,
+            resolution,
+            seed,
+            scene.ocean_level,
+            scene.tilt_rad,
+            0.5,
+            scene.derived.rotation_rate_rad_s,
+            scene.derived.base_temperature_c,
+            scene.derived.surface_pressure_bar,
+            2.0,
+        );
+        let wind_data = native_default_wind_data(&wind_cpu);
+        let cube_texel_km = radius_km * std::f32::consts::FRAC_PI_2 / resolution as f32;
+        let mut along_pairs: Vec<(f32, f32)> = Vec::new();
+        let mut cross_pairs: Vec<(f32, f32)> = Vec::new();
+        let res_i = resolution as usize;
+        let max_lag_texels = ((800.0 / cube_texel_km).ceil() as usize + 2).min(res_i / 4);
+        let condensate_at = |face: usize, x: isize, y: isize| -> f32 {
+            let (face, x, y) =
+                if (0..res_i as isize).contains(&x) && (0..res_i as isize).contains(&y) {
+                    (face, x, y)
+                } else {
+                    let direction = planet_gen::cube_sphere::cube_to_sphere(
+                        face as u32,
+                        (x as f32 + 0.5) / res_i as f32,
+                        (y as f32 + 0.5) / res_i as f32,
+                    );
+                    let (face, fx, fy) = u3_cube_coordinates(direction, resolution);
+                    (
+                        face,
+                        (fx.round() as isize).clamp(0, res_i as isize - 1),
+                        (fy.round() as isize).clamp(0, res_i as isize - 1),
+                    )
+                };
+            let index = (face * res_i * res_i + y as usize * res_i + x as usize) * 4;
+            mass[index] + mass[index + 1]
+        };
+        for face in 0..6usize {
+            let margin = max_lag_texels as isize + 2;
+            let mut y = margin;
+            while y < res_i as isize - margin {
+                let mut x = margin;
+                while x < res_i as isize - margin {
+                    let direction = planet_gen::cube_sphere::cube_to_sphere(
+                        face as u32,
+                        x as f32 / (res_i - 1) as f32,
+                        y as f32 / (res_i - 1) as f32,
+                    );
+                    let wind = [
+                        u3_linear_cube_sample(&wind_data, resolution, direction, 0),
+                        u3_linear_cube_sample(&wind_data, resolution, direction, 1),
+                        u3_linear_cube_sample(&wind_data, resolution, direction, 2),
+                    ];
+                    let radial =
+                        wind[0] * direction[0] + wind[1] * direction[1] + wind[2] * direction[2];
+                    let tangent = [
+                        wind[0] - radial * direction[0],
+                        wind[1] - radial * direction[1],
+                        wind[2] - radial * direction[2],
+                    ];
+                    let speed = (tangent[0] * tangent[0]
+                        + tangent[1] * tangent[1]
+                        + tangent[2] * tangent[2])
+                        .sqrt();
+                    if speed > 0.01 {
+                        let along = [tangent[0] / speed, tangent[1] / speed, tangent[2] / speed];
+                        let cross_raw = [
+                            direction[1] * along[2] - direction[2] * along[1],
+                            direction[2] * along[0] - direction[0] * along[2],
+                            direction[0] * along[1] - direction[1] * along[0],
+                        ];
+                        let cross_len = (cross_raw[0] * cross_raw[0]
+                            + cross_raw[1] * cross_raw[1]
+                            + cross_raw[2] * cross_raw[2])
+                            .sqrt()
+                            .max(1e-6);
+                        // Map tangent directions to face-space offsets via the
+                        // local cube-face Jacobian: finite-difference the face
+                        // parameterization once per sample point.
+                        let step_dir = |dir: [f32; 3], n: f32| -> (isize, isize) {
+                            let eps = 1.0 / res_i as f32;
+                            let center_uv = crate_face_uv(direction);
+                            let plus = crate_face_uv(normalize3([
+                                direction[0] + dir[0] * eps,
+                                direction[1] + dir[1] * eps,
+                                direction[2] + dir[2] * eps,
+                            ]));
+                            let du = (plus.0 - center_uv.0) / eps;
+                            let dv = (plus.1 - center_uv.1) / eps;
+                            let len = (du * du + dv * dv).sqrt().max(1e-6);
+                            (
+                                (du / len * n).round() as isize,
+                                (dv / len * n).round() as isize,
+                            )
+                        };
+                        let center_value = condensate_at(face, x, y);
+                        for lag_km in [300.0_f32, 800.0] {
+                            let n = ((lag_km / cube_texel_km).round() as isize).max(2);
+                            let (ox, oy) = step_dir(along, n as f32);
+                            along_pairs.push((center_value, condensate_at(face, x + ox, y + oy)));
+                            let (cx, cy) = step_dir(
+                                [
+                                    cross_raw[0] / cross_len,
+                                    cross_raw[1] / cross_len,
+                                    cross_raw[2] / cross_len,
+                                ],
+                                n as f32,
+                            );
+                            cross_pairs.push((center_value, condensate_at(face, x + cx, y + cy)));
+                        }
+                    }
+                    x += 7;
+                }
+                y += 7;
+            }
+        }
+        let correlation = |pairs: &[(f32, f32)]| -> Option<f32> {
+            if pairs.len() < 64 {
+                return None;
+            }
+            let mean_a = pairs.iter().map(|p| p.0).sum::<f32>() / pairs.len() as f32;
+            let mean_b = pairs.iter().map(|p| p.1).sum::<f32>() / pairs.len() as f32;
+            let cov: f32 = pairs.iter().map(|p| (p.0 - mean_a) * (p.1 - mean_b)).sum();
+            let var_a: f32 = pairs.iter().map(|p| (p.0 - mean_a).powi(2)).sum();
+            let var_b: f32 = pairs.iter().map(|p| (p.1 - mean_b).powi(2)).sum();
+            let denom = (var_a * var_b).sqrt();
+            (denom > 1e-9).then(|| cov / denom)
+        };
+        let rho_along = correlation(&along_pairs);
+        let rho_cross = correlation(&cross_pairs);
+        match (rho_along, rho_cross) {
+            (Some(a), Some(c)) => {
+                let ratio = a.abs() / c.abs().max(1e-6);
+                println!(
+                    "DS-046 A3 streak anisotropy (wind_scale=2): ρ_along={a:.3} ρ_cross={c:.3} ratio={ratio:.2} (gate ≤3.0, n={})",
+                    along_pairs.len()
+                );
+                if ratio > 3.0 {
+                    failures.push(format!(
+                        "DS-046 A3: along/cross autocorrelation ratio {ratio:.2} > 3.0"
+                    ));
+                }
+            }
+            _ => failures
+                .push("DS-046 A3: insufficient pair samples for autocorrelation".to_string()),
+        }
+    }
+    failures
+}
+
+fn normalize3(v: [f32; 3]) -> [f32; 3] {
+    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-9);
+    [v[0] / len, v[1] / len, v[2] / len]
+}
+
+// Face uv (unit-scale; only differences matter) for a sphere direction.
+fn crate_face_uv(direction: [f32; 3]) -> (f32, f32) {
+    let (_, x, y) = u3_cube_coordinates(direction, 1);
+    (x, y)
+}
+
+fn generate_validation_weather_at_wind_scale(
+    pipeline: &WeatherFieldPipeline,
+    gpu: &GpuContext,
+    scene: &WeatherScene,
+    dynamics: &DynamicsTextures,
+    seed: u32,
+    wind_scale: f32,
+) -> WeatherTextures {
+    let weather = pipeline.create_textures(gpu, scene.dynamics.resolution);
+    pipeline.generate(
+        gpu,
+        WeatherSnapshot {
+            face: 0,
+            resolution: scene.dynamics.resolution,
+            seed,
+            storm_count: 4,
+            coverage: 0.5,
+            moisture: 1.0,
+            surface_pressure_bar: scene.derived.surface_pressure_bar,
+            base_temp_c: scene.derived.base_temperature_c,
+            ocean_level: scene.ocean_level,
+            axial_tilt_rad: scene.tilt_rad,
+            season: 0.5,
+            storm_size: 1.0,
+            radius_km: scene.derived.radius_km,
+            rotation_rate_rad_s: scene.derived.rotation_rate_rad_s,
+            wind_scale,
+        },
+        &scene.terrain,
+        dynamics,
+        &weather,
+    );
+    weather
+}
+
 fn run_weather_validation_with_pipeline(
     gpu: &GpuContext,
     compute: &TerrainComputePipeline,
@@ -6989,6 +7721,31 @@ fn run_weather_validation_with_pipeline(
         render_size,
         &size_renders,
     );
+
+    println!("DS-046 A1–A3 weather structure gates:");
+    // Timed separately: the queue-stall gate measures production-path
+    // generations, and the wind_scale sweep adds extra substep-heavy passes.
+    let mut ds046_generation_samples_ms = Vec::new();
+    gate_failures.extend(run_ds046_a_metrics(
+        gpu,
+        &weather_pipeline,
+        &wind_pipeline,
+        &scene,
+        42,
+        &mut ds046_generation_samples_ms,
+        output_dir,
+    ));
+    let ds046_stats = compute_runtime_stats(ds046_generation_samples_ms);
+    if ds046_stats.count > 0 {
+        println!(
+            "  DS-046 fixture generation (ms): n={} p95={:.3} min={:.3} max={:.3} mean={:.3}",
+            ds046_stats.count,
+            ds046_stats.p95_ms,
+            ds046_stats.min_ms,
+            ds046_stats.max_ms,
+            ds046_stats.mean_ms
+        );
+    }
 
     println!("Wind reversal capture (analytic flow):");
     let build_flow = |sign: f32| {
@@ -7641,12 +8398,13 @@ mod tests {
     use super::{
         TopologyMetrics, U14CoverageComponent, U15_DEEP_THRESHOLD, U15_SIZE_FULL_SUPPORT_RADIUS,
         U15_SIZE_SEEDS, U15_SIZE_SUPPORT_RADIUS, U15PlumeMetrics, U15ResponseComponent,
-        U15ValidationMode, WEATHER_GENERATION_QUEUE_STALL_P95_MS, cube_edge_pairs,
-        field_view_pixels, polar_metrics, requires_weather_validation_size, u3_cube_coordinates,
-        u3_feature_axis, u3_linear_cube_sample, u3_mass_association, u3_ray_ndc,
-        u3_screen_direction, u14_coverage_growth, u14_coverage_support_metrics, u14_fixed_core_p90,
-        u14_geometry_metrics, u14_lee_continuation_metrics, u14_marine_to_land_continentality,
-        u14_mixed_coast_land_support, u14_significant_occupied_components, u15_fixture_centers,
+        U15ValidationMode, WEATHER_DIAGNOSTIC_NO_SOURCE, WEATHER_GENERATION_QUEUE_STALL_P95_MS,
+        cube_edge_pairs, field_view_pixels, polar_metrics, requires_weather_validation_size,
+        u3_cube_coordinates, u3_feature_axis, u3_linear_cube_sample, u3_mass_association,
+        u3_ray_ndc, u3_screen_direction, u14_coverage_growth, u14_coverage_support_metrics,
+        u14_fixed_core_p90, u14_geometry_metrics, u14_lee_continuation_metrics,
+        u14_marine_to_land_continentality, u14_mixed_coast_land_support,
+        u14_significant_occupied_components, u15_fixture_centers,
         u15_owner_primary_provenance_share, u15_owner_size_metrics, u15_paired_size_tops,
         u15_pixel_neighbors, u15_pixel_position, u15_seed_diagnostics, u15_seed_diagnostics_report,
         u15_significant_response_components, u15_significant_size_components, u15_size_association,
@@ -8093,7 +8851,7 @@ mod tests {
                 "max(condensate - q_sat * effective_relative_humidity_target, 0.0) * 0.22"
             )
         );
-        assert!(shader.contains("max(marine_climate, provenance_share)"));
+        assert!(shader.contains("max(marine_climate, source_owned_share)"));
         // DS-045 de-classification: low-cloud dissipation follows wind-driven
         // entrainment instead of the static marine class.
         assert!(shader.contains("state.y * low_dissipation"));
@@ -8777,6 +9535,33 @@ mod tests {
         WeatherTextures,
         TracerValidationTrace,
     ) {
+        u15_tracer_run_with_snapshot(
+            resolution,
+            height,
+            diagnostic_flags,
+            provenance_enabled,
+            continentality,
+            WeatherSnapshot {
+                base_temp_c: 30.0,
+                ..u15_size_weather_snapshot(resolution, U15_SIZE_SEEDS[0], 1.0)
+            },
+        )
+    }
+
+    #[cfg(feature = "validation")]
+    fn u15_tracer_run_with_snapshot(
+        resolution: u32,
+        height: impl Fn([f32; 3]) -> f32,
+        diagnostic_flags: u32,
+        provenance_enabled: bool,
+        continentality: f32,
+        snapshot: WeatherSnapshot,
+    ) -> (
+        GpuContext,
+        WeatherFieldPipeline,
+        WeatherTextures,
+        TracerValidationTrace,
+    ) {
         let gpu = GpuContext::new().expect("GPU init failed");
         let wind = WindFieldPipeline::new(&gpu).expect("U15 dynamics unavailable");
         let pipeline = WeatherFieldPipeline::new(&gpu).expect("U15 weather unavailable");
@@ -8785,10 +9570,6 @@ mod tests {
             ([0.2, 0.0, -0.1, continentality], 1013.0)
         });
         let field = pipeline.create_textures(&gpu, resolution);
-        let snapshot = WeatherSnapshot {
-            base_temp_c: 30.0,
-            ..u15_size_weather_snapshot(resolution, U15_SIZE_SEEDS[0], 1.0)
-        };
         let trace = pipeline.validation_tracer_trace_for_sweep(
             &gpu,
             snapshot,
@@ -8807,6 +9588,61 @@ mod tests {
     }
 
     #[cfg(feature = "validation")]
+    fn fe089_weighted_water_budget(trace: &TracerValidationTrace) -> f32 {
+        let resolution = trace.spin_resolution;
+        let face_pixels = resolution as usize * resolution as usize;
+        trace
+            .state
+            .chunks_exact(4)
+            .zip(trace.aux.chunks_exact(4))
+            .enumerate()
+            .map(|(cell, (state, aux))| {
+                let local = cell % face_pixels;
+                let weight = u15_weight(
+                    (local % resolution as usize) as u32,
+                    (local / resolution as usize) as u32,
+                    resolution,
+                );
+                (state.iter().sum::<f32>() + aux[0]) * weight
+            })
+            .sum()
+    }
+
+    #[cfg(feature = "validation")]
+    #[test]
+    fn fe089_internal_budget_is_weighted_deterministic_and_void_exact() {
+        let resolution = 16;
+        let (_, _, _, first) = u15_tracer_run(resolution, |_| -0.1, 0);
+        let (_, _, _, second) = u15_tracer_run(resolution, |_| -0.1, 0);
+        assert_eq!(first.state, second.state, "state must be deterministic");
+        assert_eq!(first.aux, second.aux, "aux must be deterministic");
+        assert_eq!(
+            first.provenance_tail, second.provenance_tail,
+            "provenance tail must be deterministic"
+        );
+        let budget = fe089_weighted_water_budget(&first);
+        assert!(
+            budget.is_finite() && budget > 0.0,
+            "weighted water budget={budget}"
+        );
+
+        let (_, _, _, void) = u15_tracer_run(resolution, |_| 0.1, WEATHER_DIAGNOSTIC_NO_SOURCE);
+        assert!(
+            void.state.iter().all(|value| *value == 0.0),
+            "void state is nonzero"
+        );
+        assert!(
+            void.aux.iter().all(|value| *value == 0.0),
+            "void aux is nonzero"
+        );
+        assert!(
+            void.provenance_tail.iter().all(|value| *value == 0.0),
+            "void provenance tail is nonzero"
+        );
+        assert_eq!(fe089_weighted_water_budget(&void), 0.0, "void water budget");
+    }
+
+    #[cfg(feature = "validation")]
     fn u15_skip_without_r16(provenance: &Option<Vec<f32>>) -> Option<&Vec<f32>> {
         match provenance {
             Some(provenance) => Some(provenance),
@@ -8819,7 +9655,7 @@ mod tests {
 
     #[cfg(feature = "validation")]
     #[test]
-    fn u15_tracer_ocean_tracks_total_water_through_phase_transfer_and_land_stays_unowned() {
+    fn u15_source_owned_tracer_tracks_ocean_and_weighted_land_sources() {
         assert!(
             u15_size_minimum_physical_eligibility(U15_SIZE_SEEDS[0])
                 >= U15_SIZE_MIN_PHYSICAL_ELIGIBILITY
@@ -8886,15 +9722,22 @@ mod tests {
                 "global gate must catch a 3% distributed provenance leak"
             );
         }
-        // All land has no open-ocean source anywhere, so ownership stays empty
-        // down to the storage format: the provenance attachment is never
-        // written on land cells.
+        // All-land ET is source-owned at the declared 0.3 share. The finite
+        // unowned land bootstrap makes the final scalar ratio lower than 0.3,
+        // but it must never exceed the source-mixing cap.
         let (_, _, _, land) = u15_tracer_run(resolution, |_| 0.1, 0);
         if let Some(p) = u15_skip_without_r16(&land.provenance) {
+            let provenance_sum: f32 = p.iter().sum();
             assert!(
-                p.iter().all(|value| *value == 0.0),
-                "land provenance must be exactly empty, max={:?}",
-                p.iter().cloned().fold(f32::NAN, f32::max)
+                provenance_sum > 0.0,
+                "land evapotranspiration minted no provenance"
+            );
+            let total_budget: f32 = (0..p.len())
+                .map(|cell| u15_total_water(&land.state, cell))
+                .sum();
+            assert!(
+                provenance_sum <= 0.31 * total_budget,
+                "land source ownership exceeds the 0.3 ET mixing cap: {provenance_sum} vs {total_budget}"
             );
         }
     }
@@ -8940,14 +9783,58 @@ mod tests {
                 );
             }
         }
-        // Land mints nothing: provenance stays exactly empty everywhere.
-        let (_, _, _, land) = u15_tracer_run(resolution, |_| 0.1, 0);
-        if let Some(p) = u15_skip_without_r16(&land.provenance) {
+    }
+
+    #[cfg(feature = "validation")]
+    #[test]
+    fn u15_land_et_source_ownership_respects_the_share_and_zero_gates() {
+        let resolution = 16;
+        let snapshot = |coverage, moisture, base_temp_c| WeatherSnapshot {
+            coverage,
+            moisture,
+            base_temp_c,
+            ..u15_size_weather_snapshot(resolution, U15_SIZE_SEEDS[0], 1.0)
+        };
+        let run = |coverage, moisture, base_temp_c| {
+            u15_tracer_run_with_snapshot(
+                resolution,
+                |_| 0.1,
+                WEATHER_DIAGNOSTIC_NO_SINK,
+                true,
+                0.0,
+                snapshot(coverage, moisture, base_temp_c),
+            )
+            .3
+        };
+
+        let active = run(1.0, 1.0, 30.0);
+        if let Some(p) = u15_skip_without_r16(&active.provenance) {
+            let source_owned: f32 = p.iter().sum();
+            let total: f32 = (0..p.len())
+                .map(|cell| u15_total_water(&active.state, cell))
+                .sum();
             assert!(
-                p.iter().all(|value| *value == 0.0),
-                "land provenance must be exactly empty, max={:?}",
-                p.iter().cloned().fold(f32::NAN, f32::max)
+                source_owned > 0.0,
+                "active land ET minted no source ownership"
             );
+            assert!(
+                source_owned <= 0.31 * total,
+                "source-owned scalar exceeds the land ET 0.3 mixing cap: {source_owned} vs {total}"
+            );
+        }
+
+        for (name, coverage, moisture, temp) in [
+            ("coverage", 0.0, 1.0, 30.0),
+            ("moisture", 1.0, 0.0, 30.0),
+            ("temperature", 1.0, 1.0, -50.0),
+        ] {
+            let gated = run(coverage, moisture, temp);
+            if let Some(p) = u15_skip_without_r16(&gated.provenance) {
+                assert!(
+                    p.iter().all(|value| *value == 0.0),
+                    "{name} ET gate must leave source ownership exactly zero"
+                );
+            }
         }
     }
 
@@ -8966,15 +9853,14 @@ mod tests {
             trace.provenance.is_none(),
             "forced disable must yield no tracer readback"
         );
-        // FE-081 couples provenance_share into phase partitioning, so the
+        // FE-081 couples source ownership into phase partitioning, so the
         // enabled and disabled runs are intentionally different fields (see
         // the weather.rs fingerprint pins). Pin the forced disable to plain
         // generation instead: the branch incapable adapters always take must
         // stay bit-identical to the Mode-Off production path.
         let wind = WindFieldPipeline::new(&gpu).expect("U15 dynamics unavailable");
         let terrain = u14_flat_terrain(16, |_| -0.1);
-        let dynamics =
-            wind.create_test_textures(&gpu, 16, |_| ([0.2, 0.0, -0.1, 0.0], 1013.0));
+        let dynamics = wind.create_test_textures(&gpu, 16, |_| ([0.2, 0.0, -0.1, 0.0], 1013.0));
         let snapshot = WeatherSnapshot {
             base_temp_c: 30.0,
             ..u15_size_weather_snapshot(16, U15_SIZE_SEEDS[0], 1.0)
@@ -9145,7 +10031,7 @@ mod tests {
         let baseline_mass = field.read_mass(&gpu);
         let baseline_geometry = field.read_geometry(&gpu);
 
-        // FE-081 couples provenance_share into phase partitioning, so a
+        // FE-081 couples source ownership into phase partitioning, so a
         // tracer-enabled rerun is intentionally a different field. Pin the
         // infrastructure-neutrality policy through the Mode-Off branch
         // instead: a forced-disable rerun must reproduce production output

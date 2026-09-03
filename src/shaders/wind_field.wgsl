@@ -19,7 +19,7 @@ struct WindFieldParams {
     rotation_rate: f32,    // relative to Earth (1.0 = 24h, 0.5 = 48h, 2.0 = 12h)
     base_temp_c: f32,      // planet mean temperature °C (15 = Earth)
     atm_pressure: f32,     // atmospheric pressure in bar (1.0 = Earth)
-    _pad0: u32,
+    wind_scale: f32,       // Reserved uniform slot; spin-up consumes its matching snapshot field.
 }
 
 @group(0) @binding(0) var<uniform> params: WindFieldParams;
@@ -270,6 +270,13 @@ fn compute_pressure(pos: vec3<f32>, idx: u32) {
     // (h) Noise perturbation (±3 hPa, slightly stronger than before)
     pressure += snoise(pos * 2.0 + noise_seed_offset(params.seed, 14u)) * 3.0;
 
+    // (i) DS-046 mesoscale cells: two seed-stable octaves (pos×8…×24, ±2.5 hPa)
+    // add 100–1,000 km convergence/divergence structure so frontal lift and
+    // column pressure vary at storm scale instead of tracing only continental
+    // outlines.
+    pressure += snoise(pos * 8.0 + noise_seed_offset(params.seed, 22u)) * 1.6;
+    pressure += snoise(pos * 24.0 + noise_seed_offset(params.seed, 23u)) * 0.9;
+
     dst[idx] = pressure;
     textureStore(output_tex, vec2<i32>(i32(idx % params.resolution), i32((idx / params.resolution) % params.resolution)), i32(params.face), vec4<f32>(pressure, 0.0, 0.0, 0.0));
 }
@@ -363,6 +370,14 @@ fn compute_wind(pos: vec3<f32>, idx: u32) {
     let lon_var2 = snoise(tilted_pos + noise_seed_offset(params.seed, 17u));
     wind_e += lon_var * 0.10;
     wind_n += lon_var2 * 0.08;
+
+    // DS-046 mesoscale steering: two octaves (pos×8…×24) bend trajectories and
+    // create convergence/divergence cells so continental interiors gain
+    // multi-directional reach instead of single-file zonal filaments.
+    let meso_e = snoise(tilted_pos * 8.0 + noise_seed_offset(params.seed, 20u));
+    let meso_n = snoise(tilted_pos * 24.0 + noise_seed_offset(params.seed, 21u));
+    wind_e += meso_e * 0.12;
+    wind_n += meso_n * 0.12;
 
     // Mountain speed boost: wind accelerates near high terrain (venturi/gap wind)
     let mountain_speed = 1.0 + smooth_step(0.08, 0.20, elevation) * 0.3;
