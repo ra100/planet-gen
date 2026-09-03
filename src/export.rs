@@ -4393,7 +4393,12 @@ mod tests {
             include_str!("preview.rs").contains("include_str!(\"shaders/cloud_density.wgsl\")")
         );
         assert!(include_str!("export.rs").contains("include_str!(\"shaders/cloud_density.wgsl\")"));
-        assert!(include_str!("shaders/cloud_export.wgsl").contains("weather_cloud_sample"));
+        // FE-089: export must use the shared land-segment path (which samples
+        // weather_cloud_sample internally in cloud_density.wgsl), not a bare
+        // point sample — this is what keeps preview and export over land in step.
+        assert!(
+            include_str!("shaders/cloud_export.wgsl").contains("weather_cloud_layers_land_segment")
+        );
 
         let (y_mae, coverage_delta, directional_correlation, y_p95) = u5_y_metrics(&direct, &tiled);
         assert!(y_mae <= 0.03, "shared-ray Y MAE={y_mae}");

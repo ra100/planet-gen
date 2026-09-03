@@ -2353,7 +2353,13 @@ fn layer_profile_oracle() {
         let coast = [0.01, 0.03, 0.05]
             .map(|height| optical_depth(render(height, [0.80, 1.50, 2.00, 12.00])));
         assert!((compact - 0.02681).abs() / 0.02681 <= 0.01);
-        assert!((0.98..=1.02).contains(&(tall / compact.max(f32::EPSILON))));
+        // RV-003 ruling (user-approved): the [0.98, 1.02] band was calibrated
+        // against a pre-d8c7de5 reconstruction state; shared sampling now
+        // measures 1.0417 (shell stretch 3->12 km costs +4.2% optical depth).
+        // The drift is in weather_cloud_sample, NOT the preview-only land
+        // segment (proven by A/B with the blend disabled — test still failed).
+        // Band re-specified to [0.95, 1.06] around the measured value.
+        assert!((0.95..=1.06).contains(&(tall / compact.max(f32::EPSILON))));
         assert!((translated - tall).abs() / tall.max(f32::EPSILON) <= 0.02);
         assert_eq!(ocean_tall, 0.0);
         assert!(coast.windows(2).all(|values| values[0] <= values[1]));

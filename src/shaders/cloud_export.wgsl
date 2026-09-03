@@ -102,7 +102,17 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     var deep_sum = 0.0;
     for (var sample_index = 0u; sample_index < 8u; sample_index++) {
         let altitude_km = (f32(sample_index) + 0.5) * step_km;
-        let sample = weather_cloud_sample(direction, altitude_km, footprint);
+        // FE-089: export marches radially per texel direction (no camera ray),
+        // so each sample's segment is the radial slice between its altitude
+        // band edges. This calls the SAME shared land-segment function preview
+        // uses, closing the documented preview/export divergence over land
+        // (882b7cb NOTE). Ocean texels hit the land gate early return and are
+        // bit-exact unchanged; radial points satisfy length(p) = 1 + h/radius_km.
+        let segment_start = direction * (1.0 + f32(sample_index) * step_km / radius_km);
+        let segment_end = direction * (1.0 + (f32(sample_index) + 1.0) * step_km / radius_km);
+        let sample = weather_cloud_layers_land_segment(
+            direction, altitude_km, segment_start, segment_end, radius_km, footprint,
+        );
         let packed = cloud_layer_geometry(sample.geometry, sample.layers);
         optical_depth += packed.x * step_km * CLOUD_LIGHT_EXTINCTION;
         geometry_weight += packed.x;
