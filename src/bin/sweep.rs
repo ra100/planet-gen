@@ -6420,12 +6420,15 @@ fn run_u3_local_validation(
 // the real validation scene.
 //   A1 (re-specified per the DS-046 ruling, 2026-08-24):
 //     A1a: coastline-correlation score of the largest connected cloud-free
-//          region < T_COAST at wind_scale {0.25, 2.0} (detector promoted from
+//          region < T_COAST at wind_scale {0.25, 4.0} (detector promoted from
 //          advisory to gating; threshold calibrated once on the FE-081-era
-//          build 882b7cb).
-//     A1b: land cloud fraction ≥25% at every tested wind_scale.
+//          build 882b7cb; RV-003 #3: max-wind eval point moved 2.0 → 4.0 when
+//          the validated range extended to [0.25, 4.0]).
+//     A1b: land cloud fraction ≥ target (0.15 floor at ws < 0.75, else 0.25)
+//          at every tested wind_scale in [0.25, 4.0].
 //     A1c: raw largest connected cloud-free region ≤35% of sphere at
-//          wind_scale 2 (catastrophe backstop, zero exclusions).
+//          wind_scale 4 (catastrophe backstop, zero exclusions; RV-003 #3:
+//          moved from ws=2 to the extended max).
 //     The legacy habitable-band raw-area metric is telemetry only.
 //   A2: high-pass (<~1500 km removed) condensate RMS ≥15% of the total, with
 //       the next octave carrying ≥25% of that energy (≥2 octaves of texture).
@@ -6436,6 +6439,9 @@ fn run_u3_local_validation(
 // validation scene, equirect grid, wind_scale 0.25 and 2.0): baseline
 // coastline-correlation scores were −0.068 (ws=min) / +0.135 (ws=max);
 // T_coast = 50% × max(−0.068, +0.135) = 0.068.
+// RV-003 #3: wind_scale 4.0 added as the max-wind eval point — measured 0.017
+// on the FE-090-era build (target/val-fe090-run.log), far below T_coast, so no
+// recalibration was needed.
 const DS046_A1A_T_COAST: f32 = 0.068;
 // RV-002 A1b re-specification (measured, validation run 6): the warm-land
 // occupied fraction at ws=0.25 is FLAT with distance from coast (≤2 texels
@@ -6793,7 +6799,7 @@ fn run_ds046_a_metrics(
     // physics, not the continent-mask defect). The new PASS set:
     //   A1a coastline decoupling: coastline-correlation score of the largest
     //       connected cloud-free region < T_COAST at wind_scale min (0.25) and
-    //       max (2.0). Promotes the existing DS-045 detector
+    //       max (4.0, RV-003 #3). Promotes the existing DS-045 detector
     //       (`ds045_no_coastline_correlated_boundary_across_wind_sweep`) from
     //       advisory unit-test scope to this gating real-scene metric.
     //       RV-002 re-specification: the free region is grown with the
@@ -6817,8 +6823,9 @@ fn run_ds046_a_metrics(
     let mut max_wind_void_telemetry = None;
     // wind_field.wgsl does not consume wind_scale. Reuse the scene dynamics;
     // WeatherSnapshot.wind_scale changes transport and forcing only.
-    // RV-003: ws=4.0 is a telemetry-only excursion beyond the validated
-    // [0,2] gate range (transport cap raised to 4.0; no gates apply above 2.0).
+    // RV-003 #3: the validated gate range is [0.25, 4.0]; ws=4.0 is a full
+    // gated eval point (A1a max-wind, A1b target, A1c backstop), no longer a
+    // telemetry-only excursion.
     for wind_scale in [0.25_f32, 1.0, 2.0, 4.0] {
         let (weather, generation_ms) = time_gpu_call(gpu, || {
             generate_validation_weather_at_wind_scale(
@@ -6862,34 +6869,36 @@ fn run_ds046_a_metrics(
             free_fraction * 100.0,
             land_cloud_fraction * 100.0,
         );
-        if (wind_scale == 0.25 || wind_scale == 2.0) && coast_score >= DS046_A1A_T_COAST {
+        if (wind_scale == 0.25 || wind_scale == 4.0) && coast_score >= DS046_A1A_T_COAST {
             failures.push(format!(
                 "DS-046 A1a wind_scale={wind_scale}: coastline-correlation score {coast_score:.3} >= T_coast {DS046_A1A_T_COAST:.3}"
             ));
         }
         // RV-002 A1b re-specification: wind-dependent target (see
-        // DS046_A1B_T_LOW_WIND for the measured rationale). RV-003: ws > 2.0
-        // is telemetry-only — no gates beyond the validated range.
+        // DS046_A1B_T_LOW_WIND for the measured rationale). RV-003 #3: gated
+        // across the full validated range [0.25, 4.0] — ws=4 measured 51.9%
+        // land_cloud(warm), well above the 0.25 target (target/val-fe090-run.log).
         let a1b_target = if wind_scale < 0.75 { DS046_A1B_T_LOW_WIND } else { 0.25 };
-        if wind_scale <= 2.0 && land_cloud_fraction < a1b_target {
+        if land_cloud_fraction < a1b_target {
             failures.push(format!(
                 "DS-046 A1b wind_scale={wind_scale}: land cloud fraction {land_cloud_fraction:.3} < target {a1b_target:.2}"
             ));
         }
-        if wind_scale == 2.0 {
+        // RV-003 #3: A1c backstop evaluated at the extended max wind (4.0).
+        if wind_scale == 4.0 {
             let (raw_free_fraction, _) = ds046_largest_free_region(&grid, false, false);
             let (lower_hemisphere_occupancy, lower_hemisphere_condensate_mean) =
                 ds046_lower_hemisphere_telemetry(&grid);
             max_wind_void_telemetry = Some(format!(
-                "wind_scale=2 lower_hemisphere_occupancy={lower_hemisphere_occupancy:.5}\nlower_hemisphere_condensate_mean={lower_hemisphere_condensate_mean:.5}"
+                "wind_scale=4 lower_hemisphere_occupancy={lower_hemisphere_occupancy:.5}\nlower_hemisphere_condensate_mean={lower_hemisphere_condensate_mean:.5}"
             ));
             println!(
-                "  DS-046 A1c raw cloud-free region at wind_scale=2: {:.1}% of sphere (backstop ≤35%)",
+                "  DS-046 A1c raw cloud-free region at wind_scale=4: {:.1}% of sphere (backstop ≤35%)",
                 raw_free_fraction * 100.0
             );
             if raw_free_fraction > 0.35 {
                 failures.push(format!(
-                    "DS-046 A1c: raw largest cloud-free region {raw_free_fraction:.3} > 0.35 of sphere at wind_scale=2"
+                    "DS-046 A1c: raw largest cloud-free region {raw_free_fraction:.3} > 0.35 of sphere at wind_scale=4"
                 ));
             }
         }
