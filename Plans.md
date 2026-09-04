@@ -193,6 +193,10 @@ User-approved follow-up to RV-002 #5: close the documented preview/export diverg
 | FE-089 #1 | cloud_export.wgsl main() radial march now calls the shared weather_cloud_layers_land_segment with radial band-edge segments (segment_start/end = direction × (1 + h/radius_km)); ocean texels bit-exact via the land gate early return; U5 test updated to assert export uses the shared land-segment path (the old weather_cloud_sample assertion pointed at the entry point that no longer appears in the file). | cc:完了 [dc278ee] |
 | FE-089 #2 | Validation: full lib suite green — 179 passed / 0 failed / 3 ignored (target/val-fe089-lib2.log), zero pin churn so no re-baselining needed; sweep at exactly 17 failures = 15 parked U15 + 2 environmental perf gates, no new failures (target/val-fe089-run.log). | cc:完了 [dc278ee] |
 
+### Next step: vegetation → weather feedback (requirements only, unplanned)
+
+Brainstorm doc: docs/brainstorms/2026-09-04-vegetation-weather-feedback-requirements.md. Land ET has no vegetation state today — et_capacity is global-coverage × global-moisture × temperature window, so a Saharan and an Amazonian cell at the same temperature contribute identical ET. Document scopes: S1 inline per-texel proxy from existing spinup fields (recommended first step, no new fields) vs S2 dedicated biome pre-pass; constraints enumerate pin churn, DS-046 re-measurement protocol, parked-U15 coupling risk, and FE-085/086 provenance doctrine. FE number will be assigned when the implementation plan is drafted. | requirements |
+
 ---
 
 ## Archived: Terrain Diffusion and Imported Terrain
