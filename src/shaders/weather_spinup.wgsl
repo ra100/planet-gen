@@ -852,15 +852,33 @@ fn advance_state(pos: vec3<f32>, provenance_mass: f32, enable_vertical: bool) ->
     let ice_fraction = 1.0 - smoothstep(-15.0, -6.0, temperature_at(pos));
     let persistent_ice = marine_fraction * ice_fraction;
     let source_ice = water.local * ice_fraction;
+    // FE-090 (S1): per-texel vegetation density from existing fields — no new
+    // fields, no layout bump. Vegetation needs per-texel moisture (coasts wet,
+    // interiors dry; lee slopes dried by rain shadow), an altitude low enough
+    // for a treeline, and no persistent ice. Bounded in [0,1]. The 6..22 °C
+    // warmth window stays in et_capacity below (single source of truth); this
+    // proxy adds the moisture/relief structure it currently lacks. wind.a is
+    // the continentality channel (same inversion as marine_fraction above), so
+    // coasts get dense vegetation and deep interiors sparse — a Saharan cell
+    // transpires less than an Amazonian one at the same temperature.
+    let elevation_km = max(sample_height(pos) - params.ocean_level, 0.0) * 5.0;
+    let continentality = smooth_step(0.15, 0.85, wind.a);
+    let veg_moisture = (1.0 - rain_shadow * 0.6)
+        * mix(0.10, 1.0, 1.0 - continentality);
+    let vegetation_density = veg_moisture
+        * (1.0 - smooth_step(2.2, 3.4, elevation_km))   // treeline cap ~3 km
+        * (1.0 - ice_fraction);                         // frozen ground: no ET
     // FE-086: bounded land-only evapotranspiration capacity. It gates the
-    // supplemental source below by coverage, moisture, and surface temperature.
-    // It is zero over standing water (water.local != 0), with no coverage or
-    // moisture, and on cold ground; the thermal window starts at 6 °C because
+    // supplemental source below by coverage, moisture, surface temperature,
+    // and per-texel vegetation density (FE-090 S1). It is zero over standing
+    // water (water.local != 0), with no coverage or moisture, on cold ground,
+    // and where vegetation is absent; the thermal window starts at 6 °C because
     // evapotranspiration is negligible below ~5 °C (frozen/inactive soil).
     let et_capacity = f32(water.local == 0.0)
         * clamp(params.coverage, 0.0, 1.0)
         * clamp(params.moisture, 0.0, 1.0)
-        * smooth_step(6.0, 22.0, temperature_at(pos));
+        * smooth_step(6.0, 22.0, temperature_at(pos))
+        * vegetation_density;
     let budgets = source_budgets(
         params.coverage,
         marine_climate,
