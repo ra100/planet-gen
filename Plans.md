@@ -193,9 +193,22 @@ User-approved follow-up to RV-002 #5: close the documented preview/export diverg
 | FE-089 #1 | cloud_export.wgsl main() radial march now calls the shared weather_cloud_layers_land_segment with radial band-edge segments (segment_start/end = direction × (1 + h/radius_km)); ocean texels bit-exact via the land gate early return; U5 test updated to assert export uses the shared land-segment path (the old weather_cloud_sample assertion pointed at the entry point that no longer appears in the file). | cc:完了 [dc278ee] |
 | FE-089 #2 | Validation: full lib suite green — 179 passed / 0 failed / 3 ignored (target/val-fe089-lib2.log), zero pin churn so no re-baselining needed; sweep at exactly 17 failures = 15 parked U15 + 2 environmental perf gates, no new failures (target/val-fe089-run.log). | cc:完了 [dc278ee] |
 
-### Next step: vegetation → weather feedback (requirements only, unplanned)
+### Perf-gate ignore switch (c50c7b8)
 
-Brainstorm doc: docs/brainstorms/2026-09-04-vegetation-weather-feedback-requirements.md. Land ET has no vegetation state today — et_capacity is global-coverage × global-moisture × temperature window, so a Saharan and an Amazonian cell at the same temperature contribute identical ET. Document scopes: S1 inline per-texel proxy from existing spinup fields (recommended first step, no new fields) vs S2 dedicated biome pre-pass; constraints enumerate pin churn, DS-046 re-measurement protocol, parked-U15 coupling risk, and FE-085/086 provenance doctrine. FE number will be assigned when the implementation plan is drafted. | requirements |
+User-approved: allow ignoring the environmental performance gates to continue work. `PLANET_GEN_IGNORE_PERF_GATES=1` downgrades the three queue p95 checks (generation, render, U3 render fixture) from fatal to reported-only; correctness gates — including parked U15 — are never ignored, and perf stays fatal by default. Verified: target/val-perf-ignore-run.log — 2 perf failures listed as ignored, 15 U15 failures remain fatal (exit 101). Note the environmental load has worsened since val-034 (generation min 664 ms vs 410 ms; U3 p95 10.4 s) — real perf evidence still needs a quiet-window run in the author's normal session.
+
+### FE-090 vegetation → weather feedback (S1 planned)
+
+User-approved scope: S1 inline per-texel vegetation proxy (the requirements doc's recommended first step). Land ET has no vegetation state today — et_capacity is global-coverage × global-moisture × temperature window, so a Saharan and an Amazonian cell at the same temperature contribute identical ET. Requirements: docs/brainstorms/2026-09-04-vegetation-weather-feedback-requirements.md; plan: docs/plans/2026-09-04-001-feat-vegetation-weather-feedback-plan.md (FE-090).
+
+| Task | 内容 | Status |
+|------|------|--------|
+| FE-090 #1 | S1 vegetation proxy + et_capacity multiply in weather_spinup.wgsl (per-texel moisture from wind.a continentality × lee drying, treeline cap ~3 km, ice zero; calm-wet mask inherits via et_capacity) | cc:TODO |
+| FE-090 #2 | Re-baseline the 3 weather.rs mass-fingerprint pins per protocol (clean build, two runs, identical hashes, documented ruling) | cc:TODO |
+| FE-090 #3 | Lib suite green ×2 (no new failures beyond known set) | cc:TODO |
+| FE-090 #4 | DS-046 re-measurement at ws ∈ {0.25…2} + ws=4 telemetry; threshold rulings only where physics plausibly moved (measure first, RV-002 #6 protocol) | cc:TODO |
+| FE-090 #5 | U15 per-seed delta report — parked values WILL move; no recalibration without user decision | cc:TODO |
+| FE-090 #6 | A/B before/after density maps + PSNR/SSIM + physical-ordering check (forest > desert at matched temperature) | cc:TODO |
 
 ---
 
