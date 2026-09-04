@@ -196,7 +196,7 @@ User-approved follow-up to RV-002 #5: close the documented preview/export diverg
 
 ### Perf-gate ignore switch (c50c7b8)
 
-User-approved: allow ignoring the environmental performance gates to continue work. `PLANET_GEN_IGNORE_PERF_GATES=1` downgrades the three queue p95 checks (generation, render, U3 render fixture) from fatal to reported-only; correctness gates — including parked U15 — are never ignored, and perf stays fatal by default. Verified: target/val-perf-ignore-run.log — 2 perf failures listed as ignored, 15 U15 failures remain fatal (exit 101). Note the environmental load has worsened since val-034 (generation min 664 ms vs 410 ms; U3 p95 10.4 s) — real perf evidence still needs a quiet-window run in the author's normal session.
+User-approved: allow ignoring the environmental performance gates to continue work. `PLANET_GEN_IGNORE_PERF_GATES=1` downgrades the three queue p95 checks (generation, render, U3 render fixture) from fatal to reported-only; correctness gates — including parked U15 — are never ignored, and perf stays fatal by default. Verified: target/val-perf-ignore-run.log — 2 perf failures listed as ignored, 15 U15 failures remain fatal (exit 101). Note the environmental load has worsened since val-034 (generation min 664 ms vs 410 ms; U3 p95 10.4 s). User ruling (2026-09-04): **performance parked / side-tracked** — the quiet-window perf re-run is deferred indefinitely; `PLANET_GEN_IGNORE_PERF_GATES=1` is the standing convention for validation runs on this box until the user reopens it. Perf gate thresholds and code are unchanged; a green perf claim still requires a run without the env var in a quiet window.
 
 ### FE-090 vegetation → weather feedback (S1 implemented)
 
