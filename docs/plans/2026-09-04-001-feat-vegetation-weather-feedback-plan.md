@@ -145,9 +145,11 @@ Consequences:
   LAND_ET_STRENGTH 2.5× left every A-metric byte-identical — land q_target
   stays far below q_sat, so condensation needs convergence regardless). S1's
   scene-scale cloud signature is therefore sub-perceptual there; its measured
-  effect is convective-response modulation. Open user decision: accept as-is /
-  amplify proxy contrast (RV-002 #3 suggests this will not help in this
-  scene) / defer until a phase-change change makes ET rate-limiting.
+   effect is convective-response modulation. User ruling (2026-09-04): accepted
+   as-is — the proxy is physically correct plumbing and the sub-perceptual
+   scene-scale signature is documented behavior, not a defect; amplification or
+   deferral remains available if a later phase-change change makes ET
+   rate-limiting.
 
 ## Out of scope
 
