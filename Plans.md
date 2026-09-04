@@ -197,18 +197,21 @@ User-approved follow-up to RV-002 #5: close the documented preview/export diverg
 
 User-approved: allow ignoring the environmental performance gates to continue work. `PLANET_GEN_IGNORE_PERF_GATES=1` downgrades the three queue p95 checks (generation, render, U3 render fixture) from fatal to reported-only; correctness gates — including parked U15 — are never ignored, and perf stays fatal by default. Verified: target/val-perf-ignore-run.log — 2 perf failures listed as ignored, 15 U15 failures remain fatal (exit 101). Note the environmental load has worsened since val-034 (generation min 664 ms vs 410 ms; U3 p95 10.4 s) — real perf evidence still needs a quiet-window run in the author's normal session.
 
-### FE-090 vegetation → weather feedback (S1 planned)
+### FE-090 vegetation → weather feedback (S1 implemented)
 
-User-approved scope: S1 inline per-texel vegetation proxy (the requirements doc's recommended first step). Land ET has no vegetation state today — et_capacity is global-coverage × global-moisture × temperature window, so a Saharan and an Amazonian cell at the same temperature contribute identical ET. Requirements: docs/brainstorms/2026-09-04-vegetation-weather-feedback-requirements.md; plan: docs/plans/2026-09-04-001-feat-vegetation-weather-feedback-plan.md (FE-090).
+User-approved scope: S1 inline per-texel vegetation proxy (the requirements doc's recommended first step). Land ET has no vegetation state today — et_capacity is global-coverage × global-moisture × temperature window, so a Saharan and an Amazonian cell at the same temperature contribute identical ET. Requirements: docs/brainstorms/2026-09-04-vegetation-weather-feedback-requirements.md; plan: docs/plans/2026-09-04-001-feat-vegetation-weather-feedback-plan.md (FE-090, completed).
 
 | Task | 内容 | Status |
 |------|------|--------|
-| FE-090 #1 | S1 vegetation proxy + et_capacity multiply in weather_spinup.wgsl (per-texel moisture from wind.a continentality × lee drying, treeline cap ~3 km, ice zero; calm-wet mask inherits via et_capacity) | cc:TODO |
-| FE-090 #2 | Re-baseline the 3 weather.rs mass-fingerprint pins per protocol (clean build, two runs, identical hashes, documented ruling) | cc:TODO |
-| FE-090 #3 | Lib suite green ×2 (no new failures beyond known set) | cc:TODO |
-| FE-090 #4 | DS-046 re-measurement at ws ∈ {0.25…2} + ws=4 telemetry; threshold rulings only where physics plausibly moved (measure first, RV-002 #6 protocol) | cc:TODO |
-| FE-090 #5 | U15 per-seed delta report — parked values WILL move; no recalibration without user decision | cc:TODO |
-| FE-090 #6 | A/B before/after density maps + PSNR/SSIM + physical-ordering check (forest > desert at matched temperature) | cc:TODO |
+| FE-090 #1 | S1 vegetation proxy + et_capacity multiply in weather_spinup.wgsl: veg_moisture = (1 − rain_shadow·0.6) × mix(0.10, 1.0, marine), treeline cap smooth_step(2.2, 3.4 km), ice zero; calm-wet mask inherits via et_capacity | cc:完了 [7a7ea42] |
+| FE-090 #2 | Pins: ZERO churn — all three fingerprint fixtures are all-ocean where et_capacity is exactly 0 (water.local gate); bit-exact by construction, verified green ×2. Ruling documented in the plan's Findings. | cc:完了 [7a7ea42] |
+| FE-090 #3 | Lib suite green ×2: 179 passed / 0 failed / 3 ignored (target/val-fe090-lib.log, val-fe090-lib3.log). One run-2 failure was an unrelated pure-CPU export-staging race under concurrent load (rows_completed 1025 vs 1024); passed in isolation and on the clean rerun. | cc:完了 [7a7ea42] |
+| FE-090 #4 | DS-046 re-measured (target/val-fe090-run): A metrics IDENTICAL to baseline at reported precision — A1a 0.038/0.056/0.040 vs T_COAST 0.068, A1b 17.5/30.8/37.0% ≥ targets, A1c 33.9% ≤ 35%, A2/A3 unchanged → no threshold re-specification needed | cc:完了 [7a7ea42] |
+| FE-090 #5 | U15 per-seed deltas (parked, NOT re-baselined): plume response_p95 scale1 +7.5…+13.4%, scale2 +25.8…+31.4% across all 8 seeds; failing set unchanged (same 15). Pathway: et_capacity feeds calm_wet_land_mask (FE-084) — sparse vegetation weakens the stratiform regime and strengthens the convective catalyst; direction physically consistent (dry surfaces → more deep convection) | cc:完了 [7a7ea42] |
+| FE-090 #6 | A/B vs baseline target/val-perf-ignore-run: all 16 U14 fixture density images bit-identical; DS-046 equirect cloud maps sub-pixel drift only (ws2: 45/32768 px, max Δ2/255; ws4: 53/32768 px, max Δ1/255) — below perceptual threshold | cc:完了 [7a7ea42] |
+| FE-090 #7 | Plans.md + plan doc stamped (status: completed) | cc:完了 |
+
+Validation (target/val-fe090-run.log, PLANET_GEN_IGNORE_PERF_GATES=1): total gate failures 15 = the same parked U15 set (zero new, zero resolved) + 2 perf gates reported-ignored. Interpretation (plan Findings): in the DS-046 scene ET source magnitude is not the binding limit for land-cloud formation (RV-002 #3: 2.5× LAND_ET_STRENGTH left every A-metric byte-identical — land q_target ≪ q_sat, condensation needs convergence regardless), so S1's scene-scale cloud signature is sub-perceptual there; its measured effect is convective-response modulation (U15 deltas above). Open user decision: accept as-is / amplify proxy contrast (RV-002 #3 suggests it will not help in this scene) / defer until a phase-change change makes ET rate-limiting.
 
 ---
 

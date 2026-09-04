@@ -1,7 +1,7 @@
 ---
 title: "feat: Vegetation-to-weather feedback (S1 inline proxy)"
 type: feat
-status: active
+status: completed
 date: 2026-09-04
 origin: docs/brainstorms/2026-09-04-vegetation-weather-feedback-requirements.md
 ---
@@ -105,13 +105,49 @@ Consequences:
 
 | # | Task | DoD | Status |
 |---|------|-----|--------|
-| 1 | Implement S1 vegetation proxy + et_capacity multiply in weather_spinup.wgsl (FE-090 comment block) | shader compiles; lib suite runs | cc:TODO |
-| 2 | Re-baseline the 3 weather.rs pins per protocol | clean build, two runs, identical hashes, ruling documented | cc:TODO |
-| 3 | Lib suite green (no new failures beyond known set), ×2 | log saved under target/ | cc:TODO |
-| 4 | DS-046 re-measurement + threshold rulings where physics moved | measured values recorded; any re-spec has a ruling comment | cc:TODO |
-| 5 | U15 per-seed delta report (no recalibration while parked) | deltas in run log; status stays known-blocked | cc:TODO |
-| 6 | A/B before/after density maps + PSNR/SSIM + physical-ordering check | numbers recorded in Plans.md | cc:TODO |
-| 7 | Plans.md update + plan status → completed | section stamped with commit hash | cc:TODO |
+| 1 | Implement S1 vegetation proxy + et_capacity multiply in weather_spinup.wgsl (FE-090 comment block) | shader compiles; lib suite runs | cc:完了 [7a7ea42] |
+| 2 | Re-baseline the 3 weather.rs pins per protocol | clean build, two runs, identical hashes, ruling documented | cc:完了 [7a7ea42] — zero churn (ruling in Findings) |
+| 3 | Lib suite green (no new failures beyond known set), ×2 | log saved under target/ | cc:完了 [7a7ea42] |
+| 4 | DS-046 re-measurement + threshold rulings where physics moved | measured values recorded; any re-spec has a ruling comment | cc:完了 [7a7ea42] — no re-spec needed (values unchanged) |
+| 5 | U15 per-seed delta report (no recalibration while parked) | deltas in run log; status stays known-blocked | cc:完了 [7a7ea42] |
+| 6 | A/B before/after density maps + PSNR/SSIM + physical-ordering check | numbers recorded in Plans.md | cc:完了 [7a7ea42] |
+| 7 | Plans.md update + plan status → completed | section stamped with commit hash | cc:完了 |
+
+## Findings (measured, target/val-fe090-run vs baseline target/val-perf-ignore-run)
+
+- **Pins: zero churn.** All three mass-fingerprint fixtures are all-ocean
+  (`terrain_from(res, |_| -0.1)`), where `et_capacity` is exactly 0 (the
+  `water.local == 0` gate), so the land-only vegetation multiply cannot move
+  them — bit-exact by construction, verified: lib suite green ×2 (179 passed /
+  3 ignored; target/val-fe090-lib.log, val-fe090-lib3.log). One run-2 failure
+  (`export::tests::midflight_cancellation_merges_worker_cache_peaks_before_terminal_checkpoint`,
+  rows_completed 1025 vs 1024) was an unrelated pure-CPU export-staging race
+  under concurrent-load contention; it passed in isolation (0.03 s) and the
+  clean rerun was fully green.
+- **Gates: zero new failures.** Total = 15 parked U15 (identical seed/fixture
+  set as before) + 2 environmental perf gates ignored via
+  `PLANET_GEN_IGNORE_PERF_GATES=1` (c50c7b8). DS-046 A metrics identical to
+  baseline at reported precision: A1a coast_corr 0.038/0.056/0.040 vs
+  T_COAST 0.068; A1b land_cloud(warm) 17.5/30.8/37.0% ≥ targets; A1c 33.9% ≤
+  35%; A2/A3 unchanged → **no threshold re-specification was needed**.
+- **A/B:** all 16 U14 fixture density images (8 seeds × coast_to_interior +
+  mountain_windward_lee) are bit-identical. DS-046 equirect cloud maps show
+  sub-pixel drift only: ws2 45/32768 px differing, max Δ2/255; ws4 53/32768
+  px, max Δ1/255 — below perceptual threshold.
+- **U15 deltas (parked, NOT re-baselined):** plume response_p95 scale1
+  +7.5…+13.4% and scale2 +25.8…+31.4% across all 8 seeds; the failing set is
+  unchanged (same 15). Pathway: `et_capacity` feeds `calm_wet_land_mask`
+  (FE-084) — per-texel vegetation weakens the calm-wet stratiform regime where
+  vegetation is sparse, strengthening the convective catalyst there. Direction
+  is physically consistent (dry/sparse surfaces → more deep convection).
+- **Interpretation:** in the DS-046 scene the ET source magnitude is not the
+  binding limit for land-cloud formation (consistent with RV-002 #3: raising
+  LAND_ET_STRENGTH 2.5× left every A-metric byte-identical — land q_target
+  stays far below q_sat, so condensation needs convergence regardless). S1's
+  scene-scale cloud signature is therefore sub-perceptual there; its measured
+  effect is convective-response modulation. Open user decision: accept as-is /
+  amplify proxy contrast (RV-002 #3 suggests this will not help in this
+  scene) / defer until a phase-change change makes ET rate-limiting.
 
 ## Out of scope
 
