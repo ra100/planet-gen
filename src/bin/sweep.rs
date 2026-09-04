@@ -565,6 +565,42 @@ fn save_u14_total_density_view(
     println!("  {name}");
 }
 
+// ponytail: env-gated U15 triage diagnostics (PLANET_GEN_U15_DUMP_TRAIL=1).
+// Dumps the shear-plume counterfactual response as a scalar cube view so the
+// plume morphology can be inspected without touching gate behavior.
+fn save_u15_trail_scalar_view(output_dir: &str, label: &str, resolution: u32, values: &[f32]) {
+    let width = resolution as usize * 3;
+    let height = resolution as usize * 2;
+    let max_value = values
+        .iter()
+        .fold(0.0f32, |maximum, &value| maximum.max(value));
+    let mut pixels = vec![0u8; width * height * 4];
+    for face in 0..6 {
+        for y in 0..resolution as usize {
+            for x in 0..resolution as usize {
+                let source =
+                    face * resolution as usize * resolution as usize + y * resolution as usize + x;
+                let target = (face / 3 * resolution as usize + y) * width
+                    + face % 3 * resolution as usize
+                    + x;
+                let value = (values[source] / max_value.max(f32::EPSILON)).clamp(0.0, 1.0);
+                let byte = (value * 255.0).round() as u8;
+                pixels[target * 4..target * 4 + 4].copy_from_slice(&[byte, byte, byte, 255]);
+            }
+        }
+    }
+    let name = format!("{label}.png");
+    image::save_buffer(
+        Path::new(output_dir).join(&name),
+        &pixels,
+        width as u32,
+        height as u32,
+        image::ColorType::Rgba8,
+    )
+    .expect("save U15 trail scalar view");
+    println!("  {name}");
+}
+
 fn generate_validation_weather(
     pipeline: &WeatherFieldPipeline,
     gpu: &GpuContext,
@@ -5514,6 +5550,20 @@ fn run_u15_field_validation(
         let trail_response: [Vec<f32>; 2] = std::array::from_fn(|index| {
             u15_trail_response(&trail_source[index], &trail_control[index])
         });
+        if std::env::var_os("PLANET_GEN_U15_DUMP_TRAIL").is_some() {
+            save_u15_trail_scalar_view(
+                output_dir,
+                &format!("u15tr_seed_{seed}_ws1_response"),
+                resolution,
+                &trail_response[0],
+            );
+            save_u15_trail_scalar_view(
+                output_dir,
+                &format!("u15tr_seed_{seed}_ws2_response"),
+                resolution,
+                &trail_response[1],
+            );
+        }
         let plume = trail_response
             .each_ref()
             .map(|response| u15_plume_metrics(response, resolution));
