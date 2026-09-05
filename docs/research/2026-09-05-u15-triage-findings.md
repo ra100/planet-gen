@@ -90,9 +90,31 @@ Implementation (`src/bin/sweep.rs`): two new `U15PlumeMetrics` fields — `downw
 
 Validation (`target/val-u15-surgery.log`, `--size 512`): **total gate failures 15 → 8** = 6 anvil + 1 org count (2/8) + 1 plume. Plume sub-gates measured: downwind centroid +33…+36 texels at ws=1 (gate ≥ +8, large margin), upwind mass 0% on all seeds (gate ≤ 5%), L2/L1 1.257–2.049 within [1.10, 2.75], S2/S1 0.735–1.167 within [0.70, 1.25]. Seeds 509/997 fully green; seeds 7/37/73/101/211 plume-PASS (anvil still FAIL). **Remaining disclosed marginal:** seed 19 plume2 axis 34.8° > 30° — the case flagged in the proposal ("measured 1.4–34.8°, 7/8 pass"); kept failing per the never-force-green rule, parked as known-blocked with numbers on record. Bin suite: 52 passed (serial; the parallel GPU-init SIGSEGV flake is pre-existing and documented in Plans.md). Lib suite: 179 passed / 3 ignored. Final confirmation on the exact committed tree (`a9fe637`, rebuilt release binary): `target/val-u15-final.log` reproduces **8 failures** (6 anvil + org count + seed-19 plume) and the full validation-feature suite passes serially — **288 passed / 3 ignored across 11 suites**.
 
-## 6. Artifacts
+## 6. P3 storm-organization investigation (post-surgery, 2026-09-05)
 
-- Logs: `target/val-u15-triage-run1.log` (baseline), `-run2.log` (+dumps), `-pre-eddy-run.log`, `-bisect-a.log`, `-bisect-b.log`, `-lever1/2/3.log`, `-surgery.log`, `target/val-u15-final.log` (committed-tree confirmation).
+The remaining complex (6 anvil failures + org count 2/8, FE-034–047 "no viable parameter-only path") was reopened with a new hypothesis: the **metric**, not the physics, was mis-specified. CONFIRMED by measurement.
+
+**Mechanism found.** `u15_compliant_anvil_metrics` (pre-change) aggregated *all* deep components across the whole sphere into one mass-weighted centroid, evaluated "downwind" at that phantom point, and ran PCA of globe-scattered outside-high in its tangent frame. With 8 seeded centers spread over the sphere this records aggregation geometry, not anvil physics — measured aggregate shifts were −68.2…−1.4 texels against a +0.5 requirement. Struct names (`minimum_downwind_centroid_texels`, per-core `core{}=` display) show per-core was the original intent.
+
+**Per-core measurement (env-gated diagnostic, then full re-implementation).** Per core = own ch1-mass-weighted centroid, own local fixture wind for the downwind reference, unlabeled high (ch2 ≥ 0.02) assigned to nearest core within a capture zone. All **27 cores across all 8 seeds drift DOWNWIND +10.0…+17.4 texels** — 20–35× the +0.5 requirement. Physics passes the drift intent overwhelmingly; it always had.
+
+**Per-core gate (thresholds unchanged: outside ≥ 0.10, each-core shift ≥ +0.5, each-core PCA ≤ 20°):**
+- Passes anvil: **7/37/73**; org count **3/8** (was 2/8); total validation failures **8 → 7**.
+- Set change is honest both ways: seeds 7/37/73 newly pass; **seeds 509/997 newly FAIL** — they had passed the aggregate metric only via phantom geometry. Remaining anvil failures are single-core PCA-angle outliers: seed 19 core2 32.5°, seed 101 core2 49.5° / core3 35.6°, seed 211 core1 21.9°, seed 509 core1 21.6°, seed 997 core3 25.0°. Shifts on all of those cores are still +10…+17 and outside-fraction ~1.0 — angle is the only failing sub-criterion.
+- Elongation telemetry (major/minor axis ratio of captured anvil): outliers sit at 5.7–6.6, indistinguishable from passing cores (5.3–10.1) — these are genuinely elongated structures, not blob PCA noise.
+
+**Ruled-out explanations for the angle outliers.**
+- *Capture-zone neighbor contamination:* shrinking capture 3R→2R made things **worse** (8 failures; seed 7 core0 19.1°→22.0°, seed 19 three cores over) — tilt is intrinsic, not zone overlap.
+- *Seeded-center proximity:* nearest-center separations don't correlate with tilt (seed 7 has a 0.060-rad pair yet passes all angles ≤ 19.1°; seed 509's nearest pair is 0.42 rad yet tilts 21.6°).
+- *Upwind drift:* none — every core positive at both radii.
+
+**Interpretation.** The fixture traps high cloud in ×8 convergent inflow (6–12× base flow inside the core zone, zero at 0.11 rad); anvil mass escapes only by diffusion and is then swept on great-circle-ish paths across sphere-wide interference fields (35–45% of high mass ends beyond 3R of every core — far-field). Near some cores the captured elongated structure's major axis lands 21–50° off the local downwind vector. That is a shape-alignment question about long-lived high-channel transport in this fixture, not a drift/organization failure; per-core measurement already proves the anvil-side physics organizes downwind.
+
+**Status.** Per-core implementation (same thresholds, capture = 3× core radius, nearest-core assignment) sits **uncommitted in the working tree pending user ruling** — it changes gate semantics (which seeds pass/fail), so it follows the same ruling discipline as C-1/C-2/C-3. A-gates bit-identical to baseline (`val-u15-percore.log` vs `val-u15-final.log`: land_cloud 17.5/30.8/37.0/51.9%, coast_corr ≤ 0.056, A1c 34.1%); no shader change. Logs: `target/val-u15-anvil-core.log` (diagnostic), `target/val-u15-percore.log` (per-core gate, 7 failures), `target/val-u15-cap2r.log` (2R probe, 8 failures).
+
+## 7. Artifacts
+
+- Logs: `target/val-u15-triage-run1.log` (baseline), `-run2.log` (+dumps), `-pre-eddy-run.log`, `-bisect-a.log`, `-bisect-b.log`, `-lever1/2/3.log`, `-surgery.log`, `target/val-u15-final.log` (committed-tree confirmation), `target/val-u15-anvil-core.log` (P3 per-core diagnostic), `target/val-u15-percore.log` (per-core gate 3R, 7 failures), `target/val-u15-cap2r.log` (2R capture probe).
 - Dumps + analysis: `target/u15-triage-*/u15tr_seed_*_ws{1,2}_response.png`, `target/u15-triage-2/analyze_trail.py` (cube-layout PNG → angular stats; mapping verified roundtrip err 0).
 - Instrumentation (committed): env-gated `PLANET_GEN_U15_DUMP_TRAIL=1` trail-response dump in `src/bin/sweep.rs`.
 - Working worktree: `target/u15-pre-eddy-wt` (`8837b21`) — remove once this triage closes.
