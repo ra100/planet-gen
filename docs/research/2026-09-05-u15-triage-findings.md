@@ -110,11 +110,25 @@ The remaining complex (6 anvil failures + org count 2/8, FE-034–047 "no viable
 
 **Interpretation.** The fixture traps high cloud in ×8 convergent inflow (6–12× base flow inside the core zone, zero at 0.11 rad); anvil mass escapes only by diffusion and is then swept on great-circle-ish paths across sphere-wide interference fields (35–45% of high mass ends beyond 3R of every core — far-field). Near some cores the captured elongated structure's major axis lands 21–50° off the local downwind vector. That is a shape-alignment question about long-lived high-channel transport in this fixture, not a drift/organization failure; per-core measurement already proves the anvil-side physics organizes downwind.
 
-**Status.** Per-core implementation (same thresholds, capture = 3× core radius, nearest-core assignment) sits **uncommitted in the working tree pending user ruling** — it changes gate semantics (which seeds pass/fail), so it follows the same ruling discipline as C-1/C-2/C-3. A-gates bit-identical to baseline (`val-u15-percore.log` vs `val-u15-final.log`: land_cloud 17.5/30.8/37.0/51.9%, coast_corr ≤ 0.056, A1c 34.1%); no shader change. Logs: `target/val-u15-anvil-core.log` (diagnostic), `target/val-u15-percore.log` (per-core gate, 7 failures), `target/val-u15-cap2r.log` (2R probe, 8 failures).
+**Status.** **Ruled and landed (user, 2026-09-05): C-4 adopted** — per-core implementation (`cb91a4f`), thresholds unchanged. A-gates bit-identical to baseline (`val-u15-percore.log` vs `val-u15-final.log`: land_cloud 17.5/30.8/37.0/51.9%, coast_corr ≤ 0.056, A1c 34.1%); no shader change; 288 tests serial. Logs: `target/val-u15-anvil-core.log` (diagnostic), `target/val-u15-percore.log` (per-core gate, 7 failures), `target/val-u15-cap2r.log` (2R probe, 8 failures).
+
+## 6a. Tilt investigation (user directive "investigate now", 2026-09-05)
+
+Question: why do 7 cores on the 5 failing seeds have anvil PCA axes 21.6–49.5° off local downwind? Env-gated annulus diagnostic (`PLANET_GEN_U15_DUMP_TILT=1`, committed with this section; log `target/val-u15-tilt.log`) decomposed the captured zone into 0–1R / 1–2R / 2–3R rings and printed inter-core bearings.
+
+Findings:
+1. **The tilt is born in the source region.** For every outlier core the |tilt| is largest in the inner annulus (1–2R; a0 is empty — the eligibility-masked component covers it) and decays outward: seed 101 core 2 −51.4°→−45.4°, seed 19 core 2 −32.8°→−32.0°, seed 997 core 3 −26.5°→−21.5°. Transport partially realigns the anvil with distance; it never fully recovers within 3R. This is not far-field contamination.
+2. **Neighbor cores are ruled out.** No component core lies within 4R of any other on any seed — every neighbor list is empty. The tilt is single-core behavior.
+3. **Tilt anti-correlates with downwind drift.** The three weakest drifts are the most tilted (seed 101 core 2: +9.1 texels / 49.5°; core 3: +11.5 / 35.6°) while aligned cores drift farthest (seed 211 core 0: +15.6 / 5.9°). A tilted escape path exports less downwind mass — coherent physics, not noise.
+4. **Population view.** Full-zone |PCA−wind| across all 27 cores is a continuous distribution (median ≈ 13°, max 49.5°), signs varying within seeds; there is no bimodal healthy/unhealthy split. 20/27 cores pass ≤ 20°. The detrainment source pattern itself (z-weighted, modulated by the frontal-lift term and convective noise at the core) sets each anvil's initial axis.
+
+Physical reading: these are tilted anvils, not mis-organized ones — every one still drifts +10…+17 texels downwind. Real mesoscale anvils tilt off the steering flow when updraft structure is asymmetric; a strict per-core ≤20° band is statistically tight against a noise-driven source population. Candidate physics for a future cycle (if pursued): asymmetry of the detrainment production term at core edges (frontal-lift modulation), not transport.
+
+Band sensitivity (measured, for ruling only — choosing a band to fit results is the rejected Option-A pattern): per-seed worst angle ≤ 20° → org 3/8; ≤ 35° → 7/8 (only seed 101 fails at 49.5°); ≤ 50° → 8/8. **Recommendation: keep 20°; seeds 19/101/211/509/997 anvil-angle stay known-blocked with numbers on record.**
 
 ## 7. Artifacts
 
-- Logs: `target/val-u15-triage-run1.log` (baseline), `-run2.log` (+dumps), `-pre-eddy-run.log`, `-bisect-a.log`, `-bisect-b.log`, `-lever1/2/3.log`, `-surgery.log`, `target/val-u15-final.log` (committed-tree confirmation), `target/val-u15-anvil-core.log` (P3 per-core diagnostic), `target/val-u15-percore.log` (per-core gate 3R, 7 failures), `target/val-u15-cap2r.log` (2R capture probe).
+- Logs: `target/val-u15-triage-run1.log` (baseline), `-run2.log` (+dumps), `-pre-eddy-run.log`, `-bisect-a.log`, `-bisect-b.log`, `-lever1/2/3.log`, `-surgery.log`, `target/val-u15-final.log` (committed-tree confirmation), `target/val-u15-anvil-core.log` (P3 per-core diagnostic), `target/val-u15-percore.log` (per-core gate 3R, 7 failures), `target/val-u15-cap2r.log` (2R capture probe), `target/val-u15-tilt.log` (annulus tilt diagnostic).
 - Dumps + analysis: `target/u15-triage-*/u15tr_seed_*_ws{1,2}_response.png`, `target/u15-triage-2/analyze_trail.py` (cube-layout PNG → angular stats; mapping verified roundtrip err 0).
 - Instrumentation (committed): env-gated `PLANET_GEN_U15_DUMP_TRAIL=1` trail-response dump in `src/bin/sweep.rs`.
 - Working worktree: `target/u15-pre-eddy-wt` (`8837b21`) — remove once this triage closes.

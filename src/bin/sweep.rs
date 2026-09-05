@@ -5378,6 +5378,145 @@ fn u15_compliant_anvil_metrics(
     }
 }
 
+// TEMP tilt investigation diagnostic (PLANET_GEN_U15_DUMP_TILT=1): per-core PCA
+// angle vs downwind decomposed by capture annulus, plus inter-core bearings.
+fn u15_anvil_tilt_diagnostics(
+    seed: u32,
+    response: &[f32],
+    components: &[U15ResponseComponent],
+    resolution: u32,
+) {
+    let labels = u15_component_labels(components, resolution);
+    let mut frames: Vec<([f32; 3], [f32; 3], [f32; 3], [f32; 3])> = Vec::new();
+    for component in components {
+        let mut center = [0.0; 3];
+        for &pixel in &component.pixels {
+            let weight = response[pixel * 4 + 1];
+            let position = u15_pixel_position(pixel, resolution);
+            for axis in 0..3 {
+                center[axis] += position[axis] * weight;
+            }
+        }
+        let Some(core) = u15_normalize(center) else {
+            continue;
+        };
+        let wind = u15_fixture_seed_wind(seed, 8, core);
+        let Some(downwind) = u15_normalize([
+            wind[0] - core[0] * u15_dot(wind, core),
+            wind[1] - core[1] * u15_dot(wind, core),
+            wind[2] - core[2] * u15_dot(wind, core),
+        ]) else {
+            continue;
+        };
+        let reference = if core[1].abs() > 0.9 {
+            [1.0, 0.0, 0.0]
+        } else {
+            [0.0, 1.0, 0.0]
+        };
+        let Some(east) = u15_normalize(u15_cross(reference, core)) else {
+            continue;
+        };
+        let north = u15_cross(core, east);
+        frames.push((core, east, north, downwind));
+    }
+    #[derive(Clone, Copy, Default)]
+    struct Annulus {
+        mass: f32,
+        covariance: [f32; 3],
+    }
+    let mut buckets = vec![[Annulus::default(); 3]; frames.len()];
+    for pixel in 0..response.len() / 4 {
+        let high = response[pixel * 4 + 2];
+        if high < U15_DEEP_THRESHOLD || labels[pixel].is_some() {
+            continue;
+        }
+        let position = u15_pixel_position(pixel, resolution);
+        let mut nearest = usize::MAX;
+        let mut nearest_distance = f32::INFINITY;
+        for (index, (core, ..)) in frames.iter().enumerate() {
+            let distance = u15_dot(position, *core).clamp(-1.0, 1.0).acos();
+            if distance < nearest_distance {
+                nearest_distance = distance;
+                nearest = index;
+            }
+        }
+        let annulus = (nearest_distance / U15_FIXTURE_CORE_RADIUS) as usize;
+        if nearest == usize::MAX || annulus >= 3 {
+            continue;
+        }
+        let (core, east, north, _) = frames[nearest];
+        let cosine = u15_dot(position, core).clamp(-1.0, 1.0);
+        let Some(direction) = u15_normalize([
+            position[0] - core[0] * cosine,
+            position[1] - core[1] * cosine,
+            position[2] - core[2] * cosine,
+        ]) else {
+            continue;
+        };
+        let distance = cosine.acos();
+        let east_value = u15_dot(direction, east) * distance;
+        let north_value = u15_dot(direction, north) * distance;
+        let slot = &mut buckets[nearest][annulus];
+        slot.mass += high;
+        slot.covariance[0] += east_value * east_value * high;
+        slot.covariance[1] += east_value * north_value * high;
+        slot.covariance[2] += north_value * north_value * high;
+    }
+    for index in 0..frames.len() {
+        let (core, east, north, downwind) = frames[index];
+        let wind_bearing = u15_dot(downwind, north).atan2(u15_dot(downwind, east));
+        let mut parts = Vec::new();
+        for annulus in 0..3 {
+            let slot = &buckets[index][annulus];
+            if slot.covariance[0] + slot.covariance[2] <= f32::EPSILON {
+                parts.push(format!("a{annulus}:mass=0"));
+                continue;
+            }
+            let principal =
+                0.5 * (2.0 * slot.covariance[1]).atan2(slot.covariance[0] - slot.covariance[2]);
+            let mut tilt = (principal - wind_bearing).to_degrees();
+            while tilt >= 90.0 {
+                tilt -= 180.0;
+            }
+            while tilt < -90.0 {
+                tilt += 180.0;
+            }
+            parts.push(format!("a{annulus}:mass={:.2},tilt={tilt:.1}", slot.mass));
+        }
+        let mut neighbors = Vec::new();
+        for other in 0..frames.len() {
+            if other == index {
+                continue;
+            }
+            let (core_b, ..) = frames[other];
+            let cosine = u15_dot(core_b, core).clamp(-1.0, 1.0);
+            let distance = cosine.acos();
+            if distance > 4.0 * U15_FIXTURE_CORE_RADIUS {
+                continue;
+            }
+            let Some(direction) = u15_normalize([
+                core_b[0] - core[0] * cosine,
+                core_b[1] - core[1] * cosine,
+                core_b[2] - core[2] * cosine,
+            ]) else {
+                continue;
+            };
+            let bearing = (u15_dot(direction, north).atan2(u15_dot(direction, east))
+                - wind_bearing)
+                .to_degrees();
+            neighbors.push(format!(
+                "{other}@{}R/relbearing{bearing:.0}",
+                (distance / U15_FIXTURE_CORE_RADIUS * 10.0).round() / 10.0
+            ));
+        }
+        println!(
+            "u15_tilt seed={seed} core={index} [{}] neighbors=[{}]",
+            parts.join(","),
+            neighbors.join(" ")
+        );
+    }
+}
+
 fn u15_trail_height(pos: [f32; 3]) -> f32 {
     let distance = u15_dot(U15_TRAIL_SOURCE, pos).clamp(-1.0, 1.0).acos();
     if distance <= U15_TRAIL_SOURCE_RADIUS {
@@ -5803,6 +5942,9 @@ fn run_u15_field_validation(
         let condensate_change = (total_eight - total_zero).abs() / total_zero.max(f32::EPSILON);
         let anvil =
             u15_compliant_anvil_metrics(seed, &count_response[2], &count_components[2], resolution);
+        if std::env::var_os("PLANET_GEN_U15_DUMP_TILT").is_some() {
+            u15_anvil_tilt_diagnostics(seed, &count_response[2], &count_components[2], resolution);
+        }
         let anvil_pass = anvil.missing_components.is_empty()
             && anvil.core_count > 0
             && anvil
