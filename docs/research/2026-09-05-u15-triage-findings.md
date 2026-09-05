@@ -79,6 +79,17 @@ Not a regime artifact — sharpness is a meaningful diagnostic and FE-090 alread
 
 **Net effect if C-1 + C-2(b) are approved:** 15 → **7** failures (6 anvil + 1 org count), all organization-related and already known-blocked. If C-2(a): 15 → **11**.
 
+## 5a. Ruling (user, 2026-09-05) and implementation
+
+User rulings on the three proposals:
+- **C-1 approved as recommended:** axis ≤ 30° applies to plume2 (ws=2) only; plume1 (ws=1) is gated by a downwind-organization check — shape-ROI centroid ≥ +8 texels downwind of the source AND upwind response mass ≤ 5%.
+- **C-2 approved:** L2/L1 re-specified to **[1.10, 2.75]**.
+- **C-3/P3:** user chose to **also relax sharpness to S2/S1 ∈ [0.70, 1.25]** (overriding the keep-as-is recommendation); organization stays parked.
+
+Implementation (`src/bin/sweep.rs`): two new `U15PlumeMetrics` fields — `downwind_centroid_texels` (signed alongwind offset of the shape-ROI centroid relative to the source, same texel scale as `centroid_texels`) and `upwind_response_fraction` (shape-ROI mass share with zonal < 0) — computed from the existing shape-ROI population; `plume_pass` restructured per the ruling; spec string updated. No shader or physics change; A-gates and pins untouched.
+
+Validation (`target/val-u15-surgery.log`, `--size 512`): **total gate failures 15 → 8** = 6 anvil + 1 org count (2/8) + 1 plume. Plume sub-gates measured: downwind centroid +33…+36 texels at ws=1 (gate ≥ +8, large margin), upwind mass 0% on all seeds (gate ≤ 5%), L2/L1 1.257–2.049 within [1.10, 2.75], S2/S1 0.735–1.167 within [0.70, 1.25]. Seeds 509/997 fully green; seeds 7/37/73/101/211 plume-PASS (anvil still FAIL). **Remaining disclosed marginal:** seed 19 plume2 axis 34.8° > 30° — the case flagged in the proposal ("measured 1.4–34.8°, 7/8 pass"); kept failing per the never-force-green rule, parked as known-blocked with numbers on record. Bin suite: 52 passed (serial; the parallel GPU-init SIGSEGV flake is pre-existing and documented in Plans.md). Lib suite: 179 passed / 3 ignored.
+
 ## 6. Artifacts
 
 - Logs: `target/val-u15-triage-run1.log` (baseline), `-run2.log` (+dumps), `-pre-eddy-run.log`, `-bisect-a.log`, `-bisect-b.log`, `-lever1/2/3.log`.

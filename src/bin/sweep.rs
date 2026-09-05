@@ -4708,6 +4708,13 @@ struct U15PlumeMetrics {
     area_telemetry: f32,
     isotropic_edge_telemetry: f32,
     centroid_texels: Option<f32>,
+    // U15 triage 2026-09-05 (user-approved gate surgery): signed alongwind
+    // offset of the shape-ROI centroid relative to the source (positive =
+    // downwind), and the share of shape-ROI mass upwind of the source. Used by
+    // the weak-wind downwind-organization check that replaces the PCA axis
+    // gate for the diffusion-limited ws=1 plume regime.
+    downwind_centroid_texels: Option<f32>,
+    upwind_response_fraction: f32,
     response_mass: f32,
     source_response_mass: f32,
     component_response_mass: f32,
@@ -4952,6 +4959,18 @@ fn u15_plume_metrics(response: &[f32], resolution: u32) -> U15PlumeMetrics {
         u15_dot(centroid, U15_TRAIL_SOURCE).clamp(-1.0, 1.0).acos()
             / (std::f32::consts::FRAC_PI_2 / resolution as f32),
     );
+    let downwind_centroid = shape_response
+        .iter()
+        .fold(0.0, |sum, (_, zonal, _, response, weight, _)| sum + zonal * response * weight)
+        / response_weight;
+    metrics.downwind_centroid_texels =
+        Some(downwind_centroid / (std::f32::consts::FRAC_PI_2 / resolution as f32));
+    metrics.upwind_response_fraction = shape_response
+        .iter()
+        .filter(|(_, zonal, _, response, _, _)| *zonal < 0.0 && *response > 0.0)
+        .map(|(_, _, _, response, weight, _)| response * weight)
+        .sum::<f32>()
+        / response_weight;
     let (east, north) = u15_size_tangent_basis(centroid);
     let wind = u15_normalize_or_zero(u15_trail_wind(centroid, U15_TRAIL_SHEAR));
     let alongwind = [u15_dot(wind, east), u15_dot(wind, north)];
@@ -5585,16 +5604,33 @@ fn run_u15_field_validation(
             &plume[1],
         );
         let trail_runtime_ms = trail_started.elapsed().as_secs_f64() * 1000.0;
-        let plume_pass = plume.iter().all(|metric| {
+        // U15 triage 2026-09-05 (user-approved gate surgery, see
+        // docs/research/2026-09-05-u15-triage-findings.md): in the current
+        // physics regime the ws=1 plume is diffusion-limited (crosswind >=
+        // alongwind on every seed), so its PCA major axis carries no
+        // wind-ownership information; the weak-wind plume must instead
+        // organize downwind of the source. The axis gate applies to the ws=2
+        // plume, where the response is an elongated streak. Ratio bands were
+        // re-specified for the dilution-limited reach scaling that replaced
+        // the pre-0e2b044 transport-limited regime.
+        let plume_pass = plume.iter().enumerate().all(|(scale, metric)| {
+            let organized = if scale == 0 {
+                metric
+                    .downwind_centroid_texels
+                    .is_some_and(|texels| texels >= 8.0)
+                    && metric.upwind_response_fraction <= 0.05
+            } else {
+                metric.axis_wind_degrees <= 30.0
+            };
             metric.response_p95 >= 0.04
                 && metric.effective_n >= 32.0
-                && metric.axis_wind_degrees <= 30.0
+                && organized
                 && metric.outer_support_response_fraction <= 0.05
                 && metric.boundary_shell_response_fraction <= 0.01
                 && metric.outside_corridor_response_fraction <= 0.05
-        }) && (1.50..=2.50).contains(&plume_length_ratio)
+        }) && (1.10..=2.75).contains(&plume_length_ratio)
             && (0.80..=1.25).contains(&plume_breadth_ratio)
-            && (0.75..=1.25).contains(&plume_sharpness_ratio)
+            && (0.70..=1.25).contains(&plume_sharpness_ratio)
             && plume_deterministic;
         let count_response: [Vec<f32>; 3] =
             std::array::from_fn(|index| u15_response(&cases[index].0, &cases[0].0));
@@ -5850,7 +5886,7 @@ fn run_u15_field_validation(
         }
     }
     let values = format!(
-        "command=cargo run --release --features validation --bin sweep -- --{validation_flag} --size 512 --output-dir {output_dir}\nshear_plume_fixture=source:{U15_TRAIL_SOURCE:?},zonal_axis:{U15_TRAIL_EAST:?},Y:{U15_TRAIL_NORTH:?};wind=((1+{U15_TRAIL_SHEAR:.2}*tanh(y/.08))/(1+{U15_TRAIL_SHEAR:.2}))*cross(Y,p); tangent_divergence_free; speed_bound=[{:.5},1]; snapshot.wind_scale=1/2; source=ocean_patch; control=matched_exterior_land_and_continentality; coverage:1,moisture:1,temp_c:15,pressure_hpa:1013,tilt:0,season:.5,earth_radius_rotation,storms:0,diagnostics:0; MUSCL/Hancock active; CFL substeps use active `transport_substeps`; shape_corridor={U15_TRAIL_SHAPE_ROI_RADIUS:.8},physical_support={U15_TRAIL_OUTER_SUPPORT_RADIUS:.8},boundary_shell={U15_TRAIL_BOUNDARY_SHELL_INNER_RADIUS:.6}..{U15_TRAIL_SHAPE_ROI_RADIUS:.6}; response=max(total_mass_source-total_mass_control,0); morphology=all_counterfactual_response>=.02_within_frozen_corridor_own_centroid_log_map_wind_frame_weighted_Q90_Q10_L_alongwind_B_crosswind; Gperp=weighted_normalized_crosswind_geodesic_derivative; S=B*Gperp; gates=each:p95>=.04,Neff>=32,axis<=30deg,outside_corridor<=5%,beyond_physical_support<=5%,boundary_shell<=1%; ratios:L2/L1=1.50..2.50,B2/B1=.80..1.25,S2/S1=.75..1.25,deterministic; mass/area/isotropic_edge/components/centroid=telemetry_only; seeds={seeds:?}\nfixture={U15_ELIGIBLE_MASK}; fixture_flow={U15_FIXTURE_FLOW:?}; source_guard=actual_GPU_weather_pipeline; size_deterministic={size_deterministic}; qualified_organization_seed_count={qualified_organization_seed_count}/{}; qualified_organization=outside_high>=.10,downwind_centroid>=.5texels,pca<=20deg\n{}\n",
+        "command=cargo run --release --features validation --bin sweep -- --{validation_flag} --size 512 --output-dir {output_dir}\nshear_plume_fixture=source:{U15_TRAIL_SOURCE:?},zonal_axis:{U15_TRAIL_EAST:?},Y:{U15_TRAIL_NORTH:?};wind=((1+{U15_TRAIL_SHEAR:.2}*tanh(y/.08))/(1+{U15_TRAIL_SHEAR:.2}))*cross(Y,p); tangent_divergence_free; speed_bound=[{:.5},1]; snapshot.wind_scale=1/2; source=ocean_patch; control=matched_exterior_land_and_continentality; coverage:1,moisture:1,temp_c:15,pressure_hpa:1013,tilt:0,season:.5,earth_radius_rotation,storms:0,diagnostics:0; MUSCL/Hancock active; CFL substeps use active `transport_substeps`; shape_corridor={U15_TRAIL_SHAPE_ROI_RADIUS:.8},physical_support={U15_TRAIL_OUTER_SUPPORT_RADIUS:.8},boundary_shell={U15_TRAIL_BOUNDARY_SHELL_INNER_RADIUS:.6}..{U15_TRAIL_SHAPE_ROI_RADIUS:.6}; response=max(total_mass_source-total_mass_control,0); morphology=all_counterfactual_response>=.02_within_frozen_corridor_own_centroid_log_map_wind_frame_weighted_Q90_Q10_L_alongwind_B_crosswind; Gperp=weighted_normalized_crosswind_geodesic_derivative; S=B*Gperp; gates=each:p95>=.04,Neff>=32,outside_corridor<=5%,beyond_physical_support<=5%,boundary_shell<=1%; ws1:downwind_centroid>=+8texels,upwind_mass<=5% (diffusion-limited blob regime — PCA axis is not a wind-ownership diagnostic); ws2:axis<=30deg; ratios:L2/L1=1.10..2.75,B2/B1=.80..1.25,S2/S1=.70..1.25,deterministic; mass/area/isotropic_edge/components/centroid=telemetry_only; seeds={seeds:?}\nfixture={U15_ELIGIBLE_MASK}; fixture_flow={U15_FIXTURE_FLOW:?}; source_guard=actual_GPU_weather_pipeline; size_deterministic={size_deterministic}; qualified_organization_seed_count={qualified_organization_seed_count}/{}; qualified_organization=outside_high>=.10,downwind_centroid>=.5texels,pca<=20deg\n{}\n",
         (1.0 - U15_TRAIL_SHEAR) / (1.0 + U15_TRAIL_SHEAR),
         seeds.len(),
         rows.join("\n"),
