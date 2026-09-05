@@ -313,3 +313,21 @@ Three-tier tectonic simulation with UI toggle between modes.
 ## Recorded Amendments
 
 - 2026-07-19: U14's historical `-10°C` cool-marine dominance fixture is superseded because it represents pack ice under the Earth model. The `+5°C` matched ocean/inland fixture tests open-water stratocumulus; the geographic polar/pack-ice gate and production persistent-ice settings (`-15..-6°C`, supply suppression `.25`, phase penalty `.15`) remain unchanged.
+
+---
+
+## Phase 11: UI Redesign — Instrument Panel Shell
+
+Full UI review + redesign of the egui shell: functionalist instrument-panel lineage, OKLCH token theme, tabbed control rail, viewport header + HUD, inspector readouts, status bar, presets, and a data-driven control grammar for extensibility. All prior controls preserved; rings and lava glow (engine-wired but previously unexposed) now have UI.
+
+Plan: [docs/plans/2026-09-05-001-feat-ui-redesign-instrument-panel-plan.md](docs/plans/2026-09-05-001-feat-ui-redesign-instrument-panel-plan.md)
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 11.1 | UI review + lineage/tokens/IA doc | Review findings R1–R9 documented in plan | - | cc:完了 [6a452e7] |
+| 11.2 | `src/ui/theme.rs` — OKLCH tokens, egui style override | Zero framework-default highlights; token tests green | 11.1 | cc:完了 [6a452e7] |
+| 11.3 | `src/ui/widgets.rs` — param rows (units, modified-dot, dbl-click reset), chips, instruments, HUD | Headless widget render test passes | 11.2 | cc:完了 [6a452e7] |
+| 11.4 | Shell: top bar / tabs / viewport header+HUD / inspector / status bar; control-parity migration | All previous controls reachable; dirty-flag semantics unchanged | 11.3 | cc:完了 [6a452e7] |
+| 11.5 | Expose rings + lava glow; preset table (7 archetypes) | Sliders drive existing uniform fields; presets apply bundles | 11.4 | cc:完了 [6a452e7] |
+| 11.6 | Help overlay (F1/?), shortcut polish, double-click canvas reset | Documented in help window and status bar | 11.4 | cc:完了 [6a452e7] |
+| 11.7 | `cargo test --lib` green + new UI tests; zero build warnings | 190 passed / 0 failed | 11.4 | cc:完了 [6a452e7] |
