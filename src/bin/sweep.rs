@@ -3647,10 +3647,18 @@ struct U15AnvilComponentMetrics {
     outside_high_mass_fraction: Option<f32>,
     downwind_centroid_texels: Option<f32>,
     pca_alignment_degrees: Option<f32>,
+    // Telemetry only: major/minor eigenvalue ratio of the captured anvil cloud.
+    // Near 1 means a blob whose PCA axis is noise; large values mean a real
+    // elongated structure whose alignment against the wind is meaningful.
+    elongation: Option<f32>,
 }
 
 const U15_ELIGIBLE_MASK: &str = "eligible_convective_core";
 const U15_DEEP_THRESHOLD: f32 = 0.02;
+// Anvil capture zone around each deep core for the per-core organization metric:
+// three core radii ≈ twice the fixture convergence influence radius — an anvil-scale
+// neighborhood; unlabeled high cloud is assigned to its nearest core.
+const U15_ANVIL_CAPTURE_RADIUS: f32 = 3.0 * U15_FIXTURE_CORE_RADIUS;
 const U15_MINIMUM_COMPONENT_FACE_AREA: f32 = 0.0025;
 const U15_FIXTURE_FLOW: [f32; 3] = [0.5, 0.0, 0.35];
 const U15_FIXTURE_CORE_RADIUS: f32 = 0.055;
@@ -4961,7 +4969,9 @@ fn u15_plume_metrics(response: &[f32], resolution: u32) -> U15PlumeMetrics {
     );
     let downwind_centroid = shape_response
         .iter()
-        .fold(0.0, |sum, (_, zonal, _, response, weight, _)| sum + zonal * response * weight)
+        .fold(0.0, |sum, (_, zonal, _, response, weight, _)| {
+            sum + zonal * response * weight
+        })
         / response_weight;
     metrics.downwind_centroid_texels =
         Some(downwind_centroid / (std::f32::consts::FRAC_PI_2 / resolution as f32));
@@ -5170,11 +5180,12 @@ fn u15_anvil_component_report(metrics: &U15CompliantAnvilMetrics) -> String {
                 format!("core{}=NO_ANVIL", component.index)
             } else {
                 format!(
-                    "core{}=extent:{} shift:{} angle:{}",
+                    "core{}=extent:{} shift:{} angle:{} elong:{}",
                     component.index,
                     u15_metric(component.outside_high_mass_fraction),
                     u15_metric(component.downwind_centroid_texels),
                     u15_metric(component.pca_alignment_degrees),
+                    u15_metric(component.elongation),
                 )
             }
         })
@@ -5192,33 +5203,58 @@ fn u15_compliant_anvil_metrics(
         return U15CompliantAnvilMetrics::default();
     }
 
+    // U15 triage P3 (2026-09-05): organization is a per-core property. The previous
+    // implementation aggregated every seeded core into one global centroid and measured
+    // displacement/PCA there — with cores scattered across the sphere that phantom point
+    // recorded geometry, not anvil physics (aggregate shifts read -68..-1 texels while
+    // every individual core drifted +10..+17 texels downwind). Per core: own deep
+    // centroid, own local fixture wind for the downwind reference, and unlabeled high
+    // cloud assigned to its nearest core within the anvil capture zone. Thresholds are
+    // unchanged from the aggregate gate; only the geometry is repaired.
     let labels = u15_component_labels(components, resolution);
-    let mut deep_center = [0.0; 3];
+    let mut frames: Vec<([f32; 3], [f32; 3], [f32; 3], Option<[f32; 3]>)> = Vec::new();
     for component in components {
+        let mut center = [0.0; 3];
         for &pixel in &component.pixels {
             let weight = response[pixel * 4 + 1];
             let position = u15_pixel_position(pixel, resolution);
             for axis in 0..3 {
-                deep_center[axis] += position[axis] * weight;
+                center[axis] += position[axis] * weight;
             }
         }
+        let Some(core) = u15_normalize(center) else {
+            continue;
+        };
+        let wind = u15_fixture_seed_wind(seed, 8, core);
+        let downwind = u15_normalize([
+            wind[0] - core[0] * u15_dot(wind, core),
+            wind[1] - core[1] * u15_dot(wind, core),
+            wind[2] - core[2] * u15_dot(wind, core),
+        ]);
+        let reference = if core[1].abs() > 0.9 {
+            [1.0, 0.0, 0.0]
+        } else {
+            [0.0, 1.0, 0.0]
+        };
+        let Some(east) = u15_normalize(u15_cross(reference, core)) else {
+            continue;
+        };
+        let north = u15_cross(core, east);
+        frames.push((core, east, north, downwind));
     }
-    let Some(deep_center) = u15_normalize(deep_center) else {
+    if frames.is_empty() {
         return U15CompliantAnvilMetrics::default();
-    };
-    let wind = u15_fixture_seed_wind(seed, 8, deep_center);
-    let Some(downwind) = u15_normalize([
-        wind[0] - deep_center[0] * u15_dot(wind, deep_center),
-        wind[1] - deep_center[1] * u15_dot(wind, deep_center),
-        wind[2] - deep_center[2] * u15_dot(wind, deep_center),
-    ]) else {
-        return U15CompliantAnvilMetrics::default();
-    };
+    }
 
-    let mut total_high = 0.0;
-    let mut outside_high = 0.0;
-    let mut outside_center = [0.0; 3];
-    let mut outside_points = Vec::new();
+    #[derive(Clone, Default)]
+    struct Bucket {
+        captured: f32,
+        centroid: [f32; 3],
+        covariance: [f32; 3],
+    }
+    let mut buckets = vec![Bucket::default(); frames.len()];
+    let mut total_high = 0.0_f32;
+    let mut outside_high = 0.0_f32;
     for pixel in 0..response.len() / 4 {
         let high = response[pixel * 4 + 2];
         if high < U15_DEEP_THRESHOLD {
@@ -5228,82 +5264,117 @@ fn u15_compliant_anvil_metrics(
         if labels[pixel].is_some() {
             continue;
         }
-        let position = u15_pixel_position(pixel, resolution);
         outside_high += high;
-        for axis in 0..3 {
-            outside_center[axis] += position[axis] * high;
+        let position = u15_pixel_position(pixel, resolution);
+        let mut nearest = usize::MAX;
+        let mut nearest_distance = f32::INFINITY;
+        for (index, (core, ..)) in frames.iter().enumerate() {
+            let distance = u15_dot(position, *core).clamp(-1.0, 1.0).acos();
+            if distance < nearest_distance {
+                nearest_distance = distance;
+                nearest = index;
+            }
         }
-        outside_points.push((position, high));
-    }
-    let Some(outside_center) = u15_normalize(outside_center) else {
-        return U15CompliantAnvilMetrics {
-            core_count: components.len(),
-            missing_components: vec![0],
-            ..Default::default()
-        };
-    };
-
-    let cosine = u15_dot(outside_center, deep_center).clamp(-1.0, 1.0);
-    let delta = [
-        outside_center[0] - deep_center[0] * cosine,
-        outside_center[1] - deep_center[1] * cosine,
-        outside_center[2] - deep_center[2] * cosine,
-    ];
-    let centroid_texels = u15_normalize(delta).map(|direction| {
-        u15_dot(direction, downwind) * cosine.acos()
-            / (std::f32::consts::FRAC_PI_2 / resolution as f32)
-    });
-    let reference = if deep_center[1].abs() > 0.9 {
-        [1.0, 0.0, 0.0]
-    } else {
-        [0.0, 1.0, 0.0]
-    };
-    let Some(east) = u15_normalize(u15_cross(reference, deep_center)) else {
-        return U15CompliantAnvilMetrics::default();
-    };
-    let north = u15_cross(deep_center, east);
-    let mut covariance = [0.0; 3];
-    for (position, weight) in &outside_points {
-        let cosine = u15_dot(*position, deep_center).clamp(-1.0, 1.0);
+        if nearest == usize::MAX || nearest_distance > U15_ANVIL_CAPTURE_RADIUS {
+            continue;
+        }
+        let bucket = &mut buckets[nearest];
+        bucket.captured += high;
+        for axis in 0..3 {
+            bucket.centroid[axis] += position[axis] * high;
+        }
+        let (core, east, north, _) = frames[nearest];
+        let cosine = u15_dot(position, core).clamp(-1.0, 1.0);
         let Some(direction) = u15_normalize([
-            position[0] - deep_center[0] * cosine,
-            position[1] - deep_center[1] * cosine,
-            position[2] - deep_center[2] * cosine,
+            position[0] - core[0] * cosine,
+            position[1] - core[1] * cosine,
+            position[2] - core[2] * cosine,
         ]) else {
             continue;
         };
         let distance = cosine.acos();
         let east_value = u15_dot(direction, east) * distance;
         let north_value = u15_dot(direction, north) * distance;
-        covariance[0] += east_value * east_value * *weight;
-        covariance[1] += east_value * north_value * *weight;
-        covariance[2] += north_value * north_value * *weight;
+        bucket.covariance[0] += east_value * east_value * high;
+        bucket.covariance[1] += east_value * north_value * high;
+        bucket.covariance[2] += north_value * north_value * high;
     }
-    let pca = (covariance[0] + covariance[2] > f32::EPSILON).then(|| {
-        let principal_angle = 0.5 * (2.0 * covariance[1]).atan2(covariance[0] - covariance[2]);
-        let principal = [principal_angle.cos(), principal_angle.sin()];
-        let expected = [u15_dot(downwind, east), u15_dot(downwind, north)];
-        (principal[0] * expected[0] + principal[1] * expected[1])
-            .abs()
-            .clamp(-1.0, 1.0)
-            .acos()
-            .to_degrees()
-    });
-    let missing = usize::from(
-        total_high <= 0.0 || outside_high <= 0.0 || centroid_texels.is_none() || pca.is_none(),
-    );
+
+    let outside_fraction = (total_high > 0.0).then_some(outside_high / total_high);
+    let mut per_core = Vec::with_capacity(frames.len());
+    let mut missing_components = Vec::new();
+    let mut minimum_shift: Option<f32> = None;
+    let mut worst_angle: Option<f32> = None;
+    for index in 0..frames.len() {
+        let (core, east, north, downwind) = frames[index];
+        let bucket = &buckets[index];
+        let shift = match (downwind, u15_normalize(bucket.centroid)) {
+            (Some(downwind), Some(centroid)) if bucket.captured > 0.0 => {
+                let cosine = u15_dot(centroid, core).clamp(-1.0, 1.0);
+                let delta = [
+                    centroid[0] - core[0] * cosine,
+                    centroid[1] - core[1] * cosine,
+                    centroid[2] - core[2] * cosine,
+                ];
+                u15_normalize(delta).map(|direction| {
+                    u15_dot(direction, downwind) * cosine.acos()
+                        / (std::f32::consts::FRAC_PI_2 / resolution as f32)
+                })
+            }
+            _ => None,
+        };
+        let angle = match (downwind, bucket.captured > 0.0) {
+            (Some(downwind), true)
+                if bucket.covariance[0] + bucket.covariance[2] > f32::EPSILON =>
+            {
+                let principal_angle = 0.5
+                    * (2.0 * bucket.covariance[1])
+                        .atan2(bucket.covariance[0] - bucket.covariance[2]);
+                let expected = [u15_dot(downwind, east), u15_dot(downwind, north)];
+                Some(
+                    (principal_angle.cos() * expected[0] + principal_angle.sin() * expected[1])
+                        .abs()
+                        .clamp(-1.0, 1.0)
+                        .acos()
+                        .to_degrees(),
+                )
+            }
+            _ => None,
+        };
+        if bucket.captured <= 0.0 || shift.is_none() || angle.is_none() {
+            missing_components.push(index);
+        }
+        let elongation = if bucket.covariance[0] + bucket.covariance[2] > f32::EPSILON {
+            let mean = 0.5 * (bucket.covariance[0] + bucket.covariance[2]);
+            let disc = ((0.5 * (bucket.covariance[0] - bucket.covariance[2])).powi(2)
+                + bucket.covariance[1] * bucket.covariance[1])
+                .sqrt();
+            let minor = mean - disc;
+            (minor > f32::EPSILON).then(|| ((mean + disc) / minor).sqrt())
+        } else {
+            None
+        };
+        if let Some(shift) = shift {
+            minimum_shift = Some(minimum_shift.map_or(shift, |value: f32| value.min(shift)));
+        }
+        if let Some(angle) = angle {
+            worst_angle = Some(worst_angle.map_or(angle, |value: f32| value.max(angle)));
+        }
+        per_core.push(U15AnvilComponentMetrics {
+            index,
+            outside_high_mass_fraction: (total_high > 0.0).then_some(bucket.captured / total_high),
+            downwind_centroid_texels: shift,
+            pca_alignment_degrees: angle,
+            elongation,
+        });
+    }
     U15CompliantAnvilMetrics {
         core_count: components.len(),
-        missing_components: (missing > 0).then_some(0).into_iter().collect(),
-        outside_high_mass_fraction: (total_high > 0.0).then_some(outside_high / total_high),
-        minimum_downwind_centroid_texels: centroid_texels,
-        worst_pca_alignment_degrees: pca,
-        components: vec![U15AnvilComponentMetrics {
-            index: 0,
-            outside_high_mass_fraction: (total_high > 0.0).then_some(outside_high / total_high),
-            downwind_centroid_texels: centroid_texels,
-            pca_alignment_degrees: pca,
-        }],
+        missing_components,
+        outside_high_mass_fraction: outside_fraction,
+        minimum_downwind_centroid_texels: minimum_shift,
+        worst_pca_alignment_degrees: worst_angle,
+        components: per_core,
     }
 }
 
@@ -5886,7 +5957,7 @@ fn run_u15_field_validation(
         }
     }
     let values = format!(
-        "command=cargo run --release --features validation --bin sweep -- --{validation_flag} --size 512 --output-dir {output_dir}\nshear_plume_fixture=source:{U15_TRAIL_SOURCE:?},zonal_axis:{U15_TRAIL_EAST:?},Y:{U15_TRAIL_NORTH:?};wind=((1+{U15_TRAIL_SHEAR:.2}*tanh(y/.08))/(1+{U15_TRAIL_SHEAR:.2}))*cross(Y,p); tangent_divergence_free; speed_bound=[{:.5},1]; snapshot.wind_scale=1/2; source=ocean_patch; control=matched_exterior_land_and_continentality; coverage:1,moisture:1,temp_c:15,pressure_hpa:1013,tilt:0,season:.5,earth_radius_rotation,storms:0,diagnostics:0; MUSCL/Hancock active; CFL substeps use active `transport_substeps`; shape_corridor={U15_TRAIL_SHAPE_ROI_RADIUS:.8},physical_support={U15_TRAIL_OUTER_SUPPORT_RADIUS:.8},boundary_shell={U15_TRAIL_BOUNDARY_SHELL_INNER_RADIUS:.6}..{U15_TRAIL_SHAPE_ROI_RADIUS:.6}; response=max(total_mass_source-total_mass_control,0); morphology=all_counterfactual_response>=.02_within_frozen_corridor_own_centroid_log_map_wind_frame_weighted_Q90_Q10_L_alongwind_B_crosswind; Gperp=weighted_normalized_crosswind_geodesic_derivative; S=B*Gperp; gates=each:p95>=.04,Neff>=32,outside_corridor<=5%,beyond_physical_support<=5%,boundary_shell<=1%; ws1:downwind_centroid>=+8texels,upwind_mass<=5% (diffusion-limited blob regime — PCA axis is not a wind-ownership diagnostic); ws2:axis<=30deg; ratios:L2/L1=1.10..2.75,B2/B1=.80..1.25,S2/S1=.70..1.25,deterministic; mass/area/isotropic_edge/components/centroid=telemetry_only; seeds={seeds:?}\nfixture={U15_ELIGIBLE_MASK}; fixture_flow={U15_FIXTURE_FLOW:?}; source_guard=actual_GPU_weather_pipeline; size_deterministic={size_deterministic}; qualified_organization_seed_count={qualified_organization_seed_count}/{}; qualified_organization=outside_high>=.10,downwind_centroid>=.5texels,pca<=20deg\n{}\n",
+        "command=cargo run --release --features validation --bin sweep -- --{validation_flag} --size 512 --output-dir {output_dir}\nshear_plume_fixture=source:{U15_TRAIL_SOURCE:?},zonal_axis:{U15_TRAIL_EAST:?},Y:{U15_TRAIL_NORTH:?};wind=((1+{U15_TRAIL_SHEAR:.2}*tanh(y/.08))/(1+{U15_TRAIL_SHEAR:.2}))*cross(Y,p); tangent_divergence_free; speed_bound=[{:.5},1]; snapshot.wind_scale=1/2; source=ocean_patch; control=matched_exterior_land_and_continentality; coverage:1,moisture:1,temp_c:15,pressure_hpa:1013,tilt:0,season:.5,earth_radius_rotation,storms:0,diagnostics:0; MUSCL/Hancock active; CFL substeps use active `transport_substeps`; shape_corridor={U15_TRAIL_SHAPE_ROI_RADIUS:.8},physical_support={U15_TRAIL_OUTER_SUPPORT_RADIUS:.8},boundary_shell={U15_TRAIL_BOUNDARY_SHELL_INNER_RADIUS:.6}..{U15_TRAIL_SHAPE_ROI_RADIUS:.6}; response=max(total_mass_source-total_mass_control,0); morphology=all_counterfactual_response>=.02_within_frozen_corridor_own_centroid_log_map_wind_frame_weighted_Q90_Q10_L_alongwind_B_crosswind; Gperp=weighted_normalized_crosswind_geodesic_derivative; S=B*Gperp; gates=each:p95>=.04,Neff>=32,outside_corridor<=5%,beyond_physical_support<=5%,boundary_shell<=1%; ws1:downwind_centroid>=+8texels,upwind_mass<=5% (diffusion-limited blob regime — PCA axis is not a wind-ownership diagnostic); ws2:axis<=30deg; ratios:L2/L1=1.10..2.75,B2/B1=.80..1.25,S2/S1=.70..1.25,deterministic; mass/area/isotropic_edge/components/centroid=telemetry_only; seeds={seeds:?}\nfixture={U15_ELIGIBLE_MASK}; fixture_flow={U15_FIXTURE_FLOW:?}; source_guard=actual_GPU_weather_pipeline; size_deterministic={size_deterministic}; qualified_organization_seed_count={qualified_organization_seed_count}/{}; qualified_organization=outside_high>=.10,each_core_downwind_centroid>=.5texels,each_core_pca<=20deg(per-core:own centroid+local wind,capture=3xcore_radius nearest-core assignment)\n{}\n",
         (1.0 - U15_TRAIL_SHEAR) / (1.0 + U15_TRAIL_SHEAR),
         seeds.len(),
         rows.join("\n"),
