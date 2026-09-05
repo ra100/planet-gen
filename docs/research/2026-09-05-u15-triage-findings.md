@@ -126,9 +126,21 @@ Physical reading: these are tilted anvils, not mis-organized ones — every one 
 
 Band sensitivity (measured, for ruling only — choosing a band to fit results is the rejected Option-A pattern): per-seed worst angle ≤ 20° → org 3/8; ≤ 35° → 7/8 (only seed 101 fails at 49.5°); ≤ 50° → 8/8. **Recommendation: keep 20°; seeds 19/101/211/509/997 anvil-angle stay known-blocked with numbers on record.**
 
+## 6b. C-5: the steering reference was storm-relative (ruling 2026-09-05)
+
+The §6a "source-region tilt" resolved one level further: it is a second reference-vector defect, not production physics. The C-4 gate samples `u15_fixture_seed_wind` **at the component centroid**, which includes the core's *own* ×8 convergence inflow. At a centroid offset δ from the seeded center that inflow (magnitude ≈ 8·sin δ, zero at the exact center, peaking near R) rotates the "downwind" reference toward the offset direction by arctan(8·sin δ / |base tangent|). Diagnostic `u15_deflect`/`u15_full` (`target/val-u15-deflect.log`, `target/val-u15-c5-evidence.log`) measured it core-for-core:
+
+- The predicted deflection equals the gate angle on **all 27 cores** — outliers are exactly the cores at flow-magnitude minima (base tangent 0.14–0.29 vs ≥ 0.5 for passers) with moderate centroid offsets (1.4–4.3 texels).
+- Against the **environmental steering flow** (fixture base flow + neighbor-center convergence, own-core convergence excluded), worst |PCA−steering| across all 27 cores is **5.8°** (storm-relative: 49.5°) and min downwind shift **+15.3 texels** — the anvils are aligned with the environmental flow everywhere; the "tilt" was own-inflow geometry read as steering.
+- This matches meteorological practice: steering flow is the mean environmental flow around a storm, explicitly excluding the storm's own circulation.
+
+**C-5 (user-ruled 2026-09-05): measure each core's downwind/PCA against `u15_fixture_environmental_wind`** — base flow + convergence from every seeded center except the nearest one. Thresholds unchanged (+0.5 texels, ≤20°, ≥10% outside mass); no shader or physics change; neighbor convergence retained so overlapping cores in future fixtures remain physical steering. Measured (`target/val-u15-c5.log`): anvil failures 5 → **0**, org count 3/8 → **8/8**, total validation failures 7 → **1** — the survivor is the unrelated seed-19 shear-plume axis (34.8° > 30°, parked per the C-1 ruling). A-gates bit-identical to baseline; 288 tests serial green.
+
+Honesty note: this complex has now required two measurement corrections (C-4 aggregate geometry, C-5 storm-relative reference) before the physics could be read at all. With both applied, the anvil-side verdict is unambiguous: drift +10…+17 texels and alignment ≤ 5.8° per core — organization was never failing; the gate could not see it. §6a's "tilt born in the source annulus" reading is superseded by this deflection mechanism (the annulus decay profile matches a fixed structure measured against a rotating reference).
+
 ## 7. Artifacts
 
-- Logs: `target/val-u15-triage-run1.log` (baseline), `-run2.log` (+dumps), `-pre-eddy-run.log`, `-bisect-a.log`, `-bisect-b.log`, `-lever1/2/3.log`, `-surgery.log`, `target/val-u15-final.log` (committed-tree confirmation), `target/val-u15-anvil-core.log` (P3 per-core diagnostic), `target/val-u15-percore.log` (per-core gate 3R, 7 failures), `target/val-u15-cap2r.log` (2R capture probe), `target/val-u15-tilt.log` (annulus tilt diagnostic).
+- Logs: `target/val-u15-triage-run1.log` (baseline), `-run2.log` (+dumps), `-pre-eddy-run.log`, `-bisect-a.log`, `-bisect-b.log`, `-lever1/2/3.log`, `-surgery.log`, `target/val-u15-final.log` (committed-tree confirmation), `target/val-u15-anvil-core.log` (P3 per-core diagnostic), `target/val-u15-percore.log` (per-core gate 3R, 7 failures), `target/val-u15-cap2r.log` (2R capture probe), `target/val-u15-tilt.log` (annulus tilt diagnostic), `target/val-u15-deflect.log` + `target/val-u15-c5-evidence.log` (dual-reference deflection diagnostic), `target/val-u15-c5.log` (C-5 environmental-steering gate: 1 failure, org 8/8).
 - Dumps + analysis: `target/u15-triage-*/u15tr_seed_*_ws{1,2}_response.png`, `target/u15-triage-2/analyze_trail.py` (cube-layout PNG → angular stats; mapping verified roundtrip err 0).
 - Instrumentation (committed): env-gated `PLANET_GEN_U15_DUMP_TRAIL=1` trail-response dump in `src/bin/sweep.rs`.
 - Working worktree: `target/u15-pre-eddy-wt` (`8837b21`) — remove once this triage closes.
