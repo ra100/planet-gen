@@ -324,10 +324,10 @@ Plan: [docs/plans/2026-09-05-001-feat-ui-redesign-instrument-panel-plan.md](docs
 
 | Task | 内容 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
-| 11.1 | UI review + lineage/tokens/IA doc | Review findings R1–R9 documented in plan | - | cc:完了 [6a452e7] |
-| 11.2 | `src/ui/theme.rs` — OKLCH tokens, egui style override | Zero framework-default highlights; token tests green | 11.1 | cc:完了 [6a452e7] |
-| 11.3 | `src/ui/widgets.rs` — param rows (units, modified-dot, dbl-click reset), chips, instruments, HUD | Headless widget render test passes | 11.2 | cc:完了 [6a452e7] |
-| 11.4 | Shell: top bar / tabs / viewport header+HUD / inspector / status bar; control-parity migration | All previous controls reachable; dirty-flag semantics unchanged | 11.3 | cc:完了 [6a452e7] |
-| 11.5 | Expose rings + lava glow; preset table (7 archetypes) | Sliders drive existing uniform fields; presets apply bundles | 11.4 | cc:完了 [6a452e7] |
-| 11.6 | Help overlay (F1/?), shortcut polish, double-click canvas reset | Documented in help window and status bar | 11.4 | cc:完了 [6a452e7] |
-| 11.7 | `cargo test --lib` green + new UI tests; zero build warnings | 190 passed / 0 failed | 11.4 | cc:完了 [6a452e7] |
+| 11.1 | UI review + lineage/tokens/IA doc | Review findings R1–R9 documented in plan | - | cc:完了 [510908e] |
+| 11.2 | `src/ui/theme.rs` — OKLCH tokens, egui style override | Zero framework-default highlights; token tests green | 11.1 | cc:完了 [510908e] |
+| 11.3 | `src/ui/widgets.rs` — param rows (units, modified-dot, dbl-click reset), chips, instruments, HUD | Headless widget render test passes | 11.2 | cc:完了 [510908e] |
+| 11.4 | Shell: top bar / tabs / viewport header+HUD / inspector / status bar; control-parity migration | All previous controls reachable; dirty-flag semantics unchanged | 11.3 | cc:完了 [510908e] |
+| 11.5 | Expose rings + lava glow; preset table (7 archetypes) | Sliders drive existing uniform fields; presets apply bundles | 11.4 | cc:完了 [510908e] |
+| 11.6 | Help overlay (F1/?), shortcut polish, double-click canvas reset | Documented in help window and status bar | 11.4 | cc:完了 [510908e] |
+| 11.7 | `cargo test --lib` green + new UI tests; zero build warnings | 190 passed / 0 failed | 11.4 | cc:完了 [510908e] |
