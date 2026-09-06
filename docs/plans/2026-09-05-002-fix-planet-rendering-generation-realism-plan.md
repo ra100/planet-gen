@@ -146,3 +146,174 @@ Visual inspection: the night hemisphere is dark, the limb is thin, the duplicate
 - Large cloud systems still come from the existing finite weather spin-up. Some broad decks and ocean-dominant distributions remain stylized; the renderer no longer introduces a separate coastline discontinuity.
 - Export moisture/material classification remains a simplified approximation even though the temperature baseline is shared.
 - All GPU evidence here used llvmpipe. Native-window composition and hardware frame times were not measured; three pre-existing manual performance tests remain ignored.
+
+### Follow-up — cloud-detail visual regression (2026-09-06)
+
+The user found the new clouds worse: high-contrast, similarly sized camouflage
+cells were dominating the weather field. The thresholded low/deep/cirrus noise
+introduced above was too strong. Replaced it with bounded, near-unity modulation
+at broader scales, attenuated inside dense columns (column mass is the fringe
+proxy). Cirrus retains its own wind-filtered detail. Weather formation, lighting,
+atmosphere, and coast-independent profile integration are unchanged.
+
+The existing contour test accidentally inherited `cloud_advection = 0`, making
+its detail comparison inert. It now enables detail and requires a nonzero fringe
+effect. A new GPU test compares all three uniform cloud layers against detail-off
+renders and limits core optical-depth changes, preventing the noise-mask regression.
+Eight contour seeds retain occupied area within 0.22% and dense mean optical depth
+within 0.15%; the original shape-preservation limits remain unchanged.
+
+`realism_capture` now saves `actual-density-no-detail.png` and
+`daylight-no-detail.png` alongside the active-detail captures. Visually inspected
+seed 42 at 768 px in `/tmp/planet-gen-cloud-detail-fix`: broad structures remain
+cohesive and the repeating high-contrast breakup is removed. The underlying coarse
+weather resolution is still visible; this correction does not invent a new cloud
+simulation to hide it. Focused detail regressions: 2 passed.
+Seeds 137 and 999 were also captured and visually checked at 256 px in
+`/tmp/planet-gen-cloud-detail-fix137` and `/tmp/planet-gen-cloud-detail-fix999`.
+All three seeds preserve live/PNG parity within 1/255 for both color and density.
+Full follow-up library suite: **197 passed, 0 failed, 3 ignored**. Changed Rust
+files pass scoped formatting checks; `git diff --check` passes.
+
+### Follow-up — blurred cloud shapes and misleading density view (2026-09-06)
+
+The user rejected the softened result as well. Reducing opacity noise exposed
+the broad weather blobs; it did not improve their silhouettes. The grayscale
+view also had a concrete regression: it read transmittance from the air/cloud
+compositor, so atmospheric extinction appeared as cloud density over empty sky.
+Density mode now integrates cloud extinction alone, without changing the normal
+color compositor. A GPU regression checks empty and populated weather with
+atmospheric density 0 and 4; cloud-only pixels must be identical.
+
+Experiments were visually reviewed, not accepted on test counts alone:
+
+- A 256-face-texel spin-up (instead of the 128 cap) retained essentially the same
+  blurred forms. Reverted; default weather generation cost/resolution is unchanged.
+- Warped opacity noise produced marbling. Finer, stronger opacity noise produced
+  a uniformly stippled surface. Both were removed.
+- The retained approach displaces the sampled weather boundaries at three
+  band-limited scales (13/43/119), in spherical 3D coordinates. It does not apply
+  another thresholded occupancy mask. Empty channels stay empty, uniform decks
+  retain their interiors, and each layer's detail switch remains independent.
+  This is subgrid appearance reconstruction, not new simulated cloud formation
+  or a claim of exact column-mass conservation under displacement.
+- Normalized-condensate extinction is calibrated from 1.2 to 3.0, shared by
+  preview and export. The 6.0 experiment was too opaque. This is an appearance
+  calibration, not a measured atmospheric coefficient.
+- The shared density shader now uses explicit LOD 0 (all its textures have one
+  mip). Removed expression-specific export shader rewriting, which missed the
+  newly displaced sample and caused compute-stage validation errors in testing.
+
+The optical-depth tests keep their original relative-error limits. Two dense
+fixtures use opacity 0.4 to retain their original effective optical depth and
+avoid sRGB8 saturation, where white pixels cannot measure optical-depth changes.
+The thin-shell oracle now computes the expected column analytically and accounts
+for sRGB8 readback quantization instead of pinning the old calibrated pixel.
+
+Reviewed captures: `/tmp/planet-gen-cloud-verified` (seed 42, 768 px) and
+`/tmp/planet-gen-cloud-boundaries-seed137` (seed 137, 768 px). Both include daylight,
+density, detail-off, night, and interactive-readback comparisons. Live/PNG maximum
+channel difference remains 1/255. Cloud outlines are more irregular without the
+repeated interior cells, but the broad weather organization remains stylized;
+this is not a claim that the user's realism concern is fully resolved.
+The capture tool now also produces density/daylight close-ups at zoom 1.55, with
+matching detail-off images. Those were inspected for seed 42. The sparse-support
+regression additionally enables displacement and still produces exactly zero
+density outside authored support.
+
+Focused export parity checks pass: tiled/direct optical-depth difference is zero,
+and maximum shared-edge/corner difference is 0.00004624. Final full library suite:
+**198 passed, 0 failed, 3 ignored** (328.85 s). The subsequently strengthened
+sparse-support test also passes individually. All-target compilation, scoped
+rustfmt checks, and `git diff --check` pass (existing OpenEXR/dead-code warnings
+remain). Evidence uses llvmpipe; native GPU frame times have not been established,
+and boundary reconstruction adds shader work. Changes remain uncommitted for
+visual review.
+
+### Follow-up — remaining large noise patches (2026-09-06)
+
+The user preferred the boundary reconstruction but still noticed large noise
+patches. This refinement keeps weather generation, cloud opacity, and the
+existing noise streams unchanged:
+
+- Correct the cloud pixel footprint to the differential of an orthographic
+  sphere intersection. The old normalized `(x,y,0.5)` proxy doubled footprint
+  size at disk center, suppressing the fine octaves there, and underestimated
+  the footprint approaching the limb. The new calculation is bounded at the
+  silhouette and scales with zoom. Terrain retains its previous filter, so this
+  does not silently change terrain normals.
+- Reduce broad boundary displacement from 0.035 to 0.018; retain smaller-scale
+  displacement at 0.014/0.005. Reduce broad opacity modulation for all three
+  layers, shifting the small remaining variation toward finer scales. The
+  density-view atmosphere fix and extinction calibration remain unchanged.
+- Add a GPU oracle for center, off-center, rotated-axis, limb, outer-limb, and
+  zoom footprint behavior. Extend the oracle's readback from 18 to 24 values to
+  include these new outputs. Existing cloud shape, support, and core-stability
+  limits are not loosened.
+
+Eight contour seeds retain occupied area within 0.36% and mean dense optical
+depth within 0.35% of detail-off. Reviewed 768 px captures in
+`/tmp/planet-gen-cloud-finer-final` (seed 42) and
+`/tmp/planet-gen-cloud-finer137` (seed 137), including zoom-1.55 density close-ups.
+Seed 137 was captured before restoring the independent terrain filter; density
+is unaffected by that restoration. Broad weather-system interiors are still
+present by design; this pass targets the coarse procedural perturbation and
+missing finer detail, not a replacement weather model.
+
+Validation: all 13 cloud regressions pass in the final full run, including the
+new projection oracle. The full run reports **198 passed, 1 failed, 3 ignored**:
+the unrelated exporter cancellation checkpoint test observed 1025 completed rows
+instead of 1024 with two workers. Its isolated rerun passes; cancellation code
+was not changed. All-target compilation and scoped formatting/diff checks pass.
+Live/PNG maximum channel delta remains 1/255 on both captured seeds. Seed 42's
+terrain-only PNG is byte-identical to the preceding accepted version. Changes
+remain uncommitted for visual review.
+
+### Follow-up — large-scale formation, not renderer detail (2026-09-06)
+
+The user clarified that the large weather masses themselves still read as
+noise. The preceding footprint/detail pass did not address this problem.
+
+Controlled captures ruled out two initial hypotheses as the main cause:
+disabling independent wind perturbations and bypassing the sparse marine-fetch
+factor barely changed the large patches. Both experiments were reverted.
+
+Two generation errors were then identified and corrected:
+
+- The **published diagnosis**, after conservative transport, multiplied low
+  condensate by three seeded erosion masks at frequencies 1, 3, and 5. Remove
+  these masks; publish the bounded transported low mass directly. The previous
+  no-noise regression inspected only spin-up finalization and missed this second
+  pass. Extend it to the actual diagnosis and add a GPU reference comparison
+  against the sampled final transported state on two seeds.
+- Both terrain transects treated underwater relief as atmospheric mountains,
+  allowing seabed slopes to create uplift, rain shadows, and cloud-height
+  changes. Clamp each transect sample to sea level in both passes. A GPU
+  regression now requires bit-identical mass and geometry for flat versus
+  ridged seabeds under otherwise identical forcing.
+
+Removing the masks alone exposed excessive warm-ocean blanket formation. Limit
+marine vapor-to-condensate conversion using existing resolved convergence,
+terrain lift, and frontal lift, while retaining weaker stable-deck formation.
+Blend continuously by marine fraction, preserving inland transported-moisture
+formation. This is a heuristic formation-rate change, not a new pressure-driven
+circulation simulation. It changes conservative phase transfer rather than
+painting holes into final cloud mass. Existing transport, coast/plume, coverage,
+and water-budget thresholds remain unchanged. Published-output fingerprints
+intentionally change with the formation model; compatibility timesteps do not.
+
+Reviewed 768 px seed-42 and seed-137 captures in
+`/tmp/planet-gen-cloud-resolved-formation` and
+`/tmp/planet-gen-cloud-resolved-137`. The images have more connected decks and
+fewer imposed noise cutouts, but broad decks remain prominent; realistic frontal
+structure is still a limitation. Preview/PNG channel differences remain at most
+1/255. This pass leaves the preceding renderer detail tuning unchanged. No
+claim of final visual acceptance or native-GPU performance is made.
+
+Validation: full validation-feature library suite **200 passed, 0 failed,
+3 ignored** (379.35 s). The subsequently added GPU transported-mass publication
+oracle also passes individually. Both revised fingerprint fixtures pass on
+repeat runs. All-target validation-feature compilation, scoped Rust 2024
+formatting, and diff checks pass; existing OpenEXR/dead-code warnings remain.
+Seed 42's terrain-only capture is byte-identical to the preceding version.
+Changes remain uncommitted for visual review.
