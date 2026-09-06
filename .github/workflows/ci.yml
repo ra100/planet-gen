@@ -32,13 +32,39 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      # Linux: install GPU/display dependencies for wgpu
+      # Linux: install GPU/display dependencies for wgpu and OpenEXR (native EXR writer)
       - name: Install Linux deps
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libxkbcommon-dev libwayland-dev libxcb-render0-dev \
-            libxcb-shape0-dev libxcb-xfixes0-dev mesa-vulkan-drivers
+            libxcb-shape0-dev libxcb-xfixes0-dev mesa-vulkan-drivers libopenexr-dev
+
+      # macOS: OpenEXR for the native EXR writer (pkg-config metadata from Homebrew)
+      - name: Install OpenEXR (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install openexr
+          echo "PKG_CONFIG_PATH=$(brew --prefix)/lib" >> "$GITHUB_ENV"
+
+      # Windows: OpenEXR from vcpkg; bin dir on PATH so tests can load the shared library
+      - name: Cache vcpkg (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: |
+            C:\vcpkg\packages
+            C:\vcpkg\downloads
+            C:\vcpkg\installed\x64-windows
+          key: vcpkg-openexr-1
+
+      - name: Install OpenEXR (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          C:\vcpkg\vcpkg.exe install openexr:x64-windows
+          Add-Content -Path $env:GITHUB_ENV -Value "PKG_CONFIG_PATH=C:\vcpkg\installed\x64-windows\lib\pkgconfig"
+          Add-Content -Path $env:GITHUB_PATH -Value "C:\vcpkg\installed\x64-windows\bin"
 
       - name: Build
         run: cargo build --all-targets
