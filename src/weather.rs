@@ -2502,7 +2502,7 @@ mod tests {
     }
 
     #[test]
-    fn provenance_mode_is_capability_gated_and_off_preserves_the_legacy_fingerprint() {
+    fn provenance_mode_is_capability_gated_and_pins_both_formation_paths() {
         let resolution = 16;
         let gpu = GpuContext::new().expect("GPU init failed");
         let terrain = terrain_from(resolution, |_| -0.1);
@@ -2529,14 +2529,16 @@ mod tests {
         // (cargo test --lib run twice, identical hashes). RV-002: re-baselined —
         // stale against the uncommitted FE-084/FE-086 tree before this work
         // (proven pre-existing by revert experiment); values verified across
-        // repeated deterministic release builds.
+        // repeated deterministic release builds. Cloud-formation correction:
+        // remove post-transport noise erosion and use resolved marine lifting;
+        // the new model intentionally changes both published-field pins.
         assert_eq!(
             mass_fingerprint(&legacy.read_mass(&gpu)),
-            5_458_526_457_701_180_197
+            3_391_817_111_555_384_101
         );
         assert_eq!(
             mass_fingerprint(&off.read_mass(&gpu)),
-            11_623_944_083_702_252_325
+            15_530_981_776_531_301_157
         );
         assert_eq!(provenance.is_some(), pipeline.provenance.is_some());
     }
@@ -2632,7 +2634,7 @@ mod tests {
     }
 
     #[test]
-    fn all_ocean_compatibility_matches_the_legacy_spinup_fixture() {
+    fn all_ocean_schedule_and_resolved_formation_match_the_pinned_fixture() {
         let resolution = 16;
         let gpu = GpuContext::new().expect("GPU init failed");
         let terrain = terrain_from(resolution, |_| -0.1);
@@ -2651,12 +2653,14 @@ mod tests {
         // RV-002: re-baselined — the pin was stale against the uncommitted
         // FE-084/FE-086 tree before this work (failure proven pre-existing by
         // a revert experiment); new value verified identical across repeated
-        // deterministic release builds.
+        // deterministic release builds. Cloud-formation correction removes
+        // diagnosis noise masks and changes marine condensation support, but
+        // preserves the compatibility schedule (not the old cloud shapes).
         let fingerprint = mass_fingerprint(&selected.read_mass(&gpu));
 
         assert_eq!(schedule.iterations, 16);
         assert_eq!(schedule.physical_interval_seconds, 1600.0);
-        assert_eq!(fingerprint, 9_282_804_621_228_303_141);
+        assert_eq!(fingerprint, 17_670_523_320_019_362_597);
     }
 
     #[test]
@@ -3526,6 +3530,91 @@ mod tests {
         assert!(!finalize.contains("noise_seed_offset"));
         assert!(finalize.contains("state.y * 1.25"));
         assert!(finalize.contains("state.z * 1.5"));
+        // Production publishes a second diagnosis after this finalize pass.
+        // Checking only finalize missed three large noise masks in that pass.
+        let diagnosis = include_str!("shaders/weather_field.wgsl")
+            .split("fn diagnose")
+            .nth(1)
+            .expect("published weather diagnosis entry point");
+        assert!(!diagnosis.contains("snoise"));
+        assert!(!diagnosis.contains("noise_seed_offset"));
+        assert!(diagnosis.contains("soft_bound(transported_low, 1.0)"));
+    }
+
+    #[test]
+    fn published_low_clouds_follow_transported_mass_without_noise_cutouts() {
+        let resolution = 16;
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let terrain = terrain_from(resolution, |_| -0.1);
+        let wind = WindFieldPipeline::new(&gpu).expect("dynamics unavailable");
+        let dynamics =
+            wind.create_test_textures(&gpu, resolution, |_| ([0.25, 0.0, -0.15, 0.0], 1013.0));
+        let pipeline = WeatherFieldPipeline::new(&gpu).expect("weather unavailable");
+        for seed in [42, 137] {
+            let mut params = snapshot(resolution);
+            params.seed = seed;
+            let weather = pipeline.create_textures(&gpu, resolution);
+            let trace = pipeline.validation_tracer_trace_for_sweep(
+                &gpu, params, &terrain, &dynamics, &weather, 0, false,
+            );
+            let mass = weather.read_mass(&gpu);
+            let n = resolution as usize;
+            assert_eq!(trace.spin_resolution, resolution);
+            let mut checked_clouds = 0;
+            // Interior samples avoid cross-face filtering. Match the actual
+            // cubemap sampler's half-texel offset, not a texel-load oracle.
+            for face in 0..6 {
+                for y in 1..n - 1 {
+                    for x in 1..n - 1 {
+                        let sx = x as f32 / (n - 1) as f32 * n as f32 - 0.5;
+                        let sy = y as f32 / (n - 1) as f32 * n as f32 - 0.5;
+                        let ix = sx.floor() as usize;
+                        let iy = sy.floor() as usize;
+                        let fx = sx - ix as f32;
+                        let fy = sy - iy as f32;
+                        let at = |x, y| trace.state[(face * n * n + y * n + x) * 4 + 1];
+                        let top = at(ix, iy) * (1.0 - fx) + at(ix + 1, iy) * fx;
+                        let bottom = at(ix, iy + 1) * (1.0 - fx) + at(ix + 1, iy + 1) * fx;
+                        let transported = (top * (1.0 - fy) + bottom * fy) * 1.25;
+                        let expected = transported / (1.0 + transported);
+                        let actual = mass[(face * n * n + y * n + x) * 4];
+                        assert!(
+                            (actual - expected).abs() < 0.001,
+                            "seed {seed}, face {face}, ({x},{y}): {actual} != {expected}"
+                        );
+                        checked_clouds += usize::from(expected > 0.02);
+                    }
+                }
+            }
+            assert!(checked_clouds > 100, "oracle must exercise occupied clouds");
+        }
+    }
+
+    #[test]
+    fn submerged_relief_cannot_lift_air_or_cast_rain_shadows() {
+        let resolution = 16;
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let wind = WindFieldPipeline::new(&gpu).expect("dynamics unavailable");
+        let dynamics =
+            wind.create_test_textures(&gpu, resolution, |_| ([0.25, 0.0, -0.15, 0.0], 1013.0));
+        let pipeline = WeatherFieldPipeline::new(&gpu).expect("weather unavailable");
+        let flat = terrain_from(resolution, |_| -0.1);
+        let seabed_ridges = terrain_from(resolution, |p| {
+            -0.15 + 0.10 * (p[0] * 19.0 + p[2] * 11.0).sin()
+        });
+        let params = snapshot(resolution);
+        let reference = generate_weather(&gpu, &pipeline, &dynamics, &flat, params);
+        let candidate = generate_weather(&gpu, &pipeline, &dynamics, &seabed_ridges, params);
+        assert_eq!(
+            reference.read_mass(&gpu),
+            candidate.read_mass(&gpu),
+            "ocean water, not the seabed, is the atmospheric lower boundary"
+        );
+        assert_eq!(
+            read_texture(&gpu, &reference._geometry_texture, resolution),
+            read_texture(&gpu, &candidate._geometry_texture, resolution),
+            "submerged relief must not change cloud-layer heights"
+        );
     }
 
     #[test]

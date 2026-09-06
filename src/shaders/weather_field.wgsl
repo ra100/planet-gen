@@ -71,11 +71,12 @@ struct TerrainTransect {
 
 fn terrain_transect(pos: vec3<f32>, wind_dir: vec3<f32>, wind_speed: f32) -> TerrainTransect {
     let step = clamp(220.0 / max(params.radius_km, 1.0), 0.018, 0.065);
-    let h0 = sample_height(pos);
-    let h1 = sample_height(normalize(pos - wind_dir * step));
-    let h2 = sample_height(normalize(pos - wind_dir * step * 2.0));
-    let h3 = sample_height(normalize(pos - wind_dir * step * 3.0));
-    let h4 = sample_height(normalize(pos - wind_dir * step * 4.0));
+    // Match spin-up: seabed slopes cannot lift air or form rain shadows.
+    let h0 = max(sample_height(pos), params.ocean_level);
+    let h1 = max(sample_height(normalize(pos - wind_dir * step)), params.ocean_level);
+    let h2 = max(sample_height(normalize(pos - wind_dir * step * 2.0)), params.ocean_level);
+    let h3 = max(sample_height(normalize(pos - wind_dir * step * 3.0)), params.ocean_level);
+    let h4 = max(sample_height(normalize(pos - wind_dir * step * 4.0)), params.ocean_level);
     let wind_gate = smooth_step(0.03, 0.20, wind_speed);
     // Only the immediately upwind slope lifts this column. Looking farther
     // upstream crosses a ridge from its lee side and incorrectly creates lift.
@@ -300,32 +301,10 @@ fn diagnose(@builtin(global_invocation_id) id: vec3<u32>) {
     let terrain_lift = terrain.ascent;
     let rain_shadow = terrain.lee_drying;
 
-    // Erosion shapes existing warm trade mass; it never creates an occupancy threshold.
-    let trade_erosion = 0.05 + 0.95 * smooth_step(
-        -0.20,
-        0.80,
-        snoise(pos * 5.0 + noise_seed_offset(params.seed, 61u)),
-    );
-    let detail_erosion = 0.55 + 0.45 * smooth_step(
-        -0.5,
-        0.5,
-        snoise(pos * 3.0 + noise_seed_offset(params.seed, 62u)),
-    );
-    let seed_erosion = 0.75 + 0.50 * smooth_step(
-        -0.5,
-        0.5,
-        snoise(pos + noise_seed_offset(params.seed, 31u)),
-    );
     // Diagnosis preserves U12's transported condensate history. Vapor never
     // becomes cloud mass here, and marine/terrain forcing never adds local mass.
     let transported_low = state.y * 1.25;
-    let low = soft_bound(
-        transported_low * min(
-            detail_erosion * mix(1.0, trade_erosion, trade_cumulus) * seed_erosion,
-            1.0,
-        ),
-        1.0,
-    );
+    let low = soft_bound(transported_low, 1.0);
     let deep = soft_bound(
         state.z * (1.0 - marine_stability * 0.20),
         1.0 - low,

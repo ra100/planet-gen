@@ -395,11 +395,12 @@ struct TerrainTransect {
 // shadow without adding a second weather field or an unbounded integration.
 fn terrain_transect(pos: vec3<f32>, wind_dir: vec3<f32>, wind_speed: f32) -> TerrainTransect {
     let step = clamp(220.0 / max(params.radius_km, 1.0), 0.018, 0.065);
-    let h0 = sample_height(pos);
-    let h1 = sample_height(normalize(pos - wind_dir * step));
-    let h2 = sample_height(normalize(pos - wind_dir * step * 2.0));
-    let h3 = sample_height(normalize(pos - wind_dir * step * 3.0));
-    let h4 = sample_height(normalize(pos - wind_dir * step * 4.0));
+    // Air follows the water surface, never the submerged terrain beneath it.
+    let h0 = max(sample_height(pos), params.ocean_level);
+    let h1 = max(sample_height(normalize(pos - wind_dir * step)), params.ocean_level);
+    let h2 = max(sample_height(normalize(pos - wind_dir * step * 2.0)), params.ocean_level);
+    let h3 = max(sample_height(normalize(pos - wind_dir * step * 3.0)), params.ocean_level);
+    let h4 = max(sample_height(normalize(pos - wind_dir * step * 4.0)), params.ocean_level);
     let wind_gate = smooth_step(0.03, 0.20, wind_speed);
     // Only the immediately upwind slope lifts this column. Looking farther
     // upstream crosses a ridge from its lee side and incorrectly creates lift.
@@ -1042,10 +1043,19 @@ fn advance_state(pos: vec3<f32>, provenance_mass: f32, enable_vertical: bool) ->
             q_sat * (1.0 - mix(0.08, 0.42, convective_lift)),
             q_target * 0.70,
         ) * (1.0 - terrain_lift * 0.65);
+        // Resolved lifting organizes formation before transport. The previous
+        // local humidity target condensed broad warm-ocean blankets; a later
+        // independent noise mask then cut fake weather systems into that mass.
+        let organized_lift = max(convergence, max(terrain_lift, frontal_lift));
+        let rising_air = smooth_step(0.08, 0.65, organized_lift);
+        let stable_deck = (1.0 - thermal) * marine_fraction
+            * (1.0 - smooth_step(0.05, 0.30, divergence)) * 0.35;
+        let formation_support = mix(1.0,
+            mix(max(0.04, stable_deck), 1.0, rising_air), marine_fraction);
         let condensation = min(
             state.x,
             max(state.x - q_lcl, 0.0) * mix(0.16, 0.56, convective_lift)
-                * phase_budget * inland_provenance * step_fraction,
+                * phase_budget * inland_provenance * step_fraction * formation_support,
         );
         let p_condensation = proportional_transfer(state.x, aux.y, condensation);
         let physical_convective_eligibility = warm_gate * physical_lift
