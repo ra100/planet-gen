@@ -55,3 +55,15 @@ data
 
 # Serena local agent state
 .serena/
+
+# Local tooling metadata and independent reference checkouts (not vendored)
+/.impeccable/
+/.tmp-research/
+/opencode.json
+/planet_heightmap_generation/
+
+# Local visual references; provenance/licensing not recorded for distribution
+/reference/art002e000190~large.jpg
+/reference/art002e000192.jpg
+/reference/art002e004462~orig.jpg
+/reference/art002e009166~orig.jpg
