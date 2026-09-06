@@ -1229,7 +1229,9 @@ fn preview_uniforms(params: &PlanetParams, derived: &DerivedProperties) -> Previ
         show_cities: 0.,
         cloud_opacity: 0.,
         cloud_advection: 0.,
-        rotation_rate: derived.rotation_rate_rad_s,
+        rotation_rate: planet_gen::terrain_compute::earth_relative_rotation_rate(
+            derived.rotation_rate_rad_s,
+        ),
         atm_pressure: derived.surface_pressure_bar,
         _pad4: 0.,
         lava_glow: 0.,

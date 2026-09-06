@@ -400,13 +400,13 @@ fn generate_native_default_scene(
         gpu,
         &terrain,
         &dynamics,
-        params.seed,
+        params.seed.wrapping_add(1000),
         ocean_level,
         params.axial_tilt_deg.to_radians(),
         0.5,
         24.0 / params.rotation_period_h,
         derived.base_temperature_c,
-        derived.atmosphere_strength,
+        derived.surface_pressure_bar,
         1.0,
     );
     WeatherScene {
@@ -6925,7 +6925,12 @@ impl Ds046Grid {
 // ocean blue) so wind_scale excursions beyond the gated range can be compared
 // visually. Diagnostic output only; not consumed by any gate.
 fn ds046_dump_cloud_map_ppm(grid: &Ds046Grid, path: &str) {
-    let max_c = grid.condensate.iter().cloned().fold(0.0_f32, f32::max).max(1e-6);
+    let max_c = grid
+        .condensate
+        .iter()
+        .cloned()
+        .fold(0.0_f32, f32::max)
+        .max(1e-6);
     let v = |x: f32| (x.clamp(0.0, 1.0) * 255.0) as u8;
     let mut buf = Vec::with_capacity(grid.width * grid.height * 3 + 32);
     buf.extend_from_slice(format!("P6\n{} {}\n255\n", grid.width, grid.height).as_bytes());
@@ -7313,7 +7318,11 @@ fn run_ds046_a_metrics(
         // DS046_A1B_T_LOW_WIND for the measured rationale). RV-003 #3: gated
         // across the full validated range [0.25, 4.0] — ws=4 measured 51.9%
         // land_cloud(warm), well above the 0.25 target (target/val-fe090-run.log).
-        let a1b_target = if wind_scale < 0.75 { DS046_A1B_T_LOW_WIND } else { 0.25 };
+        let a1b_target = if wind_scale < 0.75 {
+            DS046_A1B_T_LOW_WIND
+        } else {
+            0.25
+        };
         if land_cloud_fraction < a1b_target {
             failures.push(format!(
                 "DS-046 A1b wind_scale={wind_scale}: land cloud fraction {land_cloud_fraction:.3} < target {a1b_target:.2}"
@@ -7397,7 +7406,9 @@ fn run_ds046_a_metrics(
             scene.ocean_level,
             scene.tilt_rad,
             0.5,
-            scene.derived.rotation_rate_rad_s,
+            planet_gen::terrain_compute::earth_relative_rotation_rate(
+                scene.derived.rotation_rate_rad_s,
+            ),
             scene.derived.base_temperature_c,
             scene.derived.surface_pressure_bar,
             2.0,
@@ -8397,7 +8408,9 @@ fn run_weather_validation_with_pipeline(
             for failure in &perf_gate_failures {
                 println!("    {failure}");
             }
-            println!("  Perf gates are still failing; re-run without the env var before declaring perf green.");
+            println!(
+                "  Perf gates are still failing; re-run without the env var before declaring perf green."
+            );
         }
     } else {
         gate_failures.extend(perf_gate_failures);
@@ -8407,7 +8420,9 @@ fn run_weather_validation_with_pipeline(
         println!("U12 status: IMPLEMENTED, COMPLETE");
         println!("  Automated eight-seed topology, morphology, and storm-control gates passed.");
         if ignore_perf_gates {
-            println!("  The 512px automated gates and wind reversal passed; queue p95 gates were ignored via PLANET_GEN_IGNORE_PERF_GATES=1.");
+            println!(
+                "  The 512px automated gates and wind reversal passed; queue p95 gates were ignored via PLANET_GEN_IGNORE_PERF_GATES=1."
+            );
         } else {
             println!("  The 512px automated gates, wind reversal, and queue p95 gates passed.");
         }
@@ -8455,8 +8470,8 @@ fn run_native_default_cloud_validation(
     uniforms.ocean_fraction = scene.derived.ocean_fraction;
     uniforms.axial_tilt_rad = params.axial_tilt_deg.to_radians();
     uniforms.season = 0.5;
-    uniforms.atmosphere_density = scene.derived.atmosphere_strength;
-    uniforms.atmosphere_height = 0.02 + 0.02 * scene.derived.atmosphere_strength;
+    uniforms.atmosphere_density = scene.derived.surface_pressure_bar;
+    uniforms.atmosphere_height = scene.derived.atmosphere_shell_height();
     uniforms.height_scale = 3.0;
     uniforms.zoom = 1.0;
     uniforms.cloud_coverage = 0.5;
