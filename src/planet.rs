@@ -125,11 +125,12 @@ pub struct DerivedProperties {
     pub radius_km: f32,
     /// Sidereal rotation rate in radians per second.
     pub rotation_rate_rad_s: f32,
-    /// Surface pressure proxy in bar (1.0 = Earth-like).
+    /// Heuristic surface pressure in bar (1.0 = Earth-like). Unlike
+    /// `atmosphere_strength`, this is not a normalized score and may exceed 1 bar.
     pub surface_pressure_bar: f32,
-    /// Base equatorial temperature in °C
+    /// Global-reference surface temperature in °C
     pub base_temperature_c: f32,
-    /// Ocean coverage fraction (0.0 - 1.0)
+    /// Water inventory/sea-level control (0.0 - 1.0), not measured surface coverage.
     pub ocean_fraction: f32,
     /// Surface age factor (0.0 = young/active, 1.0 = old/inactive)
     pub surface_age: f32,
@@ -140,6 +141,19 @@ pub struct DerivedProperties {
 }
 
 impl DerivedProperties {
+    /// Isothermal molecular scale height, calibrated to terrestrial air.
+    /// Composition is not simulated; this is a bounded temperature/gravity model.
+    pub fn rayleigh_scale_height_km(&self) -> f32 {
+        (8.0 * ((self.base_temperature_c + 273.15).max(80.0) / 288.15)
+            * (9.81 / self.surface_gravity.max(0.1)))
+        .clamp(1.0, 80.0)
+    }
+
+    /// Shell cutoff after twelve e-foldings (not the density scale height).
+    pub fn atmosphere_shell_height(&self) -> f32 {
+        12.0 * self.rayleigh_scale_height_km() / self.radius_km.max(1.0)
+    }
+
     /// Derive planet properties from user parameters using planetary science rules.
     pub fn from_params(params: &PlanetParams) -> Self {
         let frost_line_au = compute_frost_line(params.metallicity);
@@ -177,7 +191,11 @@ impl DerivedProperties {
             surface_gravity,
             radius_km,
             rotation_rate_rad_s,
-            surface_pressure_bar: atmosphere_strength,
+            surface_pressure_bar: compute_surface_pressure_bar(
+                atmosphere_strength,
+                params.mass_earth,
+                params.star_distance_au,
+            ),
             base_temperature_c,
             ocean_fraction,
             surface_age,
@@ -236,6 +254,20 @@ fn compute_atmosphere_strength(mass_earth: f32, distance_au: f32) -> f32 {
     // Calibrated so Earth (M=1, d=1) gives ~0.7
     let retention = v_esc_factor / thermal_factor * 0.7;
     retention.clamp(0.0, 1.0)
+}
+
+/// Estimate atmospheric inventory independently from the bounded retention score.
+/// This is intentionally a heuristic, not a composition or climate simulation.
+/// Retention is calibrated so the Earth score of 0.7 maps to 1 bar; greater mass
+/// can support inventories above one bar instead of hitting the score's ceiling.
+fn compute_surface_pressure_bar(
+    atmosphere_strength: f32,
+    mass_earth: f32,
+    distance_au: f32,
+) -> f32 {
+    let retained_inventory = (atmosphere_strength / 0.7).powf(1.5);
+    let volatile_inventory = mass_earth.powf(0.35) * distance_au.powf(0.1);
+    (retained_inventory * volatile_inventory).clamp(0.0, 20.0)
 }
 
 fn classify_atmosphere(strength: f32, planet_type: PlanetType) -> AtmosphereType {
@@ -370,7 +402,17 @@ mod tests {
         assert_eq!(derived.atmosphere_type, AtmosphereType::Nitrogen);
         assert!((derived.radius_km - 6371.0).abs() < 0.1);
         assert!((derived.rotation_rate_rad_s - std::f32::consts::TAU / 86400.0).abs() < 1e-9);
-        assert_eq!(derived.surface_pressure_bar, derived.atmosphere_strength);
+        assert!((derived.surface_pressure_bar - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn pressure_is_not_capped_by_retention_score() {
+        let derived = DerivedProperties::from_params(&PlanetParams {
+            mass_earth: 10.0,
+            ..Default::default()
+        });
+        assert_eq!(derived.atmosphere_strength, 1.0);
+        assert!(derived.surface_pressure_bar > 1.0);
     }
 
     #[test]
@@ -507,5 +549,19 @@ mod tests {
         };
         let derived = DerivedProperties::from_params(&params);
         assert_eq!(derived.planet_type, PlanetType::IcyRocky);
+    }
+
+    #[test]
+    fn realism_atmosphere_has_independent_scale_height_and_cutoff() {
+        let mut earth = DerivedProperties::from_params(&PlanetParams::default());
+        let reference = earth.rayleigh_scale_height_km();
+        assert!((reference - 8.0).abs() < 0.1);
+        assert!(
+            (earth.atmosphere_shell_height() * earth.radius_km - reference * 12.0).abs() < 0.001
+        );
+        earth.surface_gravity *= 2.0;
+        assert!((earth.rayleigh_scale_height_km() - reference * 0.5).abs() < 0.001);
+        earth.base_temperature_c += 50.0;
+        assert!(earth.rayleigh_scale_height_km() > reference * 0.5);
     }
 }

@@ -3,6 +3,12 @@ use crate::plates::PlateGpu;
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
+/// Convert a physical angular velocity to the wind model's documented
+/// Earth-relative convention (1.0 = the app's 24-hour Earth reference).
+pub fn earth_relative_rotation_rate(rotation_rate_rad_s: f32) -> f32 {
+    rotation_rate_rad_s / (std::f32::consts::TAU / 86_400.0)
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct TerrainGenParams {
@@ -89,6 +95,39 @@ impl TerrainGenParams {
 pub struct TectonicTerrain {
     pub faces: [Vec<f32>; 6],
     pub resolution: u32,
+}
+
+impl TectonicTerrain {
+    /// Fraction of the sphere below `ocean_level`, weighted by cubemap texel
+    /// solid angle rather than treating all face pixels as equal-area samples.
+    pub fn solid_angle_ocean_coverage(&self, ocean_level: f32) -> f32 {
+        if self.resolution == 0 {
+            return 0.0;
+        }
+        let denominator = self.resolution.saturating_sub(1).max(1) as f64;
+        let mut wet_weight = 0.0_f64;
+        let mut total_weight = 0.0_f64;
+        // Each face uses the same solid-angle weights; evaluate the expensive
+        // weight once per face coordinate, not six times per terrain readback.
+        for index in 0..(self.resolution as usize).pow(2) {
+            let x = 2.0 * (index % self.resolution as usize) as f64 / denominator - 1.0;
+            let y = 2.0 * (index / self.resolution as usize) as f64 / denominator - 1.0;
+            let weight = (1.0 + x * x + y * y).powf(-1.5);
+            for face in &self.faces {
+                if let Some(height) = face.get(index) {
+                    total_weight += weight;
+                    if *height < ocean_level {
+                        wet_weight += weight;
+                    }
+                }
+            }
+        }
+        if total_weight > 0.0 {
+            (wet_weight / total_weight) as f32
+        } else {
+            0.0
+        }
+    }
 }
 
 pub struct TerrainComputePipeline {
@@ -1779,7 +1818,7 @@ impl WindFieldPipeline {
         axial_tilt_rad: f32,
         season: f32,
         smooth_weight: f32,
-        rotation_rate: f32,
+        earth_relative_rotation_rate: f32,
         base_temp_c: f32,
         atm_pressure: f32,
         wind_scale: f32,
@@ -1797,7 +1836,7 @@ impl WindFieldPipeline {
             axial_tilt_rad,
             season,
             smooth_weight,
-            rotation_rate,
+            rotation_rate: earth_relative_rotation_rate,
             base_temp_c,
             atm_pressure,
             wind_scale,
@@ -1856,7 +1895,7 @@ impl WindFieldPipeline {
         ocean_level: f32,
         axial_tilt_rad: f32,
         season: f32,
-        rotation_rate: f32,
+        earth_relative_rotation_rate: f32,
         base_temp_c: f32,
         atm_pressure: f32,
         wind_scale: f32,
@@ -1924,7 +1963,7 @@ impl WindFieldPipeline {
                 axial_tilt_rad,
                 season,
                 0.0,
-                rotation_rate,
+                earth_relative_rotation_rate,
                 base_temp_c,
                 atm_pressure,
                 wind_scale,
@@ -1956,7 +1995,7 @@ impl WindFieldPipeline {
                     axial_tilt_rad,
                     season,
                     0.22,
-                    rotation_rate,
+                    earth_relative_rotation_rate,
                     base_temp_c,
                     atm_pressure,
                     wind_scale,
@@ -1987,7 +2026,7 @@ impl WindFieldPipeline {
                 axial_tilt_rad,
                 season,
                 0.0,
-                rotation_rate,
+                earth_relative_rotation_rate,
                 base_temp_c,
                 atm_pressure,
                 wind_scale,
@@ -2013,7 +2052,7 @@ impl WindFieldPipeline {
                 axial_tilt_rad,
                 season,
                 0.0,
-                rotation_rate,
+                earth_relative_rotation_rate,
                 base_temp_c,
                 atm_pressure,
                 wind_scale,
@@ -2053,7 +2092,7 @@ impl WindFieldPipeline {
         ocean_level: f32,
         axial_tilt_rad: f32,
         season: f32,
-        rotation_rate: f32,
+        earth_relative_rotation_rate: f32,
         base_temp_c: f32,
         atm_pressure: f32,
         wind_scale: f32,
@@ -2111,7 +2150,7 @@ impl WindFieldPipeline {
                 axial_tilt_rad,
                 season,
                 0.0,
-                rotation_rate,
+                earth_relative_rotation_rate,
                 base_temp_c,
                 atm_pressure,
                 wind_scale,
@@ -2135,7 +2174,7 @@ impl WindFieldPipeline {
                     axial_tilt_rad,
                     season,
                     0.22,
-                    rotation_rate,
+                    earth_relative_rotation_rate,
                     base_temp_c,
                     atm_pressure,
                     wind_scale,
@@ -2160,7 +2199,7 @@ impl WindFieldPipeline {
                 axial_tilt_rad,
                 season,
                 0.0,
-                rotation_rate,
+                earth_relative_rotation_rate,
                 base_temp_c,
                 atm_pressure,
                 wind_scale,
@@ -2179,7 +2218,7 @@ impl WindFieldPipeline {
                 axial_tilt_rad,
                 season,
                 0.0,
-                rotation_rate,
+                earth_relative_rotation_rate,
                 base_temp_c,
                 atm_pressure,
                 wind_scale,
@@ -2540,5 +2579,64 @@ mod tests {
             "Should have peaks > 0.2, max is {}",
             max_height
         );
+    }
+
+    #[test]
+    fn realism_rotation_units_and_area_weighting() {
+        for (hours, ratio) in [(12.0, 2.0), (24.0, 1.0), (48.0, 0.5)] {
+            assert!(
+                (earth_relative_rotation_rate(std::f32::consts::TAU / (hours * 3600.0)) - ratio)
+                    .abs()
+                    < 1e-6
+            );
+        }
+        let mut terrain = TectonicTerrain {
+            resolution: 3,
+            faces: std::array::from_fn(|_| vec![1.0; 9]),
+        };
+        assert_eq!(terrain.solid_angle_ocean_coverage(0.0), 0.0);
+        assert_eq!(terrain.solid_angle_ocean_coverage(2.0), 1.0);
+        for face in &mut terrain.faces {
+            face[4] = -1.0;
+        }
+        assert!(
+            terrain.solid_angle_ocean_coverage(0.0) > 1.0 / 9.0,
+            "face centers cover more solid angle than corners"
+        );
+    }
+
+    #[test]
+    fn realism_active_tectonics_respects_motion_width_and_zero_activity() {
+        let gpu = GpuContext::new().unwrap();
+        let compute = TerrainComputePipeline::new(&gpu);
+        let plates = generate_plates(&PlateGenParams {
+            seed: 42,
+            mass_earth: 1.0,
+            ocean_fraction: 0.6,
+            tectonics_factor: 0.85,
+            continental_scale: 1.0,
+            num_plates_override: 0,
+            num_continents: 4,
+            continent_size_variety: 0.35,
+        });
+        let mut stopped = plates.clone();
+        for plate in &mut stopped {
+            plate.velocity = [0.0; 3];
+        }
+        let generate = |plates: &[PlateGpu], width, activity| {
+            compute.generate(
+                &gpu, plates, 32, 42, 1.2, 1.5, 6, 0.6, 2.1, 1.0, width, 1.0, 1.0, 9.81, activity,
+                0.2, 1.0,
+            )
+        };
+        let active = generate(&plates, 0.1, 0.85);
+        assert_eq!(active.faces, generate(&plates, 0.1, 0.85).faces);
+        assert_ne!(active.faces, generate(&stopped, 0.1, 0.85).faces);
+        assert_ne!(active.faces, generate(&plates, 0.25, 0.85).faces);
+        assert_eq!(
+            generate(&plates, 0.1, 0.0).faces,
+            generate(&stopped, 0.25, 0.0).faces
+        );
+        assert!(active.faces.iter().flatten().all(|v| v.is_finite()));
     }
 }

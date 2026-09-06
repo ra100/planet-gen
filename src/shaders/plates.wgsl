@@ -173,7 +173,7 @@ fn classify_boundary(sphere_pos: vec3<f32>, plate_a: u32, plate_b: u32) -> f32 {
 
 // Gaussian-like falloff from boundary
 fn boundary_influence(dist_diff: f32, sigma: f32) -> f32 {
-    let d = dist_diff / sigma;
+    let d = dist_diff / max(sigma, 0.0001);
     return exp(-d * d);
 }
 
@@ -185,7 +185,10 @@ fn detail_noise(pos: vec3<f32>) -> f32 {
     let p = pos + seed_offset(params.seed);
 
     for (var i = 0u; i < params.octaves; i++) {
-        value += amp * snoise(p * freq);
+        // Suppress unresolved octaves instead of baking aliases into the
+        // height cubemap. Full resolution keeps tiled exports consistent.
+        let octave_weight = 1.0 - smooth_step(0.25, 0.75, freq * 2.0 / f32(params.full_resolution));
+        value += amp * snoise(p * freq) * octave_weight;
         freq *= params.lacunarity;
         amp *= params.gain;
     }
@@ -275,7 +278,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     // === Layer 3: Mountain ranges with per-plate character ===
     let mz1 = snoise(wpos * 2.0 + seed_offset(params.seed + 2000u));
     let mz2 = snoise(wpos * 4.0 + seed_offset(params.seed + 2010u)) * 0.3;
-    let mountain_zone = smooth_step(0.1, 0.5, (mz1 + mz2) * 0.5 + 0.5) * tect;
+    // Subdued inherited intraplate ranges; active belts are added below.
+    let mountain_zone = smooth_step(0.1, 0.5, (mz1 + mz2) * 0.5 + 0.5) * tect * 0.45;
 
     // Domain-warped ridged multifractal — per-plate warp strength varies
     let mt_so = seed_offset(params.seed + 6000u);
@@ -302,6 +306,27 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     height += ridge_shaped * mountain_zone * mountain_base
         * params.mountain_scale * 0.35 * gravity_factor;
 
+    // Active velocity-driven boundary relief. Relative Euler motion projected
+    // onto the boundary normal separates compression, opening, and shear.
+    // Symmetric plate-pair quantities keep the field continuous across the edge.
+    let stress = classify_boundary(wpos, info.nearest_idx, info.second_idx);
+    let belt = boundary_influence(info.second_dist - info.nearest_dist, params.boundary_width);
+    let continental_pair = (info.nearest_type + info.second_type) * 0.5;
+    let convergence = max(-stress, 0.0);
+    let divergence = max(stress, 0.0);
+    let rel_v = cross(plates[info.nearest_idx].velocity - plates[info.second_idx].velocity, wpos);
+    let shear = max(length(rel_v) * 2.0 - abs(stress), 0.0);
+    let boundary_ridges = ridged_multifractal(wpos * 18.0 + seed_offset(params.seed + 2200u), 4, 2.1, 2.0, 1.0);
+    // Collision belts on continents; island arcs/trenches at mixed boundaries;
+    // broad spreading ridges on the ocean floor, rifts on continental crust.
+    let collision = convergence * mix(0.10, 0.48, continental_pair) * (0.35 + boundary_ridges);
+    let spreading = divergence * mix(0.14, -0.12, continental_pair);
+    let mixed_pair = 1.0 - abs(info.nearest_type + info.second_type - 1.0);
+    let trench = convergence * mixed_pair * (1.0 - info.nearest_type) * 0.12
+        * smooth_step(0.0, 0.025, info.second_dist - info.nearest_dist);
+    height += belt * tect * params.mountain_scale * gravity_factor
+        * (collision + spreading - trench + min(shear, 1.0) * (boundary_ridges - 0.4) * 0.05);
+
     // === Layer 4: Ocean floor variation ===
     let ocean_floor = smooth_step(0.0, -0.1, height);
     let of1 = snoise(raw_pos * 3.5 + seed_offset(params.seed + 3000u)) * 0.04;
@@ -319,8 +344,12 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let hotspot_radius = 0.02 + (1.0 - tect) * 0.04;
     let hotspot_height_val = 0.4 * gravity_factor;
     for (var h = 0u; h < hotspot_count; h++) {
-        let hx = seed_offset(params.seed + 500u + h * 10u);
-        let hotspot_center = normalize(hx);
+        // Uniform solid angle: azimuth is uniform and polar cosine is uniform.
+        let hs = params.seed + 500u + h * 10u;
+        let hy = hash_f32_01(hs) * 2.0 - 1.0;
+        let azimuth = hash_f32_01(hs + 1u) * 6.2831853;
+        let radial = sqrt(max(1.0 - hy * hy, 0.0));
+        let hotspot_center = vec3<f32>(radial * cos(azimuth), hy, radial * sin(azimuth));
         let hotspot_dist = 1.0 - dot(wpos, hotspot_center);
         if (hotspot_dist < hotspot_radius) {
             let volcano_h = hotspot_height_val * (1.0 - hotspot_dist / hotspot_radius);
