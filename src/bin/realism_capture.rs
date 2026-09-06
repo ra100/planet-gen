@@ -272,9 +272,25 @@ fn main() {
         ),
         ("actual-density", PreviewUniforms { view_mode: 9, ..u }),
         (
+            "density-closeup",
+            PreviewUniforms {
+                view_mode: 9,
+                zoom: 1.55,
+                ..u
+            },
+        ),
+        (
             "daylight",
             PreviewUniforms {
                 light_dir: daylight,
+                ..u
+            },
+        ),
+        (
+            "daylight-closeup",
+            PreviewUniforms {
+                light_dir: daylight,
+                zoom: 1.55,
                 ..u
             },
         ),
@@ -317,6 +333,7 @@ fn main() {
             },
         ),
     ];
+    let no_detail = PreviewRenderer::new_with_cloud_detail(&gpu, 0.0);
     for (name, settings) in cases {
         let png = renderer.render(
             &gpu,
@@ -327,6 +344,20 @@ fn main() {
             size,
         );
         save(out, size, name, &png);
+        if matches!(
+            name,
+            "daylight" | "actual-density" | "density-closeup" | "daylight-closeup"
+        ) {
+            let smooth = no_detail.render(
+                &gpu,
+                &settings,
+                &terrain_view,
+                Some(&dynamics.wind_continentality),
+                Some((&weather.mass, &weather.geometry)),
+                size,
+            );
+            save(out, size, &format!("{name}-no-detail"), &smooth);
+        }
         if name == "actual-default" || name == "daylight" || name == "actual-density" {
             renderer.render_interactive(
                 &gpu,

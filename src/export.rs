@@ -872,21 +872,9 @@ impl CloudExportPipeline {
                     },
                 ],
             });
-        // Compute shaders require explicit LOD. The checked-in shared cloud density stays
-        // byte-for-byte identical to preview; only this compute compilation unit selects LOD 0.
-        let cloud_density = include_str!("shaders/cloud_density.wgsl")
-            .replace(
-                "textureSample(weather_mass_tex, height_sampler, direction)",
-                "textureSampleLevel(weather_mass_tex, height_sampler, direction, 0.0)",
-            )
-            .replace(
-                "textureSample(weather_geometry_tex, height_sampler, direction)",
-                "textureSampleLevel(weather_geometry_tex, height_sampler, direction, 0.0)",
-            )
-            .replace(
-                "textureSample(height_tex, height_sampler, direction).r",
-                "textureSampleLevel(height_tex, height_sampler, direction, 0.0).r",
-            );
+        // Shared sampling uses explicit LOD 0 in both stages: these cubemaps
+        // have one mip level. No expression-specific shader rewriting is needed.
+        let cloud_density = include_str!("shaders/cloud_density.wgsl");
         let shader = gpu
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {

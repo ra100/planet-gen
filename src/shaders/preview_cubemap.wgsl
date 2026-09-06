@@ -269,6 +269,7 @@ fn ray_march_clouds(
     z_end: f32,
     sun_dir: vec3<f32>,
     angular_pixel_footprint: f32,
+    include_atmosphere: bool,
 ) -> ScatterResult {
     let step_len = (z_start - z_end) / f32(CLOUD_RAY_SAMPLES);
     let radius_km = max(uniforms.planet_radius_km, 1.0);
@@ -293,8 +294,13 @@ fn ray_march_clouds(
         );
         let layers = sample.layers;
         let extinction = (layers.low * 0.90 + layers.deep * 1.65 + layers.high * 0.32) * display_scale;
-
-
+        // Density diagnostics measure condensate, not air extinction. Sharing
+        // the color compositor previously added a gray atmospheric veil even
+        // to empty weather, particularly at the limb.
+        if (!include_atmosphere) {
+            transmittance *= exp(-extinction * abs(step_len) * radius_km * CLOUD_LIGHT_EXTINCTION);
+            continue;
+        }
         let world_pos = world * (1.0 + altitude_km / radius_km);
         let light_transmittance = cloud_sun_path_transmittance(world_pos, sun_world, radius_km, layers, sample.geometry);
         let sun_transmit = atmosphere_sun_transmittance(pos, sun_dir);
@@ -348,7 +354,7 @@ fn composite_volumes(background: vec3<f32>, ndc: vec2<f32>, surface_z: f32,
             let far_air = ray_march_atmosphere(ndc, -zc, -za, sun);
             color = color * far_air.transmittance + far_air.in_scatter;
         }
-        let clouds = ray_march_clouds(ndc, zc, cloud_back, sun, footprint);
+        let clouds = ray_march_clouds(ndc, zc, cloud_back, sun, footprint, true);
         color = color * clouds.transmittance + clouds.in_scatter;
         if (za > zc) {
             let near_air = ray_march_atmosphere(ndc, za, zc, sun);
@@ -909,8 +915,10 @@ fn shade_planet(in: VertexOutput) -> vec4<f32> {
     let pan = vec2<f32>(uniforms.pan_x, uniforms.pan_y);
     let ndc = ((in.uv - 0.5) * 2.0 / 0.85 - pan) / uniforms.zoom;
     // Compute derivatives before branch divergence; shared density receives this explicitly.
-    let pixel_ray = normalize(vec3<f32>(ndc, 0.5));
-    let angular_pixel_footprint = max(length(dpdx(pixel_ray)), length(dpdy(pixel_ray)));
+    let angular_pixel_footprint = cloud_sphere_pixel_footprint(ndc, dpdx(ndc), dpdy(ndc));
+    // Keep terrain's existing filter unchanged in this cloud-only refinement.
+    let terrain_pixel_ray = normalize(vec3<f32>(ndc, 0.5));
+    let terrain_pixel_footprint = max(length(dpdx(terrain_pixel_ray)), length(dpdy(terrain_pixel_ray)));
     let r2 = dot(ndc, ndc);
 
     let sun_dir = normalize(uniforms.light_dir);
@@ -1261,7 +1269,7 @@ fn shade_planet(in: VertexOutput) -> vec4<f32> {
                 let debug_top = 1.0 + debug_geometry.a / max(uniforms.planet_radius_km, 1.0);
                 let z_debug_top = sqrt(max(debug_top * debug_top - r2, 0.0));
                 let z_surface = sqrt(max(1.0 - r2, 0.0));
-                let clouds = ray_march_clouds(ndc, z_debug_top, z_surface, sun_dir, angular_pixel_footprint);
+                let clouds = ray_march_clouds(ndc, z_debug_top, z_surface, sun_dir, angular_pixel_footprint, false);
                 let cd = 1.0 - clouds.transmittance.x;
                 debug_color = vec3<f32>(cd, cd, cd);
             }
@@ -1301,7 +1309,7 @@ fn shade_planet(in: VertexOutput) -> vec4<f32> {
                 if (is_ocean) {
                     n = normal;
                 } else {
-                    n = compute_terrain_normal(rotated, normal, angular_pixel_footprint / max(normal.z, 0.15));
+                    n = compute_terrain_normal(rotated, normal, terrain_pixel_footprint / max(normal.z, 0.15));
                 }
                 // Remap from [-1,1] to [0,1] for display
                 debug_color = n * 0.5 + vec3<f32>(0.5);
@@ -1387,7 +1395,7 @@ fn shade_planet(in: VertexOutput) -> vec4<f32> {
     if (is_ocean) {
         shading_normal = normal; // Geometric sphere normal — flat water
     } else {
-        shading_normal = compute_terrain_normal(rotated, normal, angular_pixel_footprint / max(normal.z, 0.15));
+        shading_normal = compute_terrain_normal(rotated, normal, terrain_pixel_footprint / max(normal.z, 0.15));
     }
 
     // PBR inputs

@@ -1,5 +1,6 @@
 // Shared weather-driven density functions. Preview and export compile this unchanged.
-// Formation mass is authoritative; detail only erodes supported boundaries.
+// The weather field owns the large-scale mass layout. Subgrid boundary
+// displacement stays inside its support; it is not another cloud-coverage mask.
 const LOW_DETAIL_STRENGTH: f32 = 1.0;
 const DEEP_DETAIL_STRENGTH: f32 = 1.0;
 // High cirrus keeps its supported, wind-owned edge observable to U3.
@@ -7,7 +8,10 @@ const HIGH_DETAIL_STRENGTH: f32 = 1.0;
 const LOW_OPTICAL_WEIGHT: f32 = 0.50;
 const CLOUD_PHASE_G: f32 = 0.55;
 const CLOUD_PHASE_MAX: f32 = 0.62;
-const CLOUD_LIGHT_EXTINCTION: f32 = 1.2;
+// Conversion from the solver's normalized condensate columns to optical depth.
+// This is an appearance calibration, not a measured microphysical coefficient.
+// 1.2 left the default decks as translucent haze; 6.0 over-occluded them.
+const CLOUD_LIGHT_EXTINCTION: f32 = 3.0;
 
 struct CloudLayers {
     low: f32,
@@ -157,7 +161,6 @@ fn filtered_noise(
         1.0 - smooth_step(0.12, 0.50, footprint_frequency.y),
         1.0 - smooth_step(0.12, 0.50, footprint_frequency.z),
     );
-    let dominant_weight = weights.x * band_limit.x;
     let higher_weights = weights.yz * band_limit.yz;
     let dominant = wind_filtered_dominant_noise(direction, frequencies.x, stretch, seed);
     let higher = vec2<f32>(
@@ -195,45 +198,83 @@ fn isotropic_noise(
     );
 }
 
+// Detail is a small perturbation of the weather field, not a second occupancy
+// mask. Thresholding noise across every column made repeated camouflage cells.
+// Preserve dense decks; let tenuous fringes carry most of the subgrid texture.
+fn cloud_detail_modulation(detail: vec2<f32>, mass: f32, strength: f32, amplitude: vec2<f32>) -> f32 {
+    let fringe = 1.0 - smooth_step(0.08, 0.40, mass);
+    let perturbation = dot(clamp(detail, vec2<f32>(-1.0), vec2<f32>(1.0)), amplitude);
+    return 1.0 + clamp(strength, 0.0, 1.0) * (0.20 + 0.80 * fringe) * perturbation;
+}
+
+// Differential of the orthographic unit-sphere intersection. A normalized
+// (x,y,0.5) proxy doubled the footprint at disk center and underestimated it
+// near the limb, filtering away fine central structure while aliasing the rim.
+fn cloud_sphere_pixel_footprint(projected: vec2<f32>, pixel_dx: vec2<f32>, pixel_dy: vec2<f32>) -> f32 {
+    let z = sqrt(max(1.0 - dot(projected, projected), 0.0016));
+    let tangent_dx = vec3<f32>(pixel_dx, -dot(projected, pixel_dx) / z);
+    let tangent_dy = vec3<f32>(pixel_dy, -dot(projected, pixel_dy) / z);
+    return max(length(tangent_dx), length(tangent_dy));
+}
+
+fn cloud_boundary_displacement(direction: vec3<f32>, footprint: f32) -> vec3<f32> {
+    var displacement = vec3<f32>(0.0);
+    let frequencies = vec3<f32>(13.0, 43.0, 119.0);
+    // Keep the existing streams, but stop the broadest octave dominating the
+    // outline. Finer boundary structure is resolved by the sphere footprint.
+    let amplitudes = vec3<f32>(0.018, 0.014, 0.005);
+    for (var octave = 0u; octave < 3u; octave++) {
+        let p = direction * frequencies[octave] + noise_seed_offset(uniforms.cloud_seed, 80u + octave);
+        let resolved = 1.0 - smooth_step(0.12, 0.50, frequencies[octave] * footprint);
+        displacement += vec3<f32>(snoise(p), snoise(p + vec3<f32>(17.1, 3.7, 9.2)), snoise(p + vec3<f32>(5.3, 23.8, 1.6)))
+            * amplitudes[octave] * resolved;
+    }
+    return displacement - direction * dot(displacement, direction);
+}
+
 fn weather_cloud_sample(dir: vec3<f32>, altitude_km: f32, angular_pixel_footprint: f32) -> WeatherCloudSample {
     let direction = normalize(dir);
-    let mass = textureSample(weather_mass_tex, height_sampler, direction);
-    let geometry = textureSample(weather_geometry_tex, height_sampler, direction);
-    let height = textureSample(height_tex, height_sampler, direction).r;
+    let authored_mass = textureSampleLevel(weather_mass_tex, height_sampler, direction, 0.0);
+    let geometry = textureSampleLevel(weather_geometry_tex, height_sampler, direction, 0.0);
+    let height = textureSampleLevel(height_tex, height_sampler, direction, 0.0).r;
+    if (max(max(authored_mass.r, authored_mass.g), authored_mass.b) <= 0.0) {
+        return WeatherCloudSample(CloudLayers(0.0, 0.0, 0.0), authored_mass, geometry, height, 1.0, 1.0, 1.0);
+    }
+    let detail_weight = clamp(uniforms.cloud_advection, 0.0, 1.0);
+    // Refine the boundary of the resolved weather, not its opacity everywhere.
+    // A uniform deck remains uniform; an empty weather field remains empty.
+    let strengths = vec3<f32>(LOW_DETAIL_STRENGTH, DEEP_DETAIL_STRENGTH, HIGH_DETAIL_STRENGTH) * detail_weight;
+    var mass = authored_mass;
+    if (max(max(strengths.x, strengths.y), strengths.z) > 0.0) {
+        let displaced_direction = normalize(direction + cloud_boundary_displacement(direction, angular_pixel_footprint));
+        let displaced_mass = textureSampleLevel(weather_mass_tex, height_sampler, displaced_direction, 0.0);
+        let refined = mix(authored_mass.rgb, displaced_mass.rgb, clamp(strengths, vec3<f32>(0.0), vec3<f32>(1.0)));
+        mass = vec4<f32>(select(refined, vec3<f32>(0.0), authored_mass.rgb <= vec3<f32>(0.0)), authored_mass.a);
+    }
     var sample = WeatherCloudSample(CloudLayers(0.0, 0.0, 0.0), mass, geometry, height, 1.0, 1.0, 1.0);
     if (max(max(mass.r, mass.g), mass.b) <= 0.0) { return sample; }
 
     let deep_base = mix(geometry.r, geometry.g, 0.28);
     let deep_top = max(geometry.b, deep_base + 0.5);
     let deep_height_fraction = clamp((altitude_km - deep_base) / max(deep_top - deep_base, 0.1), 0.0, 1.0);
-    let detail_weight = clamp(uniforms.cloud_advection, 0.0, 1.0);
     let low_detail = isotropic_noise(
-        direction, vec3<f32>(18.0, 48.0, 110.0),
+        direction, vec3<f32>(11.0, 37.0, 101.0),
         vec3<f32>(0.50, 0.32, 0.18), angular_pixel_footprint, 40u,
     );
     let deep_detail = isotropic_noise(
-        direction, vec3<f32>(14.0, 36.0, 88.0),
+        direction, vec3<f32>(13.0, 41.0, 107.0),
         vec3<f32>(0.46, 0.34, 0.20), angular_pixel_footprint, 50u,
     );
     let tower_lobes = isotropic_noise(
-        direction, vec3<f32>(14.0, 36.0, 88.0),
+        direction, vec3<f32>(17.0, 47.0, 127.0),
         vec3<f32>(0.52, 0.30, 0.18), angular_pixel_footprint, 60u,
     );
-    // Detail is a threshold displacement, not merely a tiny brightness wobble.
-    // It can break a marginal deck into cells, while its mean stays near one and
-    // the weather mass remains the sole source of cloud water.
-    let low_breakup = smooth_step(-0.34, 0.42, low_detail.x * 0.72 + low_detail.y * 0.28);
-    sample.low_multiplier = clamp(
-        mix(1.0, 0.06 + 1.30 * low_breakup, LOW_DETAIL_STRENGTH * detail_weight),
-        0.0,
-        1.36,
+    sample.low_multiplier = cloud_detail_modulation(
+        low_detail, mass.r, LOW_DETAIL_STRENGTH * detail_weight, vec2<f32>(0.035, 0.07),
     );
     let deep_combined_detail = mix(deep_detail, tower_lobes, deep_height_fraction);
-    let deep_breakup = smooth_step(-0.28, 0.48, deep_combined_detail.x * 0.68 + deep_combined_detail.y * 0.32);
-    let deep_multiplier = clamp(
-        mix(1.0, 0.36 + 1.02 * deep_breakup, DEEP_DETAIL_STRENGTH * detail_weight),
-        0.18,
-        1.38,
+    let deep_multiplier = cloud_detail_modulation(
+        deep_combined_detail, mass.g, DEEP_DETAIL_STRENGTH * detail_weight, vec2<f32>(0.045, 0.065),
     );
     let low_depth_km = geometry.g - geometry.r;
     let shallow_family = smooth_step(0.7, 1.8, low_depth_km);
@@ -255,15 +296,12 @@ fn weather_cloud_sample(dir: vec3<f32>, altitude_km: f32, angular_pixel_footprin
     );
 
     let fibres = filtered_noise(
-        direction, vec3<f32>(18.0, 48.0, 96.0),
-        vec3<f32>(0.54, 0.30, 0.16), 1.20, angular_pixel_footprint, 70u,
+        direction, vec3<f32>(17.0, 53.0, 113.0),
+        vec3<f32>(0.54, 0.30, 0.16), 1.85, angular_pixel_footprint, 70u,
     );
     let high_base = max(geometry.b, geometry.a - 3.0);
-    let high_breakup = smooth_step(-0.36, 0.40, fibres.x * 0.82 + fibres.y * 0.18);
-    let high_modulation = clamp(
-        mix(1.0, 0.40 + 0.90 * high_breakup, HIGH_DETAIL_STRENGTH * detail_weight),
-        0.20,
-        1.30,
+    let high_modulation = cloud_detail_modulation(
+        fibres, mass.b, HIGH_DETAIL_STRENGTH * detail_weight, vec2<f32>(0.12, 0.12),
     );
     sample.high_multiplier = high_modulation * 0.28;
     sample.layers.high = max(mass.b * layer_profile(altitude_km, high_base, geometry.a) * high_modulation * 0.28, 0.0);
@@ -299,9 +337,9 @@ fn weather_cloud_layers_land_segment(
 
 fn weather_column_density_raw(dir: vec3<f32>, angular_pixel_footprint: f32) -> f32 {
     let direction = normalize(dir);
-    let mass = textureSample(weather_mass_tex, height_sampler, direction);
+    let mass = textureSampleLevel(weather_mass_tex, height_sampler, direction, 0.0);
     if (max(max(mass.r, mass.g), mass.b) <= 0.0) { return 0.0; }
-    let geometry = textureSample(weather_geometry_tex, height_sampler, direction);
+    let geometry = textureSampleLevel(weather_geometry_tex, height_sampler, direction, 0.0);
     let low_mid = (geometry.r + geometry.g) * 0.5;
     let deep_base = mix(geometry.r, geometry.g, 0.28);
     let deep_mid = (deep_base + max(geometry.b, deep_base + 0.5)) * 0.5;
@@ -366,10 +404,10 @@ fn cloud_surface_shadow(
     world_direction: vec3<f32>, sun_dir: vec3<f32>, radius_km: f32, angular_pixel_footprint: f32,
 ) -> f32 {
     let direction = normalize(world_direction);
-    let mass = textureSample(weather_mass_tex, height_sampler, direction);
+    let mass = textureSampleLevel(weather_mass_tex, height_sampler, direction, 0.0);
     let weight = mass.r + mass.g + mass.b;
     if (weight <= 0.0) { return 1.0; }
-    let geometry = textureSample(weather_geometry_tex, height_sampler, direction);
+    let geometry = textureSampleLevel(weather_geometry_tex, height_sampler, direction, 0.0);
     let deep_base = mix(geometry.r, geometry.g, 0.28);
     let deep_top = max(geometry.b, deep_base + 0.5);
     let high_base = max(geometry.b, geometry.a - 3.0);

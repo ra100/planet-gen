@@ -1292,6 +1292,11 @@ mod tests {
         settings.view_mode = 9;
         settings.show_clouds = 1.0;
         settings.cloud_coverage = 1.0;
+        // This test must exercise actual detail; the generic fixture disables it.
+        settings.cloud_advection = 1.0;
+        // Keep the optical-depth readback below sRGB8 saturation after the
+        // extinction calibration (3.0 * 0.4 = the original 1.2 reference).
+        settings.cloud_opacity = 0.4;
 
         let render = |renderer: &PreviewRenderer, seed, mass_view, render_size| {
             let settings = PreviewUniforms {
@@ -1434,8 +1439,8 @@ mod tests {
                 "seed={seed}: centroid drifted by {centroid_drift}"
             );
             assert!(
-                fringe_rms.is_finite(),
-                "seed={seed}: fringe RMS is non-finite"
+                fringe_rms.is_finite() && fringe_rms > 0.0,
+                "seed={seed}: detail must affect fringes, not silently be disabled"
             );
         }
 
@@ -1495,6 +1500,143 @@ mod tests {
             high_seed_outputs.windows(2).all(|pair| pair[0] != pair[1]),
             "high cloud seeds must select distinct stable detail streams"
         );
+    }
+
+    #[test]
+    fn cloud_detail_does_not_turn_uniform_decks_into_noise_masks() {
+        let gpu = GpuContext::new().unwrap();
+        let detailed = PreviewRenderer::new_with_cloud_detail(&gpu, 1.0);
+        let smooth = PreviewRenderer::new_with_cloud_detail(&gpu, 0.0);
+        let resolution = 16;
+        let size = 128usize;
+        let terrain = TectonicTerrain {
+            faces: std::array::from_fn(|_| vec![-0.2; 16 * 16]),
+            resolution,
+        };
+        let height = detailed.upload_terrain(&gpu, &terrain);
+        let geometry =
+            std::array::from_fn(|_| (0..16 * 16).flat_map(|_| [1.0, 3.0, 7.0, 12.0]).collect());
+        let geometry = detailed.upload_cubemap_rgba16(&gpu, &geometry, resolution);
+        let settings = PreviewUniforms {
+            view_mode: 9,
+            show_clouds: 1.0,
+            cloud_advection: 1.0,
+            cloud_coverage: 1.0,
+            // A saturated white byte cannot measure small optical-depth drift.
+            cloud_opacity: 0.4,
+            ..uniforms()
+        };
+        for channel in 0..3 {
+            let mass = std::array::from_fn(|_| {
+                (0..16 * 16)
+                    .flat_map(|_| {
+                        let mut value = [0.0; 4];
+                        value[channel] = 0.8;
+                        value[3] = if channel < 2 { 0.8 } else { 0.0 };
+                        value
+                    })
+                    .collect()
+            });
+            let mass = detailed.upload_cubemap_rgba16(&gpu, &mass, resolution);
+            let render = |renderer: &PreviewRenderer| {
+                density_values(&renderer.render(
+                    &gpu,
+                    &settings,
+                    &height,
+                    None,
+                    Some((&mass, &geometry)),
+                    size as u32,
+                ))
+            };
+            let reference = render(&smooth);
+            let candidate = render(&detailed);
+            let mut max_relative_change = 0.0_f32;
+            for y in size / 4..3 * size / 4 {
+                for x in size / 4..3 * size / 4 {
+                    let i = y * size + x;
+                    let before = optical_depth(reference[i]);
+                    let after = optical_depth(candidate[i]);
+                    assert!(before > 0.01 && after > 0.01, "no punched-out core holes");
+                    max_relative_change = max_relative_change.max((after / before - 1.0).abs());
+                }
+            }
+            // Low/deep core modulation is bounded to 2.2%, cirrus to 4.8%,
+            // plus small allowance for the 8-bit density readback.
+            let limit = if channel == 2 { 0.10 } else { 0.05 };
+            assert!(
+                max_relative_change <= limit,
+                "layer {channel}: detail dominates uniform deck ({max_relative_change})"
+            );
+            assert!(
+                max_relative_change > 0.001,
+                "layer {channel}: detail switch is inert"
+            );
+        }
+    }
+
+    #[test]
+    fn cloud_density_excludes_atmosphere_extinction() {
+        let gpu = GpuContext::new().unwrap();
+        let renderer = PreviewRenderer::new(&gpu);
+        let resolution = 16;
+        let terrain = TectonicTerrain {
+            faces: std::array::from_fn(|_| vec![-0.2; 16 * 16]),
+            resolution,
+        };
+        let height = renderer.upload_terrain(&gpu, &terrain);
+        let geometry =
+            std::array::from_fn(|_| (0..16 * 16).flat_map(|_| [1.0, 3.0, 7.0, 12.0]).collect());
+        let geometry = renderer.upload_cubemap_rgba16(&gpu, &geometry, resolution);
+        let mut settings = PreviewUniforms {
+            view_mode: 9,
+            show_clouds: 1.0,
+            cloud_coverage: 1.0,
+            show_atmosphere_layer: 1.0,
+            atmosphere_height: 0.015,
+            ..uniforms()
+        };
+        for column in [0.0, 0.3] {
+            let mass = std::array::from_fn(|_| {
+                (0..16 * 16)
+                    .flat_map(|_| [column, 0.0, 0.0, column])
+                    .collect()
+            });
+            let mass = renderer.upload_cubemap_rgba16(&gpu, &mass, resolution);
+            settings.atmosphere_density = 0.0;
+            let clear_air = renderer.render(
+                &gpu,
+                &settings,
+                &height,
+                None,
+                Some((&mass, &geometry)),
+                128,
+            );
+            settings.atmosphere_density = 4.0;
+            let thick_air = renderer.render(
+                &gpu,
+                &settings,
+                &height,
+                None,
+                Some((&mass, &geometry)),
+                128,
+            );
+            for index in 0..128 * 128 {
+                if sphere_mask(128, index) {
+                    assert_eq!(
+                        &clear_air[index * 4..index * 4 + 3],
+                        &thick_air[index * 4..index * 4 + 3],
+                        "air must not change cloud density"
+                    );
+                    if column == 0.0 {
+                        assert_eq!(
+                            &thick_air[index * 4..index * 4 + 3],
+                            &[0, 0, 0],
+                            "empty weather must remain black even with atmosphere enabled"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -1640,6 +1782,14 @@ fn layer_profile_oracle() {
     output[15] = climate_temperature(pos, 0.0, 0.0, 25.0, 0.0, 0.5);
     output[16] = ggx_distribution(1.0, 0.1);
     output[17] = ggx_smith_visibility(0.0, 1.0, 0.1);
+    let dx = vec2<f32>(0.002, 0.0);
+    let dy = vec2<f32>(0.0, 0.002);
+    output[18] = cloud_sphere_pixel_footprint(vec2<f32>(0.0), dx, dy);
+    output[19] = cloud_sphere_pixel_footprint(vec2<f32>(0.8, 0.0), dx, dy);
+    output[20] = cloud_sphere_pixel_footprint(vec2<f32>(0.0, 0.8), dx, dy);
+    output[21] = cloud_sphere_pixel_footprint(vec2<f32>(1.0, 0.0), dx, dy);
+    output[22] = cloud_sphere_pixel_footprint(vec2<f32>(0.8, 0.0), dx * 0.5, dy * 0.5);
+    output[23] = cloud_sphere_pixel_footprint(vec2<f32>(1.01, 0.0), dx, dy);
 }
 "#,
         );
@@ -1711,7 +1861,7 @@ fn layer_profile_oracle() {
             .get_mapped_range()
             .chunks_exact(4)
             .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
-            .take(18)
+            .take(24)
             .collect();
         readback.unmap();
         values
@@ -2041,6 +2191,23 @@ fn layer_profile_oracle() {
                 "{actual} != {expected}"
             );
         }
+    }
+
+    #[test]
+    fn cloud_pixel_footprint_tracks_sphere_projection_and_zoom() {
+        let values = layer_profile_oracle(&GpuContext::new().expect("GPU init failed"));
+        // Orthographic center: one image-plane pixel is one angular pixel.
+        // At x=0.8, z=0.6, the radial differential grows by 1/z.
+        assert!((values[18] - 0.002).abs() < 1.0e-6);
+        assert!((values[19] - 0.002 / 0.6).abs() < 1.0e-6);
+        assert!((values[19] - values[20]).abs() < 1.0e-6);
+        assert!(values[21] > values[19]);
+        assert!((values[22] * 2.0 - values[19]).abs() < 1.0e-6);
+        assert!(values[18..24].iter().all(|v| v.is_finite() && *v > 0.0));
+        assert!(
+            values[23] >= values[21],
+            "outer limb must not reintroduce fine aliased detail"
+        );
     }
 
     #[test]
@@ -2375,7 +2542,18 @@ fn layer_profile_oracle() {
         let ocean_tall = optical_depth(render(-0.10, [0.80, 1.50, 2.00, 12.00]));
         let coast = [0.01, 0.03, 0.05]
             .map(|height| optical_depth(render(height, [0.80, 1.50, 2.00, 12.00])));
-        assert!((compact - 0.02681).abs() / 0.02681 <= 0.01);
+        // Analytic column: mass * low optical weight * extinction weight *
+        // calibrated extinction. Compare after the same sRGB8 quantization,
+        // rather than pinning a pixel measured under the old calibration.
+        let expected_tau = 0.05_f32 * 0.5 * 0.9 * 3.0;
+        let expected_alpha = 1.0 - (-expected_tau).exp();
+        let expected_byte =
+            ((1.055 * expected_alpha.powf(1.0 / 2.4) - 0.055) * 255.0).round() as u8;
+        let expected = optical_depth(srgb_to_linear(expected_byte));
+        assert!(
+            (compact - expected).abs() / expected <= 0.01,
+            "{compact} != {expected}"
+        );
         // Thin shell integration should preserve its column mass even when
         // unrelated high-cloud geometry expands the ray-march interval.
         assert!((0.95..=1.06).contains(&(tall / compact.max(f32::EPSILON))));
@@ -2421,6 +2599,8 @@ fn layer_profile_oracle() {
             view_mode: 9,
             show_clouds: 1.0,
             cloud_coverage: 1.0,
+            // Exercise boundary displacement at the edge of an authored patch.
+            cloud_advection: 1.0,
             planet_radius_km: 500.0,
             ..uniforms()
         };
