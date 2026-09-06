@@ -12,7 +12,7 @@ struct Uniforms {
     view_mode: u32,
     season: f32, // 0=winter, 0.5=equinox, 1=summer
     atmosphere_density: f32, // 0.0 = none, 1.0 = Earth-like (reserved)
-    atmosphere_height: f32,  // scale height in planet radii (reserved)
+    atmosphere_height: f32,  // shell cutoff in planet radii, 12 molecular scale heights
     height_scale: f32,       // normal map height exaggeration
     zoom: f32,               // viewport zoom (1.0 = default)
     pan_x: f32,              // viewport pan in NDC units
@@ -141,7 +141,8 @@ fn star_color(temp: f32) -> vec3<f32> {
     // Blue (O/B) → White (A/F) → Yellow (G) → Orange (K) → Red (M)
     let blue = vec3<f32>(0.6, 0.7, 1.0);
     let white = vec3<f32>(1.0, 1.0, 1.0);
-    let yellow = vec3<f32>(1.0, 0.95, 0.85);
+    // Daylight white balance: the Sun is near-white from space, not amber.
+    let yellow = vec3<f32>(1.0, 0.98, 0.96);
     let orange = vec3<f32>(1.0, 0.75, 0.5);
     let red = vec3<f32>(1.0, 0.5, 0.3);
 
@@ -177,6 +178,9 @@ struct ScatterResult {
     transmittance: vec3<f32>,
 }
 
+// Shared incident illumination/exposure for surface and participating media.
+const SUN_IRRADIANCE: f32 = 3.14159;
+
 // Henyey-Greenstein phase function for Mie scattering.
 // g > 0: strong forward scattering (bright glow around sun).
 fn henyey_greenstein(cos_theta: f32, g: f32) -> f32 {
@@ -184,67 +188,78 @@ fn henyey_greenstein(cos_theta: f32, g: f32) -> f32 {
     return (1.0 - g2) / (4.0 * 3.14159 * pow(1.0 + g2 - 2.0 * g * cos_theta, 1.5));
 }
 
-fn ray_march_atmosphere(
-    ndc: vec2<f32>,
-    z_start: f32,
-    z_end: f32,
-    sun_dir: vec3<f32>,
-) -> ScatterResult {
-    let atm_density = uniforms.atmosphere_density;
+// Coefficients are per planet-radius distance; density is relative surface pressure.
+fn atmosphere_scale_height() -> f32 {
+    return max(uniforms.atmosphere_height / 12.0, 1.0e-6);
+}
 
-    // Rayleigh: wavelength-dependent (λ^-4), blue sky + red sunsets
-    let beta_r = vec3<f32>(1.0, 2.4, 5.8) * atm_density;
-    let scale_h_r = max(uniforms.atmosphere_height * 0.5, 0.003);
+fn atmosphere_extinction(pos: vec3<f32>) -> vec3<f32> {
+    let altitude = max(length(pos) - 1.0, 0.0);
+    let scale_h = atmosphere_scale_height();
+    let molecular = exp(-altitude / scale_h);
+    let aerosol = exp(-altitude / (scale_h * 0.15));
+    return (vec3<f32>(0.005802, 0.013558, 0.033100) * molecular
+        + vec3<f32>(0.004440) * aerosol)
+        * max(uniforms.atmosphere_density, 0.0) * max(uniforms.planet_radius_km, 1.0);
+}
 
-    // Mie: wavelength-independent (white/gray haze), concentrated near surface
-    let beta_m = vec3<f32>(1.0, 1.0, 1.0) * atm_density * 0.35;
-    let scale_h_m = scale_h_r * 0.25; // lower scale height — haze near ground
-
-    // Phase functions
-    let cos_theta = sun_dir.z; // angle between sun and view direction (0,0,1)
-    let phase_r = 0.05968 * (1.0 + cos_theta * cos_theta); // Rayleigh: 3/(16π)
-    let phase_m = henyey_greenstein(cos_theta, 0.76);        // Mie: forward-peaked
-
-    let steps = 8;
-    let step_len = (z_start - z_end) / f32(steps);
-
-    var optical_depth = vec3<f32>(0.0);
-    var in_scatter = vec3<f32>(0.0);
-
-    for (var i = 0; i < steps; i++) {
-        let z = z_start - (f32(i) + 0.5) * step_len;
-        let pos = vec3<f32>(ndc.x, ndc.y, z);
-        let altitude = length(pos) - 1.0;
-
-        if (altitude < 0.0) { continue; }
-
-        let density_r = exp(-altitude / scale_h_r);
-        let density_m = exp(-altitude / scale_h_m);
-
-        // Combined optical depth (extinction)
-        let ext = beta_r * density_r + beta_m * density_m;
-        optical_depth += ext * abs(step_len);
-
-        // Sun illumination: smooth day/night transition at terminator
-        let raw_sun_cos = dot(normalize(pos), sun_dir);
-        let sun_factor = smoothstep(-0.1, 0.2, raw_sun_cos);
-
-        if (sun_factor > 0.001) {
-            let sun_od_r = beta_r * density_r * scale_h_r / max(raw_sun_cos, 0.12);
-            let sun_od_m = beta_m * density_m * scale_h_m / max(raw_sun_cos, 0.12);
-            let view_transmit = exp(-optical_depth);
-            let sun_transmit = exp(-(sun_od_r + sun_od_m));
-
-            // Rayleigh + Mie in-scatter combined
-            let scatter_r = density_r * phase_r * beta_r;
-            let scatter_m = density_m * phase_m * beta_m;
-            in_scatter += view_transmit * sun_transmit * sun_factor * (scatter_r + scatter_m) * abs(step_len);
-        }
+fn atmosphere_sun_transmittance(pos: vec3<f32>, sun: vec3<f32>) -> vec3<f32> {
+    if (ray_sphere_positive_intersection(pos, sun, 1.0) >= 0.0) {
+        return vec3<f32>(0.0);
     }
+    if (uniforms.atmosphere_density <= 0.0 || uniforms.show_atmosphere_layer < 0.5) {
+        return vec3<f32>(1.0);
+    }
+    let radius = 1.0 + uniforms.atmosphere_height;
+    let b = dot(pos, sun);
+    let exit_distance = max(-b + sqrt(max(b * b + radius * radius - dot(pos, pos), 0.0)), 0.0);
+    var optical_depth = vec3<f32>(0.0);
+    // Quadratic spacing resolves dense air near the sample, including curved
+    // twilight paths. No secant clamp or horizon brightness floor.
+    for (var i = 0u; i < 6u; i++) {
+        let a = f32(i) / 6.0;
+        let bstep = f32(i + 1u) / 6.0;
+        let start = exit_distance * a * a;
+        let end = exit_distance * bstep * bstep;
+        optical_depth += atmosphere_extinction(pos + sun * ((start + end) * 0.5)) * (end - start);
+    }
+    return exp(-optical_depth);
+}
 
-    var result: ScatterResult;
-    result.in_scatter = in_scatter * 25.0;
-    result.transmittance = exp(-optical_depth);
+fn atmosphere_segment(pos: vec3<f32>, distance: f32, sun: vec3<f32>) -> ScatterResult {
+    var result = ScatterResult(vec3<f32>(0.0), vec3<f32>(1.0));
+    if (uniforms.atmosphere_density <= 0.0 || uniforms.show_atmosphere_layer < 0.5
+        || uniforms.atmosphere_height <= 0.0 || length(pos) < 1.0
+        || length(pos) > 1.0 + uniforms.atmosphere_height) { return result; }
+    let altitude = max(length(pos) - 1.0, 0.0);
+    let scale_h = atmosphere_scale_height();
+    let factor = uniforms.atmosphere_density * max(uniforms.planet_radius_km, 1.0);
+    let beta_r = vec3<f32>(0.005802, 0.013558, 0.033100) * factor * exp(-altitude / scale_h);
+    let beta_m = vec3<f32>(0.003996) * factor * exp(-altitude / (scale_h * 0.15));
+    let extinction = atmosphere_extinction(pos);
+    let cos_theta = -sun.z;
+    let source = (beta_r * (0.0596831 * (1.0 + cos_theta * cos_theta))
+        + beta_m * henyey_greenstein(cos_theta, 0.76))
+        * atmosphere_sun_transmittance(pos, sun) * star_color(uniforms.star_color_temp) * SUN_IRRADIANCE;
+    result.transmittance = exp(-extinction * abs(distance));
+    result.in_scatter = source / max(extinction, vec3<f32>(1.0e-8)) * (vec3<f32>(1.0) - result.transmittance);
+    return result;
+}
+
+fn ray_march_atmosphere(ndc: vec2<f32>, z_start: f32, z_end: f32, sun_dir: vec3<f32>) -> ScatterResult {
+    var result = ScatterResult(vec3<f32>(0.0), vec3<f32>(1.0));
+    let span = max(z_start - z_end, 0.0);
+    for (var i = 0u; i < 12u; i++) {
+        let a = f32(i) / 12.0;
+        let b = f32(i + 1u) / 12.0;
+        // Concentrate near the surface for front hemisphere rays. Limb paths
+        // remain symmetric to resolve their densest air near the tangent.
+        let start_t = select(a, 1.0 - (1.0 - a) * (1.0 - a), z_end >= 0.0);
+        let end_t = select(b, 1.0 - (1.0 - b) * (1.0 - b), z_end >= 0.0);
+        let segment = atmosphere_segment(vec3<f32>(ndc, z_start - (start_t + end_t) * span * 0.5), (end_t - start_t) * span, sun_dir);
+        result.in_scatter += result.transmittance * segment.in_scatter;
+        result.transmittance *= segment.transmittance;
+    }
     return result;
 }
 
@@ -262,7 +277,7 @@ fn ray_march_clouds(
     let ray_anchor = normalize((uniforms.rotation * vec4<f32>(normalize(vec3<f32>(ndc, 0.5)), 0.0)).xyz);
     let start_jitter = 0.5 + snoise(ray_anchor * 47.0 + noise_seed_offset(uniforms.cloud_seed, 45u)) * 0.005;
     let sun_world = normalize((uniforms.rotation * vec4<f32>(sun_dir, 0.0)).xyz);
-    var transmittance = 1.0;
+    var transmittance = vec3<f32>(1.0);
     var in_scatter = vec3<f32>(0.0);
 
     for (var i = 0u; i < CLOUD_RAY_SAMPLES; i++) {
@@ -278,92 +293,81 @@ fn ray_march_clouds(
         );
         let layers = sample.layers;
         let extinction = (layers.low * 0.90 + layers.deep * 1.65 + layers.high * 0.32) * display_scale;
-        if (extinction <= 0.001) { continue; }
+
 
         let world_pos = world * (1.0 + altitude_km / radius_km);
         let light_transmittance = cloud_sun_path_transmittance(world_pos, sun_world, radius_km, layers, sample.geometry);
-        let sun_facing = smooth_step(-0.05, 0.2, dot(direction, sun_dir));
+        let sun_transmit = atmosphere_sun_transmittance(pos, sun_dir);
+        let sun_facing = smooth_step(-0.025, 0.16, dot(direction, sun_dir));
         let star = star_color(uniforms.star_color_temp);
-        let phase = cloud_phase(dot(sun_dir, normalize(-pos))) * (4.0 * 3.14159);
-        let illumination = clamp(
-            0.055 + 0.10 * clamp(altitude_km / 12.0, 0.0, 1.0)
-                + sun_facing * light_transmittance * min(phase, 2.5),
-            0.0,
-            1.0,
-        );
-        let low_color = mix(vec3<f32>(0.58, 0.62, 0.70), vec3<f32>(1.0, 1.0, 0.98) * star,
-            illumination * 0.72);
-        let deep_color = mix(vec3<f32>(0.31, 0.35, 0.43), vec3<f32>(0.92, 0.94, 0.96) * star,
-            illumination * 0.48);
-        let high_color = mix(vec3<f32>(0.62, 0.69, 0.82), vec3<f32>(0.88, 0.94, 1.0) * star,
-            illumination * 0.78);
+        // Orthographic rays are all +Z to the camera; phase must not vary with
+        // screen position.  Incident energy is zero in the planet's shadow,
+        // leaving only a deliberately tiny blue night ambient.
+        let phase = cloud_phase(-sun_dir.z) * (4.0 * 3.14159);
+        let direct_energy = sun_facing * light_transmittance * (0.8 + 0.2 * min(phase, 2.5)) * SUN_IRRADIANCE;
+        let night_ambient = vec3<f32>(0.0015, 0.0020, 0.0035);
+        let low_color = night_ambient + vec3<f32>(1.0, 1.0, 0.98) * star * sun_transmit * direct_energy * 0.72;
+        let deep_color = night_ambient * 0.55 + vec3<f32>(0.92, 0.94, 0.96) * star * sun_transmit * direct_energy * 0.48;
+        let high_color = night_ambient * 1.3 + vec3<f32>(0.88, 0.94, 1.0) * star * sun_transmit * direct_energy * 0.78;
         let cloud_color = (low_color * layers.low * 0.90
             + deep_color * layers.deep * 1.65
             + high_color * layers.high * 0.32) / max(extinction / display_scale, 0.0001);
         let segment_transmittance = exp(-extinction * abs(step_len) * radius_km * CLOUD_LIGHT_EXTINCTION);
         let segment_alpha = 1.0 - segment_transmittance;
+        // Symmetric air/cloud/air integration, all in linear radiance. Air below
+        // an opaque cloud is attenuated by that cloud, never added over it.
+        let air_half = atmosphere_segment(pos, abs(step_len) * 0.5, sun_dir);
+        in_scatter += transmittance * air_half.in_scatter;
+        transmittance *= air_half.transmittance;
         in_scatter += cloud_color * transmittance * segment_alpha;
         transmittance *= segment_transmittance;
-        if (transmittance < 0.01) { break; }
+        in_scatter += transmittance * air_half.in_scatter;
+        transmittance *= air_half.transmittance;
+        if (max(max(transmittance.r, transmittance.g), transmittance.b) < 0.01) { break; }
     }
 
     var result: ScatterResult;
     result.in_scatter = in_scatter;
-    result.transmittance = vec3<f32>(transmittance);
+    result.transmittance = transmittance;
     return result;
+}
+
+// Composite from the background toward the camera. The cloud interval includes
+// its own air; integrate only the remaining atmosphere outside that interval.
+fn composite_volumes(background: vec3<f32>, ndc: vec2<f32>, surface_z: f32,
+    cloud_radius: f32, sun: vec3<f32>, footprint: f32) -> vec3<f32> {
+    let r2 = dot(ndc, ndc);
+    let atm_radius = 1.0 + max(uniforms.atmosphere_height, 0.0);
+    let za = sqrt(max(atm_radius * atm_radius - r2, 0.0));
+    let back = select(-za, surface_z, surface_z >= 0.0);
+    var color = background;
+    if (cloud_display_scale() > 0.0 && r2 < cloud_radius * cloud_radius) {
+        let zc = sqrt(max(cloud_radius * cloud_radius - r2, 0.0));
+        let cloud_back = select(-zc, surface_z, surface_z >= 0.0);
+        if (surface_z < 0.0 && za > zc) {
+            let far_air = ray_march_atmosphere(ndc, -zc, -za, sun);
+            color = color * far_air.transmittance + far_air.in_scatter;
+        }
+        let clouds = ray_march_clouds(ndc, zc, cloud_back, sun, footprint);
+        color = color * clouds.transmittance + clouds.in_scatter;
+        if (za > zc) {
+            let near_air = ray_march_atmosphere(ndc, za, zc, sun);
+            color = color * near_air.transmittance + near_air.in_scatter;
+        }
+    } else {
+        let air = ray_march_atmosphere(ndc, za, back, sun);
+        color = color * air.transmittance + air.in_scatter;
+    }
+    return color;
 }
 
 // ---- Temperature ----
 fn compute_temperature(sphere_pos: vec3<f32>, height: f32, season: f32) -> f32 {
-    let latitude = asin(clamp(sphere_pos.y, -1.0, 1.0));
-    // Axial tilt: rotate the "solar axis" rather than shifting latitude by sin(lon).
-    // This models the sub-solar point offset without creating V-shaped artifacts.
-    // The tilt shifts effective latitude smoothly across the whole sphere.
-    let tilt = uniforms.axial_tilt_rad;
-    let ct = cos(tilt);
-    let st = sin(tilt);
-    // Tilted Y-axis: the "effective pole" is rotated
-    let tilted_y = sphere_pos.y * ct + sphere_pos.z * st;
-    let effective_lat = asin(clamp(tilted_y, -1.0, 1.0));
-    let lat_deg = abs(effective_lat) * 180.0 / 3.14159;
+    let effective_lat = climate_latitude(sphere_pos, uniforms.axial_tilt_rad);
+    let lat_normalized = min(abs(climate_thermal_latitude(sphere_pos, uniforms.axial_tilt_rad, season)) / 1.5707963, 1.0);
+    let baseline = climate_temperature(sphere_pos, height, uniforms.ocean_level, uniforms.base_temp_c, uniforms.axial_tilt_rad, season);
 
-    // Sub-solar latitude: shifts the thermal equator with season and tilt.
-    // At equinox (season=0.5): sub-solar at equator. At solstice: sub-solar at ±tilt.
-    // At 90° tilt + summer: the north pole is the hottest point (Uranus-like).
-    let season_angle = (season - 0.5) * 2.0; // [-1, 1]
-    let sub_solar_lat = uniforms.axial_tilt_rad * season_angle;
-
-    // Thermal latitude: angular distance from the sub-solar point
-    let thermal_lat = effective_lat - sub_solar_lat;
-    let thermal_deg = min(abs(thermal_lat) * 180.0 / 3.14159, 90.0);
-
-    // Temperature gradient: ~50°C range from thermal equator to thermal poles
-    let lat_normalized = thermal_deg / 90.0;
-    let temp_drop = 50.0 * (0.4 * lat_normalized + 0.6 * lat_normalized * lat_normalized);
-    let temp_offset = uniforms.base_temp_c - 15.0;
-
-    let base_temp = 30.0 - temp_drop + temp_offset;
-
-    // Blurred height for lapse rate: averages nearby height samples so the
-    // lapse rate transitions gradually at coastlines instead of step-jumping.
-    let blur_r = 0.03;
-    var up_h = vec3<f32>(0.0, 1.0, 0.0);
-    if (abs(sphere_pos.y) > 0.95) { up_h = vec3<f32>(1.0, 0.0, 0.0); }
-    let th1 = normalize(cross(up_h, sphere_pos));
-    let th2 = normalize(cross(sphere_pos, th1));
-    let h_blur = (height
-        + textureSample(height_tex, height_sampler, normalize(sphere_pos + (th1 + th2) * blur_r)).r
-        + textureSample(height_tex, height_sampler, normalize(sphere_pos - (th1 + th2) * blur_r)).r
-        + textureSample(height_tex, height_sampler, normalize(sphere_pos + (th1 - th2) * blur_r)).r
-        + textureSample(height_tex, height_sampler, normalize(sphere_pos - (th1 - th2) * blur_r)).r
-    ) * 0.2;
-    let land_fraction = max(h_blur - uniforms.ocean_level, 0.0) / max(1.0 - uniforms.ocean_level, 0.01);
-    let elevation_km = land_fraction * 5.0;
-    let lapse = -6.5 * elevation_km;
-
-    let temp_noise = snoise(sphere_pos * 2.0) * 2.0;
-    let region_temp_bias = snoise(sphere_pos * 0.6 + vec3<f32>(0.0, 400.0, 0.0)) * 4.0;
-
+    // Preview-only diagnostic ocean-current anomaly, separate from shared baseline.
     // === Ocean current approximation ===
     // Western coasts → warm poleward currents (Gulf Stream, Kuroshio)
     // Eastern coasts → cold equatorward currents (California, Benguela)
@@ -410,25 +414,15 @@ fn compute_temperature(sphere_pos: vec3<f32>, height: f32, season: f32) -> f32 {
         current_temp -= land_east_score * 3.0 * lat_strength * winter_boost;
     }
 
-    return base_temp + lapse + temp_noise + region_temp_bias + current_temp;
+    return baseline + current_temp;
 }
 
 fn thermal_latitude(sphere_pos: vec3<f32>, season: f32) -> f32 {
-    let tilt = uniforms.axial_tilt_rad;
-    let tilted_y = sphere_pos.y * cos(tilt) + sphere_pos.z * sin(tilt);
-    let effective_lat = asin(clamp(tilted_y, -1.0, 1.0));
-    let sub_solar_lat = tilt * ((season - 0.5) * 2.0);
-    return effective_lat - sub_solar_lat;
+    return climate_thermal_latitude(sphere_pos, uniforms.axial_tilt_rad, season);
 }
 
 fn compute_sea_level_temperature(sphere_pos: vec3<f32>, season: f32) -> f32 {
-    let thermal_deg = min(abs(thermal_latitude(sphere_pos, season)) * 180.0 / 3.14159, 90.0);
-    let lat_normalized = thermal_deg / 90.0;
-    let temp_drop = 50.0 * (0.4 * lat_normalized + 0.6 * lat_normalized * lat_normalized);
-    let temp_offset = uniforms.base_temp_c - 15.0;
-    let temp_noise = snoise(sphere_pos * 2.0) * 2.0;
-    let region_temp_bias = snoise(sphere_pos * 0.6 + vec3<f32>(0.0, 400.0, 0.0)) * 4.0;
-    return 30.0 - temp_drop + temp_offset + temp_noise + region_temp_bias;
+    return climate_sea_level_temperature(sphere_pos, uniforms.base_temp_c, uniforms.axial_tilt_rad, season);
 }
 
 // Polar caps are a sea-level climate feature. Keeping altitude out of this
@@ -446,7 +440,7 @@ fn polar_ice_coverage(sphere_pos: vec3<f32>, is_ocean: bool) -> f32 {
     if (!is_ocean) {
         let height = textureSample(height_tex, height_sampler, sphere_pos).r;
         let land_height = clamp(
-            (height - uniforms.ocean_level) / max(1.0 - uniforms.ocean_level, 0.01),
+            (height - uniforms.ocean_level),
             0.0,
             1.0,
         );
@@ -549,7 +543,7 @@ fn compute_moisture(sphere_pos: vec3<f32>, height: f32, season: f32) -> f32 {
 
         // === Rain shadow from mountains (>2km relief) ===
         let tangent_wind = sample_wind_tangent(sphere_pos);
-        let upwind_pos = normalize(sphere_pos + tangent_wind * 0.08);
+        let upwind_pos = normalize(sphere_pos - tangent_wind * 0.08);
         let upwind_h = textureSample(height_tex, height_sampler, upwind_pos).r;
         let upwind_elev = max(upwind_h - uniforms.ocean_level, 0.0);
         let my_elevation = max(height - uniforms.ocean_level, 0.0);
@@ -665,8 +659,10 @@ fn gradient_color(mean_temp: f32, mean_moisture: f32, seasonal_temp: f32, variat
 }
 
 // ---- Terrain normal from height cubemap ----
-fn compute_terrain_normal(sphere_pos: vec3<f32>, geo_normal: vec3<f32>) -> vec3<f32> {
-    let step = 0.0015; // ~1 texel at 512 cubemap resolution
+fn compute_terrain_normal(sphere_pos: vec3<f32>, geo_normal: vec3<f32>, footprint: f32) -> vec3<f32> {
+    // A geodesic central difference is stable at cube seams and does not turn
+    // an arbitrary texture-value delta into an unbounded limb normal.
+    let step = max(2.0 / f32(textureDimensions(height_tex).x), footprint);
 
     // Build tangent frame in CUBEMAP space (consistent with height sampling)
     var up = vec3<f32>(0.0, 1.0, 0.0);
@@ -675,15 +671,15 @@ fn compute_terrain_normal(sphere_pos: vec3<f32>, geo_normal: vec3<f32>) -> vec3<
     let bitan_world = normalize(cross(sphere_pos, tan_world));
 
     // Sample 4 neighbors in cubemap space
-    let h_right = textureSample(height_tex, height_sampler, sphere_pos + tan_world * step).r;
-    let h_left  = textureSample(height_tex, height_sampler, sphere_pos - tan_world * step).r;
-    let h_up    = textureSample(height_tex, height_sampler, sphere_pos + bitan_world * step).r;
-    let h_down  = textureSample(height_tex, height_sampler, sphere_pos - bitan_world * step).r;
+    let h_right = textureSample(height_tex, height_sampler, normalize(sphere_pos + tan_world * step)).r;
+    let h_left  = textureSample(height_tex, height_sampler, normalize(sphere_pos - tan_world * step)).r;
+    let h_up    = textureSample(height_tex, height_sampler, normalize(sphere_pos + bitan_world * step)).r;
+    let h_down  = textureSample(height_tex, height_sampler, normalize(sphere_pos - bitan_world * step)).r;
 
     // Central differences → height gradient in cubemap space
-    let height_scale = uniforms.height_scale;
-    let dx = (h_right - h_left) * height_scale;
-    let dy = (h_up - h_down) * height_scale;
+    let height_scale = clamp(uniforms.height_scale, 0.0, 5.0) * 5.0 / max(uniforms.planet_radius_km, 1.0);
+    let dx = (h_right - h_left) * height_scale / (2.0 * step);
+    let dy = (h_up - h_down) * height_scale / (2.0 * step);
 
     // Perturbed normal in cubemap/world space
     let perturbed_world = normalize(sphere_pos - tan_world * dx - bitan_world * dy);
@@ -791,7 +787,18 @@ fn ggx_distribution(n_dot_h: f32, roughness: f32) -> f32 {
     let a = roughness * roughness;
     let a2 = a * a;
     let d = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
-    return a2 / (3.14159 * d * d + 0.0001);
+    return a2 / max(3.14159 * d * d, 1.0e-9);
+}
+
+// Smith's separable GGX visibility term prevents grazing-angle energy spikes.
+fn ggx_smith_g1(n_dot_x: f32, roughness: f32) -> f32 {
+    let a = roughness * roughness;
+    let nd = clamp(n_dot_x, 0.0, 1.0);
+    return 2.0 * nd / max(nd + sqrt(a * a + (1.0 - a * a) * nd * nd), 1.0e-4);
+}
+
+fn ggx_smith_visibility(n_dot_l: f32, n_dot_v: f32, roughness: f32) -> f32 {
+    return ggx_smith_g1(n_dot_l, roughness) * ggx_smith_g1(n_dot_v, roughness);
 }
 
 // ---- PBR: Schlick Fresnel ----
@@ -898,8 +905,7 @@ fn starfield(ndc: vec2<f32>, sun_dir: vec3<f32>, sun_color: vec3<f32>) -> vec3<f
 }
 
 // ---- Main fragment shader ----
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+fn shade_planet(in: VertexOutput) -> vec4<f32> {
     let pan = vec2<f32>(uniforms.pan_x, uniforms.pan_y);
     let ndc = ((in.uv - 0.5) * 2.0 / 0.85 - pan) / uniforms.zoom;
     // Compute derivatives before branch divergence; shared density receives this explicitly.
@@ -910,9 +916,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let sun_dir = normalize(uniforms.light_dir);
     let s_color = star_color(uniforms.star_color_temp);
 
-    let atm_h = uniforms.atmosphere_height;
+    // Shell cutoff is supplied from temperature/gravity, separate from density.
+    let atm_h = max(uniforms.atmosphere_height, 0.0);
     let atm_radius = 1.0 + atm_h;
-    let has_atm = uniforms.atmosphere_density > 0.001 && atm_h > 0.001;
+    let has_atm = uniforms.atmosphere_density > 0.001 && atm_h > 0.000001;
     let limb_direction = (uniforms.rotation * vec4<f32>(normalize(vec3<f32>(ndc, 0.0001)), 0.0)).xyz;
     let limb_geometry = textureSample(weather_geometry_tex, height_sampler, limb_direction);
     let cloud_top_radius = 1.0 + limb_geometry.a / max(uniforms.planet_radius_km, 1.0);
@@ -993,17 +1000,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         if (uniforms.view_mode != 0u) {
             return vec4<f32>(bg_tm, 1.0);
         }
-        var limb_color = bg;
-        if (r2 < visible_cloud_top * visible_cloud_top) {
-            let z_cloud = sqrt(max(visible_cloud_top * visible_cloud_top - r2, 0.0));
-            let clouds = ray_march_clouds(ndc, z_cloud, -z_cloud, sun_dir, angular_pixel_footprint);
-            limb_color = limb_color * clouds.transmittance + clouds.in_scatter;
-        }
-        if (has_atm && uniforms.show_atmosphere_layer > 0.5) {
-            let z_atm = sqrt(max(atm_radius * atm_radius - r2, 0.0));
-            let atmosphere = ray_march_atmosphere(ndc, z_atm, -z_atm, sun_dir);
-            limb_color = limb_color * atmosphere.transmittance + atmosphere.in_scatter;
-        }
+        var limb_color = composite_volumes(bg, ndc, -1.0, visible_cloud_top, sun_dir, angular_pixel_footprint);
         limb_color = limb_color / (limb_color + vec3<f32>(1.0));
         return vec4<f32>(limb_color, 1.0);
     }
@@ -1304,7 +1301,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 if (is_ocean) {
                     n = normal;
                 } else {
-                    n = compute_terrain_normal(rotated, normal);
+                    n = compute_terrain_normal(rotated, normal, angular_pixel_footprint / max(normal.z, 0.15));
                 }
                 // Remap from [-1,1] to [0,1] for display
                 debug_color = n * 0.5 + vec3<f32>(0.5);
@@ -1344,7 +1341,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                     let oc_lat = asin(clamp(rotated.y, -1.0, 1.0));
                     let oc_lat_norm = abs(oc_lat) / 1.5708;
                     // Expected temp at this latitude without currents
-                    let expected_temp = 30.0 - 50.0 * (0.4 * oc_lat_norm + 0.6 * oc_lat_norm * oc_lat_norm);
+                    let expected_temp = compute_sea_level_temperature(rotated, uniforms.season);
                     let anomaly = oc_temp - expected_temp;
                     // Warm anomaly → red, cold → blue, neutral → grey
                     let warm = clamp(anomaly / 8.0, 0.0, 1.0);
@@ -1382,18 +1379,19 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // ---- PBR Lighting ----
     let light = normalize(uniforms.light_dir);
     let view_dir = vec3<f32>(0.0, 0.0, 1.0); // Camera looks along -Z, view = +Z
-    let half_vec = normalize(light + view_dir);
+    let half_sum = light + view_dir;
+    let half_vec = half_sum / max(length(half_sum), 1.0e-6);
 
     // Compute terrain-perturbed normal (flat for ocean — water surface is smooth)
     var shading_normal: vec3<f32>;
     if (is_ocean) {
         shading_normal = normal; // Geometric sphere normal — flat water
     } else {
-        shading_normal = compute_terrain_normal(rotated, normal);
+        shading_normal = compute_terrain_normal(rotated, normal, angular_pixel_footprint / max(normal.z, 0.15));
     }
 
     // PBR inputs
-    let n_dot_l = max(dot(shading_normal, light), 0.0);
+    let n_dot_l = max(dot(shading_normal, light), 0.0) * smooth_step(0.0, 0.002, dot(normal, light));
     let n_dot_v = max(dot(shading_normal, view_dir), 0.001);
     let n_dot_h = max(dot(shading_normal, half_vec), 0.0);
     let h_dot_v = max(dot(half_vec, view_dir), 0.0);
@@ -1415,22 +1413,25 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         ),
         !pure_elevation,
     );
-    let f0 = select(0.04, 0.06, is_ocean); // Water has stronger Fresnel at glancing angles
+    // Air/water normal-incidence reflectance for n=1.333 is 0.0204.
+    let f0 = select(0.04, 0.0204, is_ocean);
 
     // GGX specular
     let d = ggx_distribution(n_dot_h, roughness);
     let f = fresnel_schlick(h_dot_v, f0);
-    let specular = d * f / (4.0 * n_dot_v * n_dot_l + 0.001);
+    let visibility = ggx_smith_visibility(n_dot_l, n_dot_v, roughness);
+    let specular = d * f * visibility / max(4.0 * n_dot_v * n_dot_l, 0.001);
 
     // Diffuse (energy-conserving: reduce diffuse where specular is strong)
     let diffuse = surface_color * (1.0 - f) / 3.14159;
 
     // Ambient (subtle, directional — slightly brighter on the lit hemisphere)
     let ao = select(1.0, compute_ao(rotated), !is_ocean && uniforms.show_ao > 0.5);
-    let ambient = surface_color * (0.06 + 0.04 * max(dot(normal, light), 0.0)) * ao;
+    let ambient = surface_color * (0.002 + 0.04 * max(dot(normal, light), 0.0)) * ao;
 
     // Combine — tint direct light by star color
-    var lit_color = ambient + (diffuse + specular) * n_dot_l * s_color;
+    var lit_color = ambient + (diffuse + specular) * n_dot_l * s_color * SUN_IRRADIANCE
+        * atmosphere_sun_transmittance(normal * 1.000001, light);
 
     // Cloud shadow on surface (independent from visible cloud self-shading)
     if (uniforms.show_cloud_shadows > 0.5) {
@@ -1459,21 +1460,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
 
-    // ---- Ocean sun glint (specular highlight on water) ----
-    if (is_ocean && (pure_elevation || polar_ice < 0.01)) {
-        // Blinn-Phong sun glint: tight specular on smooth water
-        let glint_power = 256.0; // very tight highlight
-        let glint_spec = pow(max(dot(normal, half_vec), 0.0), glint_power);
-        let glint_fresnel = fresnel_schlick(max(dot(half_vec, view_dir), 0.0), 0.04);
-        let glint = glint_spec * glint_fresnel * n_dot_l * 8.0; // HDR bright
-        lit_color += s_color * glint;
-    }
-
     // ---- Night-side city lights (gated by show_cities) ----
     var city_glow_through = vec3<f32>(0.0);
     var city_glow_amount = 0.0;
     if (uniforms.show_cities > 0.5 && uniforms.night_lights > 0.0 && !is_ocean) {
-        let night_factor = smooth_step(0.05, -0.1, n_dot_l);
+        let night_factor = smooth_step(0.05, -0.1, dot(normal, light));
         if (night_factor > 0.01) {
             let urban = compute_urban_density(rotated, height);
             if (urban > 0.01) {
@@ -1501,31 +1492,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
 
-    // ---- Shared bounded cloud volume (gated by show_clouds) ----
-    let visible_cloud_mass = textureSample(weather_mass_tex, height_sampler, rotated);
-    if (cloud_display_scale() > 0.0
-        && max(max(visible_cloud_mass.r, visible_cloud_mass.g), visible_cloud_mass.b) > 0.0) {
-        let geometry = textureSample(weather_geometry_tex, height_sampler, rotated);
-        let top_radius = 1.0 + geometry.a / max(uniforms.planet_radius_km, 1.0);
-        let z_cloud = sqrt(max(top_radius * top_radius - r2, 0.0));
-        let z_surface = sqrt(max(1.0 - r2, 0.0));
-        let clouds = ray_march_clouds(ndc, z_cloud, z_surface, sun_dir, angular_pixel_footprint);
-        lit_color = lit_color * clouds.transmittance + clouds.in_scatter;
-    }
-
     // City light scatter through clouds (needs both cities and clouds)
     if (uniforms.show_cities > 0.5 && uniforms.show_clouds > 0.5 && city_glow_amount > 0.05) {
         let scatter_strength = (1.0 - exp(-city_glow_amount * 2.0)) * 0.4; // thicker clouds scatter more
         lit_color += city_glow_through * scatter_strength;
     }
 
-    // Ray-marched atmosphere (gated by show_atmosphere_layer)
-    if (has_atm && uniforms.show_atmosphere_layer > 0.5) {
-        let z_atm = sqrt(max(atm_radius * atm_radius - r2, 0.0));
-        let z_surface = sqrt(1.0 - r2);
-        let scatter = ray_march_atmosphere(ndc, z_atm, z_surface, sun_dir);
-        lit_color = lit_color * scatter.transmittance + scatter.in_scatter;
-    }
+    let geometry = textureSample(weather_geometry_tex, height_sampler, rotated);
+    let top_radius = 1.0 + geometry.a / max(uniforms.planet_radius_km, 1.0);
+    lit_color = composite_volumes(lit_color, ndc, sqrt(max(1.0 - r2, 0.0)), top_radius, sun_dir, angular_pixel_footprint);
 
     // Tonemap (Reinhard)
     lit_color = lit_color / (lit_color + vec3<f32>(1.0));
@@ -1538,22 +1513,22 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         lit_color = mix(edge_bg_tm, lit_color, edge_aa);
     }
 
-    // ---- Lens flare near planet limb ----
-    // Subtle cinematic flare when sun is near the planet edge
-    if (sun_dir.z < 0.3) { // sun near or behind the planet
-        let limb_dist = abs(sqrt(r2) - 1.0); // distance from planet edge
-        if (limb_dist < 0.15) {
-            // Sun direction projected to screen
-            let sun_screen = vec2<f32>(sun_dir.x, sun_dir.y) / max(abs(sun_dir.z) + 0.3, 0.3);
-            let to_sun = normalize(sun_screen - ndc);
-            let edge_angle = dot(normalize(ndc), normalize(sun_screen));
-
-            // Anamorphic streak: horizontal elongation toward sun
-            let streak = exp(-limb_dist * limb_dist * 200.0) * max(edge_angle, 0.0);
-            let flare_color = s_color * streak * 0.15;
-            lit_color += flare_color;
-        }
-    }
-
     return vec4<f32>(lit_color, 1.0);
+}
+
+
+// Offline sRGB attachments encode automatically. egui samples a gamma-encoded
+// UNORM user texture, so its entry point must encode explicitly exactly once.
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    return shade_planet(in);
+}
+
+@fragment
+fn fs_main_display(in: VertexOutput) -> @location(0) vec4<f32> {
+    let color = shade_planet(in);
+    let linear = max(color.rgb, vec3<f32>(0.0));
+    let encoded = select(1.055 * pow(linear, vec3<f32>(1.0 / 2.4)) - 0.055,
+        12.92 * linear, linear <= vec3<f32>(0.0031308));
+    return vec4<f32>(encoded, color.a);
 }

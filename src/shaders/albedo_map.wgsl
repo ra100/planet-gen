@@ -23,26 +23,7 @@ struct AlbedoParams {
 
 // ---- Temperature (matches preview shader) ----
 fn compute_temperature(sphere_pos: vec3<f32>, height: f32) -> f32 {
-    let tilt = params.axial_tilt_rad;
-    let ct = cos(tilt);
-    let st = sin(tilt);
-    let tilted_y = sphere_pos.y * ct + sphere_pos.z * st;
-    let effective_lat = asin(clamp(tilted_y, -1.0, 1.0));
-    // Sub-solar latitude shift (matches preview shader)
-    let season_angle = (params.season - 0.5) * 2.0;
-    let sub_solar_lat = params.axial_tilt_rad * season_angle;
-    let thermal_lat = effective_lat - sub_solar_lat;
-    let thermal_deg = min(abs(thermal_lat) * 180.0 / 3.14159, 90.0);
-
-    let lat_normalized = thermal_deg / 90.0;
-    let temp_drop = 50.0 * (0.4 * lat_normalized + 0.6 * lat_normalized * lat_normalized);
-    let temp_offset = params.base_temp_c - 15.0;
-
-    let base_temp = 30.0 - temp_drop + temp_offset;
-
-    let land_fraction = max(height - params.ocean_level, 0.0) / max(1.0 - params.ocean_level, 0.01);
-    let elevation_km = land_fraction * 5.0;
-    return base_temp - elevation_km * 6.5;
+    return climate_temperature(sphere_pos, height, params.ocean_level, params.base_temp_c, params.axial_tilt_rad, params.season);
 }
 
 // ---- Hadley cell moisture ----

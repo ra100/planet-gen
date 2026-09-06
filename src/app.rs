@@ -8,7 +8,7 @@ use crate::plates::{PlateGenParams, generate_plates};
 use crate::preview::{PreviewRenderer, PreviewUniforms};
 use crate::terrain_compute::{
     DynamicsTextures, ErosionPipeline, TerrainComputePipeline, TerrainGenerationParams,
-    WindFieldPipeline,
+    WindFieldPipeline, earth_relative_rotation_rate,
 };
 use crate::weather::{
     DEFAULT_WEATHER_RESOLUTION, WeatherFieldPipeline, WeatherLifecycle, WeatherSnapshot,
@@ -93,6 +93,7 @@ pub struct PlanetGenApp {
     erosion_terrain: Option<crate::terrain_compute::TectonicTerrain>,
     erosion_remaining: u32,
     erosion_ocean_level: f32,
+    measured_ocean_coverage: Option<f32>,
     // Export state
     planet_name: String,
     export_resolution: u32,
@@ -249,6 +250,7 @@ impl PlanetGenApp {
             erosion_terrain: None,
             erosion_remaining: 0,
             erosion_ocean_level: 0.0,
+            measured_ocean_coverage: None,
             planet_name: format!("planet_{}", PlanetParams::default().seed),
             export_resolution: export::DEFAULT_EXPORT_RESOLUTION,
             export_albedo: true,
@@ -298,11 +300,11 @@ impl PlanetGenApp {
             view_mode: self.view_mode,
             season: self.season,
             atmosphere_density: if self.show_atmosphere {
-                self.derived.atmosphere_strength
+                self.derived.surface_pressure_bar
             } else {
                 0.0
             },
-            atmosphere_height: 0.02 + 0.02 * self.derived.atmosphere_strength,
+            atmosphere_height: self.derived.atmosphere_shell_height(),
             height_scale: self.height_scale,
             zoom: self.zoom,
             pan_x: self.pan[0],
@@ -407,10 +409,9 @@ impl PlanetGenApp {
         // Show un-eroded terrain immediately
         self.cached_cubemap_view = Some(self.preview_renderer.upload_terrain(&self.gpu, &terrain));
 
-        // Generate pressure-based wind field (for debug views + continentality cubemap)
+        // Allocate dynamics now; dispatch matching wind with the weather snapshot.
         {
             let cloud_res = (self.preview_resolution / 2).max(192);
-            let t_wind = std::time::Instant::now();
 
             if self.dynamics.as_ref().map(|textures| textures.resolution) != Some(cloud_res) {
                 self.dynamics = Some(self.wind_pipeline.create_textures(
@@ -420,27 +421,9 @@ impl PlanetGenApp {
                     ocean_level,
                 ));
             }
-            let dynamics = self.dynamics.as_ref().unwrap();
-            let weather = self.weather_snapshot(cloud_res, ocean_level);
-            self.wind_pipeline.generate_gpu(
-                &self.gpu,
-                &terrain,
-                dynamics,
-                weather.seed,
-                weather.ocean_level,
-                weather.axial_tilt_rad,
-                weather.season,
-                weather.rotation_rate_rad_s,
-                weather.base_temp_c,
-                weather.surface_pressure_bar,
-                weather.wind_scale,
-            );
-            log::info!(
-                "[wind {}px] {:.0}ms",
-                cloud_res,
-                t_wind.elapsed().as_secs_f64() * 1000.0
-            );
         }
+
+        self.measured_ocean_coverage = Some(terrain.solid_angle_ocean_coverage(ocean_level));
 
         // Schedule progressive erosion (skipped when erosion layer is disabled)
         if self.show_erosion {
@@ -498,6 +481,8 @@ impl PlanetGenApp {
             self.cached_cubemap_view =
                 Some(self.preview_renderer.upload_terrain(&self.gpu, terrain));
             self.erosion_remaining -= iters;
+            self.measured_ocean_coverage =
+                Some(terrain.solid_angle_ocean_coverage(self.erosion_ocean_level));
 
             log::info!(
                 "[erosion batch] {} iters in {:.0}ms, {} remaining",
@@ -509,6 +494,10 @@ impl PlanetGenApp {
 
         if self.erosion_remaining == 0 {
             self.weather_terrain = self.erosion_terrain.take();
+            self.measured_ocean_coverage = self
+                .weather_terrain
+                .as_ref()
+                .map(|terrain| terrain.solid_angle_ocean_coverage(self.erosion_ocean_level));
             self.terrain_start = None;
             self.request_weather(self.erosion_ocean_level);
             self.dispatch_weather();
@@ -615,6 +604,20 @@ impl PlanetGenApp {
         let Some((revision, snapshot)) = weather.next_submission() else {
             return;
         };
+        // Weather controls and completed erosion must use the matching wind field.
+        self.wind_pipeline.generate_gpu(
+            &self.gpu,
+            terrain,
+            dynamics,
+            snapshot.seed,
+            snapshot.ocean_level,
+            snapshot.axial_tilt_rad,
+            snapshot.season,
+            earth_relative_rotation_rate(snapshot.rotation_rate_rad_s),
+            snapshot.base_temp_c,
+            snapshot.surface_pressure_bar,
+            snapshot.wind_scale,
+        );
         self.weather_pipeline
             .generate(&self.gpu, snapshot, terrain, dynamics, weather.back());
         weather.mark_submitted(&self.gpu.queue, revision);
@@ -663,7 +666,11 @@ impl PlanetGenApp {
             tile_size: export::TILE_SIZE,
             output_dir,
             planet_name: self.planet_name.clone(),
-            erosion_iterations: self.erosion_iterations,
+            erosion_iterations: if self.show_erosion {
+                self.erosion_iterations
+            } else {
+                0
+            },
             layers: ExportLayers {
                 height: self.export_height,
                 albedo: self.export_albedo,
@@ -768,8 +775,8 @@ impl PlanetGenApp {
         if ctx.wants_keyboard_input() {
             return;
         }
-        let (randomize_seed, reset, left, right, up, down, zoom_in, zoom_out, help, escape) =
-            ctx.input(|input| {
+        let (randomize_seed, reset, left, right, up, down, zoom_in, zoom_out, help, escape) = ctx
+            .input(|input| {
                 (
                     input.key_pressed(egui::Key::N),
                     input.key_pressed(egui::Key::R),
@@ -842,28 +849,103 @@ struct ViewMode {
 }
 
 const VIEW_MODES: &[ViewMode] = &[
-    ViewMode { id: 0, label: "ALL", group: ViewGroup::Shaded },
-    ViewMode { id: 1, label: "HEIGHT", group: ViewGroup::Maps },
-    ViewMode { id: 7, label: "ROUGHNESS", group: ViewGroup::Maps },
-    ViewMode { id: 9, label: "CLOUDS", group: ViewGroup::Maps },
-    ViewMode { id: 10, label: "EMISSION", group: ViewGroup::Maps },
-    ViewMode { id: 13, label: "NORMALS", group: ViewGroup::Maps },
-    ViewMode { id: 8, label: "AO", group: ViewGroup::Debug },
-    ViewMode { id: 6, label: "PLATES", group: ViewGroup::Debug },
-    ViewMode { id: 2, label: "TEMP", group: ViewGroup::Debug },
-    ViewMode { id: 3, label: "MOISTURE", group: ViewGroup::Debug },
-    ViewMode { id: 4, label: "BIOME", group: ViewGroup::Debug },
-    ViewMode { id: 5, label: "OCEAN/ICE", group: ViewGroup::Debug },
-    ViewMode { id: 11, label: "BOUNDARY", group: ViewGroup::Debug },
-    ViewMode { id: 12, label: "SNOW", group: ViewGroup::Debug },
-    ViewMode { id: 14, label: "WIND", group: ViewGroup::Debug },
-    ViewMode { id: 15, label: "CURRENTS", group: ViewGroup::Debug },
-    ViewMode { id: 16, label: "CONTINENTALITY", group: ViewGroup::Debug },
-    ViewMode { id: 17, label: "PRESSURE", group: ViewGroup::Debug },
+    ViewMode {
+        id: 0,
+        label: "ALL",
+        group: ViewGroup::Shaded,
+    },
+    ViewMode {
+        id: 1,
+        label: "HEIGHT",
+        group: ViewGroup::Maps,
+    },
+    ViewMode {
+        id: 7,
+        label: "ROUGHNESS",
+        group: ViewGroup::Maps,
+    },
+    ViewMode {
+        id: 9,
+        label: "CLOUDS",
+        group: ViewGroup::Maps,
+    },
+    ViewMode {
+        id: 10,
+        label: "EMISSION",
+        group: ViewGroup::Maps,
+    },
+    ViewMode {
+        id: 13,
+        label: "NORMALS",
+        group: ViewGroup::Maps,
+    },
+    ViewMode {
+        id: 8,
+        label: "AO",
+        group: ViewGroup::Debug,
+    },
+    ViewMode {
+        id: 6,
+        label: "PLATES",
+        group: ViewGroup::Debug,
+    },
+    ViewMode {
+        id: 2,
+        label: "TEMP",
+        group: ViewGroup::Debug,
+    },
+    ViewMode {
+        id: 3,
+        label: "MOISTURE",
+        group: ViewGroup::Debug,
+    },
+    ViewMode {
+        id: 4,
+        label: "BIOME",
+        group: ViewGroup::Debug,
+    },
+    ViewMode {
+        id: 5,
+        label: "OCEAN/ICE",
+        group: ViewGroup::Debug,
+    },
+    ViewMode {
+        id: 11,
+        label: "BOUNDARY",
+        group: ViewGroup::Debug,
+    },
+    ViewMode {
+        id: 12,
+        label: "SNOW",
+        group: ViewGroup::Debug,
+    },
+    ViewMode {
+        id: 14,
+        label: "WIND",
+        group: ViewGroup::Debug,
+    },
+    ViewMode {
+        id: 15,
+        label: "CURRENTS",
+        group: ViewGroup::Debug,
+    },
+    ViewMode {
+        id: 16,
+        label: "CONTINENTALITY",
+        group: ViewGroup::Debug,
+    },
+    ViewMode {
+        id: 17,
+        label: "PRESSURE",
+        group: ViewGroup::Debug,
+    },
 ];
 
 fn view_mode_info(id: u32) -> &'static ViewMode {
-    VIEW_MODES.iter().find(|v| v.id == id).unwrap_or(&VIEW_MODES[0])
+    VIEW_MODES
+        .iter()
+        .find(|v| v.id == id)
+        .unwrap_or(&VIEW_MODES[0])
 }
 
 fn view_opts(group: ViewGroup) -> Vec<(u32, &'static str)> {
@@ -889,13 +971,7 @@ const EXPORT_LAYERS: &[(&str, &str)] = &[
 const TABS: [&str; 5] = ["PLANET", "TERRAIN", "CLIMATE", "LOOK", "RENDER"];
 
 const PRESETS: [&str; 7] = [
-    "EARTH",
-    "MARS",
-    "OCEAN",
-    "SNOWBALL",
-    "HOTHOUSE",
-    "VOLCANIC",
-    "RINGED",
+    "EARTH", "MARS", "OCEAN", "SNOWBALL", "HOTHOUSE", "VOLCANIC", "RINGED",
 ];
 
 impl PlanetGenApp {
@@ -1160,15 +1236,24 @@ impl PlanetGenApp {
             ui,
             &mut self.params.mass_earth,
             0.01..=10.0,
-            Param::new("Mass", "Planet mass. Affects gravity, terrain relief, plate count", 1.0)
-                .with(2, " M⊕")
-                .log_scale(),
+            Param::new(
+                "Mass",
+                "Planet mass. Affects gravity, terrain relief, plate count",
+                1.0,
+            )
+            .with(2, " M⊕")
+            .log_scale(),
         );
         changed |= widgets::slider_row(
             ui,
             &mut self.params.metallicity,
             -1.0..=1.0,
-            Param::new("[Fe/H]", "Stellar metallicity. Higher = rougher terrain", 0.0).with(2, ""),
+            Param::new(
+                "[Fe/H]",
+                "Stellar metallicity. Higher = rougher terrain",
+                0.0,
+            )
+            .with(2, ""),
         );
         changed |= widgets::slider_row(
             ui,
@@ -1314,7 +1399,11 @@ impl PlanetGenApp {
             ui,
             &mut plates,
             0..=30,
-            Param::new("Plates", "Number of tectonic plates. 0 = auto from planet mass", 0.0),
+            Param::new(
+                "Plates",
+                "Number of tectonic plates. 0 = auto from planet mass",
+                0.0,
+            ),
         ) {
             self.num_plates_override = plates as u32;
             self.needs_terrain = true;
@@ -1414,7 +1503,10 @@ impl PlanetGenApp {
         widgets::instrument_row(
             ui,
             "SURFACE AGE",
-            format!("{:.2}", self.age_override.unwrap_or(self.derived.surface_age)),
+            format!(
+                "{:.2}",
+                self.age_override.unwrap_or(self.derived.surface_age)
+            ),
         );
     }
 
@@ -1694,7 +1786,11 @@ impl PlanetGenApp {
                 "Water / ocean",
                 "Ocean surface with depth shading and specular",
             ),
-            (&mut self.show_ice, "Ice caps", "Polar and altitude ice rendering"),
+            (
+                &mut self.show_ice,
+                "Ice caps",
+                "Polar and altitude ice rendering",
+            ),
             (
                 &mut self.show_biomes,
                 "Biome colors",
@@ -1745,10 +1841,15 @@ impl PlanetGenApp {
         }
 
         widgets::section_header(ui, "viewport resolution");
-        let res_opts: Vec<(u32, &'static str)> =
-            [(256u32, "256"), (512, "512"), (768, "768"), (1024, "1K"), (2048, "2K")]
-                .into_iter()
-                .collect();
+        let res_opts: Vec<(u32, &'static str)> = [
+            (256u32, "256"),
+            (512, "512"),
+            (768, "768"),
+            (1024, "1K"),
+            (2048, "2K"),
+        ]
+        .into_iter()
+        .collect();
         if let Some(res) = widgets::chip_bar(ui, &res_opts, self.preview_resolution)
             && res != self.preview_resolution
         {
@@ -1765,7 +1866,8 @@ impl PlanetGenApp {
                     ui.label(RichText::new(t).small().color(theme::TEXT_FAINT));
                 };
                 group_label(ui, "SHADE");
-                if let Some(id) = widgets::chip_bar(ui, &view_opts(ViewGroup::Shaded), self.view_mode)
+                if let Some(id) =
+                    widgets::chip_bar(ui, &view_opts(ViewGroup::Shaded), self.view_mode)
                 {
                     self.view_mode = id;
                     self.needs_render = true;
@@ -1777,7 +1879,8 @@ impl PlanetGenApp {
                     self.needs_render = true;
                 }
                 group_label(ui, "DEBUG");
-                if let Some(id) = widgets::chip_bar(ui, &view_opts(ViewGroup::Debug), self.view_mode)
+                if let Some(id) =
+                    widgets::chip_bar(ui, &view_opts(ViewGroup::Debug), self.view_mode)
                 {
                     self.view_mode = id;
                     self.needs_render = true;
@@ -1837,16 +1940,19 @@ impl PlanetGenApp {
                             "BASE TEMP",
                             format!("{:.1} °C", self.derived.base_temperature_c),
                         );
-                        let ocean = if self.water_loss > 0.01 {
-                            format!(
-                                "{:.0}% → {:.0}%",
-                                self.derived.ocean_fraction * 100.0,
-                                self.derived.ocean_fraction * (1.0 - self.water_loss) * 100.0
-                            )
-                        } else {
-                            format!("{:.0}%", self.derived.ocean_fraction * 100.0)
-                        };
+                        let ocean = self.measured_ocean_coverage.map_or_else(
+                            || "generating…".to_owned(),
+                            |coverage| format!("{:.0}% surface", coverage * 100.0),
+                        );
                         widgets::instrument_row(ui, "OCEAN", ocean);
+                        widgets::instrument_row(
+                            ui,
+                            "WATER BUDGET",
+                            format!(
+                                "{:.0}%",
+                                self.derived.ocean_fraction * (1.0 - self.water_loss) * 100.0
+                            ),
+                        );
                         widgets::instrument_row(
                             ui,
                             "FROST LINE",
@@ -2147,8 +2253,11 @@ impl eframe::App for PlanetGenApp {
                     .map(|t| t.elapsed().as_secs_f32())
                     .unwrap_or(0.0);
                 if (self.terrain_pending || self.erosion_remaining > 0) && gen_elapsed > 1.0 {
-                    ui.painter()
-                        .rect_filled(ui.max_rect(), 0.0, egui::Color32::from_black_alpha(70));
+                    ui.painter().rect_filled(
+                        ui.max_rect(),
+                        0.0,
+                        egui::Color32::from_black_alpha(70),
+                    );
                 }
             });
 
@@ -2326,7 +2435,11 @@ mod tests {
             let s2 = rot3_mul(&rot3_view_delta(0.25, 0.0), &s1);
             let v_new = apply_vec(&s2, p);
             let disp = [v_new[0] - center_ray[0], v_new[1] - center_ray[1]];
-            assert!(disp[0].abs() < 1e-5, "yaw {yaw_deg}°: horizontal drift {}", disp[0]);
+            assert!(
+                disp[0].abs() < 1e-5,
+                "yaw {yaw_deg}°: horizontal drift {}",
+                disp[0]
+            );
             assert!(disp[1].abs() > 1e-3, "yaw {yaw_deg}°: pitch did nothing");
         }
     }
@@ -2343,7 +2456,11 @@ mod tests {
             let s2 = rot3_mul(&rot3_view_delta(0.0, 0.25), &s1);
             let v_new = apply_vec(&s2, p);
             let disp = [v_new[0] - center_ray[0], v_new[1] - center_ray[1]];
-            assert!(disp[1].abs() < 1e-5, "pitch {pitch_deg}°: vertical drift {}", disp[1]);
+            assert!(
+                disp[1].abs() < 1e-5,
+                "pitch {pitch_deg}°: vertical drift {}",
+                disp[1]
+            );
             assert!(disp[0].abs() > 1e-3, "pitch {pitch_deg}°: yaw did nothing");
         }
     }
@@ -2366,7 +2483,10 @@ mod tests {
         for i in 0..3 {
             for j in 0..3 {
                 let d: f32 = (0..3).map(|k| s[i][k] * s[j][k]).sum();
-                assert!((d - if i == j { 1.0 } else { 0.0 }).abs() < 1e-4, "rows {i},{j} dot {d}");
+                assert!(
+                    (d - if i == j { 1.0 } else { 0.0 }).abs() < 1e-4,
+                    "rows {i},{j} dot {d}"
+                );
             }
         }
     }

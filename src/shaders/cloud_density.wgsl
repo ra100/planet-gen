@@ -1,7 +1,7 @@
 // Shared weather-driven density functions. Preview and export compile this unchanged.
 // Formation mass is authoritative; detail only erodes supported boundaries.
-const LOW_DETAIL_STRENGTH: f32 = 0.55;
-const DEEP_DETAIL_STRENGTH: f32 = 0.55;
+const LOW_DETAIL_STRENGTH: f32 = 1.0;
+const DEEP_DETAIL_STRENGTH: f32 = 1.0;
 // High cirrus keeps its supported, wind-owned edge observable to U3.
 const HIGH_DETAIL_STRENGTH: f32 = 1.0;
 const LOW_OPTICAL_WEIGHT: f32 = 0.50;
@@ -21,6 +21,8 @@ struct WeatherCloudSample {
     geometry: vec4<f32>,
     height: f32,
     low_multiplier: f32,
+    deep_multiplier: f32,
+    high_multiplier: f32,
 }
 
 fn layer_profile(altitude_km: f32, base_km: f32, top_km: f32) -> f32 {
@@ -163,8 +165,8 @@ fn filtered_noise(
         snoise(direction * frequencies.z + noise_seed_offset(uniforms.cloud_seed, seed + 2u)),
     );
     return vec2<f32>(
-        dominant * dominant_weight / max(dominant_weight, 1.0e-4),
-        dot(higher, higher_weights) / max(dot(higher_weights, vec2<f32>(1.0)), 1.0e-4),
+        dominant * band_limit.x,
+        dot(higher, higher_weights) / max(dot(weights.yz, vec2<f32>(1.0)), 1.0e-4),
     );
 }
 
@@ -188,8 +190,8 @@ fn isotropic_noise(
         snoise(direction * frequencies.z + noise_seed_offset(uniforms.cloud_seed, seed + 2u)),
     );
     return vec2<f32>(
-        noise.x,
-        dot(noise.yz, weighted.yz) / max(dot(weighted.yz, vec2<f32>(1.0)), 1.0e-4),
+        noise.x * band_limit.x,
+        dot(noise.yz, weighted.yz) / max(dot(weights.yz, vec2<f32>(1.0)), 1.0e-4),
     );
 }
 
@@ -198,7 +200,7 @@ fn weather_cloud_sample(dir: vec3<f32>, altitude_km: f32, angular_pixel_footprin
     let mass = textureSample(weather_mass_tex, height_sampler, direction);
     let geometry = textureSample(weather_geometry_tex, height_sampler, direction);
     let height = textureSample(height_tex, height_sampler, direction).r;
-    var sample = WeatherCloudSample(CloudLayers(0.0, 0.0, 0.0), mass, geometry, height, 1.0);
+    var sample = WeatherCloudSample(CloudLayers(0.0, 0.0, 0.0), mass, geometry, height, 1.0, 1.0, 1.0);
     if (max(max(mass.r, mass.g), mass.b) <= 0.0) { return sample; }
 
     let deep_base = mix(geometry.r, geometry.g, 0.28);
@@ -206,44 +208,46 @@ fn weather_cloud_sample(dir: vec3<f32>, altitude_km: f32, angular_pixel_footprin
     let deep_height_fraction = clamp((altitude_km - deep_base) / max(deep_top - deep_base, 0.1), 0.0, 1.0);
     let detail_weight = clamp(uniforms.cloud_advection, 0.0, 1.0);
     let low_detail = isotropic_noise(
-        direction, vec3<f32>(6.0, 12.0, 24.0),
+        direction, vec3<f32>(18.0, 48.0, 110.0),
         vec3<f32>(0.50, 0.32, 0.18), angular_pixel_footprint, 40u,
     );
     let deep_detail = isotropic_noise(
-        direction, vec3<f32>(7.0, 14.0, 24.0),
+        direction, vec3<f32>(14.0, 36.0, 88.0),
         vec3<f32>(0.46, 0.34, 0.20), angular_pixel_footprint, 50u,
     );
     let tower_lobes = isotropic_noise(
-        direction, vec3<f32>(7.0, 14.0, 24.0),
+        direction, vec3<f32>(14.0, 36.0, 88.0),
         vec3<f32>(0.52, 0.30, 0.18), angular_pixel_footprint, 60u,
     );
+    // Detail is a threshold displacement, not merely a tiny brightness wobble.
+    // It can break a marginal deck into cells, while its mean stays near one and
+    // the weather mass remains the sole source of cloud water.
+    let low_breakup = smooth_step(-0.34, 0.42, low_detail.x * 0.72 + low_detail.y * 0.28);
     sample.low_multiplier = clamp(
-        1.0 + LOW_DETAIL_STRENGTH * detail_weight * (0.15 * low_detail.x + 0.13 * low_detail.y),
-        0.72,
-        1.22,
+        mix(1.0, 0.06 + 1.30 * low_breakup, LOW_DETAIL_STRENGTH * detail_weight),
+        0.0,
+        1.36,
     );
     let deep_combined_detail = mix(deep_detail, tower_lobes, deep_height_fraction);
+    let deep_breakup = smooth_step(-0.28, 0.48, deep_combined_detail.x * 0.68 + deep_combined_detail.y * 0.32);
     let deep_multiplier = clamp(
-        1.0 + DEEP_DETAIL_STRENGTH * detail_weight * (0.16 * deep_combined_detail.x + 0.06 * deep_combined_detail.y),
-        0.72,
-        1.22,
+        mix(1.0, 0.36 + 1.02 * deep_breakup, DEEP_DETAIL_STRENGTH * detail_weight),
+        0.18,
+        1.38,
     );
     let low_depth_km = geometry.g - geometry.r;
     let shallow_family = smooth_step(0.7, 1.8, low_depth_km);
-    let terrain_family = smooth_step(0.05, 0.22, height)
-        * (1.0 - smooth_step(0.05, 0.35, mass.g));
+    // Geometry comes from the weather field.  Do not let the terrain height
+    // switch integration/profile at the coastline: that made identical weather
+    // columns acquire an artificial land outline.
     let detached_base = mix(geometry.r, mix(geometry.r, geometry.g, 0.16), shallow_family);
     let low_profile = layer_profile(altitude_km, detached_base, geometry.g);
-    let terrain_cap = layer_profile(
-        altitude_km,
-        mix(geometry.r, geometry.g, 0.15),
-        mix(geometry.r, geometry.g, 0.8),
-    );
     sample.layers.low = max(
         mass.r * sample.low_multiplier * LOW_OPTICAL_WEIGHT
-            * mix(low_profile, terrain_cap, terrain_family * 0.45),
+            * low_profile,
         0.0,
     );
+    sample.deep_multiplier = deep_multiplier * mix(1.18, 0.68, deep_height_fraction);
     sample.layers.deep = max(
         mass.g * deep_multiplier * layer_profile(altitude_km, deep_base, deep_top)
             * mix(1.18, 0.68, deep_height_fraction),
@@ -251,15 +255,17 @@ fn weather_cloud_sample(dir: vec3<f32>, altitude_km: f32, angular_pixel_footprin
     );
 
     let fibres = filtered_noise(
-        direction, vec3<f32>(10.0, 20.0, 32.0),
+        direction, vec3<f32>(18.0, 48.0, 96.0),
         vec3<f32>(0.54, 0.30, 0.16), 1.20, angular_pixel_footprint, 70u,
     );
     let high_base = max(geometry.b, geometry.a - 3.0);
+    let high_breakup = smooth_step(-0.36, 0.40, fibres.x * 0.82 + fibres.y * 0.18);
     let high_modulation = clamp(
-        1.0 + HIGH_DETAIL_STRENGTH * detail_weight * (0.60 * fibres.x + 0.05 * fibres.y),
-        0.72,
-        1.22,
+        mix(1.0, 0.40 + 0.90 * high_breakup, HIGH_DETAIL_STRENGTH * detail_weight),
+        0.20,
+        1.30,
     );
+    sample.high_multiplier = high_modulation * 0.28;
     sample.layers.high = max(mass.b * layer_profile(altitude_km, high_base, geometry.a) * high_modulation * 0.28, 0.0);
     return sample;
 }
@@ -276,31 +282,18 @@ fn weather_cloud_layers_land_segment(
     radius_km: f32,
     angular_pixel_footprint: f32,
 ) -> WeatherCloudSample {
-    let direction = normalize(dir);
-    var sample = weather_cloud_sample(direction, altitude_km, angular_pixel_footprint);
-    // NOTE(FE-081/DS-045): land_factor keys low-cloud profile integration to
-    // the static height boundary and this land-segment path is preview-only —
-    // cloud_export integrates weather_cloud_sample without it, so preview and
-    // export diverge over land. Left as-is for leader/designer decision; the
-    // spin-up side no longer classifies coastlines.
-    let land_factor = smooth_step(0.01, 0.05, sample.height - uniforms.ocean_level);
-    if (land_factor <= 0.0) { return sample; }
-
-    if (sample.mass.r <= 0.0) { return sample; }
-    let low_depth = sample.geometry.g - sample.geometry.r;
-    let shallow_family = smooth_step(0.7, 1.8, low_depth);
-    let terrain_family = smooth_step(0.05, 0.22, sample.height)
-        * (1.0 - smooth_step(0.05, 0.35, sample.mass.g));
-    let detached_base = mix(sample.geometry.r, mix(sample.geometry.r, sample.geometry.g, 0.16), shallow_family);
-    let low_profile = layer_profile_segment_mean(
-        segment_start, segment_end, detached_base, sample.geometry.g, radius_km,
-    );
-    let terrain_cap = layer_profile_segment_mean(
-        segment_start, segment_end, mix(sample.geometry.r, sample.geometry.g, 0.15), mix(sample.geometry.r, sample.geometry.g, 0.8), radius_km,
-    );
-    let exact_low = sample.mass.r * sample.low_multiplier * LOW_OPTICAL_WEIGHT
-        * mix(low_profile, terrain_cap, terrain_family * 0.45);
-    sample.layers.low = mix(sample.layers.low, exact_low, land_factor);
+    // Integrate thin profiles on every surface, not only above a land mask.
+    // Formation mass and geometry alone own cloud shape. Both renderers use this.
+    var sample = weather_cloud_sample(normalize(dir), altitude_km, angular_pixel_footprint);
+    let g = sample.geometry;
+    let detached_base = mix(g.r, mix(g.r, g.g, 0.16), smooth_step(0.7, 1.8, g.g - g.r));
+    let deep_base = mix(g.r, g.g, 0.28);
+    sample.layers.low = sample.mass.r * sample.low_multiplier * LOW_OPTICAL_WEIGHT
+        * layer_profile_segment_mean(segment_start, segment_end, detached_base, g.g, radius_km);
+    sample.layers.deep = sample.mass.g * sample.deep_multiplier
+        * layer_profile_segment_mean(segment_start, segment_end, deep_base, max(g.b, deep_base + 0.5), radius_km);
+    sample.layers.high = sample.mass.b * sample.high_multiplier
+        * layer_profile_segment_mean(segment_start, segment_end, max(g.b, g.a - 3.0), g.a, radius_km);
     return sample;
 }
 

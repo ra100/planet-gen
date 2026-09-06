@@ -35,16 +35,7 @@ fn sample_height(gx: i32, gy: i32) -> f32 {
 
 // Simplified temperature from latitude + altitude
 fn compute_temp(sphere_pos: vec3<f32>, height: f32) -> f32 {
-    let tilt = params.axial_tilt_rad;
-    let tilted_y = sphere_pos.y * cos(tilt) + sphere_pos.z * sin(tilt);
-    let effective_lat = asin(clamp(tilted_y, -1.0, 1.0));
-    let lat_deg = abs(effective_lat) * 180.0 / 3.14159;
-    let lat_norm = lat_deg / 90.0;
-    let temp_drop = 50.0 * (0.4 * lat_norm + 0.6 * lat_norm * lat_norm);
-    let base_temp = 30.0 - temp_drop + (params.base_temp_c - 15.0);
-    let land_frac = max(height - params.ocean_level, 0.0) / max(1.0 - params.ocean_level, 0.01);
-    let lapse = -6.5 * land_frac * 5.0;
-    return base_temp + lapse;
+    return climate_temperature(sphere_pos, height, params.ocean_level, params.base_temp_c, params.axial_tilt_rad, 0.5);
 }
 
 @compute @workgroup_size(16, 16)

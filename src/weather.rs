@@ -554,9 +554,10 @@ impl WeatherFieldPipeline {
                 label: Some("weather field shader"),
                 source: wgpu::ShaderSource::Wgsl(
                     format!(
-                        "{}\n{}\n{}",
+                        "{}\n{}\n{}\n{}",
                         include_str!("shaders/cube_sphere.wgsl"),
                         include_str!("shaders/noise.wgsl"),
+                        include_str!("shaders/climate.wgsl"),
                         weather_shader,
                     )
                     .into(),
@@ -678,9 +679,10 @@ impl WeatherFieldPipeline {
                 label: Some("weather spin-up shader"),
                 source: wgpu::ShaderSource::Wgsl(
                     format!(
-                        "{}\n{}\n{}",
+                        "{}\n{}\n{}\n{}",
                         include_str!("shaders/cube_sphere.wgsl"),
                         include_str!("shaders/noise.wgsl"),
+                        include_str!("shaders/climate.wgsl"),
                         include_str!("shaders/weather_spinup.wgsl"),
                     )
                     .into(),
@@ -2516,6 +2518,8 @@ mod tests {
             &terrain,
             snapshot(resolution),
         );
+        // Realism climate migration: pins below use the shared global-reference
+        // temperature and fixed 5 km/height-unit lapse rate.
         // FE-081 de-classification couples provenance into mass (warm_marine_lift
         // and inland_provenance read provenance_share), so capture-on and
         // capture-off are intentionally different fields now. Each path is pinned
@@ -2528,11 +2532,11 @@ mod tests {
         // repeated deterministic release builds.
         assert_eq!(
             mass_fingerprint(&legacy.read_mass(&gpu)),
-            4_130_945_357_148_873_509
+            5_458_526_457_701_180_197
         );
         assert_eq!(
             mass_fingerprint(&off.read_mass(&gpu)),
-            2_621_374_564_975_805_221
+            11_623_944_083_702_252_325
         );
         assert_eq!(provenance.is_some(), pipeline.provenance.is_some());
     }
@@ -2570,11 +2574,7 @@ mod tests {
         let ocean = run(terrain_from(resolution, |_| -0.1));
         let land = run(terrain_from(resolution, |_| 0.1));
         let mixed = run(terrain_from(resolution, |pos| {
-            if pos[2] > 0.0 {
-                -0.1
-            } else {
-                0.1
-            }
+            if pos[2] > 0.0 { -0.1 } else { 0.1 }
         }));
         let Some(ocean_p) = ocean.1 else {
             return;
@@ -2599,13 +2599,17 @@ mod tests {
             land_provenance < provenance_total(&ocean_p, resolution),
             "all-land provenance not bounded under marine minting: {land_provenance}"
         );
-        assert!(mixed_p
-            .iter()
-            .all(|p| p.is_finite() && (0.0..=1.0).contains(p)));
-        assert!(mixed_p
-            .iter()
-            .zip(mixed_mass.chunks_exact(4))
-            .any(|(p, mass)| { *p > 0.001 && mass.iter().sum::<f32>() > 0.001 }));
+        assert!(
+            mixed_p
+                .iter()
+                .all(|p| p.is_finite() && (0.0..=1.0).contains(p))
+        );
+        assert!(
+            mixed_p
+                .iter()
+                .zip(mixed_mass.chunks_exact(4))
+                .any(|(p, mass)| { *p > 0.001 && mass.iter().sum::<f32>() > 0.001 })
+        );
         assert!(land_mass.iter().all(|value| value.is_finite()));
         assert!(ocean_mass.iter().all(|value| value.is_finite()));
     }
@@ -2617,8 +2621,11 @@ mod tests {
         assert!(
             shader.contains("let p_after_source = transported + provenance_source_evaporation;")
         );
-        assert!(shader
-            .contains("let p_after_rainout = p_after_source * (1.0 - provenance_rainout_scale);"));
+        assert!(
+            shader.contains(
+                "let p_after_rainout = p_after_source * (1.0 - provenance_rainout_scale);"
+            )
+        );
         assert!(shader.contains("bounded_provenance"));
         assert!(shader.contains("fn transport_with_provenance"));
         assert!(!shader.contains("provenance_finalize"));
@@ -2635,6 +2642,8 @@ mod tests {
         let pipeline = WeatherFieldPipeline::new(&gpu).expect("weather unavailable");
         let selected = generate_weather(&gpu, &pipeline, &dynamics, &terrain, snapshot(resolution));
         let schedule = spinup_schedule(dynamics.is_nearly_all_ocean());
+        // Realism climate migration: global-reference temperature replaces the
+        // old equatorial baseline. The new pin is verified on repeat runs.
         // FE-081 de-classification removed marine_climate conversion inflation;
         // baseline moved 3011d61→FE-081→DS-046 (eddy diffusion, mesoscale
         // steering, forcing exponent 0.85). Pin regenerated from a clean
@@ -2647,7 +2656,7 @@ mod tests {
 
         assert_eq!(schedule.iterations, 16);
         assert_eq!(schedule.physical_interval_seconds, 1600.0);
-        assert_eq!(fingerprint, 7_702_921_282_530_312_997);
+        assert_eq!(fingerprint, 9_282_804_621_228_303_141);
     }
 
     #[test]
@@ -2738,9 +2747,10 @@ mod tests {
         assert_eq!(geometry_a, geometry_b);
         assert!(a.iter().all(|value| value.is_finite()));
         assert!(geometry_a.iter().all(|value| value.is_finite()));
-        assert!(a
-            .chunks_exact(4)
-            .all(|pixel| pixel.iter().all(|value| (0.0..=1.0).contains(value))));
+        assert!(
+            a.chunks_exact(4)
+                .all(|pixel| pixel.iter().all(|value| (0.0..=1.0).contains(value)))
+        );
         assert!(a.chunks_exact(4).all(|pixel| {
             pixel[3] + 0.002 >= pixel[0]
                 && pixel[3] + 0.002 >= pixel[1]
@@ -2799,16 +2809,20 @@ mod tests {
         let mut clear = snapshot(16);
         clear.moisture = 0.0;
         let clear = generate_weather(&gpu, &pipeline, &dynamics, &terrain, clear);
-        assert!(read_texture(&gpu, &clear._mass_texture, 16)
-            .chunks_exact(4)
-            .all(|pixel| pixel == [0.0; 4]));
+        assert!(
+            read_texture(&gpu, &clear._mass_texture, 16)
+                .chunks_exact(4)
+                .all(|pixel| pixel == [0.0; 4])
+        );
 
         let mut clear = snapshot(16);
         clear.coverage = 0.0;
         let clear = generate_weather(&gpu, &pipeline, &dynamics, &terrain, clear);
-        assert!(read_texture(&gpu, &clear._mass_texture, 16)
-            .chunks_exact(4)
-            .all(|pixel| pixel == [0.0; 4]));
+        assert!(
+            read_texture(&gpu, &clear._mass_texture, 16)
+                .chunks_exact(4)
+                .all(|pixel| pixel == [0.0; 4])
+        );
     }
 
     #[test]
@@ -4243,10 +4257,12 @@ mod tests {
             },
         );
         assert!(no_phase.state.chunks_exact(4).any(|state| state[0] > 0.0));
-        assert!(no_phase
-            .state
-            .chunks_exact(4)
-            .all(|state| state[1] == 0.0 && state[2] == 0.0 && state[3] == 0.0));
+        assert!(
+            no_phase
+                .state
+                .chunks_exact(4)
+                .all(|state| state[1] == 0.0 && state[2] == 0.0 && state[3] == 0.0)
+        );
         assert!(no_phase.mass.iter().all(|value| *value == 0.0));
     }
 
@@ -4354,13 +4370,16 @@ mod tests {
         let mut dry = snapshot(resolution);
         dry.moisture = 0.0;
         assert!(run(dry, 0, 0).state.iter().all(|value| *value == 0.0));
-        assert!(run(snapshot(resolution), SPINUP_DIAGNOSTIC_NO_SOURCE, 0)
-            .state
-            .iter()
-            .all(|value| *value == 0.0));
+        assert!(
+            run(snapshot(resolution), SPINUP_DIAGNOSTIC_NO_SOURCE, 0)
+                .state
+                .iter()
+                .all(|value| *value == 0.0)
+        );
 
         let mut cold = snapshot(resolution);
-        cold.base_temp_c = -30.0;
+        // Keep even the +15 C equator below the frozen source cutoff.
+        cold.base_temp_c = -50.0;
         let inland_dynamics =
             wind.create_test_textures(&gpu, resolution, |_| ([0.0, 0.0, 0.0, 1.0], 1013.0));
         let weather = pipeline.create_textures(&gpu, resolution);
@@ -5337,11 +5356,7 @@ mod tests {
     /// Near-flat coast shared by DS-045 fixtures: any large height structure
     /// would add its own orographic edge and pollute the boundary metrics.
     fn ds045_shelf_coast(pos: [f32; 3]) -> f32 {
-        if pos[2] < 0.0 {
-            -0.05
-        } else {
-            0.01
-        }
+        if pos[2] < 0.0 { -0.05 } else { 0.01 }
     }
 
     #[test]

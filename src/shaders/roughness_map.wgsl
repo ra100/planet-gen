@@ -13,8 +13,8 @@ struct RoughnessParams {
     tile_offset_y: u32,
     full_resolution: u32,
     local_height: u32,
-    _pad1: u32,
-    _pad2: u32,
+    axial_tilt_rad: f32,
+    season: f32,
 }
 
 @group(0) @binding(0) var<storage, read> heightmap: array<f32>;
@@ -53,10 +53,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let sphere_pos = cube_to_sphere(params.face, uv);
 
     // Compute temperature/moisture (simplified version of preview shader)
-    let latitude = asin(clamp(sphere_pos.y, -1.0, 1.0));
-    let lat_deg = abs(latitude) * 180.0 / 3.14159;
-    let temp_scale = params.base_temp_c / 15.0;
-    let temp = 30.0 * temp_scale - lat_deg * (60.0 * temp_scale / 90.0);
+    let temp = climate_temperature(sphere_pos, height, params.ocean_level, params.base_temp_c, params.axial_tilt_rad, params.season);
 
     let seed_offset = vec3<f32>(f32(params.seed % 1000u) * 0.1, f32((params.seed / 1000u) % 1000u) * 0.1, 0.0);
     let moisture_noise = snoise(sphere_pos * 2.5 + seed_offset);

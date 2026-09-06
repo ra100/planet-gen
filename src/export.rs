@@ -22,7 +22,7 @@ use crate::png_writer::{AtomicScanlinePngWriter, PngRowFormat};
 use crate::preview::PreviewUniforms;
 use crate::terrain_compute::{
     ErosionPipeline, TectonicTerrain, TerrainComputePipeline, TerrainGenParams,
-    TerrainGenerationParams, WindFieldPipeline,
+    TerrainGenerationParams, WindFieldPipeline, earth_relative_rotation_rate,
 };
 use crate::weather::{WeatherFieldPipeline, WeatherSnapshot, WeatherTextures};
 
@@ -776,8 +776,8 @@ pub struct RoughnessMapParams {
     pub tile_offset_y: u32,
     pub full_resolution: u32,
     pub local_height: u32,
-    pub _pad1: u32,
-    pub _pad2: u32,
+    pub axial_tilt_rad: f32,
+    pub season: f32,
 }
 
 #[repr(C)]
@@ -3378,9 +3378,10 @@ pub fn run_export_with_timings_and_checkpoints(
         Some(MapPipeline::new(
             gpu,
             &format!(
-                "{}\n{}\n{}",
+                "{}\n{}\n{}\n{}",
                 include_str!("shaders/cube_sphere.wgsl"),
                 include_str!("shaders/noise.wgsl"),
+                include_str!("shaders/climate.wgsl"),
                 include_str!("shaders/roughness_map.wgsl"),
             ),
             "roughness map",
@@ -3393,9 +3394,10 @@ pub fn run_export_with_timings_and_checkpoints(
         Some(MapPipeline::new(
             gpu,
             &format!(
-                "{}\n{}\n{}",
+                "{}\n{}\n{}\n{}",
                 include_str!("shaders/cube_sphere.wgsl"),
                 include_str!("shaders/noise.wgsl"),
+                include_str!("shaders/climate.wgsl"),
                 include_str!("shaders/albedo_map.wgsl"),
             ),
             "albedo map",
@@ -3418,9 +3420,10 @@ pub fn run_export_with_timings_and_checkpoints(
         Some(MapPipeline::new(
             gpu,
             &format!(
-                "{}\n{}\n{}",
+                "{}\n{}\n{}\n{}",
                 include_str!("shaders/cube_sphere.wgsl"),
                 include_str!("shaders/noise.wgsl"),
+                include_str!("shaders/climate.wgsl"),
                 include_str!("shaders/emission_map.wgsl"),
             ),
             "emission map",
@@ -3509,8 +3512,8 @@ pub fn run_export_with_timings_and_checkpoints(
                 tile_offset_y: region.origin_y,
                 full_resolution: full_res,
                 local_height: region.height,
-                _pad1: 0,
-                _pad2: 0,
+                axial_tilt_rad: config.weather.axial_tilt_rad,
+                season: config.weather.season,
             },
             4,
             &mut progress,
@@ -3657,7 +3660,7 @@ pub fn run_export_with_timings_and_checkpoints(
             snapshot.ocean_level,
             snapshot.axial_tilt_rad,
             snapshot.season,
-            snapshot.rotation_rate_rad_s,
+            earth_relative_rotation_rate(snapshot.rotation_rate_rad_s),
             snapshot.base_temp_c,
             snapshot.surface_pressure_bar,
             snapshot.wind_scale,
@@ -4239,7 +4242,7 @@ mod tests {
             snapshot.ocean_level,
             snapshot.axial_tilt_rad,
             snapshot.season,
-            snapshot.rotation_rate_rad_s,
+            earth_relative_rotation_rate(snapshot.rotation_rate_rad_s),
             snapshot.base_temp_c,
             snapshot.surface_pressure_bar,
             snapshot.wind_scale,
@@ -5471,9 +5474,10 @@ mod tests {
         );
         let shader = |map: &str| {
             format!(
-                "{}\n{}\n{}",
+                "{}\n{}\n{}\n{}",
                 include_str!("shaders/cube_sphere.wgsl"),
                 include_str!("shaders/noise.wgsl"),
+                include_str!("shaders/climate.wgsl"),
                 map,
             )
         };
@@ -5510,8 +5514,8 @@ mod tests {
                 tile_offset_y: region.origin_y,
                 full_resolution: resolution,
                 local_height: region.height,
-                _pad1: 0,
-                _pad2: 0,
+                axial_tilt_rad: 0.2,
+                season: 0.5,
             },
         );
         assert_map_parity(

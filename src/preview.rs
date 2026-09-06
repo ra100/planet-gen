@@ -18,7 +18,7 @@ pub struct PreviewUniforms {
     pub view_mode: u32,
     pub season: f32,             // 0=winter, 0.5=equinox, 1=summer
     pub atmosphere_density: f32, // 0.0 = none, 1.0 = Earth-like (reserved for future)
-    pub atmosphere_height: f32,  // scale height in planet radii (reserved for future)
+    pub atmosphere_height: f32,  // shell cutoff in planet radii (12 Rayleigh scale heights)
     pub height_scale: f32,       // normal map height exaggeration (1.0 = subtle, 5.0 = dramatic)
     pub zoom: f32,               // viewport zoom (1.0 = default, >1 = zoomed in)
     pub pan_x: f32,              // viewport pan in NDC units
@@ -99,8 +99,9 @@ impl PreviewRenderer {
             &format!("const CLOUD_RAY_SAMPLES: u32 = {samples}u;"),
         );
         let shader_source = format!(
-            "{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}",
             include_str!("shaders/noise.wgsl"),
+            include_str!("shaders/climate.wgsl"),
             cloud_density,
             include_str!("shaders/cloud_wind_fallback.wgsl"),
             preview_shader,
@@ -202,7 +203,11 @@ impl PreviewRenderer {
                     },
                     fragment: Some(wgpu::FragmentState {
                         module: &shader,
-                        entry_point: Some("fs_main"),
+                        entry_point: Some(if format == wgpu::TextureFormat::Rgba8Unorm {
+                            "fs_main_display"
+                        } else {
+                            "fs_main"
+                        }),
                         targets: &[Some(wgpu::ColorTargetState {
                             format,
                             blend: None,
@@ -221,6 +226,8 @@ impl PreviewRenderer {
                 })
         };
         let pipeline = create_pipeline(wgpu::TextureFormat::Rgba8UnormSrgb);
+        // egui expects display-encoded UNORM texels. The display entry point
+        // encodes explicitly; an sRGB sampling view would decode them again.
         let interactive_pipeline = create_pipeline(wgpu::TextureFormat::Rgba8Unorm);
 
         let sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
@@ -1606,8 +1613,9 @@ mod tests {
 
     fn layer_profile_oracle(gpu: &GpuContext) -> Vec<f32> {
         let shader_source = format!(
-            "{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}",
             include_str!("shaders/noise.wgsl"),
+            include_str!("shaders/climate.wgsl"),
             include_str!("shaders/cloud_density.wgsl"),
             include_str!("shaders/cloud_wind_fallback.wgsl"),
             include_str!("shaders/preview_cubemap.wgsl"),
@@ -1623,6 +1631,15 @@ fn layer_profile_oracle() {
     output[4] = layer_profile_segment_mean(vec3<f32>(3.0, 0.0, 0.0), vec3<f32>(2.0, 0.0, 0.0), 1.0, 2.0, 1.0);
     output[5] = layer_profile_segment_mean(vec3<f32>(2.5, 0.0, -1.9974984), vec3<f32>(2.5, 0.0, 1.9974984), 1.0, 2.0, 1.0);
     output[6] = layer_profile_segment_mean(vec3<f32>(2.5, 0.0, 0.0), vec3<f32>(2.5, 0.0, 0.0), 1.0, 2.0, 1.0);
+    let pos = vec3<f32>(1.0, 0.0, 0.0);
+    output[10] = climate_temperature(pos, 0.0, 0.0, 15.0, 0.0, 0.5);
+    output[11] = climate_temperature(pos, 0.2, 0.0, 15.0, 0.0, 0.5);
+    output[12] = climate_temperature(pos, 0.7, 0.5, 15.0, 0.0, 0.5);
+    output[13] = climate_temperature(pos, -0.5, 0.0, 15.0, 0.0, 0.5);
+    output[14] = climate_temperature(vec3<f32>(0.0, 1.0, 0.0), 0.0, 0.0, 15.0, 0.0, 0.5);
+    output[15] = climate_temperature(pos, 0.0, 0.0, 25.0, 0.0, 0.5);
+    output[16] = ggx_distribution(1.0, 0.1);
+    output[17] = ggx_smith_visibility(0.0, 1.0, 0.1);
 }
 "#,
         );
@@ -1694,7 +1711,7 @@ fn layer_profile_oracle() {
             .get_mapped_range()
             .chunks_exact(4)
             .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
-            .take(7)
+            .take(18)
             .collect();
         readback.unmap();
         values
@@ -1710,8 +1727,9 @@ fn layer_profile_oracle() {
         resolution: u32,
     ) -> Vec<f32> {
         let shader_source = format!(
-            "{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}",
             include_str!("shaders/noise.wgsl"),
+            include_str!("shaders/climate.wgsl"),
             include_str!("shaders/cloud_density.wgsl"),
             include_str!("shaders/cloud_wind_fallback.wgsl"),
             include_str!("shaders/preview_cubemap.wgsl"),
@@ -1911,8 +1929,9 @@ fn layer_profile_oracle() {
     #[test]
     fn u4_cloud_phase_is_normalized_bounded_and_forward_weighted() {
         let shader_source = format!(
-            "{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}",
             include_str!("shaders/noise.wgsl"),
+            include_str!("shaders/climate.wgsl"),
             include_str!("shaders/cloud_density.wgsl"),
             include_str!("shaders/cloud_wind_fallback.wgsl"),
             include_str!("shaders/preview_cubemap.wgsl"),
@@ -2015,7 +2034,7 @@ fn layer_profile_oracle() {
         let values = layer_profile_oracle(&GpuContext::new().expect("GPU init failed"));
         let expected = [1.0, 0.234_375, 1.25, 0.234_375, 1.0, 39.0 / 56.0, 0.0];
 
-        assert_eq!(values.len(), expected.len());
+        assert!(values.len() >= expected.len());
         for (actual, expected) in values.into_iter().zip(expected) {
             assert!(
                 (actual - expected).abs() <= 2.0e-4,
@@ -2162,6 +2181,10 @@ fn layer_profile_oracle() {
                 &gpu,
                 &PreviewUniforms {
                     light_dir: [0.7, 0.15, 1.0],
+                    show_biomes: 0.0,
+                    show_water: 0.0,
+                    show_ice: 0.0,
+                    show_ao: 0.0,
                     cloud_coverage: 1.0,
                     cloud_opacity: 1.0,
                     show_clouds: 0.0,
@@ -2306,7 +2329,7 @@ fn layer_profile_oracle() {
     }
 
     #[test]
-    fn cloud_land_segment_profile_preserves_ocean_and_repairs_tall_low_shells() {
+    fn cloud_segment_profile_is_land_independent_and_preserves_thin_shell_mass() {
         let gpu = GpuContext::new().expect("GPU init failed");
         let resolution = 32;
         let size = 192usize;
@@ -2353,16 +2376,15 @@ fn layer_profile_oracle() {
         let coast = [0.01, 0.03, 0.05]
             .map(|height| optical_depth(render(height, [0.80, 1.50, 2.00, 12.00])));
         assert!((compact - 0.02681).abs() / 0.02681 <= 0.01);
-        // RV-003 ruling (user-approved): the [0.98, 1.02] band was calibrated
-        // against a pre-d8c7de5 reconstruction state; shared sampling now
-        // measures 1.0417 (shell stretch 3->12 km costs +4.2% optical depth).
-        // The drift is in weather_cloud_sample, NOT the preview-only land
-        // segment (proven by A/B with the blend disabled — test still failed).
-        // Band re-specified to [0.95, 1.06] around the measured value.
+        // Thin shell integration should preserve its column mass even when
+        // unrelated high-cloud geometry expands the ray-march interval.
         assert!((0.95..=1.06).contains(&(tall / compact.max(f32::EPSILON))));
         assert!((translated - tall).abs() / tall.max(f32::EPSILON) <= 0.02);
-        assert_eq!(ocean_tall, 0.0);
-        assert!(coast.windows(2).all(|values| values[0] <= values[1]));
+        assert_eq!(
+            ocean_tall, tall,
+            "identical columns must not acquire a coastline"
+        );
+        assert!(coast.iter().all(|value| *value == tall));
         assert!(
             coast
                 .iter()
@@ -2448,6 +2470,7 @@ fn layer_profile_oracle() {
         let render = |mass: &[Vec<f32>; 6], view_mode| {
             let mass_view = renderer.upload_cubemap_rgba16(&gpu, mass, resolution);
             let settings = PreviewUniforms {
+                light_dir: [0.0, 0.0, 1.0],
                 view_mode,
                 show_clouds: 1.0,
                 cloud_coverage: 1.0,
@@ -2790,7 +2813,11 @@ fn layer_profile_oracle() {
         let renderer = PreviewRenderer::new(&gpu);
         let cubemap_view = renderer.upload_terrain(&gpu, &terrain);
 
-        let uniforms = uniforms();
+        // Visibility smoke test uses daylight; a realistic unlit hemisphere is dark.
+        let uniforms = PreviewUniforms {
+            light_dir: [0.5, 0.7, 1.0],
+            ..uniforms()
+        };
 
         let size = 256;
         let pixels = renderer.render(&gpu, &uniforms, &cubemap_view, None, None, size);
@@ -3834,5 +3861,144 @@ fn layer_profile_oracle() {
 
         assert_eq!(renderer.size, 256);
         assert_eq!(rebinds, 1);
+    }
+
+    #[test]
+    fn realism_climate_and_microfacet_gpu_contracts() {
+        let gpu = GpuContext::new().unwrap();
+        let output = layer_profile_oracle(&gpu);
+        assert!(
+            (output[10] - output[11] - 6.5).abs() < 0.001,
+            "1 km lapse rate"
+        );
+        assert!(
+            (output[11] - output[12]).abs() < 0.001,
+            "sea level must not rescale elevation"
+        );
+        assert_eq!(output[10], output[13], "no submarine lapse rate");
+        assert!(output[10] - output[14] > 40.0, "equator/pole baseline");
+        assert!((output[15] - output[10] - 10.0).abs() < 0.001);
+        assert!(
+            output[16] > 3000.0 && output[16] < 3300.0,
+            "GGX peak is not crushed by epsilon"
+        );
+        assert_eq!(output[17], 0.0, "masking removes grazing energy");
+    }
+
+    #[test]
+    fn realism_live_color_parity_and_night_cloud_lighting() {
+        let gpu = GpuContext::new().unwrap();
+        let size = 64u32;
+        let mut renderer = PreviewRenderer::new(&gpu);
+        renderer.resize_target(&gpu, size, |_| {});
+        let terrain = TectonicTerrain {
+            faces: std::array::from_fn(|_| vec![-0.25; 16 * 16]),
+            resolution: 16,
+        };
+        let height = renderer.upload_terrain(&gpu, &terrain);
+        let mass =
+            std::array::from_fn(|_| (0..16 * 16).flat_map(|_| [0.8, 0.0, 0.0, 0.8]).collect());
+        let geometry =
+            std::array::from_fn(|_| (0..16 * 16).flat_map(|_| [0.8, 2.0, 3.0, 12.0]).collect());
+        let mass = renderer.upload_cubemap_rgba16(&gpu, &mass, 16);
+        let geometry = renderer.upload_cubemap_rgba16(&gpu, &geometry, 16);
+        let day = PreviewUniforms {
+            light_dir: [0.0, 0.0, 1.0],
+            show_clouds: 1.0,
+            show_cloud_shadows: 0.0,
+            ..uniforms()
+        };
+        let render = |settings: &PreviewUniforms| {
+            renderer.render(
+                &gpu,
+                settings,
+                &height,
+                None,
+                Some((&mass, &geometry)),
+                size,
+            )
+        };
+        for settings in [
+            day,
+            PreviewUniforms {
+                view_mode: 9,
+                ..day
+            },
+        ] {
+            let saved = render(&settings);
+            renderer.render_interactive(&gpu, &settings, &height, None, Some((&mass, &geometry)));
+            let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("live color parity"),
+                size: (size * size * 4) as u64,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: renderer.target_view().texture(),
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &buffer,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(size * 4),
+                        rows_per_image: Some(size),
+                    },
+                },
+                wgpu::Extent3d {
+                    width: size,
+                    height: size,
+                    depth_or_array_layers: 1,
+                },
+            );
+            gpu.queue.submit(Some(encoder.finish()));
+            let (tx, rx) = std::sync::mpsc::channel();
+            buffer
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
+            gpu.device
+                .poll(wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: None,
+                })
+                .unwrap();
+            rx.recv().unwrap().unwrap();
+            let mapped = buffer.slice(..).get_mapped_range();
+            let max_delta = saved
+                .iter()
+                .zip(mapped.iter())
+                .map(|(a, b)| a.abs_diff(*b))
+                .max()
+                .unwrap();
+            assert!(max_delta <= 2, "live/PNG delta = {max_delta}");
+        }
+        let day_image = render(&day);
+        let night_image = render(&PreviewUniforms {
+            light_dir: [0.0, 0.0, -1.0],
+            ..day
+        });
+        let central_mean = |pixels: &[u8]| -> f32 {
+            (24..40)
+                .flat_map(|y| (24..40).map(move |x| (y * size as usize + x) * 4))
+                .map(|i| {
+                    srgb_to_linear(pixels[i])
+                        + srgb_to_linear(pixels[i + 1])
+                        + srgb_to_linear(pixels[i + 2])
+                })
+                .sum::<f32>()
+                / (16.0 * 16.0 * 3.0)
+        };
+        assert!(
+            central_mean(&day_image) > 0.08,
+            "day clouds must receive direct light"
+        );
+        assert!(
+            central_mean(&night_image) < 0.01 * central_mean(&day_image),
+            "no bright night cloud floor"
+        );
     }
 }

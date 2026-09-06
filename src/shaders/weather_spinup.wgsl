@@ -216,13 +216,8 @@ fn transport_substeps(resolution: u32) -> f32 {
 }
 
 fn temperature_at(pos: vec3<f32>) -> f32 {
-    let tilted_y = pos.y * cos(params.axial_tilt_rad) + pos.z * sin(params.axial_tilt_rad);
-    let latitude = abs(asin(clamp(tilted_y, -1.0, 1.0))) / (PI * 0.5);
-    let season_shift = (params.season - 0.5) * 2.0 * sin(params.axial_tilt_rad);
-    let elevation_km = max(sample_height(pos) - params.ocean_level, 0.0) * 5.0;
-    let continentality = textureSampleLevel(wind_tex, spinup_sampler, pos, 0.0).a;
-    return params.base_temp_c - latitude * 35.0 + season_shift * tilted_y * 16.0
-        - elevation_km * 6.5 + continentality * season_shift * 5.0;
+    return climate_temperature(pos, sample_height(pos), params.ocean_level,
+        params.base_temp_c, params.axial_tilt_rad, params.season);
 }
 
 // Terrain selects where transported marine vapor can settle into a calm deck.
@@ -372,13 +367,15 @@ fn source_budgets(
         0.0,
         1.0,
     );
+    // Coverage controls both formation eligibility and a bounded moisture
+    // supply. Keep the midpoint unchanged, but do not saturate supply at 25%.
     let center = 0.88 - 0.40 * c;
     let logit = clamp((phase_rank - center) / 0.02, -8.0, 8.0);
     let eligibility = 1.0 / (1.0 + exp(-logit));
     let ranked_phase = 1.0 - exp(-8.0 * c * pow(phase_rank, 4.0));
     let phase = eligibility * 8.0 * ranked_phase / (1.0 + 7.0 * ranked_phase);
     return SourceBudgets(
-        local_potential * source_envelope,
+        min(local_potential * source_envelope * (0.4 + 1.2 * c), 1.0),
         phase,
         source_envelope,
     );
