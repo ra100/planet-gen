@@ -3073,7 +3073,7 @@ fn layer_profile_oracle() {
                 .iter()
                 .filter(|index| {
                     let y = **index / 128;
-                    y < 32 || y >= 96
+                    !(32..96).contains(&y)
                 })
                 .count();
             assert!(

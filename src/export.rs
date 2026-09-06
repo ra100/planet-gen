@@ -1340,7 +1340,7 @@ impl MapPipeline {
         MapTileBatch::new(byte_cap)
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code, clippy::too_many_arguments)]
     fn prepare_owned_tile(
         &self,
         gpu: &GpuContext,
@@ -2790,6 +2790,7 @@ fn emit_materialization_checkpoint(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn export_staged_equirect_exr(
     layer: &'static str,
     stage: &ExportStage,
@@ -2939,6 +2940,7 @@ fn quantize_unit(value: f32, max: u32) -> Result<u32, String> {
     Ok((value * max as f32).round() as u32)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn export_staged_equirect_png(
     layer: &'static str,
     stage: &ExportStage,
@@ -5856,14 +5858,14 @@ mod tests {
         println!("2K export completed in {:.2}s", elapsed.as_secs_f64());
         println!("GPU: {}", gpu.adapter_name());
         let phase = |completed: bool, milliseconds: f64| {
-            completed
-                .then(|| {
-                    format!(
-                        "{milliseconds:.2}ms ({:.1}%)",
-                        milliseconds / elapsed.as_secs_f64() / 10.0
-                    )
-                })
-                .unwrap_or_else(|| "NOT_RUN".into())
+            if completed {
+                format!(
+                    "{milliseconds:.2}ms ({:.1}%)",
+                    milliseconds / elapsed.as_secs_f64() / 10.0
+                )
+            } else {
+                "NOT_RUN".into()
+            }
         };
         println!(
             "2K ExportTimings wall-clock phases: terrain_tiles={}, map_dispatch_readback={}, export_weather={}, cloud_tile_dispatch_readback={}, staged_equirect_materialization={}, writer_output={}, writer_finish={}, total={}",

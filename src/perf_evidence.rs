@@ -397,8 +397,7 @@ impl CanonicalReport {
             self.gate_owned_bytes,
             self.gate_rss,
         ]
-        .iter()
-        .any(|gate| *gate == GateStatus::Fail)
+        .contains(&GateStatus::Fail)
             || self.generation_inclusive_ms.is_some()
             || self.erosion_inclusive_ms.is_some()
             || self.upload_sync_ms.is_some()
@@ -591,7 +590,7 @@ pub fn sha256(bytes: &[u8]) -> String {
     let bit_len = (bytes.len() as u64).wrapping_mul(8);
     let mut input = bytes.to_vec();
     input.push(0x80);
-    input.resize((input.len() + 8 + 63) / 64 * 64 - 8, 0);
+    input.resize((input.len() + 8).div_ceil(64) * 64 - 8, 0);
     input.extend_from_slice(&bit_len.to_be_bytes());
     for chunk in input.chunks_exact(64) {
         let mut words = [0u32; 64];

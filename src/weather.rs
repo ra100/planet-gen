@@ -192,6 +192,14 @@ struct ProvenancePipelines {
     transport_layout: wgpu::BindGroupLayout,
 }
 
+/// Readback quadruple from a provenance spin-up: tracer, final state, aux field, and tail.
+type ProvenanceReadback = (
+    Option<Vec<f32>>,
+    Option<Vec<f32>>,
+    Option<Vec<f32>>,
+    Option<Vec<f32>>,
+);
+
 pub struct WeatherTextures {
     _mass_texture: wgpu::Texture,
     _geometry_texture: wgpu::Texture,
@@ -856,6 +864,7 @@ impl WeatherFieldPipeline {
     /// adapters, covering the branch incapable adapters always take.
     #[cfg(any(test, feature = "validation"))]
     #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
     pub fn validation_tracer_trace_for_sweep(
         &self,
         gpu: &GpuContext,
@@ -887,6 +896,7 @@ impl WeatherFieldPipeline {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn generate_with_provenance_mode(
         &self,
         gpu: &GpuContext,
@@ -897,12 +907,7 @@ impl WeatherFieldPipeline {
         diagnostic_flags: u32,
         provenance_enabled: bool,
         readback_state: bool,
-    ) -> (
-        Option<Vec<f32>>,
-        Option<Vec<f32>>,
-        Option<Vec<f32>>,
-        Option<Vec<f32>>,
-    ) {
+    ) -> ProvenanceReadback {
         assert_eq!(snapshot.resolution, weather.resolution);
         let pixels_per_face = (weather.resolution * weather.resolution) as usize;
         let mut heights = vec![0.0; pixels_per_face * 6];
@@ -1125,16 +1130,17 @@ impl WeatherFieldPipeline {
                 _texture: texture,
             }
         };
-        let provenance = provenance_enabled
-            .then(|| self.provenance.as_ref())
-            .flatten()
-            .map(|pipelines| {
+        let provenance = if provenance_enabled {
+            self.provenance.as_ref().map(|pipelines| {
                 (
                     pipelines,
                     create_provenance("weather provenance A"),
                     create_provenance("weather provenance B"),
                 )
-            });
+            })
+        } else {
+            None
+        };
         let init_bind_group = if let Some((pipelines, provenance_a, _)) = &provenance {
             gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("weather spin-up provenance init bind group"),
@@ -1543,6 +1549,7 @@ impl WeatherFieldPipeline {
 
     /// Validation/test-only paired continuations from a single upstream front.
     #[cfg(any(test, feature = "validation"))]
+    #[allow(clippy::too_many_arguments)]
     fn paired_validation_continuation(
         &self,
         gpu: &GpuContext,
@@ -1587,6 +1594,7 @@ impl WeatherFieldPipeline {
     }
 
     #[cfg(any(test, feature = "validation"))]
+    #[allow(clippy::too_many_arguments)]
     fn validation_spinup_state(
         &self,
         gpu: &GpuContext,

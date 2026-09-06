@@ -169,9 +169,11 @@ fn record_u2_8k_timings(evidence: &mut CanonicalReport, timings: ExportTimings, 
 }
 
 fn stage_timing(completed: bool, milliseconds: f64) -> String {
-    completed
-        .then_some(milliseconds.to_string())
-        .unwrap_or_else(|| "NOT_RUN".into())
+    if completed {
+        milliseconds.to_string()
+    } else {
+        "NOT_RUN".into()
+    }
 }
 
 fn u2_8k_artifact(
@@ -544,167 +546,6 @@ fn run_u2_8k() {
     );
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn u2_8k_selects_only_bounded_layers_and_ledger() {
-        let layers = u2_8k_layers();
-        assert!(layers.height);
-        assert!(layers.albedo);
-        assert!(layers.normals);
-        assert!(layers.roughness);
-        assert!(layers.water_mask);
-        assert!(layers.clouds);
-        assert!(!layers.emission);
-        assert_eq!(
-            u2_8k_enabled_layers(&layers),
-            "height,albedo,normal,roughness,water_mask,clouds"
-        );
-
-        let limits = wgpu::Limits::default();
-        let bounded = u2_8k_bounded_ledger(&limits, &layers).unwrap();
-        assert_eq!(
-            bounded,
-            estimated_export_preflight_bytes_with_erosion(8192, &layers, 25, &limits).unwrap()
-        );
-        assert!(bounded <= MAX_8K_OWNED_LIVE_BYTES);
-        assert!(bounded < estimated_peak_streaming_bytes(8192, 16));
-
-        let legacy_emission = ExportLayers {
-            emission: true,
-            ..layers
-        };
-        assert!(u2_8k_bounded_ledger(&limits, &legacy_emission).is_err());
-    }
-
-    #[test]
-    fn cold_8k_deadline_is_four_minutes() {
-        assert_eq!(U2_8K_TIMEOUT, Duration::from_secs(240));
-        assert_eq!(U2_8K_MAX_MS, 240_000.0);
-    }
-
-    #[test]
-    fn u2_8k_records_complete_truthful_stage_timings() {
-        let mut evidence = CanonicalReport::not_run("u2-timing".into(), 42, 1);
-        record_u2_8k_timings(
-            &mut evidence,
-            ExportTimings {
-                generation_inclusive_ms: 1.0,
-                erosion_inclusive_ms: 2.0,
-                export_inclusive_ms: 3.0,
-                generation_completed: true,
-                erosion_completed: true,
-                export_completed: true,
-                meso_erosion_resolution: Some(2048),
-                meso_erosion_ms: 1.5,
-                meso_erosion_completed: true,
-                delta_reconstruction_ms: 0.5,
-                delta_reconstruction_completed: true,
-                ..ExportTimings::default()
-            },
-            6.0,
-        );
-        for timing in [
-            evidence.generation_inclusive_ms,
-            evidence.erosion_inclusive_ms,
-            evidence.upload_sync_ms,
-            evidence.encode_ms,
-            evidence.io_ms,
-            evidence.total_ms,
-        ] {
-            assert!(timing.is_some_and(f64::is_finite));
-        }
-        assert_eq!(evidence.upload_sync_ms, Some(0.0));
-        assert_eq!(evidence.encode_ms, Some(3.0));
-        assert_eq!(evidence.io_ms, Some(3.0));
-    }
-
-    #[test]
-    fn u2_8k_artifact_labels_layers_and_ledger_as_an_estimate() {
-        let artifact = u2_8k_artifact(
-            &u2_8k_layers(),
-            123,
-            ExportTimings {
-                generation_inclusive_ms: 1.0,
-                erosion_inclusive_ms: 2.0,
-                export_inclusive_ms: 3.0,
-                generation_completed: true,
-                erosion_completed: true,
-                export_completed: true,
-                meso_erosion_resolution: Some(2048),
-                meso_erosion_ms: 1.5,
-                meso_erosion_completed: true,
-                delta_reconstruction_ms: 0.5,
-                delta_reconstruction_completed: true,
-                ..ExportTimings::default()
-            },
-            6.0,
-            "target/procedural-terrain-exports/u2-test",
-        );
-        for field in [
-            "export_path=direct-exr-staged-png",
-            "enabled_layers=height,albedo,normal,roughness,water_mask,clouds",
-            "unsupported_legacy=emission",
-            "owned_live_bytes_estimate=123",
-            "generation_inclusive_ms=1",
-            "erosion_inclusive_ms=2",
-            "meso_erosion_resolution=2048",
-            "meso_erosion_ms=1.5",
-            "delta_reconstruction_ms=0.5",
-            "upload_sync_ms=0 (not applicable: no preview upload)",
-            "encode_ms=3 (inclusive streamed export)",
-            "io_ms=3 (inclusive streamed export; overlaps encode)",
-        ] {
-            assert!(artifact.contains(field), "missing {field}");
-        }
-    }
-
-    #[test]
-    fn u2_8k_early_failure_marks_unexecuted_stages_not_run() {
-        let mut evidence = CanonicalReport::not_run("u2-early-failure".into(), 42, 1);
-        let timings = ExportTimings::default();
-        record_u2_8k_timings(&mut evidence, timings, 0.01);
-        assert_eq!(evidence.generation_inclusive_ms, None);
-        assert_eq!(evidence.erosion_inclusive_ms, None);
-        assert_eq!(evidence.upload_sync_ms, None);
-        assert_eq!(evidence.encode_ms, None);
-        assert_eq!(evidence.io_ms, None);
-        assert_eq!(evidence.total_ms, Some(0.01));
-
-        let artifact = u2_8k_artifact(&u2_8k_layers(), 123, timings, 0.01, "preflight failed");
-        for field in [
-            "generation_inclusive_ms=NOT_RUN",
-            "erosion_inclusive_ms=NOT_RUN",
-            "upload_sync_ms=NOT_RUN",
-            "encode_ms=NOT_RUN",
-            "io_ms=NOT_RUN",
-        ] {
-            assert!(artifact.contains(field), "missing {field}");
-        }
-    }
-
-    #[test]
-    fn u2_8k_partial_failure_keeps_only_completed_stage_timing() {
-        let mut evidence = CanonicalReport::not_run("u2-partial-failure".into(), 42, 1);
-        record_u2_8k_timings(
-            &mut evidence,
-            ExportTimings {
-                generation_inclusive_ms: 1.0,
-                generation_completed: true,
-                ..ExportTimings::default()
-            },
-            1.5,
-        );
-        assert_eq!(evidence.generation_inclusive_ms, Some(1.0));
-        assert_eq!(evidence.erosion_inclusive_ms, None);
-        assert_eq!(evidence.upload_sync_ms, None);
-        assert_eq!(evidence.encode_ms, None);
-        assert_eq!(evidence.io_ms, None);
-    }
-}
-
 fn main() {
     match std::env::args().nth(1).as_deref() {
         Some("--u2-768") => {
@@ -875,4 +716,165 @@ fn main() {
     eprintln!("Classified: {:.1}ms", classified_ms);
 
     eprintln!("Done.");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn u2_8k_selects_only_bounded_layers_and_ledger() {
+        let layers = u2_8k_layers();
+        assert!(layers.height);
+        assert!(layers.albedo);
+        assert!(layers.normals);
+        assert!(layers.roughness);
+        assert!(layers.water_mask);
+        assert!(layers.clouds);
+        assert!(!layers.emission);
+        assert_eq!(
+            u2_8k_enabled_layers(&layers),
+            "height,albedo,normal,roughness,water_mask,clouds"
+        );
+
+        let limits = wgpu::Limits::default();
+        let bounded = u2_8k_bounded_ledger(&limits, &layers).unwrap();
+        assert_eq!(
+            bounded,
+            estimated_export_preflight_bytes_with_erosion(8192, &layers, 25, &limits).unwrap()
+        );
+        assert!(bounded <= MAX_8K_OWNED_LIVE_BYTES);
+        assert!(bounded < estimated_peak_streaming_bytes(8192, 16));
+
+        let legacy_emission = ExportLayers {
+            emission: true,
+            ..layers
+        };
+        assert!(u2_8k_bounded_ledger(&limits, &legacy_emission).is_err());
+    }
+
+    #[test]
+    fn cold_8k_deadline_is_four_minutes() {
+        assert_eq!(U2_8K_TIMEOUT, Duration::from_secs(240));
+        assert_eq!(U2_8K_MAX_MS, 240_000.0);
+    }
+
+    #[test]
+    fn u2_8k_records_complete_truthful_stage_timings() {
+        let mut evidence = CanonicalReport::not_run("u2-timing".into(), 42, 1);
+        record_u2_8k_timings(
+            &mut evidence,
+            ExportTimings {
+                generation_inclusive_ms: 1.0,
+                erosion_inclusive_ms: 2.0,
+                export_inclusive_ms: 3.0,
+                generation_completed: true,
+                erosion_completed: true,
+                export_completed: true,
+                meso_erosion_resolution: Some(2048),
+                meso_erosion_ms: 1.5,
+                meso_erosion_completed: true,
+                delta_reconstruction_ms: 0.5,
+                delta_reconstruction_completed: true,
+                ..ExportTimings::default()
+            },
+            6.0,
+        );
+        for timing in [
+            evidence.generation_inclusive_ms,
+            evidence.erosion_inclusive_ms,
+            evidence.upload_sync_ms,
+            evidence.encode_ms,
+            evidence.io_ms,
+            evidence.total_ms,
+        ] {
+            assert!(timing.is_some_and(f64::is_finite));
+        }
+        assert_eq!(evidence.upload_sync_ms, Some(0.0));
+        assert_eq!(evidence.encode_ms, Some(3.0));
+        assert_eq!(evidence.io_ms, Some(3.0));
+    }
+
+    #[test]
+    fn u2_8k_artifact_labels_layers_and_ledger_as_an_estimate() {
+        let artifact = u2_8k_artifact(
+            &u2_8k_layers(),
+            123,
+            ExportTimings {
+                generation_inclusive_ms: 1.0,
+                erosion_inclusive_ms: 2.0,
+                export_inclusive_ms: 3.0,
+                generation_completed: true,
+                erosion_completed: true,
+                export_completed: true,
+                meso_erosion_resolution: Some(2048),
+                meso_erosion_ms: 1.5,
+                meso_erosion_completed: true,
+                delta_reconstruction_ms: 0.5,
+                delta_reconstruction_completed: true,
+                ..ExportTimings::default()
+            },
+            6.0,
+            "target/procedural-terrain-exports/u2-test",
+        );
+        for field in [
+            "export_path=direct-exr-staged-png",
+            "enabled_layers=height,albedo,normal,roughness,water_mask,clouds",
+            "unsupported_legacy=emission",
+            "owned_live_bytes_estimate=123",
+            "generation_inclusive_ms=1",
+            "erosion_inclusive_ms=2",
+            "meso_erosion_resolution=2048",
+            "meso_erosion_ms=1.5",
+            "delta_reconstruction_ms=0.5",
+            "upload_sync_ms=0 (not applicable: no preview upload)",
+            "encode_ms=3 (inclusive streamed export)",
+            "io_ms=3 (inclusive streamed export; overlaps encode)",
+        ] {
+            assert!(artifact.contains(field), "missing {field}");
+        }
+    }
+
+    #[test]
+    fn u2_8k_early_failure_marks_unexecuted_stages_not_run() {
+        let mut evidence = CanonicalReport::not_run("u2-early-failure".into(), 42, 1);
+        let timings = ExportTimings::default();
+        record_u2_8k_timings(&mut evidence, timings, 0.01);
+        assert_eq!(evidence.generation_inclusive_ms, None);
+        assert_eq!(evidence.erosion_inclusive_ms, None);
+        assert_eq!(evidence.upload_sync_ms, None);
+        assert_eq!(evidence.encode_ms, None);
+        assert_eq!(evidence.io_ms, None);
+        assert_eq!(evidence.total_ms, Some(0.01));
+
+        let artifact = u2_8k_artifact(&u2_8k_layers(), 123, timings, 0.01, "preflight failed");
+        for field in [
+            "generation_inclusive_ms=NOT_RUN",
+            "erosion_inclusive_ms=NOT_RUN",
+            "upload_sync_ms=NOT_RUN",
+            "encode_ms=NOT_RUN",
+            "io_ms=NOT_RUN",
+        ] {
+            assert!(artifact.contains(field), "missing {field}");
+        }
+    }
+
+    #[test]
+    fn u2_8k_partial_failure_keeps_only_completed_stage_timing() {
+        let mut evidence = CanonicalReport::not_run("u2-partial-failure".into(), 42, 1);
+        record_u2_8k_timings(
+            &mut evidence,
+            ExportTimings {
+                generation_inclusive_ms: 1.0,
+                generation_completed: true,
+                ..ExportTimings::default()
+            },
+            1.5,
+        );
+        assert_eq!(evidence.generation_inclusive_ms, Some(1.0));
+        assert_eq!(evidence.erosion_inclusive_ms, None);
+        assert_eq!(evidence.upload_sync_ms, None);
+        assert_eq!(evidence.encode_ms, None);
+        assert_eq!(evidence.io_ms, None);
+    }
 }

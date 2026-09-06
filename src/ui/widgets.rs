@@ -201,7 +201,11 @@ pub fn instrument_row(ui: &mut egui::Ui, label: &str, value: impl std::fmt::Disp
 
 /// Status lamp: `● LABEL`, lit in accent when active, faint otherwise.
 pub fn lamp(ui: &mut egui::Ui, label: &str, active: bool) {
-    let color = if active { theme::ACCENT } else { theme::TEXT_FAINT };
+    let color = if active {
+        theme::ACCENT
+    } else {
+        theme::TEXT_FAINT
+    };
     ui.label(
         RichText::new(format!("● {label}"))
             .monospace()
@@ -223,7 +227,12 @@ pub fn key_cap(ui: &mut egui::Ui, key: &str) {
             bottom: 2,
         })
         .show(ui, |ui| {
-            ui.label(RichText::new(key).monospace().size(10.5).color(theme::TEXT_DIM));
+            ui.label(
+                RichText::new(key)
+                    .monospace()
+                    .size(10.5)
+                    .color(theme::TEXT_DIM),
+            );
         });
 }
 
@@ -312,7 +321,9 @@ mod tests {
                     ui,
                     &mut v,
                     0.1..=50.0,
-                    Param::new("Distance", "tip", 1.0).with(2, " AU").log_scale(),
+                    Param::new("Distance", "tip", 1.0)
+                        .with(2, " AU")
+                        .log_scale(),
                 );
                 let mut i = 3i32;
                 int_row(ui, &mut i, 0..=10, Param::new("Storms", "tip", 2.0));

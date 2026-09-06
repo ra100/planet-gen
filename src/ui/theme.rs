@@ -85,11 +85,21 @@ pub fn apply(ctx: &egui::Context) {
     };
 
     // Typography: humanist sans body; monospace for every numeric readout.
-    style.text_styles.insert(TextStyle::Body, egui::FontId::proportional(13.0));
-    style.text_styles.insert(TextStyle::Button, egui::FontId::proportional(12.0));
-    style.text_styles.insert(TextStyle::Heading, egui::FontId::proportional(14.0));
-    style.text_styles.insert(TextStyle::Small, egui::FontId::proportional(11.0));
-    style.text_styles.insert(TextStyle::Monospace, egui::FontId::monospace(12.0));
+    style
+        .text_styles
+        .insert(TextStyle::Body, egui::FontId::proportional(13.0));
+    style
+        .text_styles
+        .insert(TextStyle::Button, egui::FontId::proportional(12.0));
+    style
+        .text_styles
+        .insert(TextStyle::Heading, egui::FontId::proportional(14.0));
+    style
+        .text_styles
+        .insert(TextStyle::Small, egui::FontId::proportional(11.0));
+    style
+        .text_styles
+        .insert(TextStyle::Monospace, egui::FontId::monospace(12.0));
 
     // Spacing: 8px rhythm, compact rails.
     style.spacing.item_spacing = Vec2::new(8.0, 5.0);
@@ -171,7 +181,8 @@ mod tests {
 
     #[test]
     fn hardcoded_tokens_match_oklch() {
-        let cases: &[(&str, (u8, u8, u8), (f32, f32, f32))] = &[
+        type OklchCase = (&'static str, (u8, u8, u8), (f32, f32, f32));
+        let cases: &[OklchCase] = &[
             ("BG_DEEP", (8, 10, 14), (0.145, 0.010, 258.0)),
             ("BG_PANEL", (13, 17, 22), (0.175, 0.012, 258.0)),
             ("BG_RAISED", (21, 26, 32), (0.215, 0.014, 258.0)),

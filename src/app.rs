@@ -117,6 +117,7 @@ pub struct PlanetGenApp {
     hud_rect: egui::Rect,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn derive_terrain_params(
     params: &PlanetParams,
     derived: &DerivedProperties,
@@ -2476,8 +2477,8 @@ mod tests {
             let b = ((x >> 20) as f32 / u32::MAX as f32 - 0.5) * 0.4;
             s = rot3_orthonormalize(&rot3_mul(&rot3_view_delta(a, b), &s));
         }
-        for i in 0..3 {
-            let len: f32 = s[i].iter().map(|v| v * v).sum::<f32>().sqrt();
+        for (i, row) in s.iter().enumerate() {
+            let len: f32 = row.iter().map(|v| v * v).sum::<f32>().sqrt();
             assert!((len - 1.0).abs() < 1e-4, "row {i} length {len}");
         }
         for i in 0..3 {

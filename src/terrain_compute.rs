@@ -2304,9 +2304,11 @@ mod tests {
             })
         );
 
-        let mut limits = wgpu::Limits::default();
-        limits.max_storage_buffer_binding_size = limit as u32;
-        limits.max_buffer_size = limit;
+        let limits = wgpu::Limits {
+            max_storage_buffer_binding_size: limit as u32,
+            max_buffer_size: limit,
+            ..Default::default()
+        };
         let expected = tiles
             .iter()
             .map(|tile| u64::from(8192_u32) * u64::from(tile.interior_rows + 2) * 4 * 5)

@@ -1,0 +1,3 @@
+# StagedExportFailure intentionally carries full StagedIoMetrics (~120 B) so
+# failed exports still report their I/O ledger; keep it unboxed.
+large-error-threshold = 256

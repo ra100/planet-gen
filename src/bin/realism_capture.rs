@@ -81,7 +81,7 @@ fn main() {
         .map(|v| v.parse::<u32>().expect("size must be a u32"))
         .unwrap_or(768);
     assert!(
-        (64..=1536).contains(&size) && size % 64 == 0,
+        (64..=1536).contains(&size) && size.is_multiple_of(64),
         "size must be 64..1536 and divisible by 64"
     );
     std::fs::create_dir_all(out).unwrap();

@@ -37,3 +37,9 @@ half = "2"
 [build-dependencies]
 cc = "1"
 pkg-config = "0.3"
+
+[lints.clippy]
+# Strided iteration over GPU buffers uses chunks_exact throughout the
+# preview/export hot paths; as_chunks tuples do not compose with .zip()
+# chains, so keep the existing idiom.
+chunks_exact_to_as_chunks = "allow"

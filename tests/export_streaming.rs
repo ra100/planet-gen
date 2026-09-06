@@ -107,9 +107,11 @@ fn halo_is_derived_from_the_largest_map_stencil() {
 
 #[test]
 fn limit_constrained_tiles_keep_the_fixed_halo() {
-    let mut limits = wgpu::Limits::default();
-    limits.max_buffer_size = 134_217_728;
-    limits.max_storage_buffer_binding_size = 134_217_728;
+    let limits = wgpu::Limits {
+        max_buffer_size: 134_217_728,
+        max_storage_buffer_binding_size: 134_217_728,
+        ..Default::default()
+    };
     let tile_size = select_tile_size(8192, 2048, &limits, 16).unwrap();
     assert_eq!(tile_size, 1024);
     let region = TileCoordinator::new(8192, tile_size).region(1, 1);
@@ -125,9 +127,11 @@ fn default_tile_size_is_1024_and_device_fallback_remains_available() {
         TILE_SIZE
     );
 
-    let mut limits = wgpu::Limits::default();
-    limits.max_buffer_size = 32_000_000;
-    limits.max_storage_buffer_binding_size = 32_000_000;
+    let limits = wgpu::Limits {
+        max_buffer_size: 32_000_000,
+        max_storage_buffer_binding_size: 32_000_000,
+        ..Default::default()
+    };
     assert_eq!(select_tile_size(2048, TILE_SIZE, &limits, 16).unwrap(), 512);
 }
 
@@ -190,9 +194,11 @@ fn map_batch_rejects_resource_cap_before_push() {
 #[test]
 fn map_tile_preflight_rejects_overflow_and_device_limit_before_allocation() {
     assert!(map_tile_owned_bytes(u64::MAX, 1, 1, 1, 1).is_err());
-    let mut limits = wgpu::Limits::default();
-    limits.max_buffer_size = 64;
-    limits.max_storage_buffer_binding_size = 64;
+    let limits = wgpu::Limits {
+        max_buffer_size: 64,
+        max_storage_buffer_binding_size: 64,
+        ..Default::default()
+    };
     assert!(map_tile_fits_device(65, 1, &limits).is_err());
     assert!(map_tile_fits_device(64, 64, &limits).is_ok());
 }
