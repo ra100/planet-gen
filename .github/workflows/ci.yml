@@ -78,10 +78,16 @@ jobs:
         env:
           WGPU_BACKEND: gl
 
-      # Windows runners have no OpenGL; wgpu uses D3D12 (WARP headless) instead.
-      - name: Run lib tests (no GPU tests in CI, D3D12)
+      # Windows runners have no OpenGL; wgpu falls back to D3D12/WARP (software).
+      # The GPU weather/terrain regression tests are bit-exact against the
+      # reference GL stack and one path crashes under WARP, so Windows runs the
+      # non-GPU suite only (keeps the native OpenEXR writer round-trip tests).
+      - name: Run lib tests (non-GPU, D3D12)
         if: runner.os == 'Windows'
-        run: cargo test --lib -- --skip gpu --skip preview --skip export
+        run: >
+          cargo test --lib --
+          --skip gpu --skip preview --skip export
+          --skip weather --skip terrain_compute --skip noise --skip app::tests
 
   check-format:
     runs-on: ubuntu-latest
