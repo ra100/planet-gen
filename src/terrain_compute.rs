@@ -138,9 +138,10 @@ pub struct TerrainComputePipeline {
 impl TerrainComputePipeline {
     pub fn new(gpu: &GpuContext) -> Self {
         let shader_source = format!(
-            "{}\n{}\n{}",
+            "{}\n{}\n{}\n{}",
             include_str!("shaders/cube_sphere.wgsl"),
             include_str!("shaders/noise.wgsl"),
+            include_str!("shaders/terrain_profiles.wgsl"),
             include_str!("shaders/plates.wgsl"),
         );
 
@@ -614,7 +615,8 @@ impl MultiPassTerrainPipeline {
 
         // Pass 3: terrain from plates
         let terrain_src = format!(
-            "{cube_sphere}\n{noise}\n{}",
+            "{cube_sphere}\n{noise}\n{}\n{}",
+            include_str!("shaders/terrain_profiles.wgsl"),
             include_str!("shaders/terrain_from_plates.wgsl")
         );
         let terrain_shader = gpu
@@ -2581,6 +2583,121 @@ mod tests {
             "Should have peaks > 0.2, max is {}",
             max_height
         );
+    }
+
+    #[test]
+    fn terrain_profiles_have_continuous_contours_and_preserve_underlying_relief() {
+        let gpu = GpuContext::new().unwrap();
+        // Also compile the alternate JFA path with the shared profiles.
+        let _multi_pass = MultiPassTerrainPipeline::new(&gpu);
+        let source = format!(
+            "{}\n{}",
+            include_str!("shaders/terrain_profiles.wgsl"),
+            r#"
+@group(0) @binding(0) var<storage, read_write> result: array<vec4<f32>>;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (id.x >= 257u) { return; }
+    let x = f32(id.x) / 128.0 - 1.0;
+    let distance = f32(id.x) / 128.0;
+    result[id.x] = vec4<f32>(continental_elevation(x),
+        hotspot_elevation(-0.5, distance, 1.0, 0.4),
+        hotspot_elevation(0.2, distance, 1.0, 0.4),
+        hotspot_elevation(-0.49, distance, 1.0, 0.4));
+}"#
+        );
+        let shader = gpu
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("terrain profile continuity oracle"),
+                source: wgpu::ShaderSource::Wgsl(source.into()),
+            });
+        let pipeline = gpu
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("terrain profile oracle"),
+                layout: None,
+                module: &shader,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        let bytes = 257 * 16;
+        let output = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("terrain profile output"),
+            size: bytes,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("terrain profile readback"),
+            size: bytes,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: output.as_entire_binding(),
+            }],
+        });
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.dispatch_workgroups(5, 1, 1);
+        }
+        encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, bytes);
+        gpu.queue.submit(Some(encoder.finish()));
+        readback.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        gpu.device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .unwrap();
+        let mapped = readback.slice(..).get_mapped_range();
+        let values: &[[f32; 4]] = bytemuck::cast_slice(&mapped);
+        for (i, v) in values.iter().enumerate() {
+            assert!(v.iter().all(|x| x.is_finite()));
+            assert!(
+                (v[0] + values[256 - i][0]).abs() < 1e-5,
+                "odd continental curve"
+            );
+            assert!((v[3] - v[1] - 0.01).abs() < 1e-6, "retain seabed detail");
+            assert!(
+                (v[2] - v[1] - 0.7).abs() < 1e-6,
+                "same uplift on land and sea"
+            );
+            if i >= 128 {
+                assert_eq!(v[1], -0.5, "no uplift outside footprint");
+            }
+            if i > 0 {
+                let slope = (v[0] - values[i - 1][0]) * 128.0;
+                assert!(
+                    (0.0..3.0).contains(&slope),
+                    "bounded monotone slope: {slope}"
+                );
+            }
+        }
+        assert_eq!(values[128][0], 0.0);
+        assert!((values[256][0] - 1.0).abs() < 1e-6);
+        assert!((values[0][1] + 0.1).abs() < 1e-6, "peak is relative uplift");
+        assert!(
+            (values[127][1] - values[128][1]).abs() < 0.0001,
+            "no cliff at hotspot perimeter"
+        );
+        for source in [
+            include_str!("shaders/plates.wgsl"),
+            include_str!("shaders/terrain_from_plates.wgsl"),
+        ] {
+            assert!(source.contains("continental_elevation(continental_raw)"));
+            assert!(source.contains("height = hotspot_elevation("));
+            assert!(!source.contains("height = max(height, volcano_h)"));
+        }
     }
 
     #[test]

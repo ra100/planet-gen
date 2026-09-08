@@ -188,7 +188,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let c3 = snoise(wpos * cs * 4.0 + seed_offset(params.seed + 1020u)) * 0.06;
     let c4 = snoise(wpos * cs * 8.0 + seed_offset(params.seed + 1030u)) * 0.02 * high_freq_weight;
     let continental_raw = (c1 + c2 + c3 + c4) / 1.28;
-    let continental = sign(continental_raw) * pow(abs(continental_raw), 0.35);
+    let continental = continental_elevation(continental_raw);
     let noise_detail = continental * params.amplitude * 0.12;
 
     var height = plate_height * params.amplitude + noise_detail;
@@ -301,10 +301,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         let hx = seed_offset(params.seed + 500u + h * 10u);
         let hotspot_center = normalize(hx);
         let hotspot_dist = 1.0 - dot(wpos, hotspot_center);
-        if (hotspot_dist < hotspot_radius) {
-            let volcano_h = hotspot_height * (1.0 - hotspot_dist / hotspot_radius);
-            height = max(height, volcano_h);
-        }
+        height = hotspot_elevation(height, hotspot_dist, hotspot_radius, hotspot_height);
     }
 
     // Hypsometric shaping

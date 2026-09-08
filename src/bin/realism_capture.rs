@@ -270,6 +270,15 @@ fn main() {
                 ..u
             },
         ),
+        ("height", PreviewUniforms { view_mode: 1, ..u }),
+        (
+            "height-closeup",
+            PreviewUniforms {
+                view_mode: 1,
+                zoom: 1.55,
+                ..u
+            },
+        ),
         ("actual-density", PreviewUniforms { view_mode: 9, ..u }),
         (
             "density-closeup",

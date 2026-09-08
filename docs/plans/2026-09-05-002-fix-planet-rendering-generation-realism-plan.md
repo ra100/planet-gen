@@ -317,3 +317,41 @@ repeat runs. All-target validation-feature compilation, scoped Rust 2024
 formatting, and diff checks pass; existing OpenEXR/dead-code warnings remain.
 Seed 42's terrain-only capture is byte-identical to the preceding version.
 Changes remain uncommitted for visual review.
+
+### Follow-up — height-map contour artifacts (2026-09-08)
+
+The user clarified that the smooth island/continent outlines were in the height
+map, not clouds. The preceding cloud-clipping hypothesis did not explain those
+screenshots. Inspect terrain in view mode 1, independently of the atmosphere and
+clouds; the capture tool now saves full-disk and close-up height views.
+
+Two terrain profile problems were corrected in both the production analytical
+and alternate JFA generators using shared `terrain_profiles.wgsl` functions:
+
+- Continental contrast used `sign(x) * abs(x)^0.35`, whose derivative is
+  unbounded at zero. This amplifies broad noise zero contours into steep smooth
+  lines. Replace it with an odd, monotone regularized curve with bounded slope
+  and unchanged +/-1 endpoints. Existing noise streams and fine relief remain.
+- Hotspots replaced terrain with an absolute cone inside a fixed footprint.
+  On negative seabed, the footprint boundary therefore jumped from seabed to
+  zero elevation. Add relative volcanic uplift instead, with value and slope
+  tapering to zero at the perimeter; retain pre-existing relief beneath it.
+
+Seed-42 controls: `/tmp/planet-gen-height-before` is the committed baseline;
+`/tmp/planet-gen-height-after` changes only hotspots and leaves the broad
+contour problem visible; `/tmp/planet-gen-height-continuous` includes both
+corrections. Also reviewed seed 137 in
+`/tmp/planet-gen-height-continuous137`. Broad noise contours soften without
+adding a replacement noise layer. Actual elevation changes are intentional:
+seed-42 measured ocean area moves from 65.12% to 67.10% at unchanged sea level,
+primarily because fake raised hotspot footprints disappear. Cloud shaders and
+weather formation are unchanged, though weather responds to the corrected land.
+
+The GPU profile oracle tests monotonicity, bounded continental slope, symmetry,
+endpoints, relative hotspot uplift over land/seabed, preservation of underlying
+detail, and continuity at the footprint edge. It also compiles the alternate
+JFA path and checks both generators invoke the shared profiles. All 13 terrain
+tests pass, as does the subsequently strengthened oracle. All 48 downstream
+weather tests pass with validation enabled. All-target compilation
+with validation and scoped Rust formatting pass. Captures use llvmpipe; live/PNG
+differences remain at most 1/255. Changes remain uncommitted for visual review.
