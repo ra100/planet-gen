@@ -355,3 +355,74 @@ tests pass, as does the subsequently strengthened oracle. All 48 downstream
 weather tests pass with validation enabled. All-target compilation
 with validation and scoped Rust formatting pass. Captures use llvmpipe; live/PNG
 differences remain at most 1/255. Changes remain uncommitted for visual review.
+
+### Follow-up — distinguish cloud-family appearance (2026-09-08)
+
+Terrain fixes were committed as `2b56427` before this pass. The user requested
+more cloud variance and visibly different types. This pass changes shared
+preview/export density reconstruction, not weather formation or terrain:
+
+- Deeper, dilute low-cloud layers receive small rounded puffs. Thin stable
+  decks and dense overcast remain continuous. Low-cloud breakup diminishes
+  beneath a deep-cloud column, preventing two competing puff patterns.
+- Deep clouds receive a separate, larger-scale lobe field with a distinct seed
+  stream. Lobes remain coherent through altitude instead of resampling a new
+  pattern on each ray-march step.
+- Thin cirrus receives stronger wind-filtered filament contrast, while dense
+  high sheets retain the preceding restrained modulation.
+- Puffs use overlapping compact spherical kernels with variable radii, not
+  another thresholded coarse-noise mask. Their ensemble mean is normalized
+  using the kernel integral and expected radius cubed. This is appearance-level
+  normalization, not an assertion of exact per-weather-cell mass conservation.
+  No density is introduced outside existing layer support. Subpixel puffs blend
+  back to unity; dense cores retain the existing preservation gates.
+
+The first seed-42 capture (`/tmp/planet-gen-cloud-families`) was too uniformly
+popcorn-like. Reduced low/deep weights and varied radii produce the retained
+version in `/tmp/planet-gen-cloud-families-varied` (seed 42) and
+`/tmp/planet-gen-cloud-families137` (seed 137). The latter also includes isolated
+deck/cumulus/storm/cirrus density captures with constant authored columns, useful
+for separating morphology from the generated weather distribution. These are
+diagnostic family fixtures, not globally realistic cloud distributions.
+
+The new GPU oracle samples 1024 spherical directions and checks deterministic
+output, near-unit ensemble mean, nontrivial bounded variance, distinct low/deep
+fields, and exact unity for unresolved puffs. Existing dense-deck, empty-support,
+cloud-system, optical-depth, and thin-layer tests retain their original limits.
+Shared direct/tiled export parity passes (zero difference; maximum seam delta
+0.00018889). Both captured seeds retain live/PNG differences <=1/255. Native GPU
+frame time is unmeasured; the kernel adds work when resolved and occupied.
+Final focused validation: all 14 cloud-rendering tests pass (167.59 s), plus
+the shared export parity test. All-target validation-feature compilation and
+scoped formatting/diff checks pass. No full-library rerun was performed in
+this appearance-only pass.
+Changes remain uncommitted for visual review.
+
+### Follow-up — reject uniform cloud freckles (2026-09-08)
+
+The user rejected the low-cloud result above as noise-like freckles. Variable
+radii alone did not solve the dominant single-scale texture. Replace its
+frequency-55 field with connected banks (14), subordinate lobes (32, 25% weight),
+and restrained fine detail (73, at most 8%, only inside stronger banks). Reduce
+the low-family blend from 45% to 35%. These forms still multiply only existing
+low-cloud support; dense-deck protection and other cloud families are unchanged.
+This is a spatial hierarchy, not just weaker contrast on the rejected dots.
+
+Seed-42 before/after captures are `/tmp/planet-gen-cloud-families-varied` and
+`/tmp/planet-gen-cloud-clusters`; second-seed capture is
+`/tmp/planet-gen-cloud-clusters137`. The revised height-only/terrain inputs are
+unchanged. The dominant low-cloud variation now reads as larger formations
+instead of the nearly uniform bright-dot texture. Fine kernels are skipped
+outside bank interiors; native GPU frame time remains unmeasured.
+
+Add a GPU regression comparing local spatial differences against the rejected
+single-scale field. It requires reduced fine-scale variation while retaining
+nonzero variance, near-unit ensemble mean, and exact unity below resolution.
+The eight-seed cloud-system test passes unchanged (occupied-area drift <=0.59%,
+dense optical-depth drift <=0.41%). Direct/tiled export parity also passes.
+All 15 focused cloud-rendering tests pass (214.81 s). The final optimization
+skipping unused fine kernels passes the hierarchy oracle again. All-target
+validation-feature compilation and formatting/diff checks pass. Both captured
+seeds retain live/PNG channel differences <=1/255; seed-42 height PNG is
+byte-identical to the preceding version. No full-library rerun was performed.
+Changes remain uncommitted for visual review.

@@ -232,6 +232,48 @@ fn cloud_boundary_displacement(direction: vec3<f32>, footprint: f32) -> vec3<f32
     return displacement - direction * dot(displacement, direction);
 }
 
+// Compact, overlapping spherical puffs rather than thresholded fBm. The
+// integral of (1-r^2)^3 over the unit ball is 64*pi/315; normalization retains
+// mean column density in a homogeneous field. No new weather support is added.
+fn cloud_puff_field(direction: vec3<f32>, frequency: f32, footprint: f32, seed: u32, stream: u32) -> f32 {
+    let resolved = 1.0 - smooth_step(0.12, 0.45, frequency * footprint);
+    if (resolved <= 0.0) { return 1.0; }
+    let p = direction * frequency + noise_seed_offset(seed, stream);
+    let cell = floor(p);
+    var puffs = 0.0;
+    for (var z = -1; z <= 1; z++) {
+        for (var y = -1; y <= 1; y++) {
+            for (var x = -1; x <= 1; x++) {
+                let neighbor = cell + vec3<f32>(f32(x), f32(y), f32(z));
+                var h = fract(neighbor * 0.1031);
+                h += vec3<f32>(dot(h, h.yzx + vec3<f32>(33.33)));
+                let jitter = fract((h.xxy + h.yzz) * h.zyx);
+                let center = neighbor + jitter;
+                let delta = p - center;
+                let radius = 0.65 + 0.35 * fract(dot(jitter, vec3<f32>(13.7, 7.3, 23.1)));
+                let lobe = max(1.0 - dot(delta, delta) / (radius * radius), 0.0);
+                puffs += lobe * lobe * lobe;
+            }
+        }
+    }
+    // E[radius^3] for uniform radii in [0.65, 1] is 0.58678.
+    return mix(1.0, 0.15 + 0.85 * puffs / (0.63829184 * 0.58678), resolved);
+}
+
+// A hierarchy of connected banks, lobes, and restrained internal detail. Fine
+// puffs do not contribute an independent blanket of equal-sized bright dots.
+fn cloud_cluster_field(direction: vec3<f32>, footprint: f32, seed: u32, stream: u32) -> f32 {
+    let banks = cloud_puff_field(direction, 14.0, footprint, seed, stream);
+    let lobes = cloud_puff_field(direction, 32.0, footprint, seed, stream + 1u);
+    let interior = smooth_step(0.8, 1.8, banks);
+    var fine = 1.0;
+    if (interior > 0.0) {
+        fine = cloud_puff_field(direction, 73.0, footprint, seed, stream + 2u);
+    }
+    return banks * mix(1.0, lobes, 0.25)
+        * mix(1.0, fine, 0.08 * interior);
+}
+
 fn weather_cloud_sample(dir: vec3<f32>, altitude_km: f32, angular_pixel_footprint: f32) -> WeatherCloudSample {
     let direction = normalize(dir);
     let authored_mass = textureSampleLevel(weather_mass_tex, height_sampler, direction, 0.0);
@@ -278,6 +320,15 @@ fn weather_cloud_sample(dir: vec3<f32>, altitude_km: f32, angular_pixel_footprin
     );
     let low_depth_km = geometry.g - geometry.r;
     let shallow_family = smooth_step(0.7, 1.8, low_depth_km);
+    // Thin stable decks stay continuous; deeper, dilute low-cloud layers form
+    // connected banks with smaller lobes. Dense overcast stays intact.
+    let low_puff_weight = shallow_family * (1.0 - smooth_step(0.20, 0.65, mass.r))
+        * (1.0 - 0.65 * smooth_step(0.03, 0.18, mass.g))
+        * 0.35 * LOW_DETAIL_STRENGTH * detail_weight;
+    if (low_puff_weight > 0.0 && mass.r > 0.0) {
+        sample.low_multiplier *= mix(1.0,
+            cloud_cluster_field(direction, angular_pixel_footprint, uniforms.cloud_seed, 110u), low_puff_weight);
+    }
     // Geometry comes from the weather field.  Do not let the terrain height
     // switch integration/profile at the coastline: that made identical weather
     // columns acquire an artificial land outline.
@@ -289,9 +340,16 @@ fn weather_cloud_sample(dir: vec3<f32>, altitude_km: f32, angular_pixel_footprin
         0.0,
     );
     sample.deep_multiplier = deep_multiplier * mix(1.18, 0.68, deep_height_fraction);
+    // Storm columns have broader lobes than shallow cumulus. The broad form
+    // stays vertically coherent rather than changing noise at every ray step.
+    let tower_weight = (1.0 - smooth_step(0.30, 0.75, mass.g))
+        * 0.65 * DEEP_DETAIL_STRENGTH * detail_weight;
+    if (tower_weight > 0.0 && mass.g > 0.0) {
+        sample.deep_multiplier *= mix(1.0,
+            cloud_puff_field(direction, 24.0, angular_pixel_footprint, uniforms.cloud_seed, 120u), tower_weight);
+    }
     sample.layers.deep = max(
-        mass.g * deep_multiplier * layer_profile(altitude_km, deep_base, deep_top)
-            * mix(1.18, 0.68, deep_height_fraction),
+        mass.g * sample.deep_multiplier * layer_profile(altitude_km, deep_base, deep_top),
         0.0,
     );
 
@@ -303,8 +361,13 @@ fn weather_cloud_sample(dir: vec3<f32>, altitude_km: f32, angular_pixel_footprin
     let high_modulation = cloud_detail_modulation(
         fibres, mass.b, HIGH_DETAIL_STRENGTH * detail_weight, vec2<f32>(0.12, 0.12),
     );
-    sample.high_multiplier = high_modulation * 0.28;
-    sample.layers.high = max(mass.b * layer_profile(altitude_km, high_base, geometry.a) * high_modulation * 0.28, 0.0);
+    // Optically thin cirrus has stronger wind-filtered filament contrast than
+    // either liquid layer; retain the existing dense-sheet limit.
+    let filament_weight = (1.0 - smooth_step(0.20, 0.65, mass.b))
+        * HIGH_DETAIL_STRENGTH * detail_weight;
+    let filament = clamp(1.0 + 2.4 * fibres.x + 1.2 * fibres.y, 0.15, 2.5);
+    sample.high_multiplier = high_modulation * mix(1.0, filament, filament_weight) * 0.28;
+    sample.layers.high = max(mass.b * layer_profile(altitude_km, high_base, geometry.a) * sample.high_multiplier, 0.0);
     return sample;
 }
 

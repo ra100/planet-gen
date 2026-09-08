@@ -1790,6 +1790,35 @@ fn layer_profile_oracle() {
     output[21] = cloud_sphere_pixel_footprint(vec2<f32>(1.0, 0.0), dx, dy);
     output[22] = cloud_sphere_pixel_footprint(vec2<f32>(0.8, 0.0), dx * 0.5, dy * 0.5);
     output[23] = cloud_sphere_pixel_footprint(vec2<f32>(1.01, 0.0), dx, dy);
+    var sums = vec4<f32>(0.0);
+    var differences = 0.0;
+    var cluster_stats = vec4<f32>(0.0);
+    for (var i = 0u; i < 1024u; i++) {
+        let y = 1.0 - 2.0 * (f32(i) + 0.5) / 1024.0;
+        let angle = f32(i) * 2.39996323;
+        let radial = sqrt(1.0 - y * y);
+        let p = vec3<f32>(radial * cos(angle), y, radial * sin(angle));
+        let low = cloud_puff_field(p, 55.0, 0.001, 42u, 110u);
+        let tower = cloud_puff_field(p, 24.0, 0.001, 42u, 120u);
+        sums += vec4<f32>(low, low * low, tower, tower * tower);
+        differences += abs(low - tower);
+        let cluster = cloud_cluster_field(p, 0.001, 42u, 110u);
+        let shifted = normalize(p + vec3<f32>(0.002, 0.0, 0.0));
+        cluster_stats += vec4<f32>(cluster, cluster * cluster,
+            abs(low - cloud_puff_field(shifted, 55.0, 0.001, 42u, 110u)),
+            abs(cluster - cloud_cluster_field(shifted, 0.001, 42u, 110u)));
+    }
+    output[24] = sums.x / 1024.0;
+    output[25] = sums.y / 1024.0 - output[24] * output[24];
+    output[26] = sums.z / 1024.0;
+    output[27] = sums.w / 1024.0 - output[26] * output[26];
+    output[28] = differences / 1024.0;
+    output[29] = cloud_puff_field(vec3<f32>(0.0, 0.0, 1.0), 55.0, 0.02, 42u, 110u);
+    output[30] = cluster_stats.x / 1024.0;
+    output[31] = cluster_stats.y / 1024.0 - output[30] * output[30];
+    output[32] = cluster_stats.z / 1024.0;
+    output[33] = cluster_stats.w / 1024.0;
+    output[34] = cloud_cluster_field(vec3<f32>(0.0, 0.0, 1.0), 0.04, 42u, 110u);
 }
 "#,
         );
@@ -1861,7 +1890,7 @@ fn layer_profile_oracle() {
             .get_mapped_range()
             .chunks_exact(4)
             .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
-            .take(24)
+            .take(35)
             .collect();
         readback.unmap();
         values
@@ -2191,6 +2220,54 @@ fn layer_profile_oracle() {
                 "{actual} != {expected}"
             );
         }
+    }
+
+    #[test]
+    fn cloud_puff_families_have_variance_unit_mean_and_distance_filtering() {
+        let gpu = GpuContext::new().unwrap();
+        let values = layer_profile_oracle(&gpu);
+        assert_eq!(
+            values,
+            layer_profile_oracle(&gpu),
+            "deterministic morphology"
+        );
+        for (mean, variance) in [(values[24], values[25]), (values[26], values[27])] {
+            assert!((0.85..1.15).contains(&mean), "mean density drift: {mean}");
+            assert!(
+                (0.1..2.0).contains(&variance),
+                "missing or excessive variance: {variance}"
+            );
+        }
+        assert!(
+            values[28] > 0.2,
+            "low and deep families need distinct forms"
+        );
+        assert_eq!(
+            values[29], 1.0,
+            "unresolved puffs must become a smooth column"
+        );
+    }
+
+    #[test]
+    fn cloud_clusters_reduce_freckle_scale_without_flattening_variance() {
+        let values = layer_profile_oracle(&GpuContext::new().unwrap());
+        assert!(
+            (0.85..1.15).contains(&values[30]),
+            "cluster mean: {}",
+            values[30]
+        );
+        assert!(
+            (0.1..2.0).contains(&values[31]),
+            "cluster variance: {}",
+            values[31]
+        );
+        assert!(
+            values[33] < values[32] * 0.65,
+            "too much fine-scale breakup: cluster={} puffs={}",
+            values[33],
+            values[32]
+        );
+        assert_eq!(values[34], 1.0, "subpixel hierarchy must filter to unity");
     }
 
     #[test]

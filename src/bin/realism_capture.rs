@@ -343,6 +343,41 @@ fn main() {
         ),
     ];
     let no_detail = PreviewRenderer::new_with_cloud_detail(&gpu, 0.0);
+    // Isolated authored families: compare morphology without formation changes
+    // or different geography concealing whether the layer types are distinct.
+    for (name, column, geometry) in [
+        ("family-deck", [0.18, 0.0, 0.0, 0.18], [0.5, 1.0, 1.0, 12.0]),
+        (
+            "family-cumulus",
+            [0.18, 0.0, 0.0, 0.18],
+            [0.5, 2.8, 2.8, 12.0],
+        ),
+        (
+            "family-storm",
+            [0.0, 0.18, 0.0, 0.18],
+            [0.5, 2.0, 10.0, 13.0],
+        ),
+        (
+            "family-cirrus",
+            [0.0, 0.0, 0.18, 0.18],
+            [0.5, 2.0, 8.0, 12.0],
+        ),
+    ] {
+        let mass = std::array::from_fn(|_| (0..16 * 16).flat_map(|_| column).collect());
+        let geometry = std::array::from_fn(|_| (0..16 * 16).flat_map(|_| geometry).collect());
+        let mass = renderer.upload_cubemap_rgba16(&gpu, &mass, 16);
+        let geometry = renderer.upload_cubemap_rgba16(&gpu, &geometry, 16);
+        let settings = PreviewUniforms { view_mode: 9, ..u };
+        let png = renderer.render(
+            &gpu,
+            &settings,
+            &terrain_view,
+            Some(&dynamics.wind_continentality),
+            Some((&mass, &geometry)),
+            size,
+        );
+        save(out, size, name, &png);
+    }
     for (name, settings) in cases {
         let png = renderer.render(
             &gpu,
