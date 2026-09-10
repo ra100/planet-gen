@@ -1522,7 +1522,7 @@ impl ErosionPipeline {
 }
 
 // ============ Wind Field Pipeline ============
-// Pressure-based wind from terrain + continentality.
+// Analytical circulation and pressure from terrain + continentality.
 // 4-mode compute shader: init_cont → smooth_cont → pressure → wind.
 
 #[repr(C)]
@@ -2698,6 +2698,179 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             assert!(source.contains("height = hotspot_elevation("));
             assert!(!source.contains("height = max(height, volcano_h)"));
         }
+    }
+
+    #[test]
+    fn wind_steering_preserves_weak_eddies_and_thermal_trough_meanders() {
+        let gpu = GpuContext::new().unwrap();
+        let source = format!(
+            "{}\n{}\n{}\n{}",
+            include_str!("shaders/cube_sphere.wgsl"),
+            include_str!("shaders/noise.wgsl"),
+            include_str!("shaders/wind_field.wgsl"),
+            r#"
+@compute @workgroup_size(64)
+fn circulation_oracle(@builtin(global_invocation_id) id: vec3<u32>) {
+    let i = id.x;
+    let angle = f32(i) * 6.2831853 / 64.0;
+    let pos = vec3<f32>(cos(angle), 0.0, sin(angle));
+    dst[i * 4u] = thermal_trough_latitude(pos, 0.0);
+    dst[i * 4u + 1u] = thermal_trough_latitude(pos, 1.0);
+    let strength = f32(i) / 63.0;
+    dst[i * 4u + 2u] = length(bounded_stream_steering(vec3<f32>(strength * 0.001, 0.0, 0.0)));
+    dst[i * 4u + 3u] = length(bounded_stream_steering(vec3<f32>(strength * 100.0, 0.0, 0.0)));
+}"#
+        );
+        let shader = gpu
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("circulation oracle"),
+                source: wgpu::ShaderSource::Wgsl(source.into()),
+            });
+        let pipeline = gpu
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: None,
+                layout: None,
+                module: &shader,
+                entry_point: Some("circulation_oracle"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        let output = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 1024,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let wind = WindFieldPipeline::new(&gpu).unwrap();
+        let mut equinox = Vec::new();
+        for season in [0.5, 1.0, 0.0] {
+            let params = WindFieldParams {
+                seed: 1042,
+                axial_tilt_rad: 23.4_f32.to_radians(),
+                season,
+                ..WindFieldParams::zeroed()
+            };
+            let uniform = gpu
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: None,
+                    contents: bytemuck::bytes_of(&params),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
+            let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout: &pipeline.get_bind_group_layout(0),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: uniform.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: output.as_entire_binding(),
+                    },
+                ],
+            });
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            {
+                let mut pass = encoder.begin_compute_pass(&Default::default());
+                pass.set_pipeline(&pipeline);
+                pass.set_bind_group(0, &bind, &[]);
+                pass.dispatch_workgroups(1, 1, 1);
+            }
+            gpu.queue.submit(Some(encoder.finish()));
+            let values = wind.readback_1c(&gpu, &output, 256);
+            assert!(values.iter().all(|v| v.is_finite()));
+            let rows: Vec<_> = values.chunks_exact(4).collect();
+            assert_eq!(rows[0][2], 0.0);
+            assert_eq!(rows[0][3], 0.0);
+            assert!(
+                rows[63][2] < 0.00034,
+                "weak eddy must not become unit strength"
+            );
+            assert!(rows[63][3] < 1.0 && rows[63][3] > 0.99);
+            assert!(
+                rows.windows(2)
+                    .all(|p| p[1][2] > p[0][2] && p[1][3] > p[0][3])
+            );
+            if season == 0.5 {
+                equinox = rows.iter().map(|r| r[0]).collect();
+                let lo = equinox.iter().copied().fold(f32::INFINITY, f32::min);
+                let hi = equinox.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                assert!(hi - lo > 1.0, "trough must vary with longitude");
+                assert!(rows.iter().all(|r| (r[0] - r[1]).abs() < 1e-5));
+            } else {
+                let sign = if season == 1.0 { 1.0 } else { -1.0 };
+                for (i, row) in rows.iter().enumerate() {
+                    assert!((row[0] - equinox[i] - sign * 5.0).abs() < 1e-4);
+                    assert!((row[1] - row[0] - sign * 15.0).abs() < 1e-4);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn generated_wind_is_deterministic_tangent_and_continuous_at_cube_edges() {
+        let gpu = GpuContext::new().unwrap();
+        let pipeline = WindFieldPipeline::new(&gpu).unwrap();
+        let res = 16;
+        let terrain = TectonicTerrain {
+            faces: std::array::from_fn(|_| vec![-0.2; (res * res) as usize]),
+            resolution: res,
+        };
+        let generate = |seed| {
+            pipeline.generate(
+                &gpu,
+                &terrain,
+                res,
+                seed,
+                0.0,
+                23.4_f32.to_radians(),
+                0.5,
+                1.0,
+                15.0,
+                1.0,
+                1.0,
+            )
+        };
+        let field = generate(1042);
+        assert_eq!(field.wind, generate(1042).wind);
+        assert_ne!(field.wind, generate(1137).wind);
+        let mut seams = std::collections::HashMap::new();
+        let mut seam_pairs = 0;
+        for face in 0..6 {
+            for y in 0..res {
+                for x in 0..res {
+                    let pos = crate::cube_sphere::cube_to_sphere(
+                        face,
+                        x as f32 / (res - 1) as f32,
+                        y as f32 / (res - 1) as f32,
+                    );
+                    let index = ((face * res * res + y * res + x) * 3) as usize;
+                    let v: [f32; 3] = field.wind[index..index + 3].try_into().unwrap();
+                    assert!(v.iter().all(|c| c.is_finite()));
+                    let radial: f32 = v.iter().zip(pos).map(|(a, b)| a * b).sum();
+                    assert!(radial.abs() < 1e-5, "non-tangent wind: {radial}");
+                    assert!(
+                        v.iter().map(|c| c * c).sum::<f32>() < 4.0,
+                        "unbounded speed"
+                    );
+                    if x == 0 || y == 0 || x == res - 1 || y == res - 1 {
+                        let key = pos.map(|c| (c * 100000.0).round() as i32);
+                        if let Some(previous) = seams.insert(key, v) {
+                            seam_pairs += 1;
+                            assert!(
+                                previous.iter().zip(v).all(|(a, b)| (a - b).abs() < 1e-5),
+                                "wind seam at {pos:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert!(seam_pairs > 100);
     }
 
     #[test]

@@ -1819,6 +1819,42 @@ fn layer_profile_oracle() {
     output[32] = cluster_stats.z / 1024.0;
     output[33] = cluster_stats.w / 1024.0;
     output[34] = cloud_cluster_field(vec3<f32>(0.0, 0.0, 1.0), 0.04, 42u, 110u);
+    var directional = vec4<f32>(0.0);
+    for (var i = 0u; i < 512u; i++) {
+        let p = normalize(vec3<f32>(fract(f32(i) * 0.618034) - 0.5,
+            fract(f32(i) * 0.414214) - 0.5, 1.0));
+        let px = normalize(p + vec3<f32>(0.002, 0.0, 0.0));
+        let py = normalize(p + vec3<f32>(0.0, 0.002, 0.0));
+        let wx = vec3<f32>(1.0, 0.0, 0.0);
+        let wy = vec3<f32>(0.0, 1.0, 0.0);
+        let x = cloud_flow_puffs(p, 14.0, 0.001, 42u, 110u, wx, 2.2);
+        let y = cloud_flow_puffs(p, 14.0, 0.001, 42u, 110u, wy, 2.2);
+        directional += abs(vec4<f32>(
+            cloud_flow_puffs(px, 14.0, 0.001, 42u, 110u, wx, 2.2) - x,
+            cloud_flow_puffs(py, 14.0, 0.001, 42u, 110u, wx, 2.2) - x,
+            cloud_flow_puffs(px, 14.0, 0.001, 42u, 110u, wy, 2.2) - y,
+            cloud_flow_puffs(py, 14.0, 0.001, 42u, 110u, wy, 2.2) - y));
+    }
+    output[35] = directional.x; output[36] = directional.y;
+    output[37] = directional.z; output[38] = directional.w;
+    output[39] = low_cloud_segment(vec3<f32>(0.0, 0.0, 1.5), vec3<f32>(0.0, 0.0, 3.5), 0.5, 2.5, 1.0) * 2.0;
+    output[40] = low_cloud_profile(0.85, 0.5, 2.5);
+    output[41] = low_cloud_profile(1.22, 0.5, 2.5);
+    output[42] = low_cloud_profile(1.7, 0.5, 2.5);
+    output[43] = cloud_flow_puffs(vec3<f32>(0.0, 0.0, 1.0), 14.0, 0.001, 42u, 110u, vec3<f32>(0.0), 2.2)
+        - cloud_puff_field(vec3<f32>(0.0, 0.0, 1.0), 14.0, 0.001, 42u, 110u);
+    for (var i = 0u; i < 4u; i++) {
+        output[44u + i] = cloud_relief_top(0.5, 2.5, f32(i) * 0.6, 0.3);
+    }
+    let shaped_top = output[45];
+    output[48] = low_cloud_segment(vec3<f32>(0.0, 0.0, 1.5), vec3<f32>(0.0, 0.0, 1.0 + shaped_top), 0.5, shaped_top, 1.0) * (shaped_top - 0.5);
+    var integral = 0.0;
+    for (var i = 0u; i < 512u; i++) {
+        integral += low_cloud_profile(0.5 + (f32(i) + 0.5) / 512.0 * (shaped_top - 0.5), 0.5, shaped_top);
+    }
+    output[49] = integral * (shaped_top - 0.5) / 512.0;
+    output[50] = cloud_relief_top(0.5, 2.5, 0.0, 0.0);
+    output[51] = cloud_relief_top(2.5, 2.5, 0.0, 0.3);
 }
 "#,
         );
@@ -1890,7 +1926,7 @@ fn layer_profile_oracle() {
             .get_mapped_range()
             .chunks_exact(4)
             .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
-            .take(35)
+            .take(52)
             .collect();
         readback.unmap();
         values
@@ -1930,8 +1966,8 @@ fn layer_profile_oracle() {
         world_pos = vec3<f32>(0.0, 0.0, 1.0 + geometry.g * 0.5 / 100.0);
     }
     let altitude_km = (length(world_pos) - 1.0) * 100.0;
-    let layers = weather_cloud_layers(vec3<f32>(0.0, 0.0, 1.0), altitude_km, 0.0);
-    let transmittance = cloud_sun_path_transmittance(world_pos, sun_dir, 100.0, layers, geometry);
+    let sample = weather_cloud_sample(vec3<f32>(0.0, 0.0, 1.0), altitude_km, 0.0);
+    let transmittance = cloud_sun_path_transmittance(world_pos, sun_dir, 100.0, sample);
     return vec4<f32>(transmittance, 0.0, 0.0, 1.0);
 }"#,
         );
@@ -2271,6 +2307,54 @@ fn layer_profile_oracle() {
     }
 
     #[test]
+    fn cloud_wind_rotates_structure_and_layering_preserves_column_mass() {
+        let values = layer_profile_oracle(&GpuContext::new().unwrap());
+        assert!(
+            values[36] > values[35] * 1.2,
+            "eastward wind must elongate along X: {:?}",
+            &values[35..39]
+        );
+        assert!(
+            values[37] > values[38] * 1.2,
+            "northward wind must elongate along Y: {:?}",
+            &values[35..39]
+        );
+        assert!(
+            (values[39] - 1.0).abs() < 1e-5,
+            "layering changes column mass"
+        );
+        assert!(
+            values[40] > values[41] && values[42] > values[41],
+            "missing two-body vertical structure: {:?}",
+            &values[40..43]
+        );
+        // Different constant-folding/FMA paths can differ by one f32 ULP.
+        assert!(
+            values[43].abs() < 1e-6,
+            "calm flow must not stretch the kernels"
+        );
+    }
+
+    #[test]
+    fn cloud_top_relief_stays_in_envelope_and_preserves_profile_mass() {
+        let v = layer_profile_oracle(&GpuContext::new().unwrap());
+        assert!(v[44..48].windows(2).all(|pair| pair[1] >= pair[0]));
+        assert!(v[44..48].iter().all(|top| (1.89..=2.5).contains(top)));
+        assert!((v[44] - 1.9).abs() < 1e-6);
+        assert!((v[47] - 2.5).abs() < 1e-6);
+        assert!(
+            (v[48] - 1.0).abs() < 1e-5,
+            "segment loses mass after top relief"
+        );
+        assert!(
+            (v[49] - v[48]).abs() < 1e-4,
+            "point/segment profiles disagree"
+        );
+        assert_eq!(v[50], 2.5, "zero relief must preserve original top");
+        assert_eq!(v[51], 2.5, "degenerate layer must stay finite");
+    }
+
+    #[test]
     fn cloud_pixel_footprint_tracks_sphere_projection_and_zoom() {
         let values = layer_profile_oracle(&GpuContext::new().expect("GPU init failed"));
         // Orthographic center: one image-plane pixel is one angular pixel.
@@ -2357,6 +2441,23 @@ fn layer_profile_oracle() {
             &mass(0.20),
             &geometry(0.0, 12.0),
             resolution,
+        );
+        let detached = cloud_sun_path_fragment_oracle(
+            &gpu,
+            &renderer,
+            &terrain_view,
+            &cloud_view,
+            &mass(0.20),
+            &geometry(6.0, 8.0),
+            resolution,
+        );
+        // The oracle's first point is at 4 km, below this entire layer. Local
+        // density is zero there, but the sun ray crosses its full column.
+        let expected_detached = (-0.20_f32 * 0.50 * 0.90 * 3.0).exp();
+        assert!(
+            (detached[0] - expected_detached).abs() < 0.002,
+            "detached layer missing from sun path: {} != {expected_detached}",
+            detached[0]
         );
         println!(
             "U4 local shell-column metrics: clear={clear:?}, sparse={sparse:?}, dense={dense:?}, thin={thin_shell:?}, thick={thick_shell:?}"

@@ -1,11 +1,11 @@
-// Wind field compute shader: pressure-based wind from terrain + continentality.
-// 4-mode pipeline produces physically-derived wind that varies by longitude.
+// Wind field compute shader: analytical circulation from terrain + continentality.
+// Pressure and circulation share a longitude-varying thermal trough.
 // Includes cube_sphere.wgsl and noise.wgsl (concatenated at load time).
 //
 // Mode 0: Init continentality (ocean=0, land=1)
 // Mode 1: Smooth continentality (diffuse, ocean stays 0)
 // Mode 2: Pressure field (7-term: ITCZ, subtropical, continental thermal, etc.)
-// Mode 3: Wind from pressure gradient + Coriolis deflection
+// Mode 3: Analytical circulation with bounded streamfunction steering
 
 struct WindFieldParams {
     face: u32,
@@ -118,6 +118,19 @@ fn stream_curl(pos: vec3<f32>, east: vec3<f32>, north: vec3<f32>) -> vec3<f32> {
     return east * d_north - north * d_east;
 }
 
+// Keep actual eddy strength. Normalizing curl alone made arbitrarily weak
+// gradients steer as strongly as storm-scale gradients around every extremum.
+fn bounded_stream_steering(curl: vec3<f32>) -> vec3<f32> {
+    return curl / sqrt(9.0 + dot(curl, curl));
+}
+
+fn thermal_trough_latitude(pos: vec3<f32>, continentality: f32) -> f32 {
+    let season_sign = clamp((params.season - 0.5) * 2.0, -1.0, 1.0);
+    let meander = snoise(pos * 1.5 + noise_seed_offset(params.seed, 10u)) * 5.0;
+    return 5.0 * season_sign * (params.axial_tilt_rad / (23.4 * DEG))
+        + meander + continentality * 15.0 * season_sign;
+}
+
 // === Mode 0: Initialize continentality ===
 
 fn init_continentality(pos: vec3<f32>, idx: u32) {
@@ -209,11 +222,7 @@ fn compute_pressure(pos: vec3<f32>, idx: u32) {
 
     // (a) ITCZ low — longitude-varying, follows thermal equator
     // Monsoon: ITCZ shifts 15-20° poleward over large continents in summer
-    let itcz_lon_noise = snoise(pos * 1.5 + noise_seed_offset(params.seed, 10u)) * 5.0;
-    // Stronger continent pull: up to 15° poleward (monsoon)
-    let monsoon_pull = continentality * 15.0 * season_sign;
-    let itcz_base = 5.0 * season_sign * (tilt / (23.4 * DEG)); // scale with tilt
-    let itcz_lat = itcz_base + itcz_lon_noise + monsoon_pull;
+    let itcz_lat = thermal_trough_latitude(pos, continentality);
     let d_itcz = lat_deg - itcz_lat;
     pressure -= 15.0 * exp(-0.5 * pow(d_itcz / 8.0, 2.0));
 
@@ -355,9 +364,9 @@ fn compute_wind(pos: vec3<f32>, idx: u32) {
     let polar_east = smooth_step(polar_start, polar_start + 15.0, lat_deg) * -0.45;
     var wind_e = trade + westerly + polar_east;
 
-    // Surface trades converge smoothly on the shifted thermal equator. Using
-    // shifted_lat on both sides avoids a fixed geographic-equator seam.
-    let thermal_lat_deg = shifted_lat / DEG;
+    // Surface convergence follows the same meandering/seasonal trough as
+    // pressure, rather than collecting moisture on a separate latitude ring.
+    let thermal_lat_deg = lat / DEG - thermal_trough_latitude(pos, continentality);
     let hadley_m = -thermal_lat_deg / max(hadley, 1.0)
         * exp(-pow(abs(thermal_lat_deg) / max(hadley * 0.72, 1.0), 2.0)) * 0.62;
     let ferrel_center = (hadley + polar) * 0.5;
@@ -371,13 +380,12 @@ fn compute_wind(pos: vec3<f32>, idx: u32) {
     wind_e += lon_var * 0.10;
     wind_n += lon_var2 * 0.08;
 
-    // DS-046 mesoscale steering: two octaves (pos×8…×24) bend trajectories and
-    // create convergence/divergence cells so continental interiors gain
-    // multi-directional reach instead of single-file zonal filaments.
+    // Mesoscale residuals remain, but do not dominate convergence with a grid
+    // of similarly sized noise cells. Coherent stream steering owns the bends.
     let meso_e = snoise(tilted_pos * 8.0 + noise_seed_offset(params.seed, 20u));
     let meso_n = snoise(tilted_pos * 24.0 + noise_seed_offset(params.seed, 21u));
-    wind_e += meso_e * 0.12;
-    wind_n += meso_n * 0.12;
+    wind_e += meso_e * 0.04;
+    wind_n += meso_n * 0.04;
 
     // Mountain speed boost: wind accelerates near high terrain (venturi/gap wind)
     let mountain_speed = 1.0 + smooth_step(0.08, 0.20, elevation) * 0.3;
@@ -391,10 +399,10 @@ fn compute_wind(pos: vec3<f32>, idx: u32) {
     let base_wind = (east * wind_e + north * wind_n) * speed_scale;
     let base_speed = length(base_wind);
     let curl = stream_curl(pos, east, north);
-    let curl_dir = curl / max(length(curl), 0.0001);
+    let steering = bounded_stream_steering(curl);
     let wind_3d = select(
         vec3<f32>(0.0),
-        normalize(base_wind + curl_dir * base_speed * 0.28) * base_speed,
+        normalize(base_wind + steering * base_speed * 0.45) * base_speed,
         base_speed > 0.0001,
     );
 

@@ -302,7 +302,7 @@ fn ray_march_clouds(
             continue;
         }
         let world_pos = world * (1.0 + altitude_km / radius_km);
-        let light_transmittance = cloud_sun_path_transmittance(world_pos, sun_world, radius_km, layers, sample.geometry);
+        let light_transmittance = cloud_sun_path_transmittance(world_pos, sun_world, radius_km, sample);
         let sun_transmit = atmosphere_sun_transmittance(pos, sun_dir);
         let sun_facing = smooth_step(-0.025, 0.16, dot(direction, sun_dir));
         let star = star_color(uniforms.star_color_temp);

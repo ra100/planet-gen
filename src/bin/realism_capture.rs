@@ -377,6 +377,26 @@ fn main() {
             size,
         );
         save(out, size, name, &png);
+        if name == "family-cumulus" {
+            // Hold mass/geometry fixed: these isolate presentation-level wind
+            // response, not a regenerated weather field with different clouds.
+            for (label, velocity) in [
+                ("calm", [0.0, 0.0, 0.0, 0.0]),
+                ("east", [0.5, 0.0, 0.0, 0.0]),
+                ("north", [0.0, 0.5, 0.0, 0.0]),
+            ] {
+                let flow = wind.create_test_textures(&gpu, 16, |_| (velocity, 1013.0));
+                let png = renderer.render(
+                    &gpu,
+                    &settings,
+                    &terrain_view,
+                    Some(&flow.wind_continentality),
+                    Some((&mass, &geometry)),
+                    size,
+                );
+                save(out, size, &format!("{name}-wind-{label}"), &png);
+            }
+        }
     }
     for (name, settings) in cases {
         let png = renderer.render(
