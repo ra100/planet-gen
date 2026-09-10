@@ -426,3 +426,137 @@ validation-feature compilation and formatting/diff checks pass. Both captured
 seeds retain live/PNG channel differences <=1/255; seed-42 height PNG is
 byte-identical to the preceding version. No full-library rerun was performed.
 Changes remain uncommitted for visual review.
+
+### Follow-up — wind-shaped structure, vertical bodies, and layer lighting (2026-09-09)
+
+Visual/code review found that low and deep morphology remained isotropic, the
+cirrus filter ignored wind magnitude, and each low-cloud column used a single
+vertical profile. The shared self-shadow estimate also multiplied density at
+the shading point by a shell path length: detached layers above that point
+could contribute nothing because their local density there was zero.
+
+- Add wind-oriented compact kernels by compressing their crosswind axis and
+  compensating the kernel volume. Low banks stretch more than storm lobes;
+  the footprint filter accounts for the narrower axis. Calm wind is isotropic.
+  Existing isotropic helpers remain available for regression comparisons.
+- Apply bounded altitude-dependent downwind shear to storm subgrid structure.
+  Preserve the transported mass, original support, and weather-layer heights.
+- Blend thick low-cloud profiles with a normalized compact lower component and
+  lofted upper component. Point and analytic segment integration use the same
+  mixture, preserving column density. Thin decks retain their original profile.
+- Make cirrus filtering respond to actual wind magnitude, not just a fallback
+  direction or the Wind Effects toggle.
+- Integrate all three layer profiles along the local sun ray for self-shadowing,
+  including detached layers above the shading point. This is still a local-column
+  approximation with sampled coefficients, not full 3D lateral light transport
+  or a new atmospheric simulation.
+
+Reviewed seed-42 before/after in `/tmp/planet-gen-cloud-clusters` and
+`/tmp/planet-gen-cloud-layer-lighting`. The intermediate wind/profile-only version
+is `/tmp/planet-gen-cloud-wind-layers`. Capture tooling now includes fixed-column
+calm/east/north comparisons, which visibly turn the low-cloud structures with
+wind while holding mass/geometry constant. Final second-seed evidence is in
+`/tmp/planet-gen-cloud-layer-lighting137`.
+
+GPU regressions verify rotating directional gradients, calm-kernel equivalence
+(within 1e-6 for float evaluation differences), two-body vertical structure, and
+unit integrated column mass. The sun-path fixture includes a shading point at
+4 km below a detached 6–8 km deck and compares attenuation against its full
+analytic optical column. Existing test limits are not loosened. Native GPU
+performance is unmeasured; extra profile evaluation adds shader work. Weather
+generation and terrain are unchanged. Changes remain uncommitted for review.
+
+Final validation: all 16 cloud-rendering tests pass (281.53 s), including the
+detached-deck and directional/layering regressions. Separate wind-rotation,
+calm/pole/cube-edge, live-color/night-lighting, and shared export parity tests
+pass. Direct/tiled export difference is zero, maximum seam delta 0.00018889.
+Both final captures retain live/PNG differences <=1/255. All-target compilation
+with validation, scoped formatting, and diff checks pass. The full library
+suite was not rerun; evidence is from llvmpipe, not a native-GPU benchmark.
+
+### Follow-up — restrained top relief and fine cirrus (2026-09-09)
+
+The user accepted the direction and asked for further refinement. Build on the
+wind/layer changes without replacing the weather layout or adding a blanket of
+small cloud cells. Use the existing low-bank and storm-lobe fields to lower weak
+portions of their tops inside the original weather envelope. Dense decks retain
+their original geometry. Low-cloud relief is bounded to 10.5% of depth and storm
+relief to 18.2%; both still use normalized profiles over their resulting depth.
+Storm-top relief is evaluated per column, independently of ray-sample altitude,
+while internal detail retains the preceding bounded wind shear.
+
+Point density, camera-segment integration, and sun-path integration now all use
+the final sculpted geometry. Thin cirrus receives a small additional wind-filtered
+67-frequency octave, gated by thin-cloud eligibility, wind strength, and footprint
+resolution. This does not add cloud mass outside authored support.
+
+Initial captures `/tmp/planet-gen-cloud-relief` and
+`/tmp/planet-gen-cloud-relief137` made some low tops read as smooth ovals. Reduced
+relief amplitudes are retained in `/tmp/planet-gen-cloud-relief-refined` and
+`/tmp/planet-gen-cloud-relief-refined137`; compare against the preceding
+`/tmp/planet-gen-cloud-layer-lighting` captures. The refinement is intentionally
+subtle rather than a new coarse shape model.
+
+The added GPU oracle checks monotonic bounded tops, unchanged zero-relief and
+degenerate layers, unit analytic column integrals, and numerical agreement of
+point profiles with segment integration. Existing cloud checks retain their
+limits. Native GPU cost remains unmeasured; storm-top reconstruction adds an
+extra kernel evaluation for eligible columns. Changes remain uncommitted.
+
+Final reduced-amplitude captures were visually reviewed at close-up and globe
+scale across seeds 42 and 137. Live/PNG channel differences remain <=1/255;
+seed 42's height image is byte-identical to the preceding pass. Shared export
+parity passes with zero direct/tiled difference and maximum seam delta
+0.00018898. All-target compilation with validation, scoped formatting, and diff
+checks pass (existing OpenEXR/dead-code warnings remain).
+All 17 focused cloud tests pass on the retained shader, including top relief,
+wind orientation, layered lighting, sampling convergence, and visibility/shadow
+independence. The full library suite and native-GPU performance were not tested
+in this follow-up.
+
+### Follow-up — equatorial blobs and circulation coherence (2026-09-09)
+
+The user still sees blobs following the equator. Comparing detail-on/off
+captures shows rounded large-scale structures in the transported weather too;
+extra texture is not sufficient. Code inspection found that meridional trades
+converged on a longitude-independent seasonal latitude, while pressure used a
+different, meandering thermal trough. Both now share the existing pressure
+trough helper, including seasonal and continental displacement. This is still
+analytical circulation, not a pressure-gradient fluid solver; corrected the
+misleading shader header accordingly.
+
+Streamfunction curl was normalized to unit direction before steering, so weak
+eddies received the same turning strength as strong ones. A smooth magnitude
+limiter now vanishes at zero curl. Steering remains below 45% of base speed and
+the final vector retains the analytical speed. Reduced independent mesoscale
+wind perturbations from 0.12 to 0.04 to lessen similar-sized convergence cells.
+
+The circulation-only capture still showed conspicuous rounded banks. Removed
+the preceding low-cloud top-relief experiment and reduced the low-bank kernel
+blend from 0.35 to 0.18. This avoids reinforcing the same broad puffs in both
+brightness and height. Storm-top relief, cirrus detail, normalized layer
+profiles, and lighting remain. No extra noise, opacity adjustment, terrain
+change, or transport/source-budget change is included.
+
+Circulation-only A/B captures: `/tmp/planet-gen-cloud-circulation` and
+`/tmp/planet-gen-cloud-circulation137`. Final reduced-blob captures:
+`/tmp/planet-gen-cloud-circulation-refined` and
+`/tmp/planet-gen-cloud-circulation-refined137`. The visual change is restrained;
+broad weather banks still exist and this does not establish photorealism or
+fully developed frontal dynamics. Regeneration is required for new wind fields.
+
+New GPU checks pass for weak/strong eddy response, longitudinal trough variance,
+seasonal/continental shifts, actual generated wind determinism, finite bounded
+tangent vectors, and duplicate cube-edge agreement. Both storm source-eligibility
+tests pass. Shared export parity passes with zero direct/tiled difference and
+maximum seam delta 0.00017178. All-target validation compilation passes with
+existing warnings. Seed 42 terrain output remains byte-identical to the prior
+pass. Changes remain uncommitted.
+
+Both final seeds were visually reviewed; live/PNG deltas remain <=1/255 and
+both height images are byte-identical to the prior pass. Formatting and diff
+checks pass. Native-GPU performance and the complete library suite were not
+measured in this iteration.
+All 17 cloud regression tests pass with the final reduced low-bank blend,
+including density support, family variance, sampling convergence, top profiles,
+lighting, wind orientation, and visibility/shadow controls.
