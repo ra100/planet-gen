@@ -2838,8 +2838,10 @@ fn circulation_oracle(@builtin(global_invocation_id) id: vec3<u32>) {
         let field = generate(1042);
         assert_eq!(field.wind, generate(1042).wind);
         assert_ne!(field.wind, generate(1137).wind);
-        let mut seams = std::collections::HashMap::new();
+        let mut seams: std::collections::HashMap<[i32; 3], ([f32; 3], u32, u32, u32)> =
+            std::collections::HashMap::new();
         let mut seam_pairs = 0;
+        let mut worst_seam: Option<(f32, [f32; 3], [f32; 3])> = None;
         for face in 0..6 {
             for y in 0..res {
                 for x in 0..res {
@@ -2859,11 +2861,22 @@ fn circulation_oracle(@builtin(global_invocation_id) id: vec3<u32>) {
                     );
                     if x == 0 || y == 0 || x == res - 1 || y == res - 1 {
                         let key = pos.map(|c| (c * 100000.0).round() as i32);
-                        if let Some(previous) = seams.insert(key, v) {
+                        if let Some((previous, pf, px, py)) = seams.insert(key, (v, face, x, y)) {
                             seam_pairs += 1;
+                            let diff: [f32; 3] = previous
+                                .iter()
+                                .zip(v)
+                                .map(|(a, b)| (a - b).abs())
+                                .collect::<Vec<_>>()
+                                .try_into()
+                                .unwrap();
+                            let max_diff = diff.iter().cloned().fold(f32::MIN, f32::max);
+                            if worst_seam.as_ref().map_or(true, |w| max_diff > w.0) {
+                                worst_seam = Some((max_diff, previous, v));
+                            }
                             assert!(
-                                previous.iter().zip(v).all(|(a, b)| (a - b).abs() < 1e-5),
-                                "wind seam at {pos:?}"
+                                diff.iter().all(|d| *d < 1e-5),
+                                "wind seam at {pos:?}: face{pf}({px},{py})={previous:?} vs face{face}({x},{y})={v:?} diff={diff:?}\nworst seam overall: {worst_seam:?}"
                             );
                         }
                     }
