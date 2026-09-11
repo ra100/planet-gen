@@ -5,10 +5,7 @@ GPU-accelerated procedural planet generator for VFX. Produces physically plausib
 Built with Rust, wgpu (WebGPU), and egui.
 
 <p align="center">
-  <img src="docs/images/planet_01.png" width="720" alt="Earth-like planet with continents, clouds, and atmosphere">
-</p>
-<p align="center">
-  <img src="docs/images/planet_02.png" width="720" alt="Icy planet with different continent configuration">
+  <img src="docs/images/earth.png" width="900" alt="Planet Gen: Earth-like terrestrial planet with plate tectonics, biomes, clouds, and atmosphere in the real-time preview">
 </p>
 
 ## Quick Start
@@ -36,6 +33,21 @@ Requires a GPU with Vulkan, Metal, or DX12 support (most GPUs from 2018+).
 - **Ocean sun glint** — PBR-correct specular reflection on water surface
 - **Ring system** — Saturn-like rings with Cassini gaps, planet shadow, tilt control
 - **Blender addon** — one-click import of exported textures with auto-wired Principled BSDF material
+
+## Planet Types
+
+The app ships with curated presets (sidebar → PRESETS). Each preset is a full parameter bundle; the physics model derives type, tectonics, atmosphere, and climate from distance, mass, and metallicity.
+
+| Preset | Type | Screenshot |
+| --- | --- | --- |
+| **EARTH** — 1.0 AU, 1.0 M⊕ | Terrestrial · PlateTectonics | <img src="docs/images/earth.png" width="360"> |
+| **MARS** — 1.52 AU, 0.11 M⊕, dry & cold | Terrestrial · StagnantLid · ThinCO₂ | <img src="docs/images/mars.png" width="360"> |
+| **OCEAN** — no water loss, few landmasses | Terrestrial · 99% ocean | <img src="docs/images/ocean.png" width="360"> |
+| **SNOWBALL** — 2.7 AU, tilted-cold axis | IcyRocky · StagnantLid | <img src="docs/images/snowball.png" width="360"> |
+| **HOTHOUSE** — 0.72 AU, 1.6 M⊕, overcast | Terrestrial · 62 °C base temp | <img src="docs/images/hothouse.png" width="360"> |
+| **VOLCANIC** — 26 plates, lava emission | Terrestrial · volcanic glow at plate boundaries | <img src="docs/images/volcanic.png" width="360"> |
+| **RINGED** — 1.6 M⊕ with ring system | Terrestrial · Saturn-like rings | <img src="docs/images/ringed.png" width="360"> |
+| **HOT ROCKY** — 0.11 AU (Distance slider) | HotRocky · 507 °C, no water | <img src="docs/images/hotrocky.png" width="360"> |
 
 ## Usage
 
