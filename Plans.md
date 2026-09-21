@@ -239,6 +239,17 @@ Plan: [docs/plans/2026-07-26-001-feat-approved-terrain-artifact-import-plan.md](
 
 ---
 
+## Phase 5.24: Save/Load Planet Files
+
+Plan: [docs/plans/2026-09-21-001-feat-save-load-planets-plan.md](docs/plans/2026-09-21-001-feat-save-load-planets-plan.md)
+
+| Unit | 内容 | Status |
+|------|------|--------|
+| U1 | planet_file module: PlanetFile format (47 fields), checked_load validation, default_filename, tests + serde/serde_json/rfd deps | pending |
+| U2 | App wiring: collect/apply settings, rfd save/load dialogs, top-bar SAVE/LOAD buttons + transient feedback, S/L shortcuts | pending |
+
+---
+
 ## Phase 7: Blender Importer Addon
 
 Pure-Python Blender addon that imports generated textures and sets up materials.
