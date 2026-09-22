@@ -1172,6 +1172,10 @@ impl PlanetGenApp {
             night_lights: self.night_lights,
             star_color_temp: self.star_color_temp,
             city_light_hue: self.city_light_hue,
+            view_mode: self.view_mode,
+            rot: self.rot,
+            zoom: self.zoom,
+            pan: self.pan,
             planet_name: self.planet_name.clone(),
         }
     }
@@ -1230,6 +1234,10 @@ impl PlanetGenApp {
         self.night_lights = file.night_lights;
         self.star_color_temp = file.star_color_temp;
         self.city_light_hue = file.city_light_hue;
+        self.view_mode = file.view_mode;
+        self.rot = file.rot;
+        self.zoom = file.zoom;
+        self.pan = file.pan;
         self.planet_name = file.planet_name.clone();
         self.update_derived();
         self.needs_terrain = true;

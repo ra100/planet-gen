@@ -13,9 +13,11 @@ origin: "User request: ability to save and load a planet file containing all set
 New `src/planet_file.rs` (registered in `src/lib.rs`):
 
 - `FILE_FORMAT = "planet-gen"`, `FILE_VERSION = 1`.
-- `PlanetFile` — flat JSON envelope, 47 fields: format/version + 6 physics +
-  14 terrain/climate + 2 lighting + 10 layer toggles + 6 clouds/weather +
-  8 surface extras + planet_name. `#[serde(default)]` at struct level;
+- `PlanetFile` — flat JSON envelope, 52 fields (v2): format/version + 6
+  physics + 14 terrain/climate + 2 lighting + 10 layer toggles + 6
+  clouds/weather + 8 surface extras + 5 viewport state (view_mode, rot,
+  zoom, pan — added v2 on user request: a loaded planet looks exactly as it
+  was left; v1 files load with factory view defaults) + planet_name. `#[serde(default)]` at struct level;
   hand-written `Default` mirrors the app constructor (app.rs `new()`), so a
   missing field always means "factory default" and adding a field forces a
   compiler-checked default update. No `deny_unknown_fields`.
@@ -53,7 +55,7 @@ non-finite rejected; out-of-range physics rejected; filename sanitization.
 ## DoD
 
 - `cargo build`, `cargo test --lib`, `cargo clippy` clean.
-- Manual: save → inspect JSON (47 fields, pretty) → mutate sliders/name → load
+- Manual: save → inspect JSON (52 fields, pretty) → mutate sliders/name/view → load
   → planet regenerates with saved values (cloud_seed + name verbatim); cancel
   = no-op; corrupted file and out-of-range file both rejected with ERROR
   callout and unchanged state.

@@ -1,18 +1,19 @@
 //! Save/load file format for complete planet configurations.
 //!
 //! A planet file is a single pretty-printed JSON document containing every
-//! user-settable generation parameter (physics + visual overrides + name).
-//! Camera state and export settings are deliberately excluded: they describe
-//! the session, not the planet. `DerivedProperties` are recomputed on load —
-//! they are deterministic from `PlanetParams`.
+//! user-settable generation parameter (physics + visual overrides + name)
+//! plus the viewport state (view mode, rotation, zoom, pan) so a loaded
+//! planet looks exactly as it was left. `DerivedProperties` are recomputed
+//! on load — they are deterministic from `PlanetParams`.
 
 use crate::planet::PlanetParams;
 use serde::{Deserialize, Serialize};
 
 /// Magic string identifying a planet-gen file.
 pub const FILE_FORMAT: &str = "planet-gen";
-/// Current file format version.
-pub const FILE_VERSION: u32 = 1;
+/// Current file format version. v2 added viewport state (view_mode, rot,
+/// zoom, pan); v1 files load with the factory view defaults.
+pub const FILE_VERSION: u32 = 2;
 
 /// Complete serializable planet configuration.
 ///
@@ -77,6 +78,13 @@ pub struct PlanetFile {
     pub night_lights: f32,
     pub star_color_temp: f32,
     pub city_light_hue: f32,
+    // Viewport state (v2) — the view as the user left it
+    pub view_mode: u32,
+    /// Planet orientation in view space (rows of an orthogonal 3×3).
+    pub rot: [[f32; 3]; 3],
+    pub zoom: f32,
+    /// Viewport pan in NDC units.
+    pub pan: [f32; 2],
     // Identity
     pub planet_name: String,
 }
@@ -136,6 +144,10 @@ impl Default for PlanetFile {
             night_lights: 0.0,
             star_color_temp: 0.5,
             city_light_hue: 0.0,
+            view_mode: 0,
+            rot: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            zoom: 1.0,
+            pan: [0.0, 0.0],
             planet_name: format!("planet_{}", params.seed),
         }
     }
@@ -208,6 +220,15 @@ pub fn checked_load(json: &str) -> Result<PlanetFile, String> {
     finite("night_lights", file.night_lights)?;
     finite("star_color_temp", file.star_color_temp)?;
     finite("city_light_hue", file.city_light_hue)?;
+    finite("zoom", file.zoom)?;
+    for (r, row) in file.rot.iter().enumerate() {
+        for (c, v) in row.iter().enumerate() {
+            finite(&format!("rot[{r}][{c}]"), *v)?;
+        }
+    }
+    for (i, v) in file.pan.iter().enumerate() {
+        finite(&format!("pan[{i}]"), *v)?;
+    }
 
     let params = PlanetParams {
         star_distance_au: file.star_distance_au,
@@ -281,6 +302,26 @@ mod tests {
         assert_eq!(file.ring_tilt, 15.0);
         assert_eq!(file.cloud_seed, 42u32.wrapping_add(1000));
         assert_eq!(file.planet_name, "planet_42");
+        // v1 files lack the viewport fields — factory view defaults apply.
+        assert_eq!(file.view_mode, 0);
+        assert_eq!(
+            file.rot,
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+        );
+        assert_eq!(file.zoom, 1.0);
+        assert_eq!(file.pan, [0.0, 0.0]);
+    }
+
+    #[test]
+    fn viewport_state_roundtrips() {
+        let mut file = PlanetFile::default();
+        file.view_mode = 2;
+        file.rot = [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]];
+        file.zoom = 3.5;
+        file.pan = [-0.25, 0.75];
+        let json = serde_json::to_string_pretty(&file).unwrap();
+        let loaded = checked_load(&json).unwrap();
+        assert_eq!(file, loaded);
     }
 
     #[test]

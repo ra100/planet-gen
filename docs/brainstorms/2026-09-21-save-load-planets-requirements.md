@@ -14,11 +14,12 @@ Two top-bar actions:
 - **SAVE** — native OS save dialog → JSON file containing every user-settable
   generation parameter. Default filename derived from the planet name.
 - **LOAD** — native OS open dialog (JSON filter) → parse, validate, apply,
-  full terrain regeneration. Camera state is preserved across load.
+  full terrain regeneration. Viewport state (rotation/zoom/pan/view mode) is
+  restored from the file.
 
 ## Scope decisions (user-ruled)
 
-**Included in the file** (47 fields):
+**Included in the file** (52 fields):
 
 - Physics: `PlanetParams` (star distance, mass, metallicity, axial tilt,
   rotation period, seed).
@@ -28,12 +29,14 @@ Two top-bar actions:
   all 10 layer toggles, clouds/weather (coverage, cloud seed, opacity, wind
   scale, storm count/size), surface extras (lava glow, ring inner/outer/tilt/
   opacity, night lights, star color temp, city light hue).
+- Viewport state (added v2 on user request): view mode, planet rotation,
+  zoom, pan — a loaded planet looks exactly as it was left.
 - Identity: `planet_name`.
 
 **Excluded:**
 
-- Camera/view state (`zoom`, `pan`, `view_mode`, `active_tab`, `show_help`) —
-  per-session, not a property of the planet.
+- UI shell state (`active_tab`, `show_help`) — per-session, not a property of
+  the planet.
 - Export settings (`export_resolution`, 7 export layer toggles) — pipeline
   configuration, not planet content.
 - `DerivedProperties` — deterministic from `PlanetParams`; recomputed on load.
