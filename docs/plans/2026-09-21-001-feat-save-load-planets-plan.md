@@ -1,7 +1,7 @@
 ---
 title: "feat: Save/load planet files"
 type: feat
-status: active
+status: completed
 date: 2026-09-21
 origin: "User request: ability to save and load a planet file containing all settable parameters (docs/brainstorms/2026-09-21-save-load-planets-requirements.md)"
 ---
