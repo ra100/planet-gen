@@ -247,6 +247,7 @@ Plan: [docs/plans/2026-09-21-001-feat-save-load-planets-plan.md](docs/plans/2026
 |------|------|--------|
 | U1 | planet_file module: PlanetFile format (47 fields), checked_load validation, default_filename, tests + serde/serde_json/rfd deps | cc:完了 [cfc5b5e] |
 | U2 | App wiring: collect/apply settings, rfd save/load dialogs, top-bar SAVE/LOAD buttons + transient feedback, S/L shortcuts | cc:完了 [cfc5b5e] |
+| U3 | Viewport state in file (v2): view_mode, rot, zoom, pan saved/restored as the user left the viewport | cc:完了 [d72e838] |
 
 ---
 
