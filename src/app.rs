@@ -4,6 +4,7 @@ use std::sync::Arc;
 use crate::export::{self, ExportConfig, ExportHandle, ExportLayers, ExportProgress};
 use crate::gpu::GpuContext;
 use crate::planet::{DerivedProperties, PlanetParams};
+use crate::planet_file::{self, PlanetFile};
 use crate::plates::{PlateGenParams, generate_plates};
 use crate::preview::{PreviewRenderer, PreviewUniforms};
 use crate::terrain_compute::{
@@ -112,6 +113,8 @@ pub struct PlanetGenApp {
     export_destination: String,
     export_layers: String,
     gpu_error: Option<String>,
+    /// Transient save/load feedback: (ok, text, expiry). Shown in the top bar.
+    file_msg: Option<(bool, String, std::time::Instant)>,
     /// Canvas rect captured during the current frame's CentralPanel layout;
     /// HUD chips anchor inside it, not inside the whole window.
     hud_rect: egui::Rect,
@@ -268,6 +271,7 @@ impl PlanetGenApp {
             export_destination: String::new(),
             export_layers: String::new(),
             gpu_error: None,
+            file_msg: None,
             hud_rect: egui::Rect::NOTHING,
         })
     }
@@ -776,22 +780,36 @@ impl PlanetGenApp {
         if ctx.wants_keyboard_input() {
             return;
         }
-        let (randomize_seed, reset, left, right, up, down, zoom_in, zoom_out, help, escape) = ctx
-            .input(|input| {
-                (
-                    input.key_pressed(egui::Key::N),
-                    input.key_pressed(egui::Key::R),
-                    input.key_pressed(egui::Key::ArrowLeft),
-                    input.key_pressed(egui::Key::ArrowRight),
-                    input.key_pressed(egui::Key::ArrowUp),
-                    input.key_pressed(egui::Key::ArrowDown),
-                    input.key_pressed(egui::Key::Plus) || input.key_pressed(egui::Key::Equals),
-                    input.key_pressed(egui::Key::Minus),
-                    input.key_pressed(egui::Key::F1)
-                        || (input.key_pressed(egui::Key::Slash) && input.modifiers.shift),
-                    input.key_pressed(egui::Key::Escape),
-                )
-            });
+        let (
+            randomize_seed,
+            reset,
+            save,
+            load,
+            left,
+            right,
+            up,
+            down,
+            zoom_in,
+            zoom_out,
+            help,
+            escape,
+        ) = ctx.input(|input| {
+            (
+                input.key_pressed(egui::Key::N),
+                input.key_pressed(egui::Key::R),
+                input.key_pressed(egui::Key::S),
+                input.key_pressed(egui::Key::L),
+                input.key_pressed(egui::Key::ArrowLeft),
+                input.key_pressed(egui::Key::ArrowRight),
+                input.key_pressed(egui::Key::ArrowUp),
+                input.key_pressed(egui::Key::ArrowDown),
+                input.key_pressed(egui::Key::Plus) || input.key_pressed(egui::Key::Equals),
+                input.key_pressed(egui::Key::Minus),
+                input.key_pressed(egui::Key::F1)
+                    || (input.key_pressed(egui::Key::Slash) && input.modifiers.shift),
+                input.key_pressed(egui::Key::Escape),
+            )
+        });
 
         if help {
             self.show_help = !self.show_help;
@@ -807,6 +825,12 @@ impl PlanetGenApp {
         }
         if reset {
             self.reset_preview();
+        }
+        if save {
+            self.save_planet_file(ctx);
+        }
+        if load {
+            self.load_planet_file(ctx);
         }
         let rotation_step = 0.1;
         self.apply_view_rotation(
@@ -1095,6 +1119,171 @@ impl PlanetGenApp {
         self.needs_terrain = true;
     }
 
+    // ---- Save / load ------------------------------------------------------
+
+    /// Snapshot every user-settable generation parameter into a planet file.
+    fn collect_settings(&self) -> PlanetFile {
+        PlanetFile {
+            format: planet_file::FILE_FORMAT.to_owned(),
+            version: planet_file::FILE_VERSION,
+            star_distance_au: self.params.star_distance_au,
+            mass_earth: self.params.mass_earth,
+            metallicity: self.params.metallicity,
+            axial_tilt_deg: self.params.axial_tilt_deg,
+            rotation_period_h: self.params.rotation_period_h,
+            seed: self.params.seed,
+            continental_scale: self.continental_scale,
+            water_loss: self.water_loss,
+            climate_moisture: self.climate_moisture,
+            season: self.season,
+            erosion_iterations: self.erosion_iterations,
+            light_azimuth: self.light_azimuth,
+            light_elevation: self.light_elevation,
+            height_scale: self.height_scale,
+            show_atmosphere: self.show_atmosphere,
+            show_ao: self.show_ao,
+            show_water: self.show_water,
+            show_ice: self.show_ice,
+            show_biomes: self.show_biomes,
+            show_clouds: self.show_clouds,
+            show_cloud_shadows: self.show_cloud_shadows,
+            show_wind_effects: self.show_wind_effects,
+            show_cities: self.show_cities,
+            show_erosion: self.show_erosion,
+            mountain_scale: self.mountain_scale,
+            boundary_width: self.boundary_width,
+            warp_strength: self.warp_strength,
+            detail_scale: self.detail_scale,
+            age_override: self.age_override,
+            num_plates_override: self.num_plates_override,
+            num_continents: self.num_continents,
+            continent_size_variety: self.continent_size_variety,
+            cloud_coverage: self.cloud_coverage,
+            cloud_seed: self.cloud_seed,
+            cloud_opacity: self.cloud_opacity,
+            wind_scale: self.wind_scale,
+            lava_glow: self.lava_glow,
+            ring_inner: self.ring_inner,
+            ring_outer: self.ring_outer,
+            ring_tilt: self.ring_tilt,
+            ring_opacity: self.ring_opacity,
+            storm_count: self.storm_count,
+            storm_size: self.storm_size,
+            night_lights: self.night_lights,
+            star_color_temp: self.star_color_temp,
+            city_light_hue: self.city_light_hue,
+            planet_name: self.planet_name.clone(),
+        }
+    }
+
+    /// Apply a loaded planet file. Mirrors the tail of `apply_preset`
+    /// (`update_derived` + `needs_terrain`) but deliberately does NOT
+    /// recompute `cloud_seed` or `planet_name` from the seed — both are
+    /// restored verbatim from the file. Weather rebuild rides the existing
+    /// two-frame defer inside `regenerate_terrain()`.
+    fn apply_settings(&mut self, file: &PlanetFile) {
+        self.params = PlanetParams {
+            star_distance_au: file.star_distance_au,
+            mass_earth: file.mass_earth,
+            metallicity: file.metallicity,
+            axial_tilt_deg: file.axial_tilt_deg,
+            rotation_period_h: file.rotation_period_h,
+            seed: file.seed,
+        };
+        self.continental_scale = file.continental_scale;
+        self.water_loss = file.water_loss;
+        self.climate_moisture = file.climate_moisture;
+        self.season = file.season;
+        self.erosion_iterations = file.erosion_iterations;
+        self.light_azimuth = file.light_azimuth;
+        self.light_elevation = file.light_elevation;
+        self.height_scale = file.height_scale;
+        self.show_atmosphere = file.show_atmosphere;
+        self.show_ao = file.show_ao;
+        self.show_water = file.show_water;
+        self.show_ice = file.show_ice;
+        self.show_biomes = file.show_biomes;
+        self.show_clouds = file.show_clouds;
+        self.show_cloud_shadows = file.show_cloud_shadows;
+        self.show_wind_effects = file.show_wind_effects;
+        self.show_cities = file.show_cities;
+        self.show_erosion = file.show_erosion;
+        self.mountain_scale = file.mountain_scale;
+        self.boundary_width = file.boundary_width;
+        self.warp_strength = file.warp_strength;
+        self.detail_scale = file.detail_scale;
+        self.age_override = file.age_override;
+        self.num_plates_override = file.num_plates_override;
+        self.num_continents = file.num_continents;
+        self.continent_size_variety = file.continent_size_variety;
+        self.cloud_coverage = file.cloud_coverage;
+        self.cloud_seed = file.cloud_seed;
+        self.cloud_opacity = file.cloud_opacity;
+        self.wind_scale = file.wind_scale;
+        self.lava_glow = file.lava_glow;
+        self.ring_inner = file.ring_inner;
+        self.ring_outer = file.ring_outer;
+        self.ring_tilt = file.ring_tilt;
+        self.ring_opacity = file.ring_opacity;
+        self.storm_count = file.storm_count;
+        self.storm_size = file.storm_size;
+        self.night_lights = file.night_lights;
+        self.star_color_temp = file.star_color_temp;
+        self.city_light_hue = file.city_light_hue;
+        self.planet_name = file.planet_name.clone();
+        self.update_derived();
+        self.needs_terrain = true;
+    }
+
+    fn set_file_msg(&mut self, ok: bool, text: String) {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        self.file_msg = Some((ok, text, until));
+    }
+
+    /// Open the native save dialog and write the current configuration.
+    fn save_planet_file(&mut self, ctx: &egui::Context) {
+        let file = self.collect_settings();
+        let default_name = planet_file::default_filename(&self.planet_name);
+        if let Some(mut path) = rfd::FileDialog::new()
+            .set_file_name(&default_name)
+            .add_filter("Planet JSON", &["json"])
+            .save_file()
+        {
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                path.set_extension("json");
+            }
+            match serde_json::to_string_pretty(&file) {
+                Ok(json) => match std::fs::write(&path, json) {
+                    Ok(()) => self.set_file_msg(true, format!("saved {}", path.display())),
+                    Err(e) => self.set_file_msg(false, format!("save failed: {e}")),
+                },
+                Err(e) => self.set_file_msg(false, format!("save failed: {e}")),
+            }
+        } // dialog cancelled — silent no-op
+        ctx.request_repaint();
+    }
+
+    /// Open the native open dialog and load a planet file. The file is fully
+    /// parsed and validated before any app state is assigned (all-or-nothing).
+    fn load_planet_file(&mut self, ctx: &egui::Context) {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("Planet JSON", &["json"])
+            .pick_file()
+        {
+            match std::fs::read_to_string(&path) {
+                Ok(json) => match planet_file::checked_load(&json) {
+                    Ok(file) => {
+                        self.apply_settings(&file);
+                        self.set_file_msg(true, format!("loaded {}", path.display()));
+                    }
+                    Err(e) => self.set_file_msg(false, e),
+                },
+                Err(e) => self.set_file_msg(false, format!("read failed: {e}")),
+            }
+        } // dialog cancelled — silent no-op
+        ctx.request_repaint();
+    }
+
     // ---- Shell regions ----------------------------------------------------
 
     fn top_bar(&mut self, ctx: &egui::Context) {
@@ -1134,6 +1323,33 @@ impl PlanetGenApp {
                         .size(12.0)
                         .color(theme::TEXT_FAINT),
                 );
+
+                ui.add_space(12.0);
+                if ui
+                    .small_button(RichText::new("SAVE").color(theme::TEXT_DIM))
+                    .on_hover_text("Save all parameters to a JSON file (S)")
+                    .clicked()
+                {
+                    self.save_planet_file(ctx);
+                }
+                if ui
+                    .small_button(RichText::new("LOAD").color(theme::TEXT_DIM))
+                    .on_hover_text("Load parameters from a JSON file (L)")
+                    .clicked()
+                {
+                    self.load_planet_file(ctx);
+                }
+
+                // Transient save/load feedback (auto-expires in update()).
+                if let Some((ok, text, _until)) = &self.file_msg {
+                    ui.add_space(12.0);
+                    widgets::callout(
+                        ui,
+                        if *ok { "OK" } else { "ERROR" },
+                        text,
+                        if *ok { theme::OK } else { theme::DANGER },
+                    );
+                }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
@@ -1185,7 +1401,7 @@ impl PlanetGenApp {
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
-                        RichText::new("DRAG ROTATE · SCROLL ZOOM · MMB PAN · DBL-CLICK RESET · N SEED · R VIEW · ? HELP")
+                        RichText::new("DRAG ROTATE · SCROLL ZOOM · MMB PAN · DBL-CLICK RESET · N SEED · R VIEW · S SAVE · L LOAD · ? HELP")
                             .monospace()
                             .size(10.5)
                             .color(theme::TEXT_FAINT),
@@ -2142,6 +2358,12 @@ impl PlanetGenApp {
 
 impl eframe::App for PlanetGenApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Expire transient save/load feedback.
+        if let Some((_, _, until)) = &self.file_msg
+            && *until <= std::time::Instant::now()
+        {
+            self.file_msg = None;
+        }
         self.handle_keyboard_shortcuts(ctx);
         if self.export_handle.is_some() {
             self.poll_export();

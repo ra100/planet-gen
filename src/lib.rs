@@ -7,6 +7,7 @@ pub mod noise;
 pub mod openexr_writer;
 pub mod perf_evidence;
 pub mod planet;
+pub mod planet_file;
 pub mod plates;
 pub mod png_writer;
 pub mod preview;
