@@ -67,3 +67,6 @@ data
 /reference/art002e000192.jpg
 /reference/art002e004462~orig.jpg
 /reference/art002e009166~orig.jpg
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
