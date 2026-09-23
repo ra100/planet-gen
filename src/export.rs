@@ -53,7 +53,10 @@ pub const fn export_weather_resolution(face_resolution: u32) -> u32 {
     }
 }
 const STAGED_SAMPLE_REGION_SIDE: u32 = 512;
-const STAGED_SAMPLE_CACHE_REGIONS: usize = 8;
+/// One equirect row sweeps at most ~84 distinct 512px regions across the six
+/// faces (measured at 8K). The per-worker cache must hold a full row's working
+/// set or every region is re-read from disk once per row (~270x traffic).
+const STAGED_SAMPLE_CACHE_REGIONS: usize = 128;
 const MATERIALIZATION_CHECKPOINT_ROW_INTERVAL: u32 = 1024;
 const MAX_EQUIRECT_ROW_WORKERS: usize = 8;
 const ROW_QUEUE_PER_WORKER: usize = 2;
@@ -627,7 +630,9 @@ pub fn estimated_export_weather_bytes(face_resolution: u32) -> Result<u64, Strin
     if face_resolution <= 2 || resolution <= 2 {
         return Err("export weather requires faces larger than 2 pixels".into());
     }
-    let (region_side, cache_regions) = staged_sampler_config(face_resolution, 1)?;
+    // The sampler runs on the capped weather stage, so size it from that
+    // resolution (matching materialize_staged_terrain_for_weather).
+    let (region_side, cache_regions) = staged_sampler_config(resolution, 1)?;
     let face_values = u64::from(resolution)
         .checked_mul(u64::from(resolution))
         .and_then(|values| values.checked_mul(6))
@@ -3788,22 +3793,31 @@ pub fn spawn_export(
     let cancel_clone = cancel.clone();
 
     let thread = std::thread::spawn(move || {
-        match run_export(
-            &gpu,
-            &config,
-            &params,
-            &derived,
-            continental_scale,
-            water_loss,
-            terrain_params,
-            &tx,
-            &cancel_clone,
-        ) {
-            // run_export emits the single terminal Complete event after all atomic
-            // writers have published. Do not duplicate it from the worker wrapper.
-            Ok(_) => {}
-            Err(e) => {
+        // A fatal GPU error (out-of-memory / device lost) panics inside wgpu.
+        // Catch it so the worker dies cleanly and the UI gets an Error event
+        // instead of a dead channel plus a dropped handle.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_export(
+                &gpu,
+                &config,
+                &params,
+                &derived,
+                continental_scale,
+                water_loss,
+                terrain_params,
+                &tx,
+                &cancel_clone,
+            )
+        }));
+        match result {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
                 let _ = tx.send(ExportProgress::Error(e));
+            }
+            Err(_) => {
+                let _ = tx.send(ExportProgress::Error(
+                    "GPU device lost during export (out of memory). Free VRAM and retry.".into(),
+                ));
             }
         }
     });
@@ -3918,7 +3932,7 @@ mod tests {
             assert_eq!(values.len(), 16);
             assert!(values.iter().all(|value| value.is_finite()));
         }
-        assert_eq!(estimated_export_weather_bytes(8192).unwrap(), 61_472_768);
+        assert_eq!(estimated_export_weather_bytes(8192).unwrap(), 53_670_916);
         assert!(estimated_export_weather_bytes(8192).unwrap() <= MAX_8K_OWNED_LIVE_BYTES);
         assert!(materialize_staged_terrain_for_weather(&stage, 4, &AtomicBool::new(true)).is_err());
         drop(stage);

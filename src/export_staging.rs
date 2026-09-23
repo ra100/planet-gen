@@ -2,9 +2,11 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+
+use memmap2::Mmap;
 
 const ROW_CANCEL_CHECK_INTERVAL: u32 = 128;
 pub const MAX_EQUIRECT_INTERMEDIATE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
@@ -23,6 +25,10 @@ pub struct FaceStage {
     metadata: StageMetadata,
     expected_face_bytes: u64,
     coverage_lock: Mutex<()>,
+    /// One lazily created shared mapping per face. Region reads then copy from
+    /// page-cache-backed mapped memory instead of issuing a seek + read syscall
+    /// per row (an 8K region read is 512 rows).
+    mmaps: Mutex<Vec<Option<Arc<Mmap>>>>,
 }
 
 /// The on-disk backing store for a streamed cubemap export.
@@ -691,6 +697,7 @@ impl FaceStage {
             metadata,
             expected_face_bytes,
             coverage_lock: Mutex::new(()),
+            mmaps: Mutex::new(vec![None; 6]),
         })
     }
 
@@ -772,24 +779,47 @@ impl FaceStage {
             .ok_or("staged region size overflows usize")?;
         let values = usize::try_from(values).map_err(|_| "staged region size exceeds usize")?;
         self.validate(face, origin_x, origin_y, width, height, values)?;
-        let mut file = File::open(self.face_path(face))
-            .map_err(|error| format!("failed to open staged face: {error}"))?;
-        let mut result = vec![0.0; values];
+        let mmap = self.face_bytes(face)?;
+        let mapped: &Mmap = &mmap;
+        let bytes: &[u8] = mapped;
+        // f32 has no invalid bit patterns and every byte below is overwritten by
+        // the mapped copy, so skip the zero-fill.
+        let mut result = Vec::with_capacity(values);
+        unsafe { result.set_len(values) };
         let row_bytes = width as usize * self.metadata.components as usize * 4;
         let face_row_bytes =
             self.metadata.face_resolution as u64 * self.metadata.components as u64 * 4;
         for row in 0..height {
-            let offset = (origin_y + row) as u64 * face_row_bytes
-                + origin_x as u64 * self.metadata.components as u64 * 4;
-            file.seek(SeekFrom::Start(offset))
-                .map_err(|error| format!("failed to seek staged face: {error}"))?;
+            let offset = ((origin_y + row) as u64 * face_row_bytes
+                + origin_x as u64 * self.metadata.components as u64 * 4) as usize;
+            // validate() bounds the region inside the face; guard the mapping
+            // length anyway so a truncated file errors instead of panicking.
+            let end = offset
+                .checked_add(row_bytes)
+                .filter(|end| *end <= bytes.len())
+                .ok_or("staged face mapping is shorter than its metadata")?;
             let start = row as usize * row_bytes / 4;
-            file.read_exact(bytemuck::cast_slice_mut(
-                &mut result[start..start + row_bytes / 4],
-            ))
-            .map_err(|error| format!("failed to read staged region: {error}"))?;
+            result[start..start + row_bytes / 4]
+                .copy_from_slice(bytemuck::cast_slice(&bytes[offset..end]));
         }
         Ok(result)
+    }
+
+    /// Returns the mapped face file, creating the shared mapping on first use.
+    fn face_bytes(&self, face: u32) -> Result<Arc<Mmap>, String> {
+        let mut slots = self.mmaps.lock().map_err(|_| "staged mmap lock poisoned")?;
+        if let Some(existing) = &slots[face as usize] {
+            return Ok(Arc::clone(existing));
+        }
+        let file = File::open(self.face_path(face))
+            .map_err(|error| format!("failed to open staged face: {error}"))?;
+        // Face files are fully written and size-validated before any sampler is
+        // constructed, so the mapping never observes a partial file.
+        let mmap = Arc::new(unsafe {
+            Mmap::map(&file).map_err(|error| format!("failed to map staged face: {error}"))?
+        });
+        slots[face as usize] = Some(Arc::clone(&mmap));
+        Ok(mmap)
     }
 
     fn face_path(&self, face: u32) -> PathBuf {

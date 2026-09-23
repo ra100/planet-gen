@@ -2761,6 +2761,7 @@ dependencies = [
  "half",
  "image",
  "log",
+ "memmap2",
  "pkg-config",
  "png",
  "pollster",
