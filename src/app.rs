@@ -1,5 +1,6 @@
 use eframe::egui;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::export::{self, ExportConfig, ExportHandle, ExportLayers, ExportProgress};
 use crate::gpu::GpuContext;
@@ -113,6 +114,13 @@ pub struct PlanetGenApp {
     export_destination: String,
     export_layers: String,
     gpu_error: Option<String>,
+    /// Set by the device's uncaptured-error handler on fatal GPU errors
+    /// (out-of-memory / device lost). The device is then unusable; the update
+    /// loop stops all GPU work and keeps the UI alive.
+    gpu_failed: Arc<AtomicBool>,
+    /// One-shot cleanup for a lost device already ran (cancel export, clear
+    /// pending work, raise the error banner).
+    gpu_device_lost: bool,
     /// Transient save/load feedback: (ok, text, expiry). Shown in the top bar.
     file_msg: Option<(bool, String, std::time::Instant)>,
     /// Canvas rect captured during the current frame's CentralPanel layout;
@@ -171,6 +179,20 @@ impl PlanetGenApp {
             .as_ref()
             .ok_or_else(|| "eframe did not provide the required wgpu render state".to_owned())?;
         let gpu = Arc::new(GpuContext::from_eframe(render_state));
+        // Fatal GPU errors (e.g. VRAM out-of-memory) invalidate the shared
+        // device. Record them so the update loop can stop GPU work and keep
+        // the UI alive instead of panicking on the next device call.
+        let gpu_failed = Arc::new(AtomicBool::new(false));
+        {
+            let failed = Arc::clone(&gpu_failed);
+            gpu.device.on_uncaptured_error(Arc::new(move |error: wgpu::Error| {
+                log::error!("uncaptured GPU error: {error:?}");
+                // OutOfMemory invalidates the whole device; later calls panic.
+                if matches!(error, wgpu::Error::OutOfMemory { .. }) {
+                    failed.store(true, Ordering::Relaxed);
+                }
+            }));
+        }
         let preview_renderer = PreviewRenderer::new(&gpu);
         let texture_id = render_state.renderer.write().register_native_texture(
             &gpu.device,
@@ -271,6 +293,8 @@ impl PlanetGenApp {
             export_destination: String::new(),
             export_layers: String::new(),
             gpu_error: None,
+            gpu_failed,
+            gpu_device_lost: false,
             file_msg: None,
             hud_rect: egui::Rect::NOTHING,
         })
@@ -2373,6 +2397,25 @@ impl eframe::App for PlanetGenApp {
             self.file_msg = None;
         }
         self.handle_keyboard_shortcuts(ctx);
+
+        // One-shot response to a fatal GPU error: the device is lost, so stop
+        // all GPU work (cancel any running export, drop pending generation)
+        // and keep the UI alive with an explanatory banner.
+        if self.gpu_failed.load(Ordering::Relaxed) && !self.gpu_device_lost {
+            self.gpu_device_lost = true;
+            if let Some(handle) = self.export_handle.take() {
+                handle.cancel.store(true, Ordering::Relaxed);
+            }
+            self.needs_terrain = false;
+            self.terrain_pending = false;
+            self.erosion_remaining = 0;
+            self.needs_render = false;
+            self.gpu_error = Some(
+                "GPU out of memory — device lost. Free VRAM (close other GPU apps) and restart the app."
+                    .into(),
+            );
+        }
+
         if self.export_handle.is_some() {
             self.poll_export();
             ctx.request_repaint();
@@ -2533,25 +2576,29 @@ impl eframe::App for PlanetGenApp {
             self.needs_terrain = false;
             self.terrain_start = Some(std::time::Instant::now());
             ctx.request_repaint();
-        } else if self.terrain_pending {
+        } else if self.terrain_pending && !self.gpu_failed.load(Ordering::Relaxed) {
             self.terrain_pending = false;
             self.regenerate_terrain();
         }
         // Progressive erosion: apply one batch per frame, but skip when mouse is
         // pressed to avoid blocking input processing (prevents slider sticking)
         let mouse_busy = ctx.input(|i| i.pointer.any_pressed() || i.pointer.any_down());
-        if self.erosion_remaining > 0 && !mouse_busy {
+        if self.erosion_remaining > 0 && !mouse_busy && !self.gpu_failed.load(Ordering::Relaxed) {
             self.erode_batch();
             ctx.request_repaint();
         } else if self.erosion_remaining > 0 {
             ctx.request_repaint(); // retry next frame when mouse released
         }
-        let weather_busy = self.poll_weather();
+        let weather_busy = if self.gpu_failed.load(Ordering::Relaxed) {
+            false
+        } else {
+            self.poll_weather()
+        };
         self.weather_busy = weather_busy;
         if weather_busy {
             ctx.request_repaint();
         }
-        if self.needs_render {
+        if self.needs_render && !self.gpu_failed.load(Ordering::Relaxed) {
             self.render_preview();
         }
     }
@@ -2776,7 +2823,7 @@ mod tests {
         let gpu = GpuContext::new().expect("GPU init failed");
         let root = std::env::temp_dir().join(format!("planet-gen-parity-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        let (progress, _) = std::sync::mpsc::channel();
+        let (progress, _progress_rx) = std::sync::mpsc::channel();
         let exported = run_export(
             &gpu,
             &export_config(root.clone(), "preview"),
