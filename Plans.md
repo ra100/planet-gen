@@ -325,6 +325,7 @@ Three-tier tectonic simulation with UI toggle between modes.
 ## Recorded Amendments
 
 - 2026-07-19: U14's historical `-10°C` cool-marine dominance fixture is superseded because it represents pack ice under the Earth model. The `+5°C` matched ocean/inland fixture tests open-water stratocumulus; the geographic polar/pack-ice gate and production persistent-ice settings (`-15..-6°C`, supply suppression `.25`, phase penalty `.15`) remain unchanged.
+- 2026-09-23: A hand-rolled multithreaded OpenEXR ZIP writer (two-phase: let Imf write the header, then append self-assembled deflate blocks) was reverted to the committed single-threaded `Imf::writePixels(1)` writer. It grew unbounded memory in a flush loop and emitted malformed files (`Invalid("block index")`). The 240s 8K gate (12.3) is met by staged mmap I/O, not by parallelizing EXR compression; revisit only with a bounded-memory block design that keeps Imf's on-disk format authoritative.
 
 ---
 
@@ -343,3 +344,15 @@ Plan: [docs/plans/2026-09-05-001-feat-ui-redesign-instrument-panel-plan.md](docs
 | 11.5 | Expose rings + lava glow; preset table (7 archetypes) | Sliders drive existing uniform fields; presets apply bundles | 11.4 | cc:完了 [510908e] |
 | 11.6 | Help overlay (F1/?), shortcut polish, double-click canvas reset | Documented in help window and status bar | 11.4 | cc:完了 [510908e] |
 | 11.7 | `cargo test --lib` green + new UI tests; zero build warnings | 190 passed / 0 failed | 11.4 | cc:完了 [510908e] |
+
+---
+
+## Phase 12: 8K Export Stability & Staging I/O
+
+Diagnosis of the 8K export crash: not an app leak (measured VRAM delta ~350MB). Root cause chain — Vulkan out-of-memory under a memory-constrained adapter loses the shared wgpu device, and the next main-thread device call panics, killing the app. Second issue: 8K equirect row materialization is I/O-bound (~190s/layer; each of ~412K region reads did `File::open` + 512 seek/read syscalls).
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 12.1 | Graceful GPU OOM: `on_uncaptured_error` flag + one-shot update-loop cleanup (cancel export, clear pending work, error banner) + per-site same-frame guards | App stays alive with banner after VRAM OOM; no panic on next device call | - | cc:完了 [8005917] |
+| 12.2 | Export worker `catch_unwind`: wgpu panic in export thread becomes `ExportProgress::Error`, not a dead channel | Worker panic surfaces as UI error event | 12.1 | cc:完了 [8005917] |
+| 12.3 | Staged face reads via per-face `mmap` (memmap2): region read = memcpy from page cache, no per-row syscalls; skip f32 zero-fill | `perf_bench --u2-8k` layer staging well under the 240s gate; staged tests green | - | cc:完了 [fb7d295] |
