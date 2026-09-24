@@ -726,6 +726,12 @@ impl PlanetGenApp {
         );
 
         self.export_handle = Some(handle);
+        // Free preview-side GPU memory for the export's footprint: height
+        // view, wind dynamics, and weather cubemaps. The CPU terrain stays;
+        // restore_preview_after_export rebuilds these when the export finishes.
+        self.cached_cubemap_view = None;
+        self.weather = None;
+        self.dynamics = None;
         self.export_status = format!(
             "Starting export to {} (layers: {}).",
             self.export_destination, self.export_layers
@@ -777,7 +783,40 @@ impl PlanetGenApp {
         }
         if finished {
             self.export_handle = None;
+            self.restore_preview_after_export();
         }
+    }
+
+    /// Rebuild the preview GPU resources that `start_export` released. Terrain
+    /// compute is skipped: the CPU terrain is unchanged, so only the height
+    /// view, wind dynamics, and weather spinup need rebuilding. No-op when a
+    /// full regeneration or progressive erosion will rebuild the views itself.
+    fn restore_preview_after_export(&mut self) {
+        if self.gpu_failed.load(Ordering::Relaxed)
+            || self.needs_terrain
+            || self.terrain_pending
+            || self.erosion_remaining > 0
+        {
+            return;
+        }
+        let Some(terrain) = self.weather_terrain.as_ref() else {
+            return;
+        };
+        self.cached_cubemap_view =
+            Some(self.preview_renderer.upload_terrain(&self.gpu, terrain));
+        let cloud_res = (self.preview_resolution / 2).max(192);
+        if self.dynamics.as_ref().map(|d| d.resolution) != Some(cloud_res) {
+            let ocean_level = self.ocean_level();
+            self.dynamics = Some(self.wind_pipeline.create_textures(
+                &self.gpu,
+                cloud_res,
+                terrain,
+                ocean_level,
+            ));
+        }
+        self.request_weather(self.ocean_level());
+        self.dispatch_weather();
+        self.needs_render = true;
     }
 
     fn reset_preview(&mut self) {
@@ -2526,7 +2565,10 @@ impl eframe::App for PlanetGenApp {
                     .terrain_start
                     .map(|t| t.elapsed().as_secs_f32())
                     .unwrap_or(0.0);
-                if (self.terrain_pending || self.erosion_remaining > 0) && gen_elapsed > 1.0 {
+                if (self.terrain_pending || self.erosion_remaining > 0)
+            && self.export_handle.is_none()
+            && gen_elapsed > 1.0
+        {
                     ui.painter().rect_filled(
                         ui.max_rect(),
                         0.0,
@@ -2540,7 +2582,10 @@ impl eframe::App for PlanetGenApp {
             .terrain_start
             .map(|t| t.elapsed().as_secs_f32())
             .unwrap_or(0.0);
-        if (self.terrain_pending || self.erosion_remaining > 0) && gen_elapsed > 1.0 {
+        if (self.terrain_pending || self.erosion_remaining > 0)
+            && self.export_handle.is_none()
+            && gen_elapsed > 1.0
+        {
             widgets::hud_chip(
                 ctx,
                 egui::Id::new("hud_loading"),
@@ -2576,20 +2621,31 @@ impl eframe::App for PlanetGenApp {
             self.needs_terrain = false;
             self.terrain_start = Some(std::time::Instant::now());
             ctx.request_repaint();
-        } else if self.terrain_pending && !self.gpu_failed.load(Ordering::Relaxed) {
+        } else if self.terrain_pending
+            && self.export_handle.is_none()
+            && !self.gpu_failed.load(Ordering::Relaxed)
+        {
             self.terrain_pending = false;
             self.regenerate_terrain();
         }
         // Progressive erosion: apply one batch per frame, but skip when mouse is
         // pressed to avoid blocking input processing (prevents slider sticking)
         let mouse_busy = ctx.input(|i| i.pointer.any_pressed() || i.pointer.any_down());
-        if self.erosion_remaining > 0 && !mouse_busy && !self.gpu_failed.load(Ordering::Relaxed) {
+        if self.erosion_remaining > 0
+            && self.export_handle.is_none()
+            && !mouse_busy
+            && !self.gpu_failed.load(Ordering::Relaxed)
+        {
             self.erode_batch();
             ctx.request_repaint();
         } else if self.erosion_remaining > 0 {
             ctx.request_repaint(); // retry next frame when mouse released
         }
-        let weather_busy = if self.gpu_failed.load(Ordering::Relaxed) {
+        // Weather spinup is paused while an export runs: start_export released
+        // the weather cubemaps, and restore_preview_after_export re-requests them.
+        let weather_busy = if self.gpu_failed.load(Ordering::Relaxed)
+            || self.export_handle.is_some()
+        {
             false
         } else {
             self.poll_weather()
@@ -2598,7 +2654,10 @@ impl eframe::App for PlanetGenApp {
         if weather_busy {
             ctx.request_repaint();
         }
-        if self.needs_render && !self.gpu_failed.load(Ordering::Relaxed) {
+        if self.needs_render
+            && self.export_handle.is_none()
+            && !self.gpu_failed.load(Ordering::Relaxed)
+        {
             self.render_preview();
         }
     }
