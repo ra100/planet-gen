@@ -123,6 +123,10 @@ pub struct PlanetGenApp {
     gpu_device_lost: bool,
     /// Transient save/load feedback: (ok, text, expiry). Shown in the top bar.
     file_msg: Option<(bool, String, std::time::Instant)>,
+    /// Last file written by a save or opened by a load. Its folder seeds the
+    /// next save/load dialog; Ctrl+S overwrites it without a dialog and
+    /// Ctrl+Shift+S snapshots beside it as `<name>.001.json`, `.002.json`, …
+    last_file_path: Option<std::path::PathBuf>,
     /// Canvas rect captured during the current frame's CentralPanel layout;
     /// HUD chips anchor inside it, not inside the whole window.
     hud_rect: egui::Rect,
@@ -296,6 +300,7 @@ impl PlanetGenApp {
             gpu_failed,
             gpu_device_lost: false,
             file_msg: None,
+            last_file_path: None,
             hud_rect: egui::Rect::NOTHING,
         })
     }
@@ -847,6 +852,8 @@ impl PlanetGenApp {
             randomize_seed,
             reset,
             save,
+            quick_save,
+            incremental_save,
             load,
             left,
             right,
@@ -857,10 +864,14 @@ impl PlanetGenApp {
             help,
             escape,
         ) = ctx.input(|input| {
+            let ctrl = input.modifiers.ctrl || input.modifiers.command;
+            let s = input.key_pressed(egui::Key::S);
             (
                 input.key_pressed(egui::Key::N),
                 input.key_pressed(egui::Key::R),
-                input.key_pressed(egui::Key::S),
+                s && !ctrl,
+                s && ctrl && !input.modifiers.shift,
+                s && ctrl && input.modifiers.shift,
                 input.key_pressed(egui::Key::L),
                 input.key_pressed(egui::Key::ArrowLeft),
                 input.key_pressed(egui::Key::ArrowRight),
@@ -891,6 +902,12 @@ impl PlanetGenApp {
         }
         if save {
             self.save_planet_file(ctx);
+        }
+        if quick_save {
+            self.quick_save(ctx);
+        }
+        if incremental_save {
+            self.incremental_save(ctx);
         }
         if load {
             self.load_planet_file(ctx);
@@ -1311,40 +1328,103 @@ impl PlanetGenApp {
         self.file_msg = Some((ok, text, until));
     }
 
-    /// Open the native save dialog and write the current configuration.
-    fn save_planet_file(&mut self, ctx: &egui::Context) {
+    /// Serialize the current configuration and write it to `path`. Reports
+    /// success/failure via the top-bar file message; returns true on success.
+    fn write_planet_file(&mut self, path: &std::path::Path) -> bool {
         let file = self.collect_settings();
+        match serde_json::to_string_pretty(&file) {
+            Ok(json) => match std::fs::write(path, json) {
+                Ok(()) => {
+                    self.set_file_msg(true, format!("saved {}", path.display()));
+                    true
+                }
+                Err(e) => {
+                    self.set_file_msg(false, format!("save failed: {e}"));
+                    false
+                }
+            },
+            Err(e) => {
+                self.set_file_msg(false, format!("save failed: {e}"));
+                false
+            }
+        }
+    }
+
+    /// Open the native save dialog (seeded with the last used folder) and
+    /// write the current configuration. The chosen path becomes the current
+    /// file for Ctrl+S overwrite and incremental saves.
+    fn save_planet_file(&mut self, ctx: &egui::Context) {
         let default_name = planet_file::default_filename(&self.planet_name);
-        if let Some(mut path) = rfd::FileDialog::new()
+        let mut dialog = rfd::FileDialog::new()
             .set_file_name(&default_name)
-            .add_filter("Planet JSON", &["json"])
-            .save_file()
-        {
+            .add_filter("Planet JSON", &["json"]);
+        if let Some(dir) = self.last_file_path.as_ref().and_then(|p| p.parent()) {
+            dialog = dialog.set_directory(dir);
+        }
+        if let Some(mut path) = dialog.save_file() {
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 path.set_extension("json");
             }
-            match serde_json::to_string_pretty(&file) {
-                Ok(json) => match std::fs::write(&path, json) {
-                    Ok(()) => self.set_file_msg(true, format!("saved {}", path.display())),
-                    Err(e) => self.set_file_msg(false, format!("save failed: {e}")),
-                },
-                Err(e) => self.set_file_msg(false, format!("save failed: {e}")),
+            if self.write_planet_file(&path) {
+                self.last_file_path = Some(path);
             }
         } // dialog cancelled — silent no-op
         ctx.request_repaint();
     }
 
-    /// Open the native open dialog and load a planet file. The file is fully
-    /// parsed and validated before any app state is assigned (all-or-nothing).
+    /// Ctrl/⌘+S: overwrite the current file directly, no dialog. Falls back
+    /// to the save dialog when no file has been saved or loaded yet.
+    fn quick_save(&mut self, ctx: &egui::Context) {
+        match self.last_file_path.clone() {
+            Some(path) => {
+                let _ = self.write_planet_file(&path);
+            }
+            None => self.save_planet_file(ctx),
+        }
+        ctx.request_repaint();
+    }
+
+    /// Ctrl/⌘+Shift+S: snapshot the current file as `<name>.001.json`,
+    /// `.002.json`, … beside it (lowest free number). The base file itself is
+    /// never touched. With no current file, falls back to the save dialog.
+    fn incremental_save(&mut self, ctx: &egui::Context) {
+        let base = match self.last_file_path.clone() {
+            Some(p) => p,
+            None => {
+                self.save_planet_file(ctx);
+                return;
+            }
+        };
+        let stem = base.file_stem().and_then(|s| s.to_str()).unwrap_or("planet");
+        let ext = base.extension().and_then(|e| e.to_str()).unwrap_or("json");
+        let dir = base.parent().map(std::path::Path::to_path_buf).unwrap_or_default();
+        for n in 1..=999u32 {
+            let candidate = dir.join(format!("{stem}.{n:03}.{ext}"));
+            if !candidate.exists() {
+                self.write_planet_file(&candidate);
+                ctx.request_repaint();
+                return;
+            }
+        }
+        self.set_file_msg(false, "incremental save failed: 999 versions already exist".into());
+        ctx.request_repaint();
+    }
+
+    /// Open the native open dialog (seeded with the last used folder) and load
+    /// a planet file. The file is fully parsed and validated before any app
+    /// state is assigned (all-or-nothing). A successful load makes that file
+    /// the current file for Ctrl+S overwrite.
     fn load_planet_file(&mut self, ctx: &egui::Context) {
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter("Planet JSON", &["json"])
-            .pick_file()
-        {
+        let mut dialog = rfd::FileDialog::new().add_filter("Planet JSON", &["json"]);
+        if let Some(dir) = self.last_file_path.as_ref().and_then(|p| p.parent()) {
+            dialog = dialog.set_directory(dir);
+        }
+        if let Some(path) = dialog.pick_file() {
             match std::fs::read_to_string(&path) {
                 Ok(json) => match planet_file::checked_load(&json) {
                     Ok(file) => {
                         self.apply_settings(&file);
+                        self.last_file_path = Some(path.clone());
                         self.set_file_msg(true, format!("loaded {}", path.display()));
                     }
                     Err(e) => self.set_file_msg(false, e),
@@ -1398,7 +1478,9 @@ impl PlanetGenApp {
                 ui.add_space(12.0);
                 if ui
                     .small_button(RichText::new("SAVE").color(theme::TEXT_DIM))
-                    .on_hover_text("Save all parameters to a JSON file (S)")
+                    .on_hover_text(
+                        "Save… dialog (S) · Ctrl+S overwrite current · Ctrl+Shift+S snapshot",
+                    )
                     .clicked()
                 {
                     self.save_planet_file(ctx);
@@ -2408,6 +2490,10 @@ impl PlanetGenApp {
                 let rows: &[(&str, &str)] = &[
                     ("N", "Randomize seed"),
                     ("R", "Reset view"),
+                    ("S", "Save… dialog (remembers folder)"),
+                    ("Ctrl/⌘ S", "Overwrite current file"),
+                    ("Ctrl/⌘ ⇧ S", "Incremental save .001, .002 …"),
+                    ("L", "Load… dialog (last folder)"),
                     ("← → ↑ ↓", "Rotate planet"),
                     ("+ / −", "Zoom in / out"),
                     ("Drag", "Rotate planet"),
