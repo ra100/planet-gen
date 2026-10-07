@@ -1201,6 +1201,18 @@ impl ErosionPipeline {
         ocean_level: f32,
         cancel: &std::sync::atomic::AtomicBool,
     ) -> Result<(), ErosionError> {
+        self.erode_batched(gpu, terrain, iterations, ocean_level, cancel, 32)
+    }
+
+    fn erode_batched(
+        &self,
+        gpu: &GpuContext,
+        terrain: &mut TectonicTerrain,
+        iterations: u32,
+        ocean_level: f32,
+        cancel: &std::sync::atomic::AtomicBool,
+        flow_batch_size: u32,
+    ) -> Result<(), ErosionError> {
         if iterations == 0 {
             return Ok(());
         }
@@ -1215,6 +1227,9 @@ impl ErosionPipeline {
         let flow_sub_iterations = (res / 8).max(16);
 
         for face_idx in 0..6usize {
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(ErosionError::ReadbackCancelled);
+            }
             let tile_buffers: Vec<_> = tiles
                 .iter()
                 .copied()
@@ -1331,6 +1346,79 @@ impl ErosionPipeline {
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("erosion encoder"),
                 });
+            // Only height/water parity changes; reuse descriptors across all passes.
+            let bind_groups: Vec<_> = tile_buffers
+                .iter()
+                .map(|tile| {
+                    [
+                        bind_group(
+                            "erosion AA",
+                            tile,
+                            &tile.height_a,
+                            &tile.height_b,
+                            &tile.water_a,
+                            &tile.water_b,
+                        ),
+                        bind_group(
+                            "erosion AB",
+                            tile,
+                            &tile.height_a,
+                            &tile.height_b,
+                            &tile.water_b,
+                            &tile.water_a,
+                        ),
+                        bind_group(
+                            "erosion BA",
+                            tile,
+                            &tile.height_b,
+                            &tile.height_a,
+                            &tile.water_a,
+                            &tile.water_b,
+                        ),
+                        bind_group(
+                            "erosion BB",
+                            tile,
+                            &tile.height_b,
+                            &tile.height_a,
+                            &tile.water_b,
+                            &tile.water_a,
+                        ),
+                    ]
+                })
+                .collect();
+
+            let submit_batch =
+                |encoder: wgpu::CommandEncoder| -> Result<wgpu::CommandEncoder, ErosionError> {
+                    gpu.queue.submit(Some(encoder.finish()));
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    gpu.queue.on_submitted_work_done(move || {
+                        let _ = tx.send(());
+                    });
+                    loop {
+                        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                            return Err(ErosionError::ReadbackCancelled);
+                        }
+                        match rx.try_recv() {
+                            Ok(()) => break,
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                return Err(ErosionError::ReadbackFailed(
+                                    "completion callback disconnected".into(),
+                                ));
+                            }
+                            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                                gpu.device.poll(wgpu::PollType::Poll).map_err(|error| {
+                                    ErosionError::ReadbackFailed(error.to_string())
+                                })?;
+                                std::thread::sleep(std::time::Duration::from_millis(1));
+                            }
+                        }
+                    }
+                    Ok(gpu
+                        .device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("erosion batch"),
+                        }))
+                };
 
             macro_rules! synchronize_halos {
                 ($field:ident) => {
@@ -1369,83 +1457,41 @@ impl ErosionPipeline {
                     } else {
                         synchronize_halos!(water_b);
                     }
-                    for tile in &tile_buffers {
-                        let (input_height, output_height, water_in, water_out) =
-                            match (iter.is_multiple_of(2), sub.is_multiple_of(2)) {
-                                (true, true) => {
-                                    (&tile.height_a, &tile.height_b, &tile.water_a, &tile.water_b)
-                                }
-                                (true, false) => {
-                                    (&tile.height_a, &tile.height_b, &tile.water_b, &tile.water_a)
-                                }
-                                (false, true) => {
-                                    (&tile.height_b, &tile.height_a, &tile.water_a, &tile.water_b)
-                                }
-                                (false, false) => {
-                                    (&tile.height_b, &tile.height_a, &tile.water_b, &tile.water_a)
-                                }
-                            };
-                        let flow_bg = bind_group(
-                            "flow tile",
-                            tile,
-                            input_height,
-                            output_height,
-                            water_in,
-                            water_out,
-                        );
+                    for (tile, groups) in tile_buffers.iter().zip(&bind_groups) {
+                        let flow_bg = &groups[((iter % 2) * 2 + sub % 2) as usize];
                         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                             label: Some("flow pass"),
                             timestamp_writes: None,
                         });
                         pass.set_pipeline(&self.flow_pipeline);
-                        pass.set_bind_group(0, &flow_bg, &[]);
+                        pass.set_bind_group(0, flow_bg, &[]);
                         pass.dispatch_workgroups(
                             res.div_ceil(16),
                             (tile.tile.interior_rows + 2).div_ceil(16),
                             1,
                         );
                     }
+                    if (sub + 1).is_multiple_of(flow_batch_size) {
+                        encoder = submit_batch(encoder)?;
+                    }
                 }
 
                 // Phase 2: Erosion — reads final water, writes new height
-                for tile in &tile_buffers {
-                    let (input_height, output_height, water_in, water_out) = match (
-                        iter.is_multiple_of(2),
-                        flow_sub_iterations.is_multiple_of(2),
-                    ) {
-                        (true, true) => {
-                            (&tile.height_a, &tile.height_b, &tile.water_a, &tile.water_b)
-                        }
-                        (true, false) => {
-                            (&tile.height_a, &tile.height_b, &tile.water_b, &tile.water_a)
-                        }
-                        (false, true) => {
-                            (&tile.height_b, &tile.height_a, &tile.water_a, &tile.water_b)
-                        }
-                        (false, false) => {
-                            (&tile.height_b, &tile.height_a, &tile.water_b, &tile.water_a)
-                        }
-                    };
-                    let erode_bg = bind_group(
-                        "erode tile",
-                        tile,
-                        input_height,
-                        output_height,
-                        water_in,
-                        water_out,
-                    );
+                for (tile, groups) in tile_buffers.iter().zip(&bind_groups) {
+                    let erode_bg = &groups[((iter % 2) * 2 + flow_sub_iterations % 2) as usize];
                     let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                         label: Some("erode pass"),
                         timestamp_writes: None,
                     });
                     pass.set_pipeline(&self.erode_pipeline);
-                    pass.set_bind_group(0, &erode_bg, &[]);
+                    pass.set_bind_group(0, erode_bg, &[]);
                     pass.dispatch_workgroups(
                         res.div_ceil(16),
                         (tile.tile.interior_rows + 2).div_ceil(16),
                         1,
                     );
                 }
+                encoder = submit_batch(encoder)?;
             }
 
             let staging: Vec<_> = tile_buffers
@@ -2360,6 +2406,32 @@ mod tests {
                 .zip(sloped_terrain(16).faces.iter().flatten())
                 .any(|(eroded, original)| eroded != original)
         );
+    }
+
+    #[test]
+    fn erosion_batch_boundaries_preserve_height_and_water_parity() {
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let pipeline = ErosionPipeline::new(&gpu);
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        // 136px gives 17 flow passes, exercising odd water parity as well.
+        for iterations in [2, 3] {
+            let mut reference = sloped_terrain(136);
+            let mut batched = reference.clone();
+            pipeline
+                .erode_batched(&gpu, &mut reference, iterations, -1.0, &cancel, u32::MAX)
+                .unwrap();
+            pipeline
+                .erode_batched(&gpu, &mut batched, iterations, -1.0, &cancel, 3)
+                .unwrap();
+            assert_eq!(reference.faces, batched.faces);
+            assert!(
+                batched
+                    .faces
+                    .iter()
+                    .flatten()
+                    .all(|height| height.is_finite())
+            );
+        }
     }
 
     #[test]

@@ -148,14 +148,82 @@ fn eight_k_export_selects_2048_meso_erosion() {
 
 #[test]
 fn eight_k_meso_erosion_preflight_stays_within_owned_live_budget() {
-    let layers = ExportLayers {
-        emission: false,
-        ..ExportLayers::default()
-    };
+    let layers = ExportLayers::default();
     let bytes =
         estimated_export_preflight_bytes_with_erosion(8192, &layers, 25, &wgpu::Limits::default())
             .unwrap();
     assert!(bytes <= MAX_OWNED_LIVE_BYTES);
+}
+
+#[test]
+#[ignore = "full 8K GPU export; writes all layers under target/8k-erosion-validation"]
+fn eight_k_all_layers_with_erosion() {
+    let gpu = GpuContext::new().expect("GPU init failed");
+    eprintln!("8K validation adapter: {}", gpu.adapter_name());
+    let params = PlanetParams::default();
+    let derived = DerivedProperties::from_params(&params);
+    let config = ExportConfig {
+        face_resolution: 8192,
+        tile_size: TILE_SIZE,
+        output_dir: "target/8k-erosion-validation".into(),
+        planet_name: format!("seed42-{}", std::process::id()),
+        erosion_iterations: 25,
+        layers: ExportLayers::default(),
+        weather: WeatherSnapshot::default(),
+        night_lights: 1.0,
+    };
+    let (tx, rx) = channel();
+    let monitor = std::thread::spawn(move || {
+        let mut previous = String::new();
+        for event in rx {
+            if let planet_gen::export::ExportProgress::Progress { message, .. } = event {
+                let phase = message.split_whitespace().next().unwrap_or("").to_owned();
+                if phase != previous {
+                    eprintln!("{message}");
+                    previous = phase;
+                }
+            }
+        }
+    });
+    let mut timings = planet_gen::export::ExportTimings::default();
+    let output = planet_gen::export::run_export_with_timings(
+        &gpu,
+        &config,
+        &params,
+        &derived,
+        1.0,
+        0.0,
+        terrain_params(params.seed),
+        &tx,
+        &AtomicBool::new(false),
+        &mut timings,
+    )
+    .expect("8K export failed");
+    drop(tx);
+    monitor.join().unwrap();
+    for name in [
+        "height.exr",
+        "normal.exr",
+        "roughness.png",
+        "albedo.png",
+        "ao.png",
+        "water_mask.png",
+        "clouds.exr",
+        "emission.exr",
+    ] {
+        assert!(
+            std::fs::metadata(output.join(name)).unwrap().len() > 0,
+            "missing {name}"
+        );
+    }
+    eprintln!(
+        "8K export complete: {}; terrain {:.0} ms, erosion {:.0} ms, reconstruction {:.0} ms, total {:.0} ms",
+        output.display(),
+        timings.generation_inclusive_ms,
+        timings.meso_erosion_ms,
+        timings.delta_reconstruction_ms,
+        timings.total_wall_ms
+    );
 }
 
 #[test]

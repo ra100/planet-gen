@@ -782,10 +782,7 @@ impl FaceStage {
         let mmap = self.face_bytes(face)?;
         let mapped: &Mmap = &mmap;
         let bytes: &[u8] = mapped;
-        // f32 has no invalid bit patterns and every byte below is overwritten by
-        // the mapped copy, so skip the zero-fill.
         let mut result = Vec::with_capacity(values);
-        unsafe { result.set_len(values) };
         let row_bytes = width as usize * self.metadata.components as usize * 4;
         let face_row_bytes =
             self.metadata.face_resolution as u64 * self.metadata.components as u64 * 4;
@@ -798,9 +795,7 @@ impl FaceStage {
                 .checked_add(row_bytes)
                 .filter(|end| *end <= bytes.len())
                 .ok_or("staged face mapping is shorter than its metadata")?;
-            let start = row as usize * row_bytes / 4;
-            result[start..start + row_bytes / 4]
-                .copy_from_slice(bytemuck::cast_slice(&bytes[offset..end]));
+            result.extend_from_slice(bytemuck::cast_slice(&bytes[offset..end]));
         }
         Ok(result)
     }

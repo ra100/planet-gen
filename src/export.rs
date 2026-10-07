@@ -597,7 +597,7 @@ pub fn estimated_staged_export_peak_bytes(
         .and_then(|value| value.checked_mul(6))
         .and_then(|value| value.checked_mul(std::mem::size_of::<f32>() as u64))
         .ok_or("staged authoritative terrain ledger overflows u64")?;
-    let height = if layers.height {
+    let height = if layers.height || layers.emission {
         estimated_staged_equirect_bytes(face_resolution, 1)?
     } else {
         0
@@ -651,19 +651,11 @@ pub fn estimated_export_weather_bytes(face_resolution: u32) -> Result<u64, Strin
         .ok_or_else(|| "export weather live-byte ledger overflows u64".into())
 }
 
-fn has_legacy_full_equirect_layer(layers: &ExportLayers) -> bool {
-    layers.emission
-}
-
 pub fn estimated_export_preflight_bytes(
     face_resolution: u32,
     layers: &ExportLayers,
 ) -> Result<u64, String> {
-    if has_legacy_full_equirect_layer(layers) {
-        Ok(estimated_peak_streaming_bytes(face_resolution, 16))
-    } else {
-        estimated_staged_export_peak_bytes(face_resolution, layers)
-    }
+    estimated_staged_export_peak_bytes(face_resolution, layers)
 }
 
 pub fn estimated_export_preflight_bytes_with_erosion(
@@ -694,9 +686,12 @@ pub fn estimated_export_preflight_bytes_with_erosion(
             .and_then(|pixels| pixels.checked_mul(6))
             .and_then(|values| values.checked_mul(std::mem::size_of::<f32>() as u64))
             .ok_or("meso reconstruction ledger overflows u64")?;
-        terrain_faces
-            .checked_mul(2)
-            .and_then(|bytes| bytes.checked_add(meso_faces.checked_mul(2)?))
+        erosion_peak
+            .checked_add(
+                meso_faces
+                    .checked_mul(2)
+                    .ok_or("meso reconstruction ledger overflows u64")?,
+            )
             .ok_or("meso reconstruction aggregate ledger overflows u64")?
     } else {
         0
@@ -711,23 +706,6 @@ pub fn validate_8k_owned_live_bytes(bytes: u64) -> Result<(), String> {
         );
     }
     Ok(())
-}
-
-#[derive(Default)]
-struct LayerStream {
-    active_faces: u32,
-    peak_faces: u32,
-}
-
-impl LayerStream {
-    fn begin_face(&mut self) {
-        self.active_faces += 1;
-        self.peak_faces = self.peak_faces.max(self.active_faces);
-    }
-
-    fn end_face(&mut self) {
-        self.active_faces -= 1;
-    }
 }
 
 pub fn crop_region_bytes(region: TileRegion, data: &[u8], element_bytes: usize) -> Vec<u8> {
@@ -1597,6 +1575,7 @@ fn generate_terrain_tiled(
 
 // ============ Tiled Map Generation ============
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn generate_map_tiled<P: Pod>(
     gpu: &GpuContext,
@@ -1685,52 +1664,6 @@ fn generate_map_tiled<P: Pod>(
     }
 
     Ok(face_data)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn stream_map_layer<P: Pod>(
-    gpu: &GpuContext,
-    pipeline: &MapPipeline,
-    terrain: &TectonicTerrain,
-    coordinator: &TileCoordinator,
-    make_params: impl Fn(u32, TileRegion) -> P,
-    output_element_bytes: usize,
-    progress: &mut ProgressTracker,
-    map_name: &str,
-    cancel: &AtomicBool,
-) -> Result<(Vec<f32>, u32, u32), String> {
-    let full_res = coordinator.face_resolution;
-    let eq_w = full_res * 2;
-    let eq_h = full_res;
-    let mut equirect = vec![0.0; (eq_w * eq_h) as usize * (output_element_bytes / 4)];
-    let mut stream = LayerStream::default();
-    for face in 0..6u32 {
-        stream.begin_face();
-        {
-            let bytes = generate_map_tiled(
-                gpu,
-                pipeline,
-                &terrain.faces[face as usize],
-                coordinator,
-                |region| make_params(face, region),
-                output_element_bytes,
-                progress,
-                map_name,
-                face,
-                cancel,
-            )?;
-            write_face_to_equirect(
-                bytemuck::cast_slice(&bytes),
-                face,
-                full_res,
-                output_element_bytes / 4,
-                &mut equirect,
-            );
-        }
-        stream.end_face();
-    }
-    debug_assert_eq!(stream.peak_faces, 1);
-    Ok((equirect, eq_w, eq_h))
 }
 
 fn stage_terrain_faces(
@@ -2299,44 +2232,6 @@ pub(crate) fn cubemap_to_equirect(
     (result, eq_w as u32, eq_h as u32)
 }
 
-fn write_face_to_equirect(
-    face_data: &[f32],
-    face_index: u32,
-    face_res: u32,
-    channels: usize,
-    output: &mut [f32],
-) {
-    let eq_w = face_res as usize * 2;
-    let eq_h = face_res as usize;
-    let res = face_res as usize;
-    for y in 0..eq_h {
-        for x in 0..eq_w {
-            let [dx, dy, dz] = equirect_pixel_to_direction(x, y, eq_w, eq_h);
-            let (face, u, v) = direction_to_face_uv(dx, dy, dz);
-            if face != face_index as usize {
-                continue;
-            }
-            let fx = u * (res - 1) as f32;
-            let fy = v * (res - 1) as f32;
-            let ix = (fx as usize).min(res - 2);
-            let iy = (fy as usize).min(res - 2);
-            let frac_x = fx - ix as f32;
-            let frac_y = fy - iy as f32;
-            for channel in 0..channels {
-                let top = face_data[(iy * res + ix) * channels + channel]
-                    + (face_data[(iy * res + ix + 1) * channels + channel]
-                        - face_data[(iy * res + ix) * channels + channel])
-                        * frac_x;
-                let bottom = face_data[((iy + 1) * res + ix) * channels + channel]
-                    + (face_data[((iy + 1) * res + ix + 1) * channels + channel]
-                        - face_data[((iy + 1) * res + ix) * channels + channel])
-                        * frac_x;
-                output[(y * eq_w + x) * channels + channel] = top + (bottom - top) * frac_y;
-            }
-        }
-    }
-}
-
 /// Write RGBA EXR with DWAB compression (lossy, ~80% quality).
 #[cfg(test)]
 fn export_equirect_exr_rgba(
@@ -2369,6 +2264,7 @@ fn export_equirect_exr_rgba(
 }
 
 /// Write single-channel EXR as RGB (all same value) with DWAB compression.
+#[cfg(test)]
 fn export_equirect_exr_gray(
     data: &[f32],
     width: u32,
@@ -3102,14 +2998,32 @@ fn reconstruct_8k_from_meso_delta_with_cancel(
     meso_eroded: &TectonicTerrain,
     cancel: &AtomicBool,
 ) -> Result<TectonicTerrain, ReconstructionError> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err(ReconstructionError::Cancelled);
+    }
     if full_uneroded.resolution != meso_uneroded.resolution.saturating_mul(4)
         || meso_uneroded.resolution != meso_eroded.resolution
     {
         return Err(ReconstructionError::InvalidDimensions);
     }
-    let resolution = full_uneroded.resolution as usize;
-    let mut faces = std::array::from_fn(|_| Vec::with_capacity(resolution * resolution));
-    for (face, values) in faces.iter_mut().enumerate() {
+    let mut terrain = full_uneroded.clone();
+    reconstruct_meso_delta_in_place(&mut terrain, meso_uneroded, meso_eroded, cancel)?;
+    Ok(terrain)
+}
+
+fn reconstruct_meso_delta_in_place(
+    terrain: &mut TectonicTerrain,
+    meso_uneroded: &TectonicTerrain,
+    meso_eroded: &TectonicTerrain,
+    cancel: &AtomicBool,
+) -> Result<(), ReconstructionError> {
+    if terrain.resolution != meso_uneroded.resolution.saturating_mul(4)
+        || meso_uneroded.resolution != meso_eroded.resolution
+    {
+        return Err(ReconstructionError::InvalidDimensions);
+    }
+    let resolution = terrain.resolution as usize;
+    for (face, values) in terrain.faces.iter_mut().enumerate() {
         for y in 0..resolution {
             if cancel.load(Ordering::Relaxed) {
                 return Err(ReconstructionError::Cancelled);
@@ -3121,18 +3035,12 @@ fn reconstruct_8k_from_meso_delta_with_cancel(
                     x as f32 / (resolution - 1) as f32,
                     y as f32 / (resolution - 1) as f32,
                 );
-                values.push(
-                    sample_cubemap_height(meso_eroded, direction)
-                        + full_uneroded.faces[face][index]
-                        - sample_cubemap_height(meso_uneroded, direction),
-                );
+                values[index] = sample_cubemap_height(meso_eroded, direction) + values[index]
+                    - sample_cubemap_height(meso_uneroded, direction);
             }
         }
     }
-    Ok(TectonicTerrain {
-        faces,
-        resolution: full_uneroded.resolution,
-    })
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3302,7 +3210,7 @@ pub fn run_export_with_timings_and_checkpoints(
         }
         progress.advance(&format!("Eroding face {face}"));
     }
-    if config.face_resolution == 8192 {
+    if config.face_resolution == 8192 && config.erosion_iterations > 0 {
         let meso_tile_size = select_tile_size(
             MESO_EROSION_RESOLUTION,
             config.tile_size,
@@ -3334,13 +3242,8 @@ pub fn run_export_with_timings_and_checkpoints(
         timings.meso_erosion_ms = erosion_started.elapsed().as_secs_f64() * 1000.0;
         timings.meso_erosion_completed = true;
         let reconstruction_started = Instant::now();
-        terrain = reconstruct_8k_from_meso_delta_with_cancel(
-            &terrain,
-            &meso_uneroded,
-            &meso_terrain,
-            cancel,
-        )
-        .map_err(|error| error.to_string())?;
+        reconstruct_meso_delta_in_place(&mut terrain, &meso_uneroded, &meso_terrain, cancel)
+            .map_err(|error| error.to_string())?;
         timings.delta_reconstruction_ms = reconstruction_started.elapsed().as_secs_f64() * 1000.0;
         timings.delta_reconstruction_completed = true;
     } else {
@@ -3693,12 +3596,8 @@ pub fn run_export_with_timings_and_checkpoints(
         )?;
     }
 
-    timings.map_batch_metrics.completed = timings.map_batch_metrics.reached;
-    timings.map_dispatch_readback_wall_ms = timings.map_batch_metrics.dispatch_readback_wall_ms;
-    timings.staged_io_completed = timings.staged_io_metrics.rows_generated > 0;
-
     if let Some(pipeline) = emission_pipeline.as_ref() {
-        let (emission, _, _) = stream_map_layer(
+        let stage = stage_map_layer(
             gpu,
             pipeline,
             &terrain,
@@ -3721,11 +3620,28 @@ pub fn run_export_with_timings_and_checkpoints(
             &mut progress,
             "Emission",
             cancel,
+            &planet_dir,
+            &mut timings.map_batch_metrics,
         )?;
         progress.advance("Exporting emission...");
-        export_equirect_exr_gray(&emission, eq_w, eq_ht, &planet_dir.join("emission.exr"))?;
+        merge_staged_export(
+            timings,
+            export_staged_equirect_exr(
+                "emission",
+                &stage,
+                eq_w,
+                eq_ht,
+                1,
+                &planet_dir.join("emission.exr"),
+                cancel,
+                checkpoints,
+            ),
+        )?;
     }
 
+    timings.map_batch_metrics.completed = timings.map_batch_metrics.reached;
+    timings.map_dispatch_readback_wall_ms = timings.map_batch_metrics.dispatch_readback_wall_ms;
+    timings.staged_io_completed = timings.staged_io_metrics.rows_generated > 0;
     timings.export_inclusive_ms = export_started.elapsed().as_secs_f64() * 1000.0;
     timings.export_completed = true;
     timings.staged_equirect_materialization_wall_ms =
@@ -3814,10 +3730,16 @@ pub fn spawn_export(
             Ok(Err(e)) => {
                 let _ = tx.send(ExportProgress::Error(e));
             }
-            Err(_) => {
-                let _ = tx.send(ExportProgress::Error(
-                    "GPU device lost during export (out of memory). Free VRAM and retry.".into(),
-                ));
+            Err(panic) => {
+                let detail = panic
+                    .downcast_ref::<String>()
+                    .map(String::as_str)
+                    .or_else(|| panic.downcast_ref::<&str>().copied())
+                    .unwrap_or("unknown worker panic");
+                log::error!("export worker panicked: {detail}");
+                let _ = tx.send(ExportProgress::Error(format!(
+                    "Export worker failed: {detail}"
+                )));
             }
         }
     });
@@ -4638,6 +4560,29 @@ mod tests {
     }
 
     #[test]
+    fn meso_reconstruction_reuses_full_resolution_storage() {
+        let mut full = directional_terrain(16);
+        let original = full.clone();
+        let meso = directional_terrain(4);
+        let mut eroded = meso.clone();
+        for height in eroded.faces.iter_mut().flatten() {
+            *height -= 0.125;
+        }
+        let pointers = full.faces.each_ref().map(|face| face.as_ptr());
+        reconstruct_meso_delta_in_place(&mut full, &meso, &eroded, &AtomicBool::new(false))
+            .unwrap();
+        assert_eq!(pointers, full.faces.each_ref().map(|face| face.as_ptr()));
+        for (actual, before) in full
+            .faces
+            .iter()
+            .flatten()
+            .zip(original.faces.iter().flatten())
+        {
+            assert!((actual - (before - 0.125)).abs() < 1e-6);
+        }
+    }
+
+    #[test]
     fn reserved_tile_at_exact_cap_is_inserted_without_double_counting() {
         let mut batch = MapTileBatch::new(128);
         batch.reserve(128).unwrap();
@@ -5228,8 +5173,10 @@ mod tests {
         let staged = estimated_export_preflight_bytes(8192, &layers).unwrap();
         let with_erosion =
             estimated_export_preflight_bytes_with_erosion(8192, &layers, 25, &limits).unwrap();
-        assert!(with_erosion > staged);
-        assert!(with_erosion > 2 * 1024 * 1024 * 1024);
+        let erosion_peak = 6 * 8192_u64.pow(2) * 4
+            + 2 * 6 * 2048_u64.pow(2) * 4
+            + ErosionPipeline::aggregate_tiled_bytes(2048, &limits).unwrap();
+        assert_eq!(with_erosion, staged.max(erosion_peak));
         assert!(with_erosion <= MAX_8K_OWNED_LIVE_BYTES);
     }
 

@@ -781,6 +781,7 @@ impl PlanetGenApp {
                         };
                         self.export_progress = 0.0;
                         self.export_done_ok = false;
+                        self.gpu_error = Some(self.export_status.clone());
                         finished = true;
                     }
                 }
