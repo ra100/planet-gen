@@ -1820,7 +1820,7 @@ fn cloud_export_uniforms(snapshot: WeatherSnapshot) -> PreviewUniforms {
         ring_opacity: 0.0,
         planet_radius_km: snapshot.radius_km,
         show_cloud_shadows: 0.0,
-        _pad5: 0.0,
+        surface_seed: 0,
     }
 }
 
@@ -2841,6 +2841,14 @@ fn quantize_unit(value: f32, max: u32) -> Result<u32, String> {
     Ok((value * max as f32).round() as u32)
 }
 
+fn albedo_srgb(value: f32) -> f32 {
+    if value <= 0.003_130_8 {
+        value * 12.92
+    } else {
+        1.055 * value.powf(1.0 / 2.4) - 0.055
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn export_staged_equirect_png(
     layer: &'static str,
@@ -2919,8 +2927,15 @@ fn export_staged_equirect_png(
                 }
             }
             PngRowFormat::Rgba8 => {
-                for (output, value) in encoded.iter_mut().zip(row) {
-                    *output = quantize_or_return!(value, u8::MAX as u32) as u8;
+                for (output, pixel) in encoded.chunks_exact_mut(4).zip(row.chunks_exact(4)) {
+                    for channel in 0..4 {
+                        let value = if channel < 3 {
+                            albedo_srgb(pixel[channel])
+                        } else {
+                            pixel[channel]
+                        };
+                        output[channel] = quantize_or_return!(value, u8::MAX as u32) as u8;
+                    }
                 }
             }
         }
@@ -3292,10 +3307,11 @@ pub fn run_export_with_timings_and_checkpoints(
         Some(MapPipeline::new(
             gpu,
             &format!(
-                "{}\n{}\n{}\n{}",
+                "{}\n{}\n{}\n{}\n{}",
                 include_str!("shaders/cube_sphere.wgsl"),
                 include_str!("shaders/noise.wgsl"),
                 include_str!("shaders/climate.wgsl"),
+                include_str!("shaders/surface_material.wgsl"),
                 include_str!("shaders/albedo_map.wgsl"),
             ),
             "albedo map",
@@ -3448,7 +3464,7 @@ pub fn run_export_with_timings_and_checkpoints(
                 seed: params.seed,
                 base_temp_c: derived.base_temperature_c,
                 ocean_level,
-                ocean_fraction: effective_ocean,
+                ocean_fraction: derived.ocean_fraction * config.weather.moisture,
                 axial_tilt_rad: params.axial_tilt_deg.to_radians(),
                 season: config.weather.season,
                 tile_offset_x: region.origin_x,
@@ -4780,7 +4796,15 @@ mod tests {
                 .collect(),
             PngRowFormat::Rgba8 => monolithic
                 .iter()
-                .map(|value| (value * 255.0).round() as u8)
+                .enumerate()
+                .map(|(channel, &value)| {
+                    let encoded = if channel % 4 < 3 {
+                        albedo_srgb(value)
+                    } else {
+                        value
+                    };
+                    (encoded * 255.0).round() as u8
+                })
                 .collect(),
         };
         assert_eq!(actual, expected);
@@ -5399,6 +5423,210 @@ mod tests {
     }
 
     #[test]
+    fn albedo_png_encodes_linear_reflectance_as_srgb() {
+        for (linear, expected) in [
+            (0.0, 0),
+            (0.003_130_8, 10),
+            (0.18, 118),
+            (0.5, 188),
+            (1.0, 255),
+        ] {
+            assert_eq!(quantize_unit(albedo_srgb(linear), 255).unwrap(), expected);
+        }
+        assert_eq!(
+            quantize_unit(0.5, 255).unwrap(),
+            128,
+            "alpha and masks stay linear"
+        );
+        for invalid in [f32::NAN, f32::INFINITY, -0.1, 1.1] {
+            assert!(quantize_unit(albedo_srgb(invalid), 255).is_err());
+        }
+    }
+
+    #[test]
+    fn earth_surface_materials_follow_climate_seed_and_terrain() {
+        #[repr(C)]
+        #[derive(Clone, Copy, Pod, Zeroable)]
+        struct Fixture {
+            resolution: u32,
+            seed: u32,
+            moisture: f32,
+            temp: f32,
+            elevation: f32,
+            slope: f32,
+            valley: f32,
+            water: f32,
+        }
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let source = format!(
+            "{}\n{}\n{}",
+            include_str!("shaders/noise.wgsl"),
+            include_str!("shaders/surface_material.wgsl"),
+            r#"
+struct Fixture {
+    resolution: u32, seed: u32, moisture: f32, temp: f32,
+    elevation: f32, slope: f32, valley: f32, water: f32,
+}
+@group(0) @binding(0) var<storage, read> heights: array<f32>;
+@group(0) @binding(1) var<storage, read_write> output: array<vec4<f32>>;
+@group(0) @binding(2) var<uniform> fixture: Fixture;
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (id.x >= fixture.resolution || id.y >= fixture.resolution) { return; }
+    let uv = vec2<f32>(id.xy) / f32(fixture.resolution - 1u);
+    let lon = uv.x * 6.2831853;
+    let lat = (uv.y - 0.5) * 3.14159265;
+    let p = vec3<f32>(cos(lat) * cos(lon), sin(lat), cos(lat) * sin(lon));
+    var color = surface_land_albedo(p, fixture.seed, fixture.temp, fixture.moisture,
+        fixture.temp, fixture.elevation, fixture.slope, fixture.valley, fixture.water);
+    if (fixture.elevation < 0.0) {
+        color = surface_ocean_albedo(p, fixture.seed, -fixture.elevation, fixture.temp);
+    }
+    output[id.y * fixture.resolution + id.x] = vec4<f32>(color, 1.0);
+}
+"#,
+        );
+        let pipeline = MapPipeline::new(&gpu, &source, "surface material contracts", 16);
+        let coordinator = TileCoordinator::new(128, 128);
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let cancel = AtomicBool::new(false);
+        let render = |fixture: Fixture| {
+            let mut progress = ProgressTracker::new(&tx, 1);
+            let bytes = generate_map_tiled(
+                &gpu,
+                &pipeline,
+                &vec![0.0; 128 * 128],
+                &coordinator,
+                |_| fixture,
+                16,
+                &mut progress,
+                "surface",
+                0,
+                &cancel,
+            )
+            .unwrap();
+            bytes
+                .chunks_exact(16)
+                .map(bytemuck::pod_read_unaligned::<[f32; 4]>)
+                .collect::<Vec<_>>()
+        };
+        let dry = Fixture {
+            resolution: 128,
+            seed: 42,
+            moisture: 8.0,
+            temp: 28.0,
+            elevation: 0.08,
+            slope: 0.1,
+            valley: 0.0,
+            water: 0.7,
+        };
+        let sand = render(dry);
+        assert_eq!(sand, render(dry), "material seed must reproduce exactly");
+        let other = render(Fixture { seed: 73, ..dry });
+        assert_ne!(
+            sand, other,
+            "planet seed must change geology at fixed terrain/climate"
+        );
+        let forest = render(Fixture {
+            moisture: 200.0,
+            ..dry
+        });
+        let mean = |pixels: &[[f32; 4]], channel: usize| {
+            pixels.iter().map(|p| p[channel]).sum::<f32>() / pixels.len() as f32
+        };
+        assert!(
+            mean(&sand, 0) > mean(&forest, 0) * 3.0,
+            "forest must be darker than dry ground"
+        );
+        assert!(
+            mean(&forest, 1) > mean(&forest, 0) * 1.4,
+            "wet warm ground must support green canopy"
+        );
+        let pale = sand
+            .iter()
+            .filter(|p| p[0] > 0.50 && p[2] / p[0] > 0.52)
+            .count();
+        let red = sand.iter().filter(|p| p[0] / p[1] > 1.65).count();
+        let beige = sand
+            .iter()
+            .filter(|p| p[0] / p[1] > 1.15 && p[0] / p[1] < 1.5)
+            .count();
+        assert!(
+            pale > 100 && red > 100 && beige > 100,
+            "need coherent pale, red and beige ground: {pale}/{red}/{beige}"
+        );
+        for pixels in [&sand, &other, &forest] {
+            assert!(
+                pixels
+                    .iter()
+                    .flatten()
+                    .all(|v| v.is_finite() && (0.0..=1.0).contains(v))
+            );
+            for row in pixels.chunks_exact(128) {
+                for channel in 0..3 {
+                    assert!(
+                        (row[0][channel] - row[127][channel]).abs() < 0.002,
+                        "longitude seam in material field"
+                    );
+                }
+            }
+        }
+        let wet_valley = render(Fixture {
+            moisture: 200.0,
+            elevation: 0.02,
+            valley: 1.0,
+            ..dry
+        });
+        let wet_flat = render(Fixture {
+            moisture: 200.0,
+            elevation: 0.02,
+            ..dry
+        });
+        assert_ne!(
+            wet_valley, wet_flat,
+            "wet lowland incisions need drainage coloring"
+        );
+        assert_eq!(
+            sand,
+            render(Fixture { valley: 1.0, ..dry }),
+            "dry basins must not acquire rivers"
+        );
+        let highland = Fixture {
+            elevation: 0.7,
+            moisture: 200.0,
+            ..dry
+        };
+        assert_eq!(
+            render(highland),
+            render(Fixture {
+                valley: 1.0,
+                ..highland
+            }),
+            "river proxy must not paint mountains as water"
+        );
+        let deep = render(Fixture {
+            elevation: -0.4,
+            ..dry
+        });
+        assert_eq!(
+            deep,
+            render(Fixture {
+                elevation: -0.8,
+                ..dry
+            }),
+            "deep seabed relief must not show through opaque water"
+        );
+        assert_ne!(
+            deep,
+            render(Fixture {
+                elevation: -0.005,
+                ..dry
+            })
+        );
+        println!("surface palette pixels: pale={pale} red={red} beige={beige}");
+    }
+
+    #[test]
     fn tile_local_gpu_maps_match_monolithic_output() {
         let gpu = GpuContext::new().expect("GPU init failed");
         let resolution = 128;
@@ -5425,10 +5653,11 @@ mod tests {
         );
         let shader = |map: &str| {
             format!(
-                "{}\n{}\n{}\n{}",
+                "{}\n{}\n{}\n{}\n{}",
                 include_str!("shaders/cube_sphere.wgsl"),
                 include_str!("shaders/noise.wgsl"),
                 include_str!("shaders/climate.wgsl"),
+                include_str!("shaders/surface_material.wgsl"),
                 map,
             )
         };

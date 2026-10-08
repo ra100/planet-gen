@@ -226,6 +226,7 @@ fn main() {
     u.zoom = 1.0;
     u.cloud_coverage = 0.5;
     u.cloud_seed = snapshot.seed;
+    u.surface_seed = params.seed;
     u.star_color_temp = 0.5;
     u.show_ao = 1.0;
     u.show_water = 1.0;

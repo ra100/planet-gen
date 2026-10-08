@@ -50,7 +50,7 @@ pub struct PreviewUniforms {
     pub ring_opacity: f32,  // ring opacity (0-1)
     pub planet_radius_km: f32,
     pub show_cloud_shadows: f32,
-    pub _pad5: f32,
+    pub surface_seed: u32,
 }
 
 pub struct PreviewRenderer {
@@ -99,9 +99,10 @@ impl PreviewRenderer {
             &format!("const CLOUD_RAY_SAMPLES: u32 = {samples}u;"),
         );
         let shader_source = format!(
-            "{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}",
             include_str!("shaders/noise.wgsl"),
             include_str!("shaders/climate.wgsl"),
+            include_str!("shaders/surface_material.wgsl"),
             cloud_density,
             include_str!("shaders/cloud_wind_fallback.wgsl"),
             preview_shader,
@@ -774,7 +775,7 @@ mod tests {
             ring_opacity: 0.0,
             planet_radius_km: 6371.0,
             show_cloud_shadows: 1.0,
-            _pad5: 0.0,
+            surface_seed: 42,
         }
     }
 
@@ -1755,9 +1756,10 @@ mod tests {
 
     fn layer_profile_oracle(gpu: &GpuContext) -> Vec<f32> {
         let shader_source = format!(
-            "{}\n{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}",
             include_str!("shaders/noise.wgsl"),
             include_str!("shaders/climate.wgsl"),
+            include_str!("shaders/surface_material.wgsl"),
             include_str!("shaders/cloud_density.wgsl"),
             include_str!("shaders/cloud_wind_fallback.wgsl"),
             include_str!("shaders/preview_cubemap.wgsl"),
@@ -1942,9 +1944,10 @@ fn layer_profile_oracle() {
         resolution: u32,
     ) -> Vec<f32> {
         let shader_source = format!(
-            "{}\n{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}",
             include_str!("shaders/noise.wgsl"),
             include_str!("shaders/climate.wgsl"),
+            include_str!("shaders/surface_material.wgsl"),
             include_str!("shaders/cloud_density.wgsl"),
             include_str!("shaders/cloud_wind_fallback.wgsl"),
             include_str!("shaders/preview_cubemap.wgsl"),
@@ -2144,9 +2147,10 @@ fn layer_profile_oracle() {
     #[test]
     fn u4_cloud_phase_is_normalized_bounded_and_forward_weighted() {
         let shader_source = format!(
-            "{}\n{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}",
             include_str!("shaders/noise.wgsl"),
             include_str!("shaders/climate.wgsl"),
+            include_str!("shaders/surface_material.wgsl"),
             include_str!("shaders/cloud_density.wgsl"),
             include_str!("shaders/cloud_wind_fallback.wgsl"),
             include_str!("shaders/preview_cubemap.wgsl"),
@@ -3484,6 +3488,34 @@ fn layer_profile_oracle() {
         for pair in rendered.windows(2) {
             assert_ne!(pair[0], pair[1], "fixture materials must remain distinct");
         }
+
+        let albedo = PreviewUniforms {
+            view_mode: 19,
+            ..fixture(22.0, 0.7)
+        };
+        let first = render_fixture(0.20, albedo);
+        assert_ne!(
+            first,
+            render_fixture(
+                0.20,
+                PreviewUniforms {
+                    surface_seed: 73,
+                    ..albedo
+                }
+            ),
+            "planet seed must alter the surface with fixed terrain"
+        );
+        assert_eq!(
+            first,
+            render_fixture(
+                0.20,
+                PreviewUniforms {
+                    cloud_seed: 999,
+                    ..albedo
+                }
+            ),
+            "cloud seed must not recolor the ground"
+        );
 
         let mean_roughness = |pixels: &[u8]| {
             pixels

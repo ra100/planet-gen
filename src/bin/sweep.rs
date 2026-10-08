@@ -265,7 +265,7 @@ fn generate_planet_png(
         ring_opacity: 0.0,
         planet_radius_km: derived.radius_km,
         show_cloud_shadows: 1.0,
-        _pad5: 0.0,
+        surface_seed: seed,
     };
 
     renderer.render(gpu, &uniforms, &cubemap_view, None, None, render_size)
@@ -8817,7 +8817,7 @@ fn main() {
         ring_opacity: 0.0,
         planet_radius_km: derived.radius_km,
         show_cloud_shadows: 1.0,
-        _pad5: 0.0,
+        surface_seed: 42,
     };
 
     // Render without wind effects (analytical wind only)

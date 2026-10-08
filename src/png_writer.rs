@@ -65,6 +65,9 @@ impl AtomicScanlinePngWriter {
         let mut encoder = png::Encoder::new(file, width, height);
         encoder.set_color(format.color_type());
         encoder.set_depth(format.bit_depth());
+        if format == PngRowFormat::Rgba8 {
+            encoder.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
+        }
         // 8K layers are hundreds of MB raw; the default balanced mode costs tens
         // of seconds per image for a modest size win. Fast (fdeflate) encodes
         // several times faster at a small size cost, irrelevant next to encode time.

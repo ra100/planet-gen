@@ -44,7 +44,7 @@ struct Uniforms {
     ring_opacity: f32,     // ring opacity (0-1)
     planet_radius_km: f32,
     show_cloud_shadows: f32,
-    _pad5: f32,
+    surface_seed: u32,
 }
 
 const CLOUD_RAY_SAMPLES: u32 = 8u;
@@ -513,7 +513,7 @@ fn compute_moisture(sphere_pos: vec3<f32>, height: f32, season: f32) -> f32 {
     let hadley_base = hadley_cell_moisture(thermal_lat) * ocean_scale;
 
     // Local noise variation (breaks latitude bands)
-    let noise1 = snoise(sphere_pos * 3.0 + vec3<f32>(100.0, 0.0, 0.0));
+    let noise1 = snoise(sphere_pos * 3.0 + noise_seed_offset(uniforms.surface_seed, 73u));
     let local_var = noise1 * 0.5;
     var moisture = hadley_base * (0.55 + 0.45 * (local_var + 0.5));
     moisture += 50.0 * (local_var + 0.5) * ocean_scale;
@@ -550,12 +550,15 @@ fn compute_moisture(sphere_pos: vec3<f32>, height: f32, season: f32) -> f32 {
         // === Rain shadow from mountains (>2km relief) ===
         let tangent_wind = sample_wind_tangent(sphere_pos);
         let upwind_pos = normalize(sphere_pos - tangent_wind * 0.08);
-        let upwind_h = textureSample(height_tex, height_sampler, upwind_pos).r;
+        let crosswind = cross(sphere_pos, tangent_wind) * 0.025;
+        let upwind_h = (textureSample(height_tex, height_sampler, upwind_pos).r * 2.0
+            + textureSample(height_tex, height_sampler, normalize(upwind_pos + crosswind)).r
+            + textureSample(height_tex, height_sampler, normalize(upwind_pos - crosswind)).r) * 0.25;
         let upwind_elev = max(upwind_h - uniforms.ocean_level, 0.0);
         let my_elevation = max(height - uniforms.ocean_level, 0.0);
         if (upwind_elev > my_elevation + 0.02) {
             let relief = upwind_elev - my_elevation;
-            let shadow_strength = smooth_step(0.02, 0.06, relief) * 0.7;
+            let shadow_strength = smooth_step(0.02, 0.25, relief) * 0.55;
             moisture *= (1.0 - shadow_strength);
         }
     } else {
@@ -565,7 +568,7 @@ fn compute_moisture(sphere_pos: vec3<f32>, height: f32, season: f32) -> f32 {
     // === Regional moisture character ===
     // Low-frequency noise gives each region a wet or dry personality.
     // This creates "jungle continents" vs "desert continents" at similar latitudes.
-    let region_moisture_bias = snoise(sphere_pos * 0.7 + vec3<f32>(500.0, 0.0, 0.0));
+    let region_moisture_bias = snoise(sphere_pos * 0.7 + noise_seed_offset(uniforms.surface_seed, 74u));
     moisture *= 1.0 + region_moisture_bias * 0.25; // ±25% regional variation
 
     moisture *= 0.5 + uniforms.ocean_fraction;
@@ -584,84 +587,6 @@ fn compute_moisture(sphere_pos: vec3<f32>, height: f32, season: f32) -> f32 {
 fn height_color(h: f32, ocean_level: f32) -> vec3<f32> {
     let v = clamp((h + 0.5) / 1.3, 0.0, 1.0);
     return vec3<f32>(v, v, v);
-}
-
-// ---- Continuous gradient biome coloring ----
-// Replaces discrete Whittaker lookup with smooth 2D interpolation.
-// Temperature × moisture → color via 3×2 anchor grid.
-
-fn gradient_color(mean_temp: f32, mean_moisture: f32, seasonal_temp: f32, variation: f32, region_noise: f32) -> vec3<f32> {
-    // 12-biome system: 4 temperature bands × 3 moisture levels
-    // Biome classification uses MEAN ANNUAL values for stability
-    let r = region_noise; // [0,1] regional sub-variant selector
-
-    // Temperature bands (smooth interpolation weights)
-    let t_polar   = 1.0 - smooth_step(-15.0, 0.0, mean_temp);    // <0°C: ice/tundra
-    let t_boreal  = smooth_step(-10.0, 2.0, mean_temp) * (1.0 - smooth_step(8.0, 18.0, mean_temp));
-    let t_temperate = smooth_step(5.0, 15.0, mean_temp) * (1.0 - smooth_step(20.0, 30.0, mean_temp));
-    let t_tropical = smooth_step(18.0, 28.0, mean_temp);
-
-    // Moisture bands
-    let m_arid = 1.0 - smooth_step(15.0, 40.0, mean_moisture);   // <25mm: desert
-    let m_semi = smooth_step(15.0, 35.0, mean_moisture) * (1.0 - smooth_step(55.0, 90.0, mean_moisture));
-    let m_wet  = smooth_step(50.0, 90.0, mean_moisture);          // >70mm: forest/jungle
-
-    // === 12 biome anchor colors with regional sub-variants ===
-    // Polar
-    let ice_desert    = mix(vec3<f32>(0.72, 0.75, 0.80), vec3<f32>(0.60, 0.58, 0.55), r); // cold dry
-    let tundra        = mix(vec3<f32>(0.55, 0.58, 0.45), vec3<f32>(0.48, 0.52, 0.38), r); // cold semi: lichen/moss
-    let polar_wet     = mix(vec3<f32>(0.62, 0.68, 0.65), vec3<f32>(0.52, 0.60, 0.50), r); // cold wet: boggy tundra
-
-    // Boreal
-    let cold_steppe   = mix(vec3<f32>(0.58, 0.48, 0.32), vec3<f32>(0.52, 0.42, 0.28), r); // cool dry steppe
-    let boreal_forest = mix(vec3<f32>(0.12, 0.28, 0.10), vec3<f32>(0.18, 0.32, 0.14), r); // dark conifer
-    let boreal_bog    = mix(vec3<f32>(0.15, 0.30, 0.12), vec3<f32>(0.22, 0.35, 0.18), r); // wet taiga
-
-    // Temperate
-    let med_scrub     = mix(mix(vec3<f32>(0.55, 0.50, 0.30), vec3<f32>(0.62, 0.42, 0.24), r),
-                             vec3<f32>(0.48, 0.44, 0.28), smooth_step(0.7, 1.0, r)); // Mediterranean
-    let temp_forest   = mix(mix(vec3<f32>(0.14, 0.38, 0.10), vec3<f32>(0.22, 0.42, 0.15), r),
-                             vec3<f32>(0.10, 0.30, 0.08), smooth_step(0.6, 1.0, r)); // deciduous/mixed
-    let temp_rain     = mix(vec3<f32>(0.08, 0.34, 0.08), vec3<f32>(0.12, 0.38, 0.10), r); // temperate rainforest
-
-    // Tropical
-    let hot_desert    = mix(mix(vec3<f32>(0.85, 0.75, 0.55), vec3<f32>(0.75, 0.45, 0.25), r),
-                             vec3<f32>(0.40, 0.32, 0.25), smooth_step(0.7, 1.0, r)); // sand/red/volcanic
-    let savanna       = mix(vec3<f32>(0.52, 0.48, 0.22), vec3<f32>(0.42, 0.40, 0.18), r); // dry grassland
-    let tropical_rain = mix(mix(vec3<f32>(0.06, 0.30, 0.04), vec3<f32>(0.04, 0.24, 0.03), r),
-                             vec3<f32>(0.10, 0.28, 0.06), smooth_step(0.5, 1.0, r)); // deep jungle
-
-    // Blend across moisture within each temperature band
-    let polar_color = m_arid * ice_desert + m_semi * tundra + m_wet * polar_wet;
-    let boreal_color = m_arid * cold_steppe + m_semi * boreal_forest + m_wet * boreal_bog;
-    let temp_color = m_arid * med_scrub + m_semi * temp_forest + m_wet * temp_rain;
-    let trop_color = m_arid * hot_desert + m_semi * savanna + m_wet * tropical_rain;
-
-    // Blend across temperature bands
-    var base = t_polar * polar_color + t_boreal * boreal_color
-             + t_temperate * temp_color + t_tropical * trop_color;
-    // Normalize blending weights (they don't always sum to 1 due to overlapping smooth_steps)
-    let w_sum = t_polar + t_boreal + t_temperate + t_tropical;
-    base /= max(w_sum, 0.25); // floor at 0.25 prevents color spikes at band boundaries
-
-    // === Seasonal color modulation ===
-    let temp_deviation = seasonal_temp - mean_temp;
-    let green_amount = max(base.g - max(base.r, base.b), 0.0);
-    if (green_amount > 0.05) {
-        let winter_factor = clamp(-temp_deviation / 20.0, 0.0, 1.0);
-        let summer_factor = clamp(temp_deviation / 20.0, 0.0, 1.0);
-        base += vec3<f32>(0.06, -0.02, -0.03) * winter_factor * green_amount * 2.0;
-        base += vec3<f32>(-0.01, 0.02, 0.0) * summer_factor * green_amount;
-    }
-    if (seasonal_temp < 5.0 && mean_temp < 15.0) {
-        let cold_winter = clamp(-temp_deviation / 15.0, 0.0, 1.0);
-        base = mix(base, vec3<f32>(0.80, 0.82, 0.85), cold_winter * 0.25 * t_polar);
-    }
-
-    // Per-pixel noise for natural texture
-    base += base * variation * 0.12;
-
-    return base;
 }
 
 // ---- Terrain normal from height cubemap ----
@@ -696,13 +621,21 @@ fn compute_terrain_normal(sphere_pos: vec3<f32>, geo_normal: vec3<f32>, footprin
     return perturbed_view;
 }
 
+fn surface_relief(sphere_pos: vec3<f32>, height: f32) -> vec2<f32> {
+    let step = max(0.004, 2.0 / f32(textureDimensions(height_tex).x));
+    let frame = tangent_basis(sphere_pos);
+    let e = textureSample(height_tex, height_sampler, normalize(sphere_pos + frame[0] * step)).r;
+    let w = textureSample(height_tex, height_sampler, normalize(sphere_pos - frame[0] * step)).r;
+    let n = textureSample(height_tex, height_sampler, normalize(sphere_pos + frame[1] * step)).r;
+    let s = textureSample(height_tex, height_sampler, normalize(sphere_pos - frame[1] * step)).r;
+    let slope = length(vec2<f32>(e - w, n - s)) / (2.0 * step);
+    let incision = max(min(e, w), min(n, s)) - height;
+    let valley = material_ramp(0.001, 0.012, incision);
+    return vec2<f32>(slope, valley);
+}
+
 fn terrain_slope(sphere_pos: vec3<f32>) -> f32 {
-    let step = 0.015;
-    let east = textureSample(height_tex, height_sampler, sphere_pos + vec3<f32>(step, 0.0, 0.0)).r;
-    let west = textureSample(height_tex, height_sampler, sphere_pos - vec3<f32>(step, 0.0, 0.0)).r;
-    let north = textureSample(height_tex, height_sampler, sphere_pos + vec3<f32>(0.0, step, 0.0)).r;
-    let south = textureSample(height_tex, height_sampler, sphere_pos - vec3<f32>(0.0, step, 0.0)).r;
-    return max(abs(east - west), abs(north - south)) / (2.0 * step);
+    return surface_relief(sphere_pos, textureSample(height_tex, height_sampler, sphere_pos).r).x;
 }
 
 // Mountain snow needs elevation, sustained cold, terrain that can retain it,
@@ -1021,16 +954,7 @@ fn shade_planet(in: VertexOutput) -> vec4<f32> {
     let height = textureSample(height_tex, height_sampler, rotated).r;
     let is_ocean = height < uniforms.ocean_level;
 
-    let color_var = snoise(rotated * 8.0);
-    // Regional color variance: low-freq noise for spatially coherent biome sub-variants
-    let region_noise = snoise(rotated * 0.8 + vec3<f32>(200.0, 0.0, 0.0)) * 0.5
-                     + snoise(rotated * 1.6 + vec3<f32>(0.0, 300.0, 0.0)) * 0.25;
-    let region_val = clamp(region_noise + 0.5, 0.0, 1.0);
-
-    // Compute effective latitude for altitude zonation (consistent tilt model)
-    let tilt_main = uniforms.axial_tilt_rad;
-    let tilted_y_main = rotated.y * cos(tilt_main) + rotated.z * sin(tilt_main);
-    let effective_lat = asin(clamp(tilted_y_main, -1.0, 1.0));
+    let color_var = snoise(rotated * 8.0 + noise_seed_offset(uniforms.surface_seed, 72u));
 
     let pure_elevation = uniforms.show_biomes < 0.5 && uniforms.show_water < 0.5;
     var surface_color: vec3<f32>;
@@ -1044,91 +968,26 @@ fn shade_planet(in: VertexOutput) -> vec4<f32> {
         // Pure elevation mode — no ocean/land distinction, just height
         surface_color = height_color(height, uniforms.ocean_level);
     } else if (is_ocean && uniforms.show_water > 0.5) {
-        // Smooth ocean gradient: shallow → deep with continuous depth color
-        let raw_depth = (uniforms.ocean_level - height) / max(uniforms.ocean_level + 1.0, 0.5);
-        let depth = clamp(raw_depth, 0.0, 1.0);
-        let depth_noise = snoise(rotated * 8.0) * 0.02;
-
-        let near_shore = vec3<f32>(0.07, 0.22, 0.38);
-        let mid_ocean  = vec3<f32>(0.04, 0.14, 0.36);
-        let deep_ocean = vec3<f32>(0.02, 0.06, 0.22);
-        let shelf = smoothstep(0.02, 0.18, depth + depth_noise);
-        let abyss = smoothstep(0.18, 0.55, depth);
-        var ocean_color = mix(near_shore, mix(mid_ocean, deep_ocean, abyss), shelf);
-        ocean_color += vec3<f32>(0.0, 0.015, 0.02) * color_var;
-
-        surface_color = ocean_color;
+        let depth = clamp((uniforms.ocean_level - height) / max(uniforms.ocean_level + 1.0, 0.5), 0.0, 1.0);
+        surface_color = surface_ocean_albedo(rotated, uniforms.surface_seed, depth,
+            compute_temperature(rotated, height, uniforms.season));
     } else if (is_ocean) {
         // Water OFF but biomes ON: show height-based grayscale for below-sea-level
         surface_color = height_color(height, uniforms.ocean_level);
     } else {
-        // Land: biome coloring or height ramp
-        let seasonal_temp = compute_temperature(rotated, height, uniforms.season);
+        let seasonal_temp_local = compute_temperature(rotated, height, uniforms.season);
+        let mean_temp = compute_temperature(rotated, height, 0.5);
+        let mean_moisture_local = compute_moisture(rotated, height, 0.5);
+        terrain_land_height = clamp(
+            (height - uniforms.ocean_level) / max(1.0 - uniforms.ocean_level, 0.01), 0.0, 1.0);
+        let relief = surface_relief(rotated, height);
+        terrain_slope_value = relief.x;
         if (uniforms.show_biomes > 0.5) {
-            let mean_temp = compute_temperature(rotated, height, 0.5);
-            let mean_moisture = compute_moisture(rotated, height, 0.5);
-            surface_color = gradient_color(mean_temp, mean_moisture, seasonal_temp, color_var, region_val);
+            surface_color = surface_land_albedo(rotated, uniforms.surface_seed, mean_temp,
+                mean_moisture_local, seasonal_temp_local, terrain_land_height,
+                relief.x, relief.y, uniforms.ocean_fraction);
         } else {
             surface_color = height_color(height, uniforms.ocean_level);
-        }
-
-        // Elevation tinting: darken lowlands, lighten highlands
-        // Uses raw height for strong contrast on dry worlds (Mars, Venus)
-        terrain_land_height = clamp(
-            (height - uniforms.ocean_level) / max(1.0 - uniforms.ocean_level, 0.01),
-            0.0,
-            1.0,
-        );
-        let h_for_tint = clamp((height + 0.5) / 1.0, 0.0, 1.0);
-        let elev_tint = mix(0.65, 1.35, h_for_tint);
-        surface_color *= elev_tint;
-        terrain_slope_value = terrain_slope(rotated);
-
-        // Altitude zonation — derived from 6.5°C/km lapse rate
-        // 1km altitude ~ 8° poleward for vegetation/snow lines
-        // Compute sea-level temperature to derive where each biome zone starts
-        let sea_level_temp = compute_temperature(rotated, uniforms.ocean_level, 0.5);
-        // Convert threshold temperatures to altitude via lapse rate: alt_km = (T_sealevel - T_threshold) / 6.5
-        // Then to land_height units: land_height = alt_km / 5.0
-        let snow_elev_km = max(sea_level_temp / 6.5, 0.0);         // 0°C line
-        let rock_elev_km = max((sea_level_temp - 5.0) / 6.5, 0.0); // 5°C line
-        let alpine_elev_km = max((sea_level_temp - 10.0) / 6.5, 0.0); // 10°C treeline
-        let highland_elev_km = max((sea_level_temp - 18.0) / 6.5, 0.0); // 18°C highland start
-        let snow_line = clamp(snow_elev_km / 5.0, 0.05, 0.95);
-        let rock_line = clamp(rock_elev_km / 5.0, 0.04, snow_line - 0.03);
-        let alpine_line = clamp(alpine_elev_km / 5.0, 0.03, rock_line - 0.03);
-        let highland_line = clamp(highland_elev_km / 5.0, 0.02, alpine_line - 0.02);
-
-        let seasonal_temp_local = compute_temperature(rotated, height, uniforms.season);
-        let mean_moisture_local = compute_moisture(rotated, height, 0.5);
-        // Bounded material bands: highland vegetation, alpine meadow/scree,
-        // then exposed rock. Snow is a separate final deposit over these bands.
-        let highland_material = smooth_step(highland_line, highland_line + 0.08, terrain_land_height)
-            * (1.0 - smooth_step(alpine_line - 0.04, alpine_line + 0.02, terrain_land_height));
-        let alpine_material = smooth_step(alpine_line, alpine_line + 0.06, terrain_land_height)
-            * (1.0 - smooth_step(rock_line - 0.03, rock_line + 0.02, terrain_land_height));
-        let rock_material = smooth_step(rock_line, rock_line + 0.05, terrain_land_height)
-            * (1.0 - smooth_step(snow_line - 0.03, snow_line + 0.02, terrain_land_height));
-
-        if (highland_material > 0.0) {
-            let highland_arid = surface_color * vec3<f32>(0.90, 0.82, 0.72);
-            let highland_wet = surface_color * vec3<f32>(0.78, 0.75, 0.65);
-            let highland_color = mix(highland_wet, highland_arid, smooth_step(30.0, 15.0, mean_moisture_local));
-            surface_color = mix(surface_color, highland_color, highland_material * 0.6);
-        }
-
-        if (alpine_material > 0.0) {
-            let alpine_tropical = vec3<f32>(0.38, 0.48, 0.28);
-            let alpine_temperate = vec3<f32>(0.42, 0.45, 0.32);
-            let alpine_arid = vec3<f32>(0.52, 0.46, 0.36);
-            var alpine_color = mix(alpine_temperate, alpine_tropical, smooth_step(15.0, 25.0, seasonal_temp_local));
-            alpine_color = mix(alpine_color, alpine_arid, smooth_step(30.0, 12.0, mean_moisture_local));
-            surface_color = mix(surface_color, alpine_color, alpine_material);
-        }
-
-        if (rock_material > 0.0) {
-            let rock_color = vec3<f32>(0.48, 0.46, 0.42) + vec3<f32>(0.04) * color_var;
-            surface_color = mix(surface_color, rock_color, rock_material);
         }
 
         mountain_snow = select(
@@ -1148,11 +1007,6 @@ fn shade_planet(in: VertexOutput) -> vec4<f32> {
             surface_color = mix(surface_color, snow_color, mountain_snow);
         }
 
-        // Beach transition — very subtle, only at close zoom
-        if (terrain_land_height < 0.015) {
-            let beach_blend = smooth_step(0.015, 0.0, terrain_land_height);
-            surface_color = mix(surface_color, vec3<f32>(0.55, 0.52, 0.42), beach_blend * 0.3);
-        }
     }
 
     // One blue-white albedo for the shared ocean/land polar cap boundary.
@@ -1201,7 +1055,9 @@ fn shade_planet(in: VertexOutput) -> vec4<f32> {
             case 4u: {
                 let mean_t = compute_temperature(rotated, height, 0.5);
                 let mean_m = compute_moisture(rotated, height, 0.5);
-                debug_color = gradient_color(mean_t, mean_m, mean_t, 0.0, region_val) * 1.3;
+                debug_color = surface_land_albedo(rotated, uniforms.surface_seed,
+                    mean_t, mean_m, mean_t, terrain_land_height, terrain_slope_value,
+                    0.0, uniforms.ocean_fraction);
             }
             case 5u: {
                 if (is_ocean) {

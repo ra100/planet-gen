@@ -373,7 +373,7 @@ impl PlanetGenApp {
                 .map(|snapshot| snapshot.radius_km)
                 .unwrap_or(self.derived.radius_km),
             show_cloud_shadows: if self.show_cloud_shadows { 1.0 } else { 0.0 },
-            _pad5: 0.0,
+            surface_seed: self.params.seed,
         }
     }
 

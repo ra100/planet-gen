@@ -1241,7 +1241,7 @@ fn preview_uniforms(params: &PlanetParams, derived: &DerivedProperties) -> Previ
         ring_opacity: 0.,
         planet_radius_km: derived.radius_km,
         show_cloud_shadows: 0.,
-        _pad5: 0.,
+        surface_seed: params.seed,
     }
 }
 
