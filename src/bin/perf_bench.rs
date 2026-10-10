@@ -19,7 +19,7 @@ use planet_gen::planet::{DerivedProperties, PlanetParams};
 use planet_gen::plates::{PlateGenParams, generate_plates};
 use planet_gen::preview::PreviewRenderer;
 use planet_gen::terrain_compute::{
-    ErosionPipeline, TerrainComputePipeline, TerrainGenerationParams,
+    ErosionClimate, ErosionPipeline, TerrainComputePipeline, TerrainGenerationParams,
 };
 use planet_gen::weather::WeatherSnapshot;
 use std::sync::Arc;
@@ -280,6 +280,7 @@ fn run_u2_768() {
         &mut warmup,
         U2_768_PREVIEW_EROSION_ITERATIONS,
         ocean_level,
+        ErosionClimate::default(),
     ) {
         eprintln!("warmup erosion failed: {error}");
         return;
@@ -314,6 +315,7 @@ fn run_u2_768() {
         &mut measured,
         U2_768_PREVIEW_EROSION_ITERATIONS,
         ocean_level,
+        ErosionClimate::default(),
     ) {
         eprintln!("measured erosion failed: {error}");
         return;
@@ -611,7 +613,13 @@ fn main() {
             &gpu, &plates, warmup_res, seed, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0, 9.81,
             0.85, 0.2, 1.0,
         );
-        if let Err(error) = erosion_pipeline.erode(&gpu, &mut terrain, 5, ocean_level) {
+        if let Err(error) = erosion_pipeline.erode(
+            &gpu,
+            &mut terrain,
+            5,
+            ocean_level,
+            ErosionClimate::default(),
+        ) {
             eprintln!("warmup erosion failed: {error}");
             return;
         }
@@ -650,9 +658,13 @@ fn main() {
 
         // Erosion
         let t2 = Instant::now();
-        if let Err(error) =
-            erosion_pipeline.erode(&gpu, &mut terrain, erosion_iterations, ocean_level)
-        {
+        if let Err(error) = erosion_pipeline.erode(
+            &gpu,
+            &mut terrain,
+            erosion_iterations,
+            ocean_level,
+            ErosionClimate::default(),
+        ) {
             eprintln!("erosion failed at {res}px: {error}");
             return;
         }

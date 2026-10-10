@@ -21,7 +21,7 @@ use crate::plates::{PlateGenParams, generate_plates};
 use crate::png_writer::{AtomicScanlinePngWriter, PngRowFormat};
 use crate::preview::PreviewUniforms;
 use crate::terrain_compute::{
-    ErosionPipeline, TectonicTerrain, TerrainComputePipeline, TerrainGenParams,
+    ErosionClimate, ErosionPipeline, TectonicTerrain, TerrainComputePipeline, TerrainGenParams,
     TerrainGenerationParams, WindFieldPipeline, earth_relative_rotation_rate,
 };
 use crate::weather::{WeatherFieldPipeline, WeatherSnapshot, WeatherTextures};
@@ -3219,6 +3219,13 @@ pub fn run_export_with_timings_and_checkpoints(
     // --- Phase 3: Erosion ---
     let erosion_started = Instant::now();
     let erosion_pipeline = ErosionPipeline::new(gpu);
+    let erosion_climate = ErosionClimate {
+        seed: params.seed,
+        base_temp_c: derived.base_temperature_c,
+        axial_tilt_rad: params.axial_tilt_deg.to_radians(),
+        moisture: config.weather.moisture,
+        ocean_fraction: derived.ocean_fraction,
+    };
     for face in 0..6u32 {
         if cancel.load(Ordering::Relaxed) {
             return Err("Cancelled".into());
@@ -3250,6 +3257,7 @@ pub fn run_export_with_timings_and_checkpoints(
                 &mut meso_terrain,
                 config.erosion_iterations,
                 ocean_level,
+                erosion_climate,
                 cancel,
             )
             .map_err(|error| format!("meso erosion preflight failed: {error}"))?;
@@ -3268,6 +3276,7 @@ pub fn run_export_with_timings_and_checkpoints(
                 &mut terrain,
                 config.erosion_iterations,
                 ocean_level,
+                erosion_climate,
                 cancel,
             )
             .map_err(|error| format!("erosion preflight failed: {error}"))?;
@@ -3561,7 +3570,14 @@ pub fn run_export_with_timings_and_checkpoints(
         let weather_resolution = export_weather_resolution(config.face_resolution);
         let weather_terrain =
             materialize_staged_terrain_for_weather(&terrain_stage, weather_resolution, cancel)?;
-        let snapshot = export_weather_snapshot(config.weather, weather_resolution);
+        let snapshot = export_weather_snapshot(
+            WeatherSnapshot {
+                surface_seed: params.seed,
+                ocean_fraction: derived.ocean_fraction * config.weather.moisture,
+                ..config.weather
+            },
+            weather_resolution,
+        );
         let wind_pipeline = WindFieldPipeline::new(gpu)
             .map_err(|error| format!("export wind pipeline unavailable: {error}"))?;
         let dynamics =
@@ -3808,6 +3824,8 @@ mod tests {
             face: 5,
             resolution: 2048,
             seed: 0xDEAD_BEEF,
+            surface_seed: 42,
+            ocean_fraction: 0.7,
             storm_count: 7,
             coverage: 0.72,
             moisture: 0.34,

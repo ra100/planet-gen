@@ -274,9 +274,6 @@ fn ray_march_clouds(
     let step_len = (z_start - z_end) / f32(CLOUD_RAY_SAMPLES);
     let radius_km = max(uniforms.planet_radius_km, 1.0);
     let display_scale = cloud_display_scale();
-    // Ray-anchor jitter is deterministic in world space, avoiding camera-space shimmer.
-    let ray_anchor = normalize((uniforms.rotation * vec4<f32>(normalize(vec3<f32>(ndc, 0.5)), 0.0)).xyz);
-    let start_jitter = 0.5 + snoise(ray_anchor * 47.0 + noise_seed_offset(uniforms.cloud_seed, 45u)) * 0.005;
     let sun_world = normalize((uniforms.rotation * vec4<f32>(sun_dir, 0.0)).xyz);
     var transmittance = vec3<f32>(1.0);
     var in_scatter = vec3<f32>(0.0);
@@ -284,7 +281,7 @@ fn ray_march_clouds(
     for (var i = 0u; i < CLOUD_RAY_SAMPLES; i++) {
         let segment_start = vec3<f32>(ndc, z_start - f32(i) * step_len);
         let segment_end = vec3<f32>(ndc, z_start - f32(i + 1u) * step_len);
-        let z = z_start - (f32(i) + start_jitter) * step_len;
+        let z = z_start - (f32(i) + 0.5) * step_len;
         let pos = vec3<f32>(ndc, z);
         let altitude_km = max((length(pos) - 1.0) * radius_km, 0.0);
         let direction = normalize(pos);
@@ -301,20 +298,54 @@ fn ray_march_clouds(
             transmittance *= exp(-extinction * abs(step_len) * radius_km * CLOUD_LIGHT_EXTINCTION);
             continue;
         }
-        let world_pos = world * (1.0 + altitude_km / radius_km);
+        // Thin layers can lie far from the ray segment's midpoint. Evaluate
+        // their lighting inside the cloud, where the integrated density resides.
+        let geometry = sample.geometry;
+        let low_base = mix(geometry.r, mix(geometry.r, geometry.g, 0.16),
+            smooth_step(0.7, 1.8, geometry.g - geometry.r));
+        let deep_base = mix(geometry.r, geometry.g, 0.28);
+        let high_base = max(geometry.b, geometry.a - 3.0);
+        let start_altitude = max((length(segment_start) - 1.0) * radius_km, 0.0);
+        let end_altitude = max((length(segment_end) - 1.0) * radius_km, 0.0);
+        let ray_delta = segment_end - segment_start;
+        let closest_t = clamp(-dot(segment_start, ray_delta) / max(dot(ray_delta, ray_delta), 1.0e-12), 0.0, 1.0);
+        let min_altitude = max((length(segment_start + closest_t * ray_delta) - 1.0) * radius_km, 0.0);
+        let max_altitude = max(start_altitude, end_altitude);
+        let clipped_bases = clamp(vec3<f32>(low_base, deep_base, high_base),
+            vec3<f32>(min_altitude), vec3<f32>(max_altitude));
+        let clipped_tops = clamp(vec3<f32>(geometry.g, max(geometry.b, deep_base + 0.5), geometry.a),
+            vec3<f32>(min_altitude), vec3<f32>(max_altitude));
+        // Opaque columns are seen from their near boundary, not halfway through
+        // their mass. This is the mean of t*exp(-tau*t) over the segment.
+        let optical_depth = extinction * abs(step_len) * radius_km * CLOUD_LIGHT_EXTINCTION;
+        var visible_fraction = 0.5 - optical_depth / 12.0;
+        if (optical_depth >= 0.05) {
+            visible_fraction = 1.0 / optical_depth - 1.0 / (exp(min(optical_depth, 80.0)) - 1.0);
+        }
+        let light_centres = mix(clipped_bases, clipped_tops,
+            select(visible_fraction, 1.0 - visible_fraction, start_altitude >= end_altitude));
+        let layer_weights = vec3<f32>(layers.low * 0.90, layers.deep * 1.65, layers.high * 0.32);
+        let light_altitude = dot(light_centres, layer_weights) / max(dot(layer_weights, vec3<f32>(1.0)), 0.0001);
+        let world_pos = world * (1.0 + light_altitude / radius_km);
         let light_transmittance = cloud_sun_path_transmittance(world_pos, sun_world, radius_km, sample);
         let sun_transmit = atmosphere_sun_transmittance(pos, sun_dir);
         let sun_facing = smooth_step(-0.025, 0.16, dot(direction, sun_dir));
-        let star = star_color(uniforms.star_color_temp);
+        let star = star_color(uniforms.star_color_temp) / star_color(0.5);
         // Orthographic rays are all +Z to the camera; phase must not vary with
         // screen position.  Incident energy is zero in the planet's shadow,
         // leaving only a deliberately tiny blue night ambient.
         let phase = cloud_phase(-sun_dir.z) * (4.0 * 3.14159);
-        let direct_energy = sun_facing * light_transmittance * (0.8 + 0.2 * min(phase, 2.5)) * SUN_IRRADIANCE;
+        // Higher scattering orders lose directionality and penetrate the cloud
+        // farther. This bounded approximation lifts dense bodies without a
+        // noise-based lighting term or sun-independent illumination at night.
+        let multiple_scatter = 0.38 * sqrt(light_transmittance)
+            + 0.30 * (1.0 - light_transmittance);
+        let direct_energy = sun_facing * (light_transmittance * (0.8 + 0.2 * min(phase, 2.5))
+            + multiple_scatter) * (SUN_IRRADIANCE / 1.36);
         let night_ambient = vec3<f32>(0.0015, 0.0020, 0.0035);
-        let low_color = night_ambient + vec3<f32>(1.0, 1.0, 0.98) * star * sun_transmit * direct_energy * 0.72;
-        let deep_color = night_ambient * 0.55 + vec3<f32>(0.92, 0.94, 0.96) * star * sun_transmit * direct_energy * 0.48;
-        let high_color = night_ambient * 1.3 + vec3<f32>(0.88, 0.94, 1.0) * star * sun_transmit * direct_energy * 0.78;
+        let low_color = night_ambient + vec3<f32>(1.0, 1.0, 0.99) * star * sun_transmit * direct_energy * 1.08;
+        let deep_color = night_ambient * 0.55 + vec3<f32>(0.97, 0.98, 1.0) * star * sun_transmit * direct_energy * 1.0;
+        let high_color = night_ambient * 1.3 + vec3<f32>(0.92, 0.96, 1.0) * star * sun_transmit * direct_energy * 0.85;
         let cloud_color = (low_color * layers.low * 0.90
             + deep_color * layers.deep * 1.65
             + high_color * layers.high * 0.32) / max(extinction / display_scale, 0.0001);
@@ -507,16 +538,9 @@ fn compute_moisture(sphere_pos: vec3<f32>, height: f32, season: f32) -> f32 {
     let monsoon_pull = land_score * 8.0 * 3.14159 / 180.0 * season_angle;
     let thermal_lat = effective_lat - sub_solar_lat - monsoon_pull;
 
-    // Hadley cell base moisture — scaled by ocean fraction FIRST.
-    // Softened ocean scaling: low-water worlds still get some moisture
-    let ocean_scale = 0.25 + 0.75 * uniforms.ocean_fraction;
-    let hadley_base = hadley_cell_moisture(thermal_lat) * ocean_scale;
-
-    // Local noise variation (breaks latitude bands)
-    let noise1 = snoise(sphere_pos * 3.0 + noise_seed_offset(uniforms.surface_seed, 73u));
-    let local_var = noise1 * 0.5;
-    var moisture = hadley_base * (0.55 + 0.45 * (local_var + 0.5));
-    moisture += 50.0 * (local_var + 0.5) * ocean_scale;
+    // Share the regional climate with the weather's vegetation source.
+    var moisture = climate_regional_moisture(sphere_pos, thermal_lat,
+        preview_hadley_top(), preview_subpolar_lat(), uniforms.surface_seed, uniforms.ocean_fraction);
 
     // === Coast/interior moisture gradient ===
     // GPU-computed continentality (0=coast/ocean, ~0.8=deep interior) from cubemap
@@ -564,14 +588,6 @@ fn compute_moisture(sphere_pos: vec3<f32>, height: f32, season: f32) -> f32 {
     } else {
         moisture *= 1.3; // Over ocean
     }
-
-    // === Regional moisture character ===
-    // Low-frequency noise gives each region a wet or dry personality.
-    // This creates "jungle continents" vs "desert continents" at similar latitudes.
-    let region_moisture_bias = snoise(sphere_pos * 0.7 + noise_seed_offset(uniforms.surface_seed, 74u));
-    moisture *= 1.0 + region_moisture_bias * 0.25; // ±25% regional variation
-
-    moisture *= 0.5 + uniforms.ocean_fraction;
 
     // Pressure-dependent precipitation scaling (ExoPlaSim: precip ~ P^(-0.5))
     // Thinner atmospheres cycle water faster → more precipitation per unit moisture

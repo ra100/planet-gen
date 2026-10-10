@@ -1,17 +1,12 @@
 // Shared weather-driven density functions. Preview and export compile this unchanged.
-// The weather field owns the large-scale mass layout. Subgrid boundary
-// displacement stays inside its support; it is not another cloud-coverage mask.
-const LOW_DETAIL_STRENGTH: f32 = 1.0;
-const DEEP_DETAIL_STRENGTH: f32 = 1.0;
-// High cirrus keeps its supported, wind-owned edge observable to U3.
-const HIGH_DETAIL_STRENGTH: f32 = 1.0;
+// The weather field owns cloud coverage, condensate and vertical geometry.
 const LOW_OPTICAL_WEIGHT: f32 = 0.50;
 const CLOUD_PHASE_G: f32 = 0.55;
 const CLOUD_PHASE_MAX: f32 = 0.62;
 // Conversion from the solver's normalized condensate columns to optical depth.
 // This is an appearance calibration, not a measured microphysical coefficient.
-// 1.2 left the default decks as translucent haze; 6.0 over-occluded them.
-const CLOUD_LIGHT_EXTINCTION: f32 = 3.0;
+// Liquid banks need substantial reflection rather than a translucent gray veil.
+const CLOUD_LIGHT_EXTINCTION: f32 = 4.5;
 
 struct CloudLayers {
     low: f32,
@@ -114,99 +109,6 @@ fn cloud_phase(cos_theta: f32) -> f32 {
     return min((1.0 - g2) / (4.0 * 3.14159 * pow(denominator, 1.5)), CLOUD_PHASE_MAX);
 }
 
-fn wind_filtered_dominant_noise(
-    direction: vec3<f32>,
-    frequency: f32,
-    stretch: f32,
-    seed: u32,
-) -> f32 {
-    let offset = noise_seed_offset(uniforms.cloud_seed, seed);
-    let center = snoise(direction * frequency + offset);
-    let wind = sample_wind_tangent_data(direction);
-    let amount = clamp(stretch - 1.0, 0.0, 1.0) * smooth_step(0.02, 0.3, wind.magnitude);
-    if (amount <= 0.0) { return center; }
-    let tangent = wind.direction - direction * dot(wind.direction, direction);
-    let tangent_length = length(tangent);
-    if (tangent_length <= 1.0e-6) { return center; }
-
-    // A finite symmetric geodesic filter smooths the first two octaves along wind.
-    let step = clamp(0.60 / frequency, 1.0e-4, 0.10);
-    let along = tangent / tangent_length;
-    let forward = normalize(direction * cos(step) + along * sin(step));
-    let backward = normalize(direction * cos(step) - along * sin(step));
-    let far_forward = normalize(direction * cos(2.0 * step) + along * sin(2.0 * step));
-    let far_backward = normalize(direction * cos(2.0 * step) - along * sin(2.0 * step));
-    return mix(
-        center,
-        0.05 * center
-            + 0.20 * snoise(forward * frequency + offset)
-            + 0.20 * snoise(backward * frequency + offset)
-            + 0.275 * snoise(far_forward * frequency + offset)
-            + 0.275 * snoise(far_backward * frequency + offset),
-        amount,
-    );
-}
-
-fn filtered_noise(
-    direction: vec3<f32>,
-    frequencies: vec3<f32>,
-    weights: vec3<f32>,
-    stretch: f32,
-    angular_pixel_footprint: f32,
-    seed: u32,
-) -> vec2<f32> {
-    let footprint_frequency = frequencies * angular_pixel_footprint;
-    let band_limit = vec3<f32>(
-        1.0 - smooth_step(0.12, 0.50, footprint_frequency.x),
-        1.0 - smooth_step(0.12, 0.50, footprint_frequency.y),
-        1.0 - smooth_step(0.12, 0.50, footprint_frequency.z),
-    );
-    let higher_weights = weights.yz * band_limit.yz;
-    let dominant = wind_filtered_dominant_noise(direction, frequencies.x, stretch, seed);
-    let higher = vec2<f32>(
-        snoise(direction * frequencies.y + noise_seed_offset(uniforms.cloud_seed, seed + 1u)),
-        snoise(direction * frequencies.z + noise_seed_offset(uniforms.cloud_seed, seed + 2u)),
-    );
-    return vec2<f32>(
-        dominant * band_limit.x,
-        dot(higher, higher_weights) / max(dot(weights.yz, vec2<f32>(1.0)), 1.0e-4),
-    );
-}
-
-fn isotropic_noise(
-    direction: vec3<f32>,
-    frequencies: vec3<f32>,
-    weights: vec3<f32>,
-    angular_pixel_footprint: f32,
-    seed: u32,
-) -> vec2<f32> {
-    let footprint_frequency = frequencies * angular_pixel_footprint;
-    let band_limit = vec3<f32>(
-        1.0 - smooth_step(0.12, 0.50, footprint_frequency.x),
-        1.0 - smooth_step(0.12, 0.50, footprint_frequency.y),
-        1.0 - smooth_step(0.12, 0.50, footprint_frequency.z),
-    );
-    let weighted = weights * band_limit;
-    let noise = vec3<f32>(
-        snoise(direction * frequencies.x + noise_seed_offset(uniforms.cloud_seed, seed)),
-        snoise(direction * frequencies.y + noise_seed_offset(uniforms.cloud_seed, seed + 1u)),
-        snoise(direction * frequencies.z + noise_seed_offset(uniforms.cloud_seed, seed + 2u)),
-    );
-    return vec2<f32>(
-        noise.x * band_limit.x,
-        dot(noise.yz, weighted.yz) / max(dot(weights.yz, vec2<f32>(1.0)), 1.0e-4),
-    );
-}
-
-// Detail is a small perturbation of the weather field, not a second occupancy
-// mask. Thresholding noise across every column made repeated camouflage cells.
-// Preserve dense decks; let tenuous fringes carry most of the subgrid texture.
-fn cloud_detail_modulation(detail: vec2<f32>, mass: f32, strength: f32, amplitude: vec2<f32>) -> f32 {
-    let fringe = 1.0 - smooth_step(0.08, 0.40, mass);
-    let perturbation = dot(clamp(detail, vec2<f32>(-1.0), vec2<f32>(1.0)), amplitude);
-    return 1.0 + clamp(strength, 0.0, 1.0) * (0.20 + 0.80 * fringe) * perturbation;
-}
-
 // Differential of the orthographic unit-sphere intersection. A normalized
 // (x,y,0.5) proxy doubled the footprint at disk center and underestimated it
 // near the limb, filtering away fine central structure while aliasing the rim.
@@ -217,78 +119,6 @@ fn cloud_sphere_pixel_footprint(projected: vec2<f32>, pixel_dx: vec2<f32>, pixel
     return max(length(tangent_dx), length(tangent_dy));
 }
 
-fn cloud_boundary_displacement(direction: vec3<f32>, footprint: f32) -> vec3<f32> {
-    var displacement = vec3<f32>(0.0);
-    let frequencies = vec3<f32>(13.0, 43.0, 119.0);
-    // Keep the existing streams, but stop the broadest octave dominating the
-    // outline. Finer boundary structure is resolved by the sphere footprint.
-    let amplitudes = vec3<f32>(0.018, 0.014, 0.005);
-    for (var octave = 0u; octave < 3u; octave++) {
-        let p = direction * frequencies[octave] + noise_seed_offset(uniforms.cloud_seed, 80u + octave);
-        let resolved = 1.0 - smooth_step(0.12, 0.50, frequencies[octave] * footprint);
-        displacement += vec3<f32>(snoise(p), snoise(p + vec3<f32>(17.1, 3.7, 9.2)), snoise(p + vec3<f32>(5.3, 23.8, 1.6)))
-            * amplitudes[octave] * resolved;
-    }
-    return displacement - direction * dot(displacement, direction);
-}
-
-// Compact, overlapping spherical puffs rather than thresholded fBm. The
-// integral of (1-r^2)^3 over the unit ball is 64*pi/315; normalization retains
-// mean column density in a homogeneous field. No new weather support is added.
-fn cloud_puff_field(direction: vec3<f32>, frequency: f32, footprint: f32, seed: u32, stream: u32) -> f32 {
-    return cloud_flow_puffs(direction, frequency, footprint, seed, stream, vec3<f32>(0.0), 1.0);
-}
-
-fn cloud_flow_puffs(direction: vec3<f32>, frequency: f32, footprint: f32, seed: u32, stream: u32, flow: vec3<f32>, stretch: f32) -> f32 {
-    let side = cross(direction, flow);
-    let side_length = length(side);
-    let axis = side / max(side_length, 1.0e-6);
-    let elongation = mix(1.0, clamp(stretch, 1.0, 3.0), smooth_step(0.0, 0.01, side_length));
-    // Compress only across the local wind; the kernel remains within the
-    // original unit support, so the 27-cell neighborhood is still sufficient.
-    let resolved = 1.0 - smooth_step(0.12, 0.45, frequency * footprint * elongation);
-    if (resolved <= 0.0) { return 1.0; }
-    let p = direction * frequency + noise_seed_offset(seed, stream);
-    let cell = floor(p);
-    var puffs = 0.0;
-    for (var z = -1; z <= 1; z++) {
-        for (var y = -1; y <= 1; y++) {
-            for (var x = -1; x <= 1; x++) {
-                let neighbor = cell + vec3<f32>(f32(x), f32(y), f32(z));
-                var h = fract(neighbor * 0.1031);
-                h += vec3<f32>(dot(h, h.yzx + vec3<f32>(33.33)));
-                let jitter = fract((h.xxy + h.yzz) * h.zyx);
-                let center = neighbor + jitter;
-                let delta = p - center;
-                let radius = 0.65 + 0.35 * fract(dot(jitter, vec3<f32>(13.7, 7.3, 23.1)));
-                let across = dot(delta, axis);
-                let distance_squared = dot(delta, delta) + across * across * (elongation * elongation - 1.0);
-                let lobe = max(1.0 - distance_squared / (radius * radius), 0.0);
-                puffs += lobe * lobe * lobe;
-            }
-        }
-    }
-    // E[radius^3] for uniform radii in [0.65, 1] is 0.58678.
-    return mix(1.0, 0.15 + 0.85 * puffs * elongation / (0.63829184 * 0.58678), resolved);
-}
-
-// A hierarchy of connected banks, lobes, and restrained internal detail. Fine
-// puffs do not contribute an independent blanket of equal-sized bright dots.
-fn cloud_cluster_field(direction: vec3<f32>, footprint: f32, seed: u32, stream: u32) -> f32 {
-    return cloud_flow_clusters(direction, footprint, seed, stream, vec3<f32>(0.0), 1.0);
-}
-
-fn cloud_flow_clusters(direction: vec3<f32>, footprint: f32, seed: u32, stream: u32, flow: vec3<f32>, stretch: f32) -> f32 {
-    let banks = cloud_flow_puffs(direction, 14.0, footprint, seed, stream, flow, stretch);
-    let lobes = cloud_flow_puffs(direction, 32.0, footprint, seed, stream + 1u, flow, mix(1.0, stretch, 0.5));
-    let interior = smooth_step(0.8, 1.8, banks);
-    var fine = 1.0;
-    if (interior > 0.0) {
-        fine = cloud_puff_field(direction, 73.0, footprint, seed, stream + 2u);
-    }
-    return banks * mix(1.0, lobes, 0.25)
-        * mix(1.0, fine, 0.08 * interior);
-}
 
 // Two normalized components share the same column mass: a compact lower deck
 // and a lofted upper body. Thin layers retain the original single profile.
@@ -308,122 +138,24 @@ fn low_cloud_segment(p0: vec3<f32>, p1: vec3<f32>, base: f32, top: f32, radius: 
     return mix(layer_profile_segment_mean(p0, p1, base, top, radius), bodies, layered);
 }
 
-// Sculpt within the transported layer envelope, not above it. The profile is
-// renormalized over the resulting depth, so relief does not mint cloud mass.
-fn cloud_relief_top(base: f32, top: f32, form: f32, amount: f32) -> f32 {
-    let relief = 1.0 - smooth_step(0.35, 1.8, form);
-    return top - max(top - base, 0.0) * clamp(amount, 0.0, 0.30) * relief;
-}
-
+// Rendering follows transported condensate and diagnosed layer heights directly.
+// Seed and wind affect weather formation; they do not stamp an opacity texture.
 fn weather_cloud_sample(dir: vec3<f32>, altitude_km: f32, angular_pixel_footprint: f32) -> WeatherCloudSample {
     let direction = normalize(dir);
-    let authored_mass = textureSampleLevel(weather_mass_tex, height_sampler, direction, 0.0);
+    let mass = textureSampleLevel(weather_mass_tex, height_sampler, direction, 0.0);
     let geometry = textureSampleLevel(weather_geometry_tex, height_sampler, direction, 0.0);
     let height = textureSampleLevel(height_tex, height_sampler, direction, 0.0).r;
-    if (max(max(authored_mass.r, authored_mass.g), authored_mass.b) <= 0.0) {
-        return WeatherCloudSample(CloudLayers(0.0, 0.0, 0.0), authored_mass, geometry, height, 1.0, 1.0, 1.0);
-    }
-    let detail_weight = clamp(uniforms.cloud_advection, 0.0, 1.0);
-    let wind = sample_wind_tangent_data(direction);
-    let wind_strength = smooth_step(0.02, 0.5, wind.magnitude) * detail_weight;
-    // Refine the boundary of the resolved weather, not its opacity everywhere.
-    // A uniform deck remains uniform; an empty weather field remains empty.
-    let strengths = vec3<f32>(LOW_DETAIL_STRENGTH, DEEP_DETAIL_STRENGTH, HIGH_DETAIL_STRENGTH) * detail_weight;
-    var mass = authored_mass;
-    if (max(max(strengths.x, strengths.y), strengths.z) > 0.0) {
-        let displaced_direction = normalize(direction + cloud_boundary_displacement(direction, angular_pixel_footprint));
-        let displaced_mass = textureSampleLevel(weather_mass_tex, height_sampler, displaced_direction, 0.0);
-        let refined = mix(authored_mass.rgb, displaced_mass.rgb, clamp(strengths, vec3<f32>(0.0), vec3<f32>(1.0)));
-        mass = vec4<f32>(select(refined, vec3<f32>(0.0), authored_mass.rgb <= vec3<f32>(0.0)), authored_mass.a);
-    }
-    var sample = WeatherCloudSample(CloudLayers(0.0, 0.0, 0.0), mass, geometry, height, 1.0, 1.0, 1.0);
+    var sample = WeatherCloudSample(CloudLayers(0.0, 0.0, 0.0), mass, geometry, height, 1.0, 1.0, 0.28);
     if (max(max(mass.r, mass.g), mass.b) <= 0.0) { return sample; }
-
+    let detached_base = mix(geometry.r, mix(geometry.r, geometry.g, 0.16),
+        smooth_step(0.7, 1.8, geometry.g - geometry.r));
     let deep_base = mix(geometry.r, geometry.g, 0.28);
-    let deep_top = max(geometry.b, deep_base + 0.5);
-    let deep_height_fraction = clamp((altitude_km - deep_base) / max(deep_top - deep_base, 0.1), 0.0, 1.0);
-    // Presentation-level shear, bounded in world angle. Keep original weather
-    // mass/support and layer heights; only subgrid structure leans downwind.
-    let shear_angle = min(80.0 / max(uniforms.planet_radius_km, 1.0), 0.018) * wind_strength;
-    let deep_direction = normalize(direction - wind.direction * shear_angle * deep_height_fraction);
-    let low_detail = isotropic_noise(
-        direction, vec3<f32>(11.0, 37.0, 101.0),
-        vec3<f32>(0.50, 0.32, 0.18), angular_pixel_footprint, 40u,
-    );
-    let deep_detail = isotropic_noise(
-        deep_direction, vec3<f32>(13.0, 41.0, 107.0),
-        vec3<f32>(0.46, 0.34, 0.20), angular_pixel_footprint, 50u,
-    );
-    let tower_lobes = isotropic_noise(
-        deep_direction, vec3<f32>(17.0, 47.0, 127.0),
-        vec3<f32>(0.52, 0.30, 0.18), angular_pixel_footprint, 60u,
-    );
-    sample.low_multiplier = cloud_detail_modulation(
-        low_detail, mass.r, LOW_DETAIL_STRENGTH * detail_weight, vec2<f32>(0.035, 0.07),
-    );
-    let deep_combined_detail = mix(deep_detail, tower_lobes, deep_height_fraction);
-    let deep_multiplier = cloud_detail_modulation(
-        deep_combined_detail, mass.g, DEEP_DETAIL_STRENGTH * detail_weight, vec2<f32>(0.045, 0.065),
-    );
-    let low_depth_km = geometry.g - geometry.r;
-    let shallow_family = smooth_step(0.7, 1.8, low_depth_km);
-    // Thin stable decks stay continuous. Low-cloud kernels only provide subtle
-    // internal variation: strong broad lobes plus matching raised tops stamped
-    // repeated oval blobs onto the transported weather, especially in trades.
-    let low_puff_weight = shallow_family * (1.0 - smooth_step(0.20, 0.65, mass.r))
-        * (1.0 - 0.65 * smooth_step(0.03, 0.18, mass.g))
-        * 0.18 * LOW_DETAIL_STRENGTH * detail_weight;
-    if (low_puff_weight > 0.0 && mass.r > 0.0) {
-        let form = cloud_flow_clusters(direction, angular_pixel_footprint, uniforms.cloud_seed, 110u,
-            wind.direction, 1.0 + 1.2 * wind_strength);
-        sample.low_multiplier *= mix(1.0, form, low_puff_weight);
-    }
-    sample.deep_multiplier = deep_multiplier * mix(1.18, 0.68, deep_height_fraction);
-    // Storm columns have broader lobes than shallow cumulus. The broad form
-    // stays vertically coherent rather than changing noise at every ray step.
-    let tower_weight = (1.0 - smooth_step(0.30, 0.75, mass.g))
-        * 0.65 * DEEP_DETAIL_STRENGTH * detail_weight;
-    if (tower_weight > 0.0 && mass.g > 0.0) {
-        let form = cloud_flow_puffs(deep_direction, 24.0, angular_pixel_footprint, uniforms.cloud_seed, 120u,
-            wind.direction, 1.0 + 0.45 * wind_strength);
-        sample.deep_multiplier *= mix(1.0, form, tower_weight);
-        // Column-top relief must not depend on the altitude of a ray sample.
-        let top_form = cloud_flow_puffs(direction, 24.0, angular_pixel_footprint, uniforms.cloud_seed, 120u,
-            wind.direction, 1.0 + 0.45 * wind_strength);
-        sample.geometry.b = cloud_relief_top(max(sample.geometry.g, deep_base), geometry.b, top_form, tower_weight * 0.28);
-    }
-
-    let fibres = filtered_noise(
-        direction, vec3<f32>(17.0, 53.0, 113.0),
-        vec3<f32>(0.54, 0.30, 0.16), 1.85, angular_pixel_footprint, 70u,
-    );
-    let high_modulation = cloud_detail_modulation(
-        fibres, mass.b, HIGH_DETAIL_STRENGTH * detail_weight, vec2<f32>(0.12, 0.12),
-    );
-    // Optically thin cirrus has stronger wind-filtered filament contrast than
-    // either liquid layer; retain the existing dense-sheet limit.
-    let filament_weight = (1.0 - smooth_step(0.20, 0.65, mass.b))
-        * HIGH_DETAIL_STRENGTH * detail_weight;
-    // A resolved, directional fine octave enriches the existing wisps instead
-    // of adding isotropic dots. Blend to zero as its crosswind scale vanishes.
-    let wisp_lod = 1.0 - smooth_step(0.12, 0.45, 67.0 * angular_pixel_footprint);
-    var wisp = 0.0;
-    if (filament_weight > 0.0 && mass.b > 0.0 && wisp_lod > 0.0) {
-        wisp = wind_filtered_dominant_noise(direction, 67.0, 2.0, 74u) * wisp_lod;
-    }
-    let filament = clamp(1.0 + 2.4 * fibres.x + 1.2 * fibres.y + 0.4 * wisp * wind_strength, 0.15, 2.5);
-    sample.high_multiplier = high_modulation * mix(1.0, filament, filament_weight) * 0.28;
-    // Point samples, camera segments, and sunlight use this same final geometry.
-    // Surface classification never switches the vertical profile.
-    let g = sample.geometry;
-    let detached_base = mix(g.r, mix(g.r, g.g, 0.16), smooth_step(0.7, 1.8, g.g - g.r));
-    let shaped_deep_base = mix(g.r, g.g, 0.28);
-    sample.layers.low = mass.r * sample.low_multiplier * LOW_OPTICAL_WEIGHT
-        * low_cloud_profile(altitude_km, detached_base, g.g);
-    sample.layers.deep = mass.g * sample.deep_multiplier
-        * layer_profile(altitude_km, shaped_deep_base, max(g.b, shaped_deep_base + 0.5));
+    sample.layers.low = mass.r * LOW_OPTICAL_WEIGHT
+        * low_cloud_profile(altitude_km, detached_base, geometry.g);
+    sample.layers.deep = mass.g
+        * layer_profile(altitude_km, deep_base, max(geometry.b, deep_base + 0.5));
     sample.layers.high = mass.b * sample.high_multiplier
-        * layer_profile(altitude_km, max(g.b, g.a - 3.0), g.a);
+        * layer_profile(altitude_km, max(geometry.b, geometry.a - 3.0), geometry.a);
     return sample;
 }
 
@@ -544,5 +276,5 @@ fn cloud_surface_shadow(
         + weather_column_density_raw(center, angular_pixel_footprint)
         + weather_column_density_raw(normalize(center + spread), angular_pixel_footprint)) / 3.0;
     let shadow_scale = clamp(uniforms.cloud_coverage, 0.0, 1.0) * clamp(uniforms.cloud_opacity, 0.0, 1.0);
-    return exp(-density * shadow_scale * 3.5);
+    return exp(-density * shadow_scale * CLOUD_LIGHT_EXTINCTION * (3.5 / 3.0));
 }

@@ -15,6 +15,8 @@ struct SpinupParams {
     rotation_rate_rad_s: f32,
     diagnostic_flags: u32,
     wind_scale: f32,
+    surface_seed: u32,
+    ocean_fraction: f32,
 }
 
 @group(0) @binding(0) var<uniform> params: SpinupParams;
@@ -57,11 +59,9 @@ const TRANSFER_CAP_PER_SUBSTEP: f32 = 0.12;
 const STORM_RECHARGE_LAND: f32 = 0.06;
 const STORM_RECHARGE_MARINE: f32 = 0.18;
 const STORM_RECHARGE_HARD_CAP: f32 = 0.24;
-// DS-046 #1: bounded eddy diffusion κ∇²(state). κ targets √(κ·25600s) ≈ 450 km
-// (4–8 texels @128) so advection-only filaments mix across-wind instead of
-// smearing. The explicit blend clamps at 0.24 (< the 0.25 two-dimensional
-// monotonicity limit), so extrema never amplify at any resolution/substep count.
-const EDDY_DIFFUSIVITY_M2_S: f32 = 8000000.0;
+// Keep mixing below the resolved cloud-ripple scale. The stencil averages
+// four neighbors, so effective diffusivity is one quarter of this coefficient.
+const EDDY_DIFFUSIVITY_M2_S: f32 = 10000.0;
 const EDDY_DIFFUSION_MAX_BLEND: f32 = 0.24;
 
 fn smooth_step(edge0: f32, edge1: f32, value: f32) -> f32 {
@@ -127,10 +127,6 @@ fn proportional_transfer(source: f32, provenance: f32, amount: f32) -> f32 {
     return select(0.0, amount * provenance / source, source > 0.0 && amount > 0.0);
 }
 
-fn face_angle(a: vec3<f32>, b: vec3<f32>) -> f32 {
-    return acos(clamp(dot(a, b), -1.0, 1.0));
-}
-
 fn min_face_angle(resolution: u32) -> f32 {
     let step = 2.0 / f32(resolution - 1u);
     let neighbor_length = sqrt(3.0 - 2.0 * step + step * step);
@@ -150,7 +146,7 @@ fn catalyst_center(index: u32) -> vec3<f32> {
     let angle = rank * 2.3999632 + phase;
     let base = vec3<f32>(sqrt(max(1.0 - z * z, 0.0)) * cos(angle), z, sqrt(max(1.0 - z * z, 0.0)) * sin(angle));
     let basis = tangent_basis(base);
-    let jitter = (noise_seed_offset(params.seed, 201u + index).xy * 2.0 - 1.0) * 0.12;
+    let jitter = (noise_seed_offset(params.seed, 201u + index).xy * 0.02 - 1.0) * 0.12;
     return normalize(base + basis[0] * jitter.x + basis[1] * jitter.y);
 }
 
@@ -252,8 +248,7 @@ fn source_potential(
     marine_fraction: f32,
     thermal: f32,
 ) -> f32 {
-    // Vapor enters this field only over open water. Land can only convert
-    // transported vapor already held in state.x.
+    // Open-water supply; canopy evapotranspiration is budgeted separately.
     return marine_fraction * mix(0.42, 0.68, thermal);
 }
 
@@ -265,16 +260,7 @@ const WATER_EDGE_SOFTNESS: f32 = 0.004;
 // Residual bootstrap humidity so purely-land worlds still seed sub-saturated
 // vapor; the shore-keyed fetch ramp dominates wherever water exists.
 const SEED_RESIDUAL_FRACTION: f32 = 0.05;
-// FE-085: bounded land-surface evapotranspiration strength. Peak budget
-// (coverage=moisture=thermal=1) is 0.27 vs the 0.68 peak open-ocean supply
-// potential, i.e. ~40% — raised from 0.17 to lift land cloud decks toward
-// ≥25% while keeping the fetch-scaled marine source dominant.
-// RV-002 A1b (validation runs 3–5): raising this to 0.35/0.45/0.68 left every
-// A-metric and the all-land doctrine value byte-identical — land q_target
-// stays far below q_sat, so sub-saturated ET vapor cannot condense without
-// convergence; the strength constant is not the binding limit for A1b.
-// Reverted to 0.27; A1b needs a gate re-spec or phase-change change (user
-// decision).
+// Canopy conductance remains below the peak open-water supply (0.68).
 const LAND_ET_STRENGTH: f32 = 0.27;
 // The source-owned tracer mints land evaporation at a reduced share while ocean
 // evaporation mints at 1.0. It is therefore ocean-dominant provenance, not a
@@ -334,13 +320,8 @@ struct SourceBudgets {
     source_envelope: f32,
 }
 
-// Coverage controls source supply and vapor phase conversion independently.
-// FE-084 note: an earlier draft routed evapotranspiration into phase_rank as
-// well. Measured on the DS-046 validation scenes, boosting land phase
-// capacity intercepts transported marine vapor at ws=2 hard enough that
-// lee-side ocean decks thin and the raw connected cloud-free region (A1c
-// backstop) grows past its gate, so sourcing stays bounded to the supply/
-// humidity channels below.
+// Coverage controls supply and conversion independently. Wet land's local
+// conversion support is added in advance_state after evaluating its canopy.
 fn source_budgets(
     coverage: f32,
     marine_fraction: f32,
@@ -412,6 +393,35 @@ fn terrain_transect(pos: vec3<f32>, wind_dir: vec3<f32>, wind_speed: f32) -> Ter
     );
 }
 
+fn land_canopy(pos: vec3<f32>, continentality: f32, rain_shadow: f32) -> f32 {
+    let elevation_km = max(sample_height(pos) - params.ocean_level, 0.0) * 5.0;
+    let rotation_ratio = max(abs(params.rotation_rate_rad_s) / 0.00007292116, 0.1);
+    var hadley_lat = min(30.0 / pow(rotation_ratio, 0.3), 70.0);
+    hadley_lat += select(1.5 - clamp(params.base_temp_c - 21.0, 0.0, 14.0) * 0.25,
+        clamp(params.base_temp_c - 15.0, -20.0, 6.0) * 0.25, params.base_temp_c <= 21.0);
+    let polar_lat = min(60.0 / pow(rotation_ratio, 0.2), 80.0);
+    let land_moisture = climate_regional_moisture(pos, climate_latitude(pos, params.axial_tilt_rad),
+        clamp(hadley_lat, 5.0, 75.0), polar_lat, params.surface_seed, params.ocean_fraction)
+        * mix(1.0, 0.55, smooth_step(0.1, 0.7, continentality))
+        * (1.0 - rain_shadow * 0.55) * pow(max(params.surface_pressure_bar, 0.05), -0.5);
+    let thawed = smoothstep(-15.0, -6.0, temperature_at(pos));
+    return smooth_step(25.0, 100.0, land_moisture)
+        * (1.0 - smooth_step(2.2, 3.4, elevation_km)) * thawed;
+}
+
+fn canopy_vapor_seed(pos: vec3<f32>, water_local: f32, source_envelope: f32) -> f32 {
+    let wind = textureSampleLevel(wind_tex, spinup_sampler, pos, 0.0);
+    let tangent = wind.xyz - pos * dot(wind.xyz, pos);
+    let speed = length(tangent);
+    let terrain = terrain_transect(pos, tangent / max(speed, 0.0001), speed);
+    let thermal = smooth_step(-25.0, 30.0, temperature_at(pos));
+    // Initialize finite, sub-saturated humidity over wet vegetation. Starting
+    // every continental interior dry exhausted the short spin-up on recharge.
+    return (1.0 - water_local) * land_canopy(pos, wind.a, terrain.lee_drying)
+        * mix(0.16, 0.68, thermal) * smooth_step(0.05, 0.3, params.surface_pressure_bar)
+        * clamp(params.moisture, 0.0, 1.0) * source_envelope * 0.55;
+}
+
 fn mc_slope(left: vec4<f32>, center: vec4<f32>, right: vec4<f32>) -> vec4<f32> {
     let backward = center - left;
     let forward = right - center;
@@ -426,6 +436,35 @@ struct Reconstruction {
 fn cell_area(pos: vec3<f32>) -> f32 {
     let cube = sphere_to_face_uv(pos).yz * 2.0 - 1.0;
     return pow(1.0 + dot(cube, cube), -1.5);
+}
+
+fn cube_basis(face: u32) -> mat3x3<f32> {
+    switch (face) {
+        case 0u: { return mat3x3<f32>(vec3<f32>(1, 0, 0), vec3<f32>(0, 0, -1), vec3<f32>(0, -1, 0)); }
+        case 1u: { return mat3x3<f32>(vec3<f32>(-1, 0, 0), vec3<f32>(0, 0, 1), vec3<f32>(0, -1, 0)); }
+        case 2u: { return mat3x3<f32>(vec3<f32>(0, 1, 0), vec3<f32>(1, 0, 0), vec3<f32>(0, 0, 1)); }
+        case 3u: { return mat3x3<f32>(vec3<f32>(0, -1, 0), vec3<f32>(1, 0, 0), vec3<f32>(0, 0, -1)); }
+        case 4u: { return mat3x3<f32>(vec3<f32>(0, 0, 1), vec3<f32>(1, 0, 0), vec3<f32>(0, -1, 0)); }
+        default: { return mat3x3<f32>(vec3<f32>(0, 0, -1), vec3<f32>(-1, 0, 0), vec3<f32>(0, -1, 0)); }
+    }
+}
+
+// J * grad(s or t) is the outward edge normal times its angular length.
+// Neighbor directions and lengths are not edge normals/lengths on an oblique
+// cubemap grid; using them made transport depend on the face orientation.
+fn shared_edge_vector(a: vec3<f32>, b: vec3<f32>) -> vec3<f32> {
+    let midpoint = normalize(a + b);
+    let basis = cube_basis(u32(sphere_to_face_uv(midpoint).x));
+    let cube = vec2<f32>(dot(midpoint, basis[1]), dot(midpoint, basis[2])) / dot(midpoint, basis[0]);
+    let a_uv = vec2<f32>(dot(a, basis[1]), dot(a, basis[2])) / dot(a, basis[0]);
+    let b_uv = vec2<f32>(dot(b, basis[1]), dot(b, basis[2])) / dot(b, basis[0]);
+    let delta = b_uv - a_uv;
+    let along_s = abs(delta.x) >= abs(delta.y);
+    let axis = select(basis[2], basis[1], along_s);
+    let coordinate = select(cube.y, cube.x, along_s);
+    let orientation = sign(select(delta.y, delta.x, along_s));
+    let metric_step = 2.0 / f32(params.spin_resolution - 1u);
+    return (axis - coordinate * basis[0]) * (orientation * metric_step / (1.0 + dot(cube, cube)));
 }
 
 fn reconstruct(center: vec3<f32>) -> Reconstruction {
@@ -461,6 +500,16 @@ fn velocity(pos: vec3<f32>, normal: vec3<f32>) -> f32 {
     return dot(wind - pos * dot(wind, pos), normal) * MAX_WIND_MPS;
 }
 
+fn reservoir_velocity(pos: vec3<f32>, edge: vec3<f32>) -> vec4<f32> {
+    let wind = textureSampleLevel(wind_tex, spinup_sampler, pos, 0.0).xyz * params.wind_scale;
+    let tangent = wind - pos * dot(wind, pos);
+    let lower = dot(tangent, edge) * MAX_WIND_MPS;
+    // Upper ice follows a modest directional shear within the existing speed
+    // bound, so cirrus can trail and cross the lower liquid cloud banks.
+    let upper = dot(tangent * 0.90 + cross(pos, tangent) * 0.25, edge) * MAX_WIND_MPS;
+    return vec4<f32>(lower, lower, lower, upper);
+}
+
 fn hancock(center: vec3<f32>) -> Reconstruction {
     let fuv = sphere_to_face_uv(center);
     let face = u32(fuv.x);
@@ -470,21 +519,27 @@ fn hancock(center: vec3<f32>) -> Reconstruction {
     let west_pos = cube_to_sphere(face, uv - vec2<f32>(step, 0.0));
     let north_pos = cube_to_sphere(face, uv + vec2<f32>(0.0, step));
     let south_pos = cube_to_sphere(face, uv - vec2<f32>(0.0, step));
-    let east_normal = normalize(east_pos - center * dot(east_pos, center));
-    let north_normal = normalize(north_pos - center * dot(north_pos, center));
     let reconstructed = reconstruct(center);
     let param_step = 2.0 * step;
     let area = cell_area(center);
-    let east_flux = velocity(normalize(center + east_pos), east_normal) * reconstructed.east;
-    let west_flux = velocity(normalize(center + west_pos), east_normal) * reconstructed.west;
-    let north_flux = velocity(normalize(center + north_pos), north_normal) * reconstructed.north;
-    let south_flux = velocity(normalize(center + south_pos), north_normal) * reconstructed.south;
-    let divergence = ((east_flux * 0.5 * (area + cell_area(east_pos)) / max(face_angle(center, east_pos) / param_step, 0.0001)
-        - west_flux * 0.5 * (area + cell_area(west_pos)) / max(face_angle(center, west_pos) / param_step, 0.0001))
-        + (north_flux * 0.5 * (area + cell_area(north_pos)) / max(face_angle(center, north_pos) / param_step, 0.0001)
-        - south_flux * 0.5 * (area + cell_area(south_pos)) / max(face_angle(center, south_pos) / param_step, 0.0001))) / max(area * param_step, 0.0001);
-    let half = reconstructed.center - 0.5 * physical_interval_seconds() / max(params.radius_km * 1000.0, 1.0) / transport_substeps(params.spin_resolution) * divergence;
-    return Reconstruction(half, half + reconstructed.west - reconstructed.center, half + reconstructed.east - reconstructed.center, half + reconstructed.south - reconstructed.center, half + reconstructed.north - reconstructed.center);
+    let east_flux = reservoir_velocity(normalize(center + east_pos), shared_edge_vector(center, east_pos)) * reconstructed.east;
+    let west_flux = reservoir_velocity(normalize(center + west_pos), shared_edge_vector(center, west_pos)) * reconstructed.west;
+    let north_flux = reservoir_velocity(normalize(center + north_pos), shared_edge_vector(center, north_pos)) * reconstructed.north;
+    let south_flux = reservoir_velocity(normalize(center + south_pos), shared_edge_vector(center, south_pos)) * reconstructed.south;
+    let divergence = (east_flux + west_flux + north_flux + south_flux) / max(area * param_step * param_step, 0.000001);
+    let half = max(reconstructed.center - 0.5 * physical_interval_seconds()
+        / max(params.radius_km * 1000.0, 1.0) / transport_substeps(params.spin_resolution)
+        * divergence, vec4<f32>(0.0));
+    let west = reconstructed.west - reconstructed.center;
+    let east = reconstructed.east - reconstructed.center;
+    let south = reconstructed.south - reconstructed.center;
+    let north = reconstructed.north - reconstructed.center;
+    let minimum = min(min(west, east), min(south, north));
+    // Re-limit slopes at half time. Strong outflow can make a previously valid
+    // face negative after prediction, importing negative cloud water downwind.
+    let theta = min(vec4<f32>(1.0), half / max(-minimum, vec4<f32>(0.000001)));
+    return Reconstruction(half, half + west * theta, half + east * theta,
+        half + south * theta, half + north * theta);
 }
 
 fn state_toward(center: vec3<f32>, toward: vec3<f32>) -> vec4<f32> {
@@ -512,18 +567,17 @@ fn a_is_minus(a: vec3<f32>, b: vec3<f32>) -> bool {
 }
 
 fn shared_flux(a: vec3<f32>, a_state: vec4<f32>, b: vec3<f32>, b_state: vec4<f32>) -> vec4<f32> {
-    let midpoint = normalize(a + b);
     let a_is_canonical_minus = a_is_minus(a, b);
     let minus = select(b, a, a_is_canonical_minus);
     let plus = select(a, b, a_is_canonical_minus);
     let minus_state = select(b_state, a_state, a_is_canonical_minus);
     let plus_state = select(a_state, b_state, a_is_canonical_minus);
-    let normal = normalize(plus - midpoint * dot(plus, midpoint));
-    let minus_velocity = velocity(minus, normal);
-    let plus_velocity = velocity(plus, normal);
-    let same_sign = minus_velocity * plus_velocity >= 0.0;
+    let edge = shared_edge_vector(minus, plus);
+    let minus_velocity = reservoir_velocity(minus, edge);
+    let plus_velocity = reservoir_velocity(plus, edge);
+    let same_sign = minus_velocity * plus_velocity >= vec4<f32>(0.0);
     let average_velocity = 0.5 * (minus_velocity + plus_velocity);
-    let upwind = select(plus_state, minus_state, average_velocity >= 0.0);
+    let upwind = select(plus_state, minus_state, average_velocity >= vec4<f32>(0.0));
     let rusanov = 0.5 * (minus_velocity * minus_state + plus_velocity * plus_state - max(abs(minus_velocity), abs(plus_velocity)) * (plus_state - minus_state));
     return select(-select(rusanov, average_velocity * upwind, same_sign), select(rusanov, average_velocity * upwind, same_sign), a_is_canonical_minus);
 }
@@ -596,10 +650,7 @@ fn provenance_transport(pos: vec3<f32>) -> f32 {
     let west_flux = shared_flux(west_pos, provenance_toward(west_pos, pos), pos, predicted.west).x;
     let north_flux = shared_flux(pos, predicted.north, north_pos, provenance_toward(north_pos, pos)).x;
     let south_flux = shared_flux(south_pos, provenance_toward(south_pos, pos), pos, predicted.south).x;
-    let divergence = (east_flux * face_angle(pos, east_pos)
-        - west_flux * face_angle(west_pos, pos)
-        + north_flux * face_angle(pos, north_pos)
-        - south_flux * face_angle(south_pos, pos))
+    let divergence = (east_flux - west_flux + north_flux - south_flux)
         / max(cell_area(pos) * metric_step * metric_step, 0.000001);
     return predicted.center.x - physical_interval_seconds() / max(params.radius_km * 1000.0, 1.0)
         / transport_substeps(params.spin_resolution) * divergence;
@@ -659,14 +710,12 @@ fn init(@builtin(global_invocation_id) id: vec3<u32>) {
         0.0,
         (params.diagnostic_flags & DIAGNOSTIC_NO_SOURCE) != 0u,
     );
-    // DS-045: one-time sub-saturated bootstrap with a monotonic shore-anchored
-    // decay keyed to blurred water proximity — no coastal band. Transport never
-    // recharges it on land.
+    // Both maritime proximity and local vegetation seed finite vapor, not clouds.
     let land_seed = (1.0 - water.local)
         * (SEED_RESIDUAL_FRACTION + (1.0 - SEED_RESIDUAL_FRACTION) * water.fetch)
         * thermal_stability
         * clamp(params.coverage, 0.0, 1.0) * clamp(params.moisture, 0.0, 1.0)
-        * pressure * 0.10;
+        * pressure * 0.10 + canopy_vapor_seed(pos, water.local, budgets.source_envelope);
     let seeded_vapor = select(
         min(marine_vapor + land_seed, 0.70 * mix(0.16, 0.68, thermal_stability) * pressure),
         marine_vapor,
@@ -716,12 +765,12 @@ fn init_with_provenance(@builtin(global_invocation_id) id: vec3<u32>) {
         0.0,
         (params.diagnostic_flags & DIAGNOSTIC_NO_SOURCE) != 0u,
     );
-    // DS-045: monotonic shore-anchored bootstrap decay — no coastal band.
+    // Keep the same finite humidity initialization in both capability paths.
     let land_seed = (1.0 - water.local)
         * (SEED_RESIDUAL_FRACTION + (1.0 - SEED_RESIDUAL_FRACTION) * water.fetch)
         * thermal_stability
         * clamp(params.coverage, 0.0, 1.0) * clamp(params.moisture, 0.0, 1.0)
-        * pressure * 0.10;
+        * pressure * 0.10 + canopy_vapor_seed(pos, water.local, budgets.source_envelope);
     let seeded_vapor = select(
         min(marine_vapor + land_seed, 0.70 * mix(0.16, 0.68, thermal_stability) * pressure),
         marine_vapor,
@@ -774,10 +823,7 @@ fn advance_state(pos: vec3<f32>, provenance_mass: f32, enable_vertical: bool) ->
     let west_flux = shared_flux(west_pos, state_toward(west_pos, pos), pos, predicted.west);
     let north_flux = shared_flux(pos, predicted.north, north_pos, state_toward(north_pos, pos));
     let south_flux = shared_flux(south_pos, state_toward(south_pos, pos), pos, predicted.south);
-    let transport_divergence = (east_flux * face_angle(pos, east_pos)
-        - west_flux * face_angle(west_pos, pos)
-        + north_flux * face_angle(pos, north_pos)
-        - south_flux * face_angle(south_pos, pos))
+    let transport_divergence = (east_flux - west_flux + north_flux - south_flux)
         / max(cell_area(pos) * metric_step * metric_step, 0.000001);
     // DS-046 #1: bounded local eddy stabilization of the pre-transport
     // neighborhood. This cubemap stencil is not area-weighted or proven
@@ -788,10 +834,14 @@ fn advance_state(pos: vec3<f32>, provenance_mass: f32, enable_vertical: bool) ->
             + sample_state(cube_to_sphere(face, uv - vec2<f32>(grid_step, 0.0)))
             + sample_state(cube_to_sphere(face, uv + vec2<f32>(0.0, grid_step)))
             + sample_state(cube_to_sphere(face, uv - vec2<f32>(0.0, grid_step))));
-    var state = predicted.center
+    // Hancock predicts face fluxes at half time; the full update starts from
+    // the original cell average. Using predicted.center applied convergence
+    // for an extra half step and compressed condensate into sharp ribbons.
+    let previous = sample_state(pos);
+    var state = previous
         - physical_interval_seconds() * step_fraction
             / max(params.radius_km * 1000.0, 1.0) * transport_divergence
-        + eddy * (neighborhood - predicted.center);
+        + eddy * (neighborhood - previous);
     // state=(q_bl,c_low,c_deep,c_high),
     // aux=(q_ft,P_bl,P_low,P_deep), tail=(P_ft,P_high,0,0).
     // q_ft takes the slower circulation path (0.35 of the full-wind rate,
@@ -825,7 +875,7 @@ fn advance_state(pos: vec3<f32>, provenance_mass: f32, enable_vertical: bool) ->
         tail.x += p_bl_to_ft;
     }
 
-    let diagnostic_step = max(texel_angle * 1.5, 0.01);
+    let diagnostic_step = max(texel_angle * 1.5, 0.004);
     let basis = tangent_basis(pos);
     let east = basis[0];
     let north = basis[1];
@@ -834,7 +884,16 @@ fn advance_state(pos: vec3<f32>, provenance_mass: f32, enable_vertical: bool) ->
     let divergence_north_wind = textureSampleLevel(wind_tex, spinup_sampler, normalize(pos + north * diagnostic_step), 0.0).xyz * forcing_scale;
     let divergence_south_wind = textureSampleLevel(wind_tex, spinup_sampler, normalize(pos - north * diagnostic_step), 0.0).xyz * forcing_scale;
     let divergence = (dot(divergence_east_wind - divergence_west_wind, east) + dot(divergence_north_wind - divergence_south_wind, north)) / (2.0 * diagnostic_step);
-    let convergence = smooth_step(0.01, 0.3, -divergence * 0.2);
+    let wind_dx = (divergence_east_wind - divergence_west_wind) / (2.0 * diagnostic_step);
+    let wind_dy = (divergence_north_wind - divergence_south_wind) / (2.0 * diagnostic_step);
+    // Symmetric strain stretches filaments; rigid rotation does not. Reuse the
+    // lift stencil so entrainment can spare the rotating cloud cores.
+    let deformation = vec2<f32>(dot(wind_dx, east) - dot(wind_dy, north),
+        dot(wind_dy, east) + dot(wind_dx, north));
+    let strain = length(deformation);
+    let lift_rate = max(-divergence * 0.2, 0.0);
+    let convergence = mix(smooth_step(0.01, 0.3, lift_rate),
+        1.0 - exp(-2.0 * lift_rate), smooth_step(1.25, 3.0, params.wind_scale));
 
     let terrain = terrain_transect(pos, wind_dir, effective_speed);
     let terrain_lift = terrain.ascent;
@@ -850,22 +909,7 @@ fn advance_state(pos: vec3<f32>, provenance_mass: f32, enable_vertical: bool) ->
     let ice_fraction = 1.0 - smoothstep(-15.0, -6.0, temperature_at(pos));
     let persistent_ice = marine_fraction * ice_fraction;
     let source_ice = water.local * ice_fraction;
-    // FE-090 (S1): per-texel vegetation density from existing fields — no new
-    // fields, no layout bump. Vegetation needs per-texel moisture (coasts wet,
-    // interiors dry; lee slopes dried by rain shadow), an altitude low enough
-    // for a treeline, and no persistent ice. Bounded in [0,1]. The 6..22 °C
-    // warmth window stays in et_capacity below (single source of truth); this
-    // proxy adds the moisture/relief structure it currently lacks. wind.a is
-    // the continentality channel (same inversion as marine_fraction above), so
-    // coasts get dense vegetation and deep interiors sparse — a Saharan cell
-    // transpires less than an Amazonian one at the same temperature.
-    let elevation_km = max(sample_height(pos) - params.ocean_level, 0.0) * 5.0;
-    let continentality = smooth_step(0.15, 0.85, wind.a);
-    let veg_moisture = (1.0 - rain_shadow * 0.6)
-        * mix(0.10, 1.0, 1.0 - continentality);
-    let vegetation_density = veg_moisture
-        * (1.0 - smooth_step(2.2, 3.4, elevation_km))   // treeline cap ~3 km
-        * (1.0 - ice_fraction);                         // frozen ground: no ET
+    let vegetation_density = land_canopy(pos, wind.a, rain_shadow);
     // FE-086: bounded land-only evapotranspiration capacity. It gates the
     // supplemental source below by coverage, moisture, surface temperature,
     // and per-texel vegetation density (FE-090 S1). It is zero over standing
@@ -892,7 +936,7 @@ fn advance_state(pos: vec3<f32>, provenance_mass: f32, enable_vertical: bool) ->
     let ocean_supply = budgets.supply * water.local * water.fetch * surface_supply_factor;
     let et_budget = LAND_ET_STRENGTH * et_capacity;
     let supply_budget = ocean_supply + et_budget;
-    let phase_budget = budgets.phase;
+    let phase_budget = max(budgets.phase, et_capacity * budgets.source_envelope * 1.2);
     // FE-078 (DS-043): advected source-owned provenance raises the inland
     // humidity ceiling toward the marine value so wind-aligned plumes survive
     // farther inland. This is ocean-dominant, not marine-origin evidence when
@@ -920,8 +964,13 @@ fn advance_state(pos: vec3<f32>, provenance_mass: f32, enable_vertical: bool) ->
         0.0,
         0.92,
     );
-    let q_target = q_sat * supply_budget * clamp(params.moisture, 0.0, 1.0)
-        * effective_relative_humidity_target;
+    // A wet canopy controls the humidity ceiling; its conductance limits the
+    // actual water flux below. Multiplying the ceiling by the small ET budget
+    // held inland air permanently below its condensation threshold.
+    let land_humidity = (1.0 - water.local) * vegetation_density
+        * smooth_step(6.0, 22.0, temperature_at(pos)) * budgets.source_envelope * 0.85;
+    let q_target = q_sat * max(ocean_supply, land_humidity)
+        * clamp(params.moisture, 0.0, 1.0) * effective_relative_humidity_target;
     // DS-045: flow/history signals replace static marine classification.
     // Saturation of transported vapor relative to its climate target is smooth
     // by advection; source ownership carries its weighted source history.
@@ -942,7 +991,8 @@ fn advance_state(pos: vec3<f32>, provenance_mass: f32, enable_vertical: bool) ->
         et_capacity > 0.0,
     );
         if ((params.diagnostic_flags & DIAGNOSTIC_NO_SOURCE) == 0u) {
-        let evaporation = max(q_target - state.x, 0.0) * 0.030 * step_fraction;
+        let evaporation = min(max(q_target - state.x, 0.0), q_sat * supply_budget)
+            * 0.030 * step_fraction;
         state.x += evaporation;
         let land_supply_share = et_budget / max(supply_budget, 0.0001);
         // Ownership rule: provenance mints the source-step evaporation.
@@ -972,14 +1022,17 @@ fn advance_state(pos: vec3<f32>, provenance_mass: f32, enable_vertical: bool) ->
     let storm_catalyst = convective_catalyst(pos) * (1.0 - stratiform_regime);
     if ((params.diagnostic_flags & DIAGNOSTIC_NO_PHASE_CHANGE) == 0u) {
         let catalyst = storm_catalyst;
-        let pressure_east = textureSampleLevel(pressure_tex, spinup_sampler, normalize(pos + east * diagnostic_step), 0.0).r;
-        let pressure_west = textureSampleLevel(pressure_tex, spinup_sampler, normalize(pos - east * diagnostic_step), 0.0).r;
-        let pressure_north = textureSampleLevel(pressure_tex, spinup_sampler, normalize(pos + north * diagnostic_step), 0.0).r;
-        let pressure_south = textureSampleLevel(pressure_tex, spinup_sampler, normalize(pos - north * diagnostic_step), 0.0).r;
+        // Keep the front detector independent of grid spacing. A longer baseline
+        // also avoids amplifying the half-float pressure texture's rounding error.
+        let frontal_step = clamp(300.0 / max(params.radius_km, 1.0), 0.02, 0.08);
+        let pressure_east = textureSampleLevel(pressure_tex, spinup_sampler, normalize(pos + east * frontal_step), 0.0).r;
+        let pressure_west = textureSampleLevel(pressure_tex, spinup_sampler, normalize(pos - east * frontal_step), 0.0).r;
+        let pressure_north = textureSampleLevel(pressure_tex, spinup_sampler, normalize(pos + north * frontal_step), 0.0).r;
+        let pressure_south = textureSampleLevel(pressure_tex, spinup_sampler, normalize(pos - north * frontal_step), 0.0).r;
         let pressure_delta = vec2<f32>(pressure_east - pressure_west, pressure_north - pressure_south);
         let temperature_delta = vec2<f32>(
-            temperature_at(normalize(pos + east * diagnostic_step)) - temperature_at(normalize(pos - east * diagnostic_step)),
-            temperature_at(normalize(pos + north * diagnostic_step)) - temperature_at(normalize(pos - north * diagnostic_step)),
+            temperature_at(normalize(pos + east * frontal_step)) - temperature_at(normalize(pos - east * frontal_step)),
+            temperature_at(normalize(pos + north * frontal_step)) - temperature_at(normalize(pos - north * frontal_step)),
         );
         let pressure_gradient = length(pressure_delta);
         let temperature_gradient = length(temperature_delta);
@@ -1038,11 +1091,6 @@ fn advance_state(pos: vec3<f32>, provenance_mass: f32, enable_vertical: bool) ->
             0.0,
             1.0,
         );
-        // Lift cools an air parcel to its LCL; only vapor above that capacity changes phase.
-        let q_lcl = min(
-            q_sat * (1.0 - mix(0.08, 0.42, convective_lift)),
-            q_target * 0.70,
-        ) * (1.0 - terrain_lift * 0.65);
         // Resolved lifting organizes formation before transport. The previous
         // local humidity target condensed broad warm-ocean blankets; a later
         // independent noise mask then cut fake weather systems into that mass.
@@ -1050,6 +1098,14 @@ fn advance_state(pos: vec3<f32>, provenance_mass: f32, enable_vertical: bool) ->
         let rising_air = smooth_step(0.08, 0.65, organized_lift);
         let stable_deck = (1.0 - thermal) * marine_fraction
             * (1.0 - smooth_step(0.05, 0.30, divergence)) * 0.35;
+        // The old 0.70*q_target ceiling condensed moist marine air even without
+        // lifting. Lower the parcel capacity when convergence, fronts or a cool
+        // stable boundary layer actually support clouds; descending air stays dry.
+        let marine_lifting = clamp(organized_lift + stable_deck * 0.65, 0.0, 1.0);
+        let marine_capacity = q_target * mix(1.08, 0.48, marine_lifting);
+        let land_capacity = min(q_sat * (1.0 - mix(0.08, 0.42, convective_lift)), q_target * 0.70);
+        let q_lcl = mix(land_capacity, marine_capacity, marine_fraction)
+            * (1.0 - terrain_lift * 0.65);
         let formation_support = mix(1.0,
             mix(max(0.04, stable_deck), 1.0, rising_air), marine_fraction);
         let condensation = min(
@@ -1104,12 +1160,53 @@ fn advance_state(pos: vec3<f32>, provenance_mass: f32, enable_vertical: bool) ->
         aux.z += p_orographic * (1.0 - orographic_deep_fraction);
         aux.w += p_orographic * orographic_deep_fraction;
 
-        let evaporation = min(state.y, max(q_target - state.x, 0.0) * 0.012 * step_fraction);
+        // A descending parcel warms and regains vapor capacity. Use the same
+        // local capacity as condensation so unsupported trails can dissolve
+        // without evaporating cloud cores that are still being lifted.
+        let subsidence = smooth_step(0.02, 0.30, divergence);
+        let evaporation = min(state.y, max(q_lcl - state.x, 0.0)
+            * (0.012 + subsidence * 0.12) * step_fraction);
         state.x += evaporation;
         state.y -= evaporation;
         let p_low_evaporation = proportional_transfer(state.y + evaporation, aux.z, evaporation);
         aux.z -= p_low_evaporation;
         aux.y += p_low_evaporation;
+
+        // Thin filaments entrain dry air from both sides. Strain increases the
+        // exchange, while broad banks and rotating cores retain their water.
+        let wind_lateral = normalize(cross(pos, wind_dir) + east * 0.0001);
+        // Sample across the compressive axis, rather than assuming every thin
+        // bank is parallel to the wind. The two signs give the same air pair.
+        let axis_cos = clamp(deformation.x / max(strain, 0.0001), -1.0, 1.0);
+        let stretch_x = sqrt(0.5 * (1.0 + axis_cos));
+        let stretch_y = sqrt(0.5 * (1.0 - axis_cos))
+            * select(-1.0, 1.0, deformation.y >= 0.0);
+        let compressive = north * stretch_x - east * stretch_y;
+        let lateral = select(wind_lateral, compressive, strain > 0.5);
+        let mixing_step = max(texel_angle * 1.5, 60.0 / max(params.radius_km, 1.0));
+        let left_air = sample_state(normalize(pos + lateral * mixing_step));
+        let right_air = sample_state(normalize(pos - lateral * mixing_step));
+        let surrounding_cloud = 0.5 * (left_air.y + left_air.z + right_air.y + right_air.z);
+        let low_water = max(state.y, 0.0);
+        let deep_water = max(state.z, 0.0);
+        let cloud_water = low_water + deep_water;
+        let exposed_water = max(cloud_water - surrounding_cloud, 0.0);
+        let dry_air = 1.0 - clamp(0.5 * (left_air.x + right_air.x) / max(q_sat, 0.0001), 0.0, 1.0);
+        let entrainment = 0.25 + 0.75 * smooth_step(0.5, 4.0, strain);
+        let edge_evaporation = min(min(cloud_water, max(q_sat - state.x, 0.0)),
+            exposed_water * smooth_step(0.006, 0.06, cloud_water) * dry_air
+                * (1.0 - catalyst) * entrainment * step_fraction);
+        let low_edge = edge_evaporation * low_water / max(cloud_water, 0.0001);
+        let deep_edge = edge_evaporation - low_edge;
+        let p_low_edge = proportional_transfer(state.y, aux.z, low_edge);
+        let p_deep_edge = proportional_transfer(state.z, aux.w, deep_edge);
+        state.y -= low_edge;
+        state.z -= deep_edge;
+        state.x += edge_evaporation;
+        aux.z -= p_low_edge;
+        aux.w -= p_deep_edge;
+        aux.y += p_low_edge + p_deep_edge;
+
         let catalyst_activation = catalyst * budgets.source_envelope;
         let q_up = q_sat * (1.0 - 0.79 * catalyst);
         let vapor_excess = max(state.x - q_up, 0.0);
@@ -1143,6 +1240,28 @@ fn advance_state(pos: vec3<f32>, provenance_mass: f32, enable_vertical: bool) ->
         let p_detrainment = proportional_transfer(state.z + detrainment, aux.w, detrainment);
         aux.w -= p_detrainment;
         tail.y += p_detrainment;
+
+        // Frontal ascent can freeze upper-air vapor without a deep storm below
+        // it. Ice subsequently follows its own sheared transport direction.
+        let upper_lift = smooth_step(0.04, 0.65,
+            max(frontal_lift, max(convergence * 0.45, terrain_lift * 0.35)));
+        let upper_vapor = select(state.x, aux.x, enable_vertical);
+        let ice_capacity = q_sat * 0.012;
+        let ice_growth = min(min(upper_vapor, max(q_sat * 0.08 - state.w, 0.0)),
+            max(upper_vapor - ice_capacity, 0.0)
+                * upper_lift * phase_budget * 0.12 * step_fraction);
+        if (enable_vertical) {
+            let ice_provenance = proportional_transfer(aux.x, tail.x, ice_growth);
+            aux.x -= ice_growth;
+            tail.x -= ice_provenance;
+            tail.y += ice_provenance;
+        } else {
+            let ice_provenance = proportional_transfer(state.x, aux.y, ice_growth);
+            state.x -= ice_growth;
+            aux.y -= ice_provenance;
+            tail.y += ice_provenance;
+        }
+        state.w += ice_growth;
 
     }
 
@@ -1202,7 +1321,7 @@ fn transport(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     // Provenance texture may be unbound in this pass: neutral mass keeps the
     // local humidity target (0 share → no blend).
-    let advance = advance_state(direction(id, res), 0.0, false);
+    let advance = advance_state(direction(id, res), 0.0, !all_ocean_compat());
     textureStore(state_out, vec2<i32>(id.xy), i32(id.z), advance.state);
     textureStore(aux_out, vec2<i32>(id.xy), i32(id.z), advance.aux);
     textureStore(provenance_tail_out, vec2<i32>(id.xy), i32(id.z), advance.tail);

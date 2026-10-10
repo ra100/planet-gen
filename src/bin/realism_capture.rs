@@ -9,7 +9,7 @@ use planet_gen::{
 };
 
 // Reproducible native-default rendering, without a display server.
-// Usage: cargo run --bin realism_capture -- OUTPUT_DIR [SEED] [size]
+// Usage: cargo run --bin realism_capture -- OUTPUT_DIR [SEED] [SIZE] [--clouds-only]
 // size must be a multiple of 64 for aligned readback rows.
 fn read_interactive(gpu: &GpuContext, renderer: &PreviewRenderer, size: u32) -> Vec<u8> {
     let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -69,9 +69,33 @@ fn save(out: &str, size: u32, name: &str, pixels: &[u8]) {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    let clouds_only = args.iter().any(|arg| arg == "--clouds-only");
+    let wind_override = args
+        .windows(2)
+        .find(|pair| pair[0] == "--wind-scale")
+        .map(|pair| {
+            pair[1]
+                .parse::<f32>()
+                .expect("wind scale must be a number")
+                .clamp(0.0, 4.0)
+        });
+    let cloud_settings: serde_json::Value = args
+        .windows(2)
+        .find(|pair| pair[0] == "--cloud-settings")
+        .map(|pair| {
+            serde_json::from_slice(&std::fs::read(&pair[1]).expect("read cloud settings"))
+                .expect("parse cloud settings")
+        })
+        .unwrap_or(serde_json::Value::Null);
+    let setting = |name: &str, fallback: f32| {
+        cloud_settings[name]
+            .as_f64()
+            .map(|value| value as f32)
+            .unwrap_or(fallback)
+    };
     let out = args
         .get(1)
-        .expect("Usage: realism_capture OUTPUT_DIR [SEED] [SIZE]");
+        .expect("Usage: realism_capture OUTPUT_DIR [SEED] [SIZE] [--clouds-only] [--cloud-settings PLANET_JSON]");
     let seed = args
         .get(2)
         .map(|v| v.parse::<u32>().expect("seed must be a u32"))
@@ -174,19 +198,33 @@ fn main() {
     let weather = weather_pipeline.create_textures(&gpu, 384);
     let snapshot = WeatherSnapshot {
         resolution: 384,
-        seed: params.seed.wrapping_add(1000),
-        storm_count: 2,
-        coverage: 0.5,
-        moisture: 1.0,
+        surface_seed: params.seed,
+        ocean_fraction: derived.ocean_fraction * setting("climate_moisture", 1.0),
+        seed: cloud_settings["cloud_seed"]
+            .as_u64()
+            .map(|seed| seed as u32)
+            .unwrap_or_else(|| params.seed.wrapping_add(1000)),
+        storm_count: cloud_settings["storm_count"]
+            .as_u64()
+            .map(|count| count as u32)
+            .unwrap_or(2),
+        coverage: setting("cloud_coverage", 0.5),
+        moisture: setting("climate_moisture", 1.0),
         surface_pressure_bar: derived.surface_pressure_bar,
         base_temp_c: derived.base_temperature_c,
         ocean_level,
         axial_tilt_rad: params.axial_tilt_deg.to_radians(),
-        season: 0.5,
-        storm_size: 1.0,
+        season: setting("season", 0.5),
+        storm_size: setting("storm_size", 1.0),
         radius_km: derived.radius_km,
         rotation_rate_rad_s: derived.rotation_rate_rad_s,
-        wind_scale: 1.0,
+        wind_scale: if let Some(value) = wind_override {
+            value
+        } else if cloud_settings["show_wind_effects"].as_bool() == Some(false) {
+            0.0
+        } else {
+            setting("wind_scale", 1.0)
+        },
         face: 0,
     };
     wind.generate_gpu(
@@ -217,14 +255,14 @@ fn main() {
     ];
     u.ocean_level = ocean_level;
     u.base_temp_c = derived.base_temperature_c;
-    u.ocean_fraction = derived.ocean_fraction;
+    u.ocean_fraction = snapshot.ocean_fraction;
     u.axial_tilt_rad = snapshot.axial_tilt_rad;
-    u.season = 0.5;
+    u.season = snapshot.season;
     u.atmosphere_density = derived.surface_pressure_bar;
     u.atmosphere_height = derived.atmosphere_shell_height();
     u.height_scale = 3.0;
     u.zoom = 1.0;
-    u.cloud_coverage = 0.5;
+    u.cloud_coverage = snapshot.coverage;
     u.cloud_seed = snapshot.seed;
     u.surface_seed = params.seed;
     u.star_color_temp = 0.5;
@@ -236,7 +274,7 @@ fn main() {
     u.show_cloud_shadows = 1.0;
     u.show_atmosphere_layer = 1.0;
     u.show_cities = 1.0;
-    u.cloud_opacity = 1.0;
+    u.cloud_opacity = setting("cloud_opacity", 1.0);
     u.cloud_advection = 1.0;
     u.rotation_rate = 1.0;
     u.atm_pressure = derived.surface_pressure_bar;
@@ -290,6 +328,14 @@ fn main() {
             },
         ),
         (
+            "density-orbital",
+            PreviewUniforms {
+                view_mode: 9,
+                zoom: 3.5,
+                ..u
+            },
+        ),
+        (
             "daylight",
             PreviewUniforms {
                 light_dir: daylight,
@@ -301,6 +347,14 @@ fn main() {
             PreviewUniforms {
                 light_dir: daylight,
                 zoom: 1.55,
+                ..u
+            },
+        ),
+        (
+            "daylight-orbital",
+            PreviewUniforms {
+                light_dir: daylight,
+                zoom: 3.5,
                 ..u
             },
         ),
@@ -378,7 +432,7 @@ fn main() {
             size,
         );
         save(out, size, name, &png);
-        if name == "family-cumulus" {
+        if name == "family-cumulus" && !clouds_only {
             // Hold mass/geometry fixed: these isolate presentation-level wind
             // response, not a regenerated weather field with different clouds.
             for (label, velocity) in [
@@ -400,6 +454,23 @@ fn main() {
         }
     }
     for (name, settings) in cases {
+        if clouds_only
+            && !matches!(
+                name,
+                "daylight"
+                    | "daylight-closeup"
+                    | "daylight-orbital"
+                    | "actual-density"
+                    | "density-closeup"
+                    | "density-orbital"
+                    | "backlit"
+                    | "night-clouds"
+                    | "night-clear"
+                    | "daylight-surface"
+            )
+        {
+            continue;
+        }
         let png = renderer.render(
             &gpu,
             &settings,
@@ -411,7 +482,11 @@ fn main() {
         save(out, size, name, &png);
         if matches!(
             name,
-            "daylight" | "actual-density" | "density-closeup" | "daylight-closeup"
+            "daylight"
+                | "actual-density"
+                | "density-closeup"
+                | "daylight-closeup"
+                | "daylight-orbital"
         ) {
             let smooth = no_detail.render(
                 &gpu,
@@ -447,6 +522,82 @@ fn main() {
                 &png[i..i + 3],
                 &interactive[i..i + 3]
             );
+        }
+    }
+    let mass = weather.read_mass(&gpu);
+    let geometry = weather.read_geometry(&gpu);
+    std::fs::write(
+        format!("{out}/weather-mass.f32"),
+        bytemuck::cast_slice::<f32, u8>(&mass),
+    )
+    .unwrap();
+    let heights: Vec<f32> = terrain.faces.iter().flatten().copied().collect();
+    std::fs::write(
+        format!("{out}/terrain-height.f32"),
+        bytemuck::cast_slice::<f32, u8>(&heights),
+    )
+    .unwrap();
+    std::fs::write(
+        format!("{out}/weather-settings.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "resolution": weather.resolution,
+            "terrain_resolution": terrain.resolution,
+            "wind_scale": snapshot.wind_scale,
+            "surface_seed": snapshot.surface_seed,
+            "cloud_seed": snapshot.seed,
+            "ocean_fraction": snapshot.ocean_fraction,
+            "ocean_level": ocean_level,
+            "base_temp_c": snapshot.base_temp_c,
+            "axial_tilt_rad": snapshot.axial_tilt_rad,
+            "coverage": snapshot.coverage,
+            "moisture": snapshot.moisture,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let face_values = (weather.resolution * weather.resolution * 4) as usize;
+    let geometry_faces =
+        std::array::from_fn(|face| geometry[face * face_values..(face + 1) * face_values].to_vec());
+    let layer_geometry = renderer.upload_cubemap_rgba16(&gpu, &geometry_faces, weather.resolution);
+    for (name, channel) in [("low-density", 0), ("cirrus-density", 2)] {
+        let layer_mass = std::array::from_fn(|face| {
+            mass[face * face_values..(face + 1) * face_values]
+                .chunks_exact(4)
+                .flat_map(|column| {
+                    let mut isolated = [0.0; 4];
+                    isolated[channel] = column[channel];
+                    isolated[3] = column[channel];
+                    isolated
+                })
+                .collect()
+        });
+        let layer_mass = renderer.upload_cubemap_rgba16(&gpu, &layer_mass, weather.resolution);
+        let pixels = renderer.render(
+            &gpu,
+            &PreviewUniforms {
+                view_mode: 9,
+                zoom: 1.55,
+                ..u
+            },
+            &terrain_view,
+            Some(&dynamics.wind_continentality),
+            Some((&layer_mass, &layer_geometry)),
+            size,
+        );
+        save(out, size, name, &pixels);
+        if channel == 2 {
+            let pixels = renderer.render(
+                &gpu,
+                &PreviewUniforms {
+                    light_dir: daylight,
+                    ..u
+                },
+                &terrain_view,
+                Some(&dynamics.wind_continentality),
+                Some((&layer_mass, &layer_geometry)),
+                size,
+            );
+            save(out, size, "cirrus-daylight", &pixels);
         }
     }
 }

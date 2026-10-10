@@ -1,18 +1,65 @@
 //! Erosion comparison: renders the same planet with different erosion levels.
-//! Generates 3 images: no erosion, default (25), heavy (50).
-//! Uses height debug view for clearest comparison.
+//! Usage: erosion_compare [OUTPUT_DIR] [MOISTURE]
 
 use planet_gen::gpu::GpuContext;
 use planet_gen::planet::{DerivedProperties, PlanetParams};
 use planet_gen::plates::{PlateGenParams, generate_plates};
 use planet_gen::preview::{PreviewRenderer, PreviewUniforms};
-use planet_gen::terrain_compute::{ErosionPipeline, TerrainComputePipeline};
+use planet_gen::terrain_compute::{
+    ErosionClimate, ErosionPipeline, TectonicTerrain, TerrainComputePipeline,
+};
 use std::path::Path;
+
+fn report_changes(before: &TectonicTerrain, after: &TectonicTerrain, ocean_level: f32) {
+    let mut total = [0.0_f64; 3];
+    let mut counts = [0_u64; 3];
+    let mut roughness = [0.0_f64; 2];
+    let res = before.resolution as usize;
+    for (original, eroded) in before.faces.iter().zip(&after.faces) {
+        for y in 1..res - 1 {
+            for x in 1..res - 1 {
+                let i = y * res + x;
+                let elevation = original[i] - ocean_level;
+                let region = if elevation < -0.018 {
+                    0
+                } else if elevation.abs() < 0.018 {
+                    1
+                } else {
+                    2
+                };
+                total[region] += f64::from((eroded[i] - original[i]).abs());
+                counts[region] += 1;
+                if region == 1 {
+                    for (index, field) in [original, eroded].iter().enumerate() {
+                        let mean =
+                            (field[i - 1] + field[i + 1] + field[i - res] + field[i + res]) * 0.25;
+                        roughness[index] += f64::from((field[i] - mean).abs());
+                    }
+                }
+            }
+        }
+    }
+    let mean = |index: usize| total[index] / counts[index].max(1) as f64;
+    println!(
+        "mean_height_change deep_ocean={:.7} shore={:.7} inland={:.7} shore_roughness_ratio={:.3}",
+        mean(0),
+        mean(1),
+        mean(2),
+        roughness[1] / roughness[0].max(1e-12)
+    );
+}
 
 fn main() {
     env_logger::init();
 
-    let output_dir = "output/erosion_compare";
+    let output_dir = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "output/erosion_compare".into());
+    let moisture = std::env::args()
+        .nth(2)
+        .map(|s| s.parse::<f32>().expect("moisture in [0, 1]"))
+        .unwrap_or(1.0)
+        .clamp(0.0, 1.0);
     let render_size = 1024u32;
 
     let gpu = GpuContext::new().expect("Failed to initialize GPU");
@@ -22,13 +69,20 @@ fn main() {
     let erosion = ErosionPipeline::new(&gpu);
     let renderer = PreviewRenderer::new(&gpu);
 
-    std::fs::create_dir_all(output_dir).expect("Failed to create output directory");
+    std::fs::create_dir_all(&output_dir).expect("Failed to create output directory");
 
     let params = PlanetParams::default();
     let derived = DerivedProperties::from_params(&params);
     let seed = 42u32;
     let effective_ocean = derived.ocean_fraction;
     let ocean_level = -1.0 + 2.0 * effective_ocean;
+    let climate = ErosionClimate {
+        seed,
+        base_temp_c: derived.base_temperature_c,
+        axial_tilt_rad: params.axial_tilt_deg.to_radians(),
+        moisture,
+        ocean_fraction: effective_ocean,
+    };
 
     let plates = generate_plates(&PlateGenParams {
         seed,
@@ -69,10 +123,17 @@ fn main() {
         );
 
         // Apply erosion
-        if let Err(error) = erosion.erode(&gpu, &mut terrain, *iterations, ocean_level) {
+        let original = terrain.clone();
+        let erosion_started = std::time::Instant::now();
+        if let Err(error) = erosion.erode(&gpu, &mut terrain, *iterations, ocean_level, climate) {
             eprintln!("erosion failed: {error}");
             return;
         }
+        println!(
+            "erosion iterations={iterations} moisture={moisture:.2} elapsed_ms={:.1}",
+            erosion_started.elapsed().as_secs_f64() * 1000.0
+        );
+        report_changes(&original, &terrain, ocean_level);
 
         let cubemap_view = renderer.upload_terrain(&gpu, &terrain);
 
@@ -84,10 +145,10 @@ fn main() {
                     [-sy, cy * sx, cy * cx, 0.0],
                     [0.0, 0.0, 0.0, 1.0],
                 ],
-                light_dir: [0.5, 0.7, -1.0],
+                light_dir: [0.5, 0.7, 1.0],
                 ocean_level,
                 base_temp_c: derived.base_temperature_c,
-                ocean_fraction: effective_ocean,
+                ocean_fraction: effective_ocean * moisture,
                 axial_tilt_rad: params.axial_tilt_deg.to_radians(),
                 view_mode: *view_mode,
                 season: 0.5,

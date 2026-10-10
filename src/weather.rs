@@ -37,6 +37,9 @@ pub struct WeatherSnapshot {
     pub rotation_rate_rad_s: f32,
     /// 0 = calm, 1 = physical baseline, 2 = strong transport.
     pub wind_scale: f32,
+    pub surface_seed: u32,
+    /// Ocean factor used by the surface's regional moisture model.
+    pub ocean_fraction: f32,
 }
 
 impl Default for WeatherSnapshot {
@@ -57,11 +60,13 @@ impl Default for WeatherSnapshot {
             radius_km: 6_371.0,
             rotation_rate_rad_s: 7.292_115e-5,
             wind_scale: 1.0,
+            surface_seed: 0,
+            ocean_fraction: 0.7,
         }
     }
 }
 
-const SPINUP_RESOLUTION: u32 = 128;
+const SPINUP_RESOLUTION: u32 = 384;
 // Keep the 25,600 s spin-up horizon while giving transport more bounded steps.
 const SPINUP_ITERATIONS: usize = 20;
 const PHYSICAL_INTERVAL_SECONDS: f32 = 1280.0;
@@ -170,6 +175,8 @@ struct SpinupParams {
     diagnostic_flags: u32,
     // Occupies the former private padding slot; WGSL has the same offset.
     wind_scale: f32,
+    surface_seed: u32,
+    ocean_fraction: f32,
 }
 
 struct SpinupTexture {
@@ -1038,6 +1045,8 @@ impl WeatherFieldPipeline {
                     0
                 },
             wind_scale: snapshot.wind_scale,
+            surface_seed: snapshot.surface_seed,
+            ocean_fraction: snapshot.ocean_fraction,
         };
         let spinup_uniform = gpu
             .device
@@ -1090,10 +1099,10 @@ impl WeatherFieldPipeline {
         let provenance_tail_b = create_state("weather spin-up provenance tail B");
         let create_provenance = |label| {
             // Tracer VRAM policy: the A/B provenance cubemap pair is capped at
-            // 384 KiB — exactly 2 x R16Float x SPINUP_RESOLUTION^2 x 6 faces x 2 B
+            // 3456 KiB — 2 x R16Float x SPINUP_RESOLUTION^2 x 6 faces x 2 B
             // today. Fail fast rather than silently doubling GPU memory if the
             // resolution cap or format ever moves.
-            const PROVENANCE_PAIR_BUDGET_BYTES: usize = 384 * 1024;
+            const PROVENANCE_PAIR_BUDGET_BYTES: usize = 3456 * 1024;
             let pair_bytes = 2 * (spin_resolution * spin_resolution * 6 * 2) as usize;
             assert!(
                 pair_bytes <= PROVENANCE_PAIR_BUDGET_BYTES,
@@ -1629,6 +1638,8 @@ impl WeatherFieldPipeline {
             rotation_rate_rad_s: snapshot.rotation_rate_rad_s,
             diagnostic_flags,
             wind_scale: snapshot.wind_scale,
+            surface_seed: snapshot.surface_seed,
+            ocean_fraction: snapshot.ocean_fraction,
         };
         let uniform = gpu
             .device
@@ -1940,6 +1951,8 @@ mod tests {
             resolution,
             seed: 42,
             storm_count: 2,
+            surface_seed: 42,
+            ocean_fraction: 0.7,
             coverage: 0.5,
             moisture: 1.0,
             surface_pressure_bar: 1.0,
@@ -2191,6 +2204,8 @@ mod tests {
             rotation_rate_rad_s: snapshot.rotation_rate_rad_s,
             diagnostic_flags: config.diagnostic_flags,
             wind_scale: snapshot.wind_scale,
+            surface_seed: snapshot.surface_seed,
+            ocean_fraction: snapshot.ocean_fraction,
         };
         let spinup_uniform = gpu
             .device

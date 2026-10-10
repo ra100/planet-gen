@@ -971,7 +971,33 @@ pub struct ErosionParams {
     pub channel_threshold: f32,
     pub ocean_level: f32,
     pub seed: u32,
+    pub face: u32,
+    pub base_temp_c: f32,
+    pub axial_tilt_rad: f32,
+    pub moisture: f32,
+    pub ocean_fraction: f32,
     pub _pad0: u32,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct ErosionClimate {
+    pub seed: u32,
+    pub base_temp_c: f32,
+    pub axial_tilt_rad: f32,
+    pub moisture: f32,
+    pub ocean_fraction: f32,
+}
+
+impl Default for ErosionClimate {
+    fn default() -> Self {
+        Self {
+            seed: 42,
+            base_temp_c: 15.0,
+            axial_tilt_rad: 23.5_f32.to_radians(),
+            moisture: 1.0,
+            ocean_fraction: 0.7,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -986,6 +1012,7 @@ struct ErosionTileBuffers {
     height_b: wgpu::Buffer,
     water_a: wgpu::Buffer,
     water_b: wgpu::Buffer,
+    routing: wgpu::Buffer,
     params: wgpu::Buffer,
 }
 
@@ -1011,7 +1038,8 @@ fn erosion_tiles(
     max_binding_bytes: u64,
 ) -> Result<Vec<ErosionTile>, ErosionError> {
     let row_bytes = u64::from(resolution)
-        .checked_mul(std::mem::size_of::<f32>() as u64)
+        // Routing stores an inverse slope sum and local runoff per pixel.
+        .checked_mul(std::mem::size_of::<[f32; 2]>() as u64)
         .ok_or(ErosionError::MemoryEstimateOverflow)?;
     let rows_with_halo = max_binding_bytes / row_bytes;
     let max_interior_rows =
@@ -1040,6 +1068,7 @@ fn erosion_tiles(
 }
 
 pub struct ErosionPipeline {
+    prepare_pipeline: wgpu::ComputePipeline,
     flow_pipeline: wgpu::ComputePipeline,
     erode_pipeline: wgpu::ComputePipeline,
     bind_group_layout: wgpu::BindGroupLayout,
@@ -1061,15 +1090,17 @@ impl ErosionPipeline {
         u64::from(resolution)
             .checked_mul(rows_with_halos)
             .and_then(|values| values.checked_mul(std::mem::size_of::<f32>() as u64))
-            // Four concurrent storage buffers plus one staging buffer per tile.
-            .and_then(|tile_bytes| tile_bytes.checked_mul(5))
+            // Four scalar storage fields, vec2 routing, and scalar staging.
+            .and_then(|tile_bytes| tile_bytes.checked_mul(7))
             .ok_or(ErosionError::MemoryEstimateOverflow)
     }
 
     pub fn new(gpu: &GpuContext) -> Self {
         let shader_source = format!(
-            "{}\n{}",
+            "{}\n{}\n{}\n{}",
             include_str!("shaders/noise.wgsl"),
+            include_str!("shaders/climate.wgsl"),
+            include_str!("shaders/cube_sphere.wgsl"),
             include_str!("shaders/erosion.wgsl"),
         );
 
@@ -1140,6 +1171,7 @@ impl ErosionPipeline {
                             },
                             count: None,
                         },
+                        create_storage_entry(5, false),
                     ],
                 });
 
@@ -1150,6 +1182,17 @@ impl ErosionPipeline {
                 bind_group_layouts: &[&bind_group_layout],
                 push_constant_ranges: &[],
             });
+
+        let prepare_pipeline =
+            gpu.device
+                .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("erosion runoff and routing"),
+                    layout: Some(&pipeline_layout),
+                    module: &shader,
+                    entry_point: Some("prepare_flow"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                });
 
         let flow_pipeline = gpu
             .device
@@ -1174,23 +1217,24 @@ impl ErosionPipeline {
             });
 
         Self {
+            prepare_pipeline,
             flow_pipeline,
             erode_pipeline,
             bind_group_layout,
         }
     }
 
-    /// Run N iterations of D8 drainage + channel-carving erosion on each face.
-    /// Each iteration: 64+ flow accumulation sub-passes → 1 erosion pass.
+    /// Run climate-weighted drainage, stream incision, and coastal smoothing.
     pub fn erode(
         &self,
         gpu: &GpuContext,
         terrain: &mut TectonicTerrain,
         iterations: u32,
         ocean_level: f32,
+        climate: ErosionClimate,
     ) -> Result<(), ErosionError> {
         let cancel = std::sync::atomic::AtomicBool::new(false);
-        self.erode_with_cancel(gpu, terrain, iterations, ocean_level, &cancel)
+        self.erode_with_cancel(gpu, terrain, iterations, ocean_level, climate, &cancel)
     }
 
     pub fn erode_with_cancel(
@@ -1199,9 +1243,10 @@ impl ErosionPipeline {
         terrain: &mut TectonicTerrain,
         iterations: u32,
         ocean_level: f32,
+        climate: ErosionClimate,
         cancel: &std::sync::atomic::AtomicBool,
     ) -> Result<(), ErosionError> {
-        self.erode_batched(gpu, terrain, iterations, ocean_level, cancel, 32)
+        self.erode_batched(gpu, terrain, iterations, ocean_level, climate, cancel, 32)
     }
 
     fn erode_batched(
@@ -1210,10 +1255,11 @@ impl ErosionPipeline {
         terrain: &mut TectonicTerrain,
         iterations: u32,
         ocean_level: f32,
+        climate: ErosionClimate,
         cancel: &std::sync::atomic::AtomicBool,
         flow_batch_size: u32,
     ) -> Result<(), ErosionError> {
-        if iterations == 0 {
+        if iterations == 0 || climate.ocean_fraction <= 0.0 {
             return Ok(());
         }
 
@@ -1224,7 +1270,11 @@ impl ErosionPipeline {
             u64::from(limits.max_storage_buffer_binding_size).min(limits.max_buffer_size),
         )?;
         // Resolution-adaptive: longer propagation for higher resolution
-        let flow_sub_iterations = (res / 8).max(16);
+        let flow_sub_iterations = if climate.moisture <= 0.0 {
+            0
+        } else {
+            (res / 8).max(16)
+        };
 
         for face_idx in 0..6usize {
             if cancel.load(std::sync::atomic::Ordering::Relaxed) {
@@ -1253,12 +1303,17 @@ impl ErosionPipeline {
                         height: tile.interior_rows + 2,
                         full_resolution: res,
                         row_offset: tile.row_offset,
-                        erosion_rate: 0.08,
+                        erosion_rate: 0.05,
                         deposition_rate: 0.05,
                         min_slope: 0.001,
                         channel_threshold: 8.0,
                         ocean_level,
-                        seed: 42,
+                        seed: climate.seed,
+                        face: face_idx as u32,
+                        base_temp_c: climate.base_temp_c,
+                        axial_tilt_rad: climate.axial_tilt_rad,
+                        moisture: climate.moisture,
+                        ocean_fraction: climate.ocean_fraction,
                         _pad0: 0,
                     };
                     ErosionTileBuffers {
@@ -1270,33 +1325,30 @@ impl ErosionPipeline {
                                 usage,
                             },
                         ),
-                        height_b: gpu.device.create_buffer_init(
-                            &wgpu::util::BufferInitDescriptor {
-                                label: Some("erosion height B"),
-                                contents: bytemuck::cast_slice(&height),
-                                usage,
-                            },
-                        ),
-                        water_a: gpu
-                            .device
-                            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                                label: Some("erosion water A"),
-                                contents: bytemuck::cast_slice(&vec![
-                                    1.0_f32;
-                                    tile_pixels as usize
-                                ]),
-                                usage,
-                            }),
-                        water_b: gpu
-                            .device
-                            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                                label: Some("erosion water B"),
-                                contents: bytemuck::cast_slice(&vec![
-                                    1.0_f32;
-                                    tile_pixels as usize
-                                ]),
-                                usage,
-                            }),
+                        height_b: gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("erosion height B"),
+                            size: tile_pixels * std::mem::size_of::<f32>() as u64,
+                            usage,
+                            mapped_at_creation: false,
+                        }),
+                        water_a: gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("erosion water A"),
+                            size: tile_pixels * std::mem::size_of::<f32>() as u64,
+                            usage,
+                            mapped_at_creation: false,
+                        }),
+                        water_b: gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("erosion water B"),
+                            size: tile_pixels * std::mem::size_of::<f32>() as u64,
+                            usage,
+                            mapped_at_creation: false,
+                        }),
+                        routing: gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("erosion routing and runoff"),
+                            size: tile_pixels * std::mem::size_of::<[f32; 2]>() as u64,
+                            usage,
+                            mapped_at_creation: false,
+                        }),
                         params: gpu
                             .device
                             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1337,6 +1389,10 @@ impl ErosionPipeline {
                         wgpu::BindGroupEntry {
                             binding: 4,
                             resource: water_out.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: tile.routing.as_entire_binding(),
                         },
                     ],
                 })
@@ -1421,8 +1477,9 @@ impl ErosionPipeline {
                 };
 
             macro_rules! synchronize_halos {
-                ($field:ident) => {
-                    let row_bytes = u64::from(res) * std::mem::size_of::<f32>() as u64;
+                ($field:ident, $components:expr) => {
+                    let row_bytes =
+                        u64::from(res) * std::mem::size_of::<f32>() as u64 * $components;
                     for pair in tile_buffers.windows(2) {
                         let upper = &pair[0];
                         let lower = &pair[1];
@@ -1446,16 +1503,32 @@ impl ErosionPipeline {
 
             for iter in 0..iterations {
                 if iter.is_multiple_of(2) {
-                    synchronize_halos!(height_a);
+                    synchronize_halos!(height_a, 1);
                 } else {
-                    synchronize_halos!(height_b);
+                    synchronize_halos!(height_b, 1);
                 }
+                // Height is fixed during accumulation: cache its downhill weights
+                // and rainfall once, and restart runoff from the local source.
+                for (tile, groups) in tile_buffers.iter().zip(&bind_groups) {
+                    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("prepare flow"),
+                        timestamp_writes: None,
+                    });
+                    pass.set_pipeline(&self.prepare_pipeline);
+                    pass.set_bind_group(0, &groups[((iter % 2) * 2 + 1) as usize], &[]);
+                    pass.dispatch_workgroups(
+                        res.div_ceil(16),
+                        (tile.tile.interior_rows + 2).div_ceil(16),
+                        1,
+                    );
+                }
+                synchronize_halos!(routing, 2);
                 // Phase 1: Flow accumulation with the current height and water buffers.
                 for sub in 0..flow_sub_iterations {
                     if sub.is_multiple_of(2) {
-                        synchronize_halos!(water_a);
+                        synchronize_halos!(water_a, 1);
                     } else {
-                        synchronize_halos!(water_b);
+                        synchronize_halos!(water_b, 1);
                     }
                     for (tile, groups) in tile_buffers.iter().zip(&bind_groups) {
                         let flow_bg = &groups[((iter % 2) * 2 + sub % 2) as usize];
@@ -2348,7 +2421,7 @@ mod tests {
         );
         assert!(
             tiles.iter().all(|tile| {
-                u64::from(8192_u32) * u64::from(tile.interior_rows + 2) * 4 <= limit
+                u64::from(8192_u32) * u64::from(tile.interior_rows + 2) * 8 <= limit
             })
         );
 
@@ -2359,7 +2432,7 @@ mod tests {
         };
         let expected = tiles
             .iter()
-            .map(|tile| u64::from(8192_u32) * u64::from(tile.interior_rows + 2) * 4 * 5)
+            .map(|tile| u64::from(8192_u32) * u64::from(tile.interior_rows + 2) * 4 * 7)
             .sum::<u64>();
         assert_eq!(
             ErosionPipeline::aggregate_tiled_bytes(8192, &limits).unwrap(),
@@ -2382,7 +2455,14 @@ mod tests {
         let mut terrain = sloped_terrain(16);
         let cancel = std::sync::atomic::AtomicBool::new(true);
         assert!(matches!(
-            pipeline.erode_with_cancel(&gpu, &mut terrain, 1, -1.0, &cancel),
+            pipeline.erode_with_cancel(
+                &gpu,
+                &mut terrain,
+                1,
+                -1.0,
+                ErosionClimate::default(),
+                &cancel
+            ),
             Err(ErosionError::ReadbackCancelled)
         ));
     }
@@ -2394,8 +2474,12 @@ mod tests {
         let mut once = sloped_terrain(16);
         let mut twice = sloped_terrain(16);
 
-        pipeline.erode(&gpu, &mut once, 1, -1.0).unwrap();
-        pipeline.erode(&gpu, &mut twice, 2, -1.0).unwrap();
+        pipeline
+            .erode(&gpu, &mut once, 1, 0.0, ErosionClimate::default())
+            .unwrap();
+        pipeline
+            .erode(&gpu, &mut twice, 2, 0.0, ErosionClimate::default())
+            .unwrap();
 
         assert_ne!(once.faces, twice.faces);
         assert!(
@@ -2418,10 +2502,26 @@ mod tests {
             let mut reference = sloped_terrain(136);
             let mut batched = reference.clone();
             pipeline
-                .erode_batched(&gpu, &mut reference, iterations, -1.0, &cancel, u32::MAX)
+                .erode_batched(
+                    &gpu,
+                    &mut reference,
+                    iterations,
+                    -1.0,
+                    ErosionClimate::default(),
+                    &cancel,
+                    u32::MAX,
+                )
                 .unwrap();
             pipeline
-                .erode_batched(&gpu, &mut batched, iterations, -1.0, &cancel, 3)
+                .erode_batched(
+                    &gpu,
+                    &mut batched,
+                    iterations,
+                    -1.0,
+                    ErosionClimate::default(),
+                    &cancel,
+                    3,
+                )
                 .unwrap();
             assert_eq!(reference.faces, batched.faces);
             assert!(
@@ -2441,7 +2541,9 @@ mod tests {
         let mut terrain = sloped_terrain(16);
         let original = sloped_terrain(16);
 
-        pipeline.erode(&gpu, &mut terrain, 0, -1.0).unwrap();
+        pipeline
+            .erode(&gpu, &mut terrain, 0, -1.0, ErosionClimate::default())
+            .unwrap();
 
         assert_eq!(terrain.faces, original.faces);
     }

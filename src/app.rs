@@ -9,8 +9,8 @@ use crate::planet_file::{self, PlanetFile};
 use crate::plates::{PlateGenParams, generate_plates};
 use crate::preview::{PreviewRenderer, PreviewUniforms};
 use crate::terrain_compute::{
-    DynamicsTextures, ErosionPipeline, TerrainComputePipeline, TerrainGenerationParams,
-    WindFieldPipeline, earth_relative_rotation_rate,
+    DynamicsTextures, ErosionClimate, ErosionPipeline, TerrainComputePipeline,
+    TerrainGenerationParams, WindFieldPipeline, earth_relative_rotation_rate,
 };
 use crate::weather::{
     DEFAULT_WEATHER_RESOLUTION, WeatherFieldPipeline, WeatherLifecycle, WeatherSnapshot,
@@ -394,14 +394,10 @@ impl PlanetGenApp {
     }
 
     fn regenerate_terrain(&mut self) {
-        // Install custom wgpu error handler that stores errors instead of panicking
-        self.gpu
-            .device
-            .push_error_scope(wgpu::ErrorFilter::Validation);
-        self.gpu
-            .device
-            .push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        self.run_gpu_work(Self::regenerate_terrain_inner);
+    }
 
+    fn regenerate_terrain_inner(&mut self) {
         use std::time::Instant;
         let t0 = Instant::now();
 
@@ -496,9 +492,20 @@ impl PlanetGenApp {
 
     /// Apply a batch of erosion iterations and re-render. Called each frame.
     fn erode_batch(&mut self) {
+        self.run_gpu_work(Self::erode_batch_inner);
+    }
+
+    fn erode_batch_inner(&mut self) {
         use std::time::Instant;
         let batch_size = 5u32;
         let iters = batch_size.min(self.erosion_remaining);
+        let climate = ErosionClimate {
+            seed: self.params.seed,
+            base_temp_c: self.derived.base_temperature_c,
+            axial_tilt_rad: self.params.axial_tilt_deg.to_radians(),
+            moisture: self.climate_moisture,
+            ocean_fraction: self.derived.ocean_fraction,
+        };
 
         if let Some(ref mut terrain) = self.erosion_terrain {
             let t = Instant::now();
@@ -506,7 +513,7 @@ impl PlanetGenApp {
                 .erosion_pipeline
                 .as_ref()
                 .expect("procedural terrain owns erosion pipeline")
-                .erode(&self.gpu, terrain, iters, self.erosion_ocean_level)
+                .erode(&self.gpu, terrain, iters, self.erosion_ocean_level, climate)
             {
                 self.gpu_error = Some(error.to_string());
                 self.erosion_remaining = 0;
@@ -537,13 +544,25 @@ impl PlanetGenApp {
             self.dispatch_weather();
         }
         self.needs_render = true;
+    }
 
-        // Check for GPU errors (OOM, validation)
-        if let Some(err) = pollster::block_on(self.gpu.device.pop_error_scope()) {
-            self.gpu_error = Some(format!("GPU OOM: {err}"));
-        }
-        if let Some(err) = pollster::block_on(self.gpu.device.pop_error_scope()) {
-            self.gpu_error = Some(format!("GPU validation: {err}"));
+    fn run_gpu_work(&mut self, operation: fn(&mut Self)) {
+        let device = self.gpu.device.clone();
+        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+
+        operation(self);
+
+        // Both scopes belong to this operation, even when it returns early.
+        let out_of_memory = pollster::block_on(device.pop_error_scope());
+        let validation = pollster::block_on(device.pop_error_scope());
+        if let Some(error) = out_of_memory.or(validation) {
+            if matches!(error, wgpu::Error::OutOfMemory { .. }) {
+                self.gpu_failed.store(true, Ordering::Relaxed);
+            }
+            self.gpu_error = Some(format!("GPU error: {error}"));
+            self.erosion_remaining = 0;
+            self.needs_render = false;
         }
     }
 
@@ -600,6 +619,8 @@ impl PlanetGenApp {
             face: 0,
             resolution,
             seed: self.cloud_seed,
+            surface_seed: self.params.seed,
+            ocean_fraction: self.derived.ocean_fraction * self.climate_moisture,
             storm_count: self.storm_count,
             coverage: self.cloud_coverage,
             moisture: self.climate_moisture,
@@ -1894,6 +1915,7 @@ impl PlanetGenApp {
             )
             .with(2, ""),
         ) {
+            self.needs_terrain = true;
             self.invalidate_weather();
         }
         if widgets::slider_row(

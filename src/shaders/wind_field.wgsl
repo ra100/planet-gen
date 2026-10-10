@@ -19,7 +19,7 @@ struct WindFieldParams {
     rotation_rate: f32,    // relative to Earth (1.0 = 24h, 0.5 = 48h, 2.0 = 12h)
     base_temp_c: f32,      // planet mean temperature °C (15 = Earth)
     atm_pressure: f32,     // atmospheric pressure in bar (1.0 = Earth)
-    wind_scale: f32,       // Reserved uniform slot; spin-up consumes its matching snapshot field.
+    wind_scale: f32,
 }
 
 @group(0) @binding(0) var<uniform> params: WindFieldParams;
@@ -105,12 +105,20 @@ fn sample_height(dir: vec3<f32>) -> f32 {
 
 // A seeded streamfunction yields a bounded, seam-free curl in the local tangent plane.
 fn streamfunction(pos: vec3<f32>) -> f32 {
+    // Strong advection stretches the smallest resolved eddies into sub-texel
+    // folds. Retain broad curls while reducing that unresolved steering.
+    let fine = mix(1.0, 0.70, smooth_step(1.25, 3.75, params.wind_scale));
     return snoise(pos * 3.2 + noise_seed_offset(params.seed, 18u)) * 0.65
-        + snoise(pos * 6.7 + noise_seed_offset(params.seed, 19u)) * 0.35;
+        + snoise(pos * 6.7 + noise_seed_offset(params.seed, 19u)) * 0.35
+        + snoise(pos * 18.0 + noise_seed_offset(params.seed, 20u)) * 0.06
+        + snoise(pos * 46.0 + noise_seed_offset(params.seed, 21u)) * (0.028 * fine)
+        + snoise(pos * 85.0 + noise_seed_offset(params.seed, 24u))
+            * (0.008 * fine * smooth_step(192.0, 384.0, f32(params.resolution)));
 }
 
 fn stream_curl(pos: vec3<f32>, east: vec3<f32>, north: vec3<f32>) -> vec3<f32> {
-    let step = 0.028;
+    // Resolve the shorter eddies instead of averaging their opposing sides.
+    let step = max(0.5 * 1.5707963 / f32(params.resolution), 0.001);
     let d_east = (streamfunction(normalize(pos + east * step))
         - streamfunction(normalize(pos - east * step))) / (2.0 * step);
     let d_north = (streamfunction(normalize(pos + north * step))
@@ -303,14 +311,13 @@ fn compute_wind(pos: vec3<f32>, idx: u32) {
     let ct = cos(tilt);
     let st = sin(tilt);
 
-    // Local east/north frame aligned with TILTED pole.
-    // Smooth blend near poles prevents the frame singularity ring.
+    // Keep the circulation axis fixed. Blending to a second axis moved the
+    // frame singularity into the polar weather belt and kinked its flow.
     let tilted_pole = vec3<f32>(0.0, ct, st);
-    let pole_closeness = abs(dot(pos, tilted_pole));
-    let up_blend = smooth_step(0.80, 0.98, pole_closeness);
-    let up_ref = normalize(mix(tilted_pole, vec3<f32>(1.0, 0.0, 0.0), up_blend));
-    let east = normalize(cross(up_ref, pos));
-    let north = normalize(cross(pos, east));
+    let zonal = cross(tilted_pole, pos);
+    let zonal_length = length(zonal);
+    let east = zonal / max(zonal_length, 0.00001);
+    let north = cross(pos, east);
 
     // Latitude in tilted frame
     let tilted_y = pos.y * ct + pos.z * st;
@@ -328,9 +335,8 @@ fn compute_wind(pos: vec3<f32>, idx: u32) {
 
     // Cell boundary wobble: shifts effective latitude to break concentric rings.
     // Three components: noise + continental (monsoon) + elevation (orographic).
-    let pole_boost = 1.0 + 5.0 * abs(sin(lat));
     let noise_wobble = snoise(
-        tilted_pos * (2.0 * pole_boost) + noise_seed_offset(params.seed, 15u),
+        tilted_pos * 2.0 + noise_seed_offset(params.seed, 15u),
     ) * 8.0;
 
     // Continental wobble (monsoon): Hadley cell extends poleward over large continents.
@@ -380,13 +386,6 @@ fn compute_wind(pos: vec3<f32>, idx: u32) {
     wind_e += lon_var * 0.10;
     wind_n += lon_var2 * 0.08;
 
-    // Mesoscale residuals remain, but do not dominate convergence with a grid
-    // of similarly sized noise cells. Coherent stream steering owns the bends.
-    let meso_e = snoise(tilted_pos * 8.0 + noise_seed_offset(params.seed, 20u));
-    let meso_n = snoise(tilted_pos * 24.0 + noise_seed_offset(params.seed, 21u));
-    wind_e += meso_e * 0.04;
-    wind_n += meso_n * 0.04;
-
     // Mountain speed boost: wind accelerates near high terrain (venturi/gap wind)
     let mountain_speed = 1.0 + smooth_step(0.08, 0.20, elevation) * 0.3;
 
@@ -394,17 +393,18 @@ fn compute_wind(pos: vec3<f32>, idx: u32) {
     let p = max(params.atm_pressure, 0.05);
     let speed_scale = pow(1.0 / p, 0.15) * mountain_speed;
 
-    // Bend the transported flow with a deterministic tangent-space curl while
-    // retaining the analytical field's speed for the existing CFL bound.
-    let base_wind = (east * wind_e + north * wind_n) * speed_scale;
+    // Fine eddies deform transported cloud water, rather than modulating its
+    // opacity afterwards. Preserve their speed variation within the CFL bound.
+    let polar_fade = smooth_step(0.0025, 0.15, zonal_length);
+    let base_wind = (east * wind_e + north * wind_n) * speed_scale * polar_fade;
     let base_speed = length(base_wind);
     let curl = stream_curl(pos, east, north);
     let steering = bounded_stream_steering(curl);
-    let wind_3d = select(
-        vec3<f32>(0.0),
-        normalize(base_wind + steering * base_speed * 0.45) * base_speed,
-        base_speed > 0.0001,
-    );
+    // Synoptic eddies continue across weak zonal flow, where tying their speed
+    // to base_speed alone left long, stationary cloud bands.
+    let eddy_speed = max(base_speed, 0.25) * polar_fade;
+    let combined_wind = base_wind + steering * eddy_speed * 0.50;
+    let wind_3d = combined_wind / max(length(combined_wind), 1.0);
 
     let base = idx * 3u;
     dst[base] = wind_3d.x;

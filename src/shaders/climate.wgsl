@@ -37,3 +37,25 @@ fn climate_temperature(
     return climate_sea_level_temperature(pos, base_temp_c, axial_tilt_rad, season)
         - 6.5 * climate_elevation_km(height, ocean_level);
 }
+
+fn climate_hadley_moisture(latitude_rad: f32, hadley_lat: f32, polar_lat: f32) -> f32 {
+    let lat_deg = abs(latitude_rad) * 180.0 / 3.14159;
+    let itcz = 200.0 * exp(-lat_deg * lat_deg / 200.0);
+    let subtropical = -80.0 * exp(-pow(lat_deg - hadley_lat, 2.0) / 60.0);
+    let midlatitude = 90.0 * exp(-pow(lat_deg - (hadley_lat + polar_lat) * 0.5, 2.0) / 200.0);
+    let polar = -60.0 * smoothstep(polar_lat + 5.0, polar_lat + 25.0, lat_deg);
+    return max(itcz + subtropical + midlatitude + polar + 90.0, 10.0);
+}
+
+// Annual moisture used by both surface vegetation and land vapor supply.
+fn climate_regional_moisture(
+    pos: vec3<f32>, latitude: f32, hadley_lat: f32, polar_lat: f32,
+    surface_seed: u32, ocean_fraction: f32,
+) -> f32 {
+    let ocean_scale = 0.25 + 0.75 * ocean_fraction;
+    let local = snoise(pos * 3.0 + noise_seed_offset(surface_seed, 73u)) * 0.5;
+    let baseline = climate_hadley_moisture(latitude, hadley_lat, polar_lat) * ocean_scale;
+    let region = snoise(pos * 0.7 + noise_seed_offset(surface_seed, 74u));
+    return (baseline * (0.55 + 0.45 * (local + 0.5)) + 50.0 * (local + 0.5) * ocean_scale)
+        * (1.0 + region * 0.25) * (0.5 + ocean_fraction);
+}

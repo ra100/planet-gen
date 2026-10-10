@@ -65,35 +65,24 @@ pub struct PreviewRenderer {
 
 impl PreviewRenderer {
     pub fn new(gpu: &GpuContext) -> Self {
-        Self::new_with_cloud_config(gpu, [1.0; 3], 8)
+        Self::new_with_cloud_config(gpu, 8)
     }
 
-    pub fn new_with_cloud_detail(gpu: &GpuContext, detail_strength: f32) -> Self {
-        Self::new_with_cloud_config(gpu, [detail_strength; 3], 8)
+    // Retained for capture callers; cloud structure now comes from weather.
+    pub fn new_with_cloud_detail(gpu: &GpuContext, _detail_strength: f32) -> Self {
+        Self::new(gpu)
     }
 
-    pub fn new_with_cloud_detail_layers(gpu: &GpuContext, detail_strength: [f32; 3]) -> Self {
-        Self::new_with_cloud_config(gpu, detail_strength, 8)
+    pub fn new_with_cloud_detail_layers(gpu: &GpuContext, _detail_strength: [f32; 3]) -> Self {
+        Self::new(gpu)
     }
 
     pub fn new_with_cloud_samples(gpu: &GpuContext, samples: u32) -> Self {
-        Self::new_with_cloud_config(gpu, [1.0; 3], samples)
+        Self::new_with_cloud_config(gpu, samples)
     }
 
-    fn new_with_cloud_config(gpu: &GpuContext, detail_strength: [f32; 3], samples: u32) -> Self {
-        let cloud_density = include_str!("shaders/cloud_density.wgsl")
-            .replace(
-                "const LOW_DETAIL_STRENGTH: f32 = 1.0;",
-                &format!("const LOW_DETAIL_STRENGTH: f32 = {};", detail_strength[0]),
-            )
-            .replace(
-                "const DEEP_DETAIL_STRENGTH: f32 = 1.0;",
-                &format!("const DEEP_DETAIL_STRENGTH: f32 = {};", detail_strength[1]),
-            )
-            .replace(
-                "const HIGH_DETAIL_STRENGTH: f32 = 1.0;",
-                &format!("const HIGH_DETAIL_STRENGTH: f32 = {};", detail_strength[2]),
-            );
+    fn new_with_cloud_config(gpu: &GpuContext, samples: u32) -> Self {
+        let cloud_density = include_str!("shaders/cloud_density.wgsl");
         let preview_shader = include_str!("shaders/preview_cubemap.wgsl").replace(
             "const CLOUD_RAY_SAMPLES: u32 = 8u;",
             &format!("const CLOUD_RAY_SAMPLES: u32 = {samples}u;"),
@@ -1273,7 +1262,7 @@ mod tests {
     }
 
     #[test]
-    fn cloud_detail_erodes_edges_without_replacing_weather_systems() {
+    fn cloud_renderer_preserves_weather_without_seeded_opacity_texture() {
         let gpu = GpuContext::new().expect("GPU init failed");
         let detail_on = PreviewRenderer::new_with_cloud_detail(&gpu, 1.0);
         let detail_off = PreviewRenderer::new_with_cloud_detail(&gpu, 0.0);
@@ -1293,7 +1282,7 @@ mod tests {
         settings.view_mode = 9;
         settings.show_clouds = 1.0;
         settings.cloud_coverage = 1.0;
-        // This test must exercise actual detail; the generic fixture disables it.
+        // Legacy presentation controls must not introduce another density field.
         settings.cloud_advection = 1.0;
         // Keep the optical-depth readback below sRGB8 saturation after the
         // extinction calibration (3.0 * 0.4 = the original 1.2 reference).
@@ -1440,8 +1429,8 @@ mod tests {
                 "seed={seed}: centroid drifted by {centroid_drift}"
             );
             assert!(
-                fringe_rms.is_finite() && fringe_rms > 0.0,
-                "seed={seed}: detail must affect fringes, not silently be disabled"
+                fringe_rms == 0.0 && core_rms == 0.0,
+                "seed={seed}: renderer added texture to transported mass"
             );
         }
 
@@ -1498,8 +1487,8 @@ mod tests {
             .into_iter()
             .collect();
         assert!(
-            high_seed_outputs.windows(2).all(|pair| pair[0] != pair[1]),
-            "high cloud seeds must select distinct stable detail streams"
+            high_seed_outputs.windows(2).all(|pair| pair[0] == pair[1]),
+            "cloud seed must change formation, not add a rendering texture"
         );
     }
 
@@ -1561,16 +1550,9 @@ mod tests {
                     max_relative_change = max_relative_change.max((after / before - 1.0).abs());
                 }
             }
-            // Low/deep core modulation is bounded to 2.2%, cirrus to 4.8%,
-            // plus small allowance for the 8-bit density readback.
-            let limit = if channel == 2 { 0.10 } else { 0.05 };
-            assert!(
-                max_relative_change <= limit,
-                "layer {channel}: detail dominates uniform deck ({max_relative_change})"
-            );
-            assert!(
-                max_relative_change > 0.001,
-                "layer {channel}: detail switch is inert"
+            assert_eq!(
+                max_relative_change, 0.0,
+                "layer {channel}: renderer textured a uniform deck"
             );
         }
     }
@@ -1792,71 +1774,10 @@ fn layer_profile_oracle() {
     output[21] = cloud_sphere_pixel_footprint(vec2<f32>(1.0, 0.0), dx, dy);
     output[22] = cloud_sphere_pixel_footprint(vec2<f32>(0.8, 0.0), dx * 0.5, dy * 0.5);
     output[23] = cloud_sphere_pixel_footprint(vec2<f32>(1.01, 0.0), dx, dy);
-    var sums = vec4<f32>(0.0);
-    var differences = 0.0;
-    var cluster_stats = vec4<f32>(0.0);
-    for (var i = 0u; i < 1024u; i++) {
-        let y = 1.0 - 2.0 * (f32(i) + 0.5) / 1024.0;
-        let angle = f32(i) * 2.39996323;
-        let radial = sqrt(1.0 - y * y);
-        let p = vec3<f32>(radial * cos(angle), y, radial * sin(angle));
-        let low = cloud_puff_field(p, 55.0, 0.001, 42u, 110u);
-        let tower = cloud_puff_field(p, 24.0, 0.001, 42u, 120u);
-        sums += vec4<f32>(low, low * low, tower, tower * tower);
-        differences += abs(low - tower);
-        let cluster = cloud_cluster_field(p, 0.001, 42u, 110u);
-        let shifted = normalize(p + vec3<f32>(0.002, 0.0, 0.0));
-        cluster_stats += vec4<f32>(cluster, cluster * cluster,
-            abs(low - cloud_puff_field(shifted, 55.0, 0.001, 42u, 110u)),
-            abs(cluster - cloud_cluster_field(shifted, 0.001, 42u, 110u)));
-    }
-    output[24] = sums.x / 1024.0;
-    output[25] = sums.y / 1024.0 - output[24] * output[24];
-    output[26] = sums.z / 1024.0;
-    output[27] = sums.w / 1024.0 - output[26] * output[26];
-    output[28] = differences / 1024.0;
-    output[29] = cloud_puff_field(vec3<f32>(0.0, 0.0, 1.0), 55.0, 0.02, 42u, 110u);
-    output[30] = cluster_stats.x / 1024.0;
-    output[31] = cluster_stats.y / 1024.0 - output[30] * output[30];
-    output[32] = cluster_stats.z / 1024.0;
-    output[33] = cluster_stats.w / 1024.0;
-    output[34] = cloud_cluster_field(vec3<f32>(0.0, 0.0, 1.0), 0.04, 42u, 110u);
-    var directional = vec4<f32>(0.0);
-    for (var i = 0u; i < 512u; i++) {
-        let p = normalize(vec3<f32>(fract(f32(i) * 0.618034) - 0.5,
-            fract(f32(i) * 0.414214) - 0.5, 1.0));
-        let px = normalize(p + vec3<f32>(0.002, 0.0, 0.0));
-        let py = normalize(p + vec3<f32>(0.0, 0.002, 0.0));
-        let wx = vec3<f32>(1.0, 0.0, 0.0);
-        let wy = vec3<f32>(0.0, 1.0, 0.0);
-        let x = cloud_flow_puffs(p, 14.0, 0.001, 42u, 110u, wx, 2.2);
-        let y = cloud_flow_puffs(p, 14.0, 0.001, 42u, 110u, wy, 2.2);
-        directional += abs(vec4<f32>(
-            cloud_flow_puffs(px, 14.0, 0.001, 42u, 110u, wx, 2.2) - x,
-            cloud_flow_puffs(py, 14.0, 0.001, 42u, 110u, wx, 2.2) - x,
-            cloud_flow_puffs(px, 14.0, 0.001, 42u, 110u, wy, 2.2) - y,
-            cloud_flow_puffs(py, 14.0, 0.001, 42u, 110u, wy, 2.2) - y));
-    }
-    output[35] = directional.x; output[36] = directional.y;
-    output[37] = directional.z; output[38] = directional.w;
     output[39] = low_cloud_segment(vec3<f32>(0.0, 0.0, 1.5), vec3<f32>(0.0, 0.0, 3.5), 0.5, 2.5, 1.0) * 2.0;
     output[40] = low_cloud_profile(0.85, 0.5, 2.5);
     output[41] = low_cloud_profile(1.22, 0.5, 2.5);
     output[42] = low_cloud_profile(1.7, 0.5, 2.5);
-    output[43] = cloud_flow_puffs(vec3<f32>(0.0, 0.0, 1.0), 14.0, 0.001, 42u, 110u, vec3<f32>(0.0), 2.2)
-        - cloud_puff_field(vec3<f32>(0.0, 0.0, 1.0), 14.0, 0.001, 42u, 110u);
-    for (var i = 0u; i < 4u; i++) {
-        output[44u + i] = cloud_relief_top(0.5, 2.5, f32(i) * 0.6, 0.3);
-    }
-    let shaped_top = output[45];
-    output[48] = low_cloud_segment(vec3<f32>(0.0, 0.0, 1.5), vec3<f32>(0.0, 0.0, 1.0 + shaped_top), 0.5, shaped_top, 1.0) * (shaped_top - 0.5);
-    var integral = 0.0;
-    for (var i = 0u; i < 512u; i++) {
-        integral += low_cloud_profile(0.5 + (f32(i) + 0.5) / 512.0 * (shaped_top - 0.5), 0.5, shaped_top);
-    }
-    output[49] = integral * (shaped_top - 0.5) / 512.0;
-    output[50] = cloud_relief_top(0.5, 2.5, 0.0, 0.0);
-    output[51] = cloud_relief_top(2.5, 2.5, 0.0, 0.3);
 }
 "#,
         );
@@ -2263,66 +2184,8 @@ fn layer_profile_oracle() {
     }
 
     #[test]
-    fn cloud_puff_families_have_variance_unit_mean_and_distance_filtering() {
-        let gpu = GpuContext::new().unwrap();
-        let values = layer_profile_oracle(&gpu);
-        assert_eq!(
-            values,
-            layer_profile_oracle(&gpu),
-            "deterministic morphology"
-        );
-        for (mean, variance) in [(values[24], values[25]), (values[26], values[27])] {
-            assert!((0.85..1.15).contains(&mean), "mean density drift: {mean}");
-            assert!(
-                (0.1..2.0).contains(&variance),
-                "missing or excessive variance: {variance}"
-            );
-        }
-        assert!(
-            values[28] > 0.2,
-            "low and deep families need distinct forms"
-        );
-        assert_eq!(
-            values[29], 1.0,
-            "unresolved puffs must become a smooth column"
-        );
-    }
-
-    #[test]
-    fn cloud_clusters_reduce_freckle_scale_without_flattening_variance() {
+    fn cloud_layering_preserves_column_mass() {
         let values = layer_profile_oracle(&GpuContext::new().unwrap());
-        assert!(
-            (0.85..1.15).contains(&values[30]),
-            "cluster mean: {}",
-            values[30]
-        );
-        assert!(
-            (0.1..2.0).contains(&values[31]),
-            "cluster variance: {}",
-            values[31]
-        );
-        assert!(
-            values[33] < values[32] * 0.65,
-            "too much fine-scale breakup: cluster={} puffs={}",
-            values[33],
-            values[32]
-        );
-        assert_eq!(values[34], 1.0, "subpixel hierarchy must filter to unity");
-    }
-
-    #[test]
-    fn cloud_wind_rotates_structure_and_layering_preserves_column_mass() {
-        let values = layer_profile_oracle(&GpuContext::new().unwrap());
-        assert!(
-            values[36] > values[35] * 1.2,
-            "eastward wind must elongate along X: {:?}",
-            &values[35..39]
-        );
-        assert!(
-            values[37] > values[38] * 1.2,
-            "northward wind must elongate along Y: {:?}",
-            &values[35..39]
-        );
         assert!(
             (values[39] - 1.0).abs() < 1e-5,
             "layering changes column mass"
@@ -2332,30 +2195,6 @@ fn layer_profile_oracle() {
             "missing two-body vertical structure: {:?}",
             &values[40..43]
         );
-        // Different constant-folding/FMA paths can differ by one f32 ULP.
-        assert!(
-            values[43].abs() < 1e-6,
-            "calm flow must not stretch the kernels"
-        );
-    }
-
-    #[test]
-    fn cloud_top_relief_stays_in_envelope_and_preserves_profile_mass() {
-        let v = layer_profile_oracle(&GpuContext::new().unwrap());
-        assert!(v[44..48].windows(2).all(|pair| pair[1] >= pair[0]));
-        assert!(v[44..48].iter().all(|top| (1.89..=2.5).contains(top)));
-        assert!((v[44] - 1.9).abs() < 1e-6);
-        assert!((v[47] - 2.5).abs() < 1e-6);
-        assert!(
-            (v[48] - 1.0).abs() < 1e-5,
-            "segment loses mass after top relief"
-        );
-        assert!(
-            (v[49] - v[48]).abs() < 1e-4,
-            "point/segment profiles disagree"
-        );
-        assert_eq!(v[50], 2.5, "zero relief must preserve original top");
-        assert_eq!(v[51], 2.5, "degenerate layer must stay finite");
     }
 
     #[test]
@@ -2457,7 +2296,7 @@ fn layer_profile_oracle() {
         );
         // The oracle's first point is at 4 km, below this entire layer. Local
         // density is zero there, but the sun ray crosses its full column.
-        let expected_detached = (-0.20_f32 * 0.50 * 0.90 * 3.0).exp();
+        let expected_detached = (-0.20_f32 * 0.50 * 0.90 * 4.5).exp();
         assert!(
             (detached[0] - expected_detached).abs() < 0.002,
             "detached layer missing from sun path: {} != {expected_detached}",
@@ -2727,7 +2566,7 @@ fn layer_profile_oracle() {
         // Analytic column: mass * low optical weight * extinction weight *
         // calibrated extinction. Compare after the same sRGB8 quantization,
         // rather than pinning a pixel measured under the old calibration.
-        let expected_tau = 0.05_f32 * 0.5 * 0.9 * 3.0;
+        let expected_tau = 0.05_f32 * 0.5 * 0.9 * 4.5;
         let expected_alpha = 1.0 - (-expected_tau).exp();
         let expected_byte =
             ((1.055 * expected_alpha.powf(1.0 / 2.4) - 0.055) * 255.0).round() as u8;
@@ -3689,6 +3528,8 @@ fn layer_profile_oracle() {
                     resolution: 16,
                     seed: 42,
                     storm_count: 8,
+                    surface_seed: 42,
+                    ocean_fraction: 0.7,
                     coverage,
                     moisture,
                     surface_pressure_bar: 1.0,
@@ -3732,6 +3573,8 @@ fn layer_profile_oracle() {
             resolution: 16,
             seed: 42,
             storm_count: 0,
+            surface_seed: 42,
+            ocean_fraction: 0.7,
             coverage: 0.75,
             moisture: 1.0,
             surface_pressure_bar: 1.0,
@@ -4015,6 +3858,8 @@ fn layer_profile_oracle() {
                 resolution: WEATHER_RESOLUTION,
                 seed: 42,
                 storm_count: 8,
+                surface_seed: 42,
+                ocean_fraction: 0.7,
                 coverage: 0.8,
                 moisture: 0.8,
                 surface_pressure_bar: 0.7,

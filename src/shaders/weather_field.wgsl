@@ -14,6 +14,8 @@ struct WeatherSnapshot {
     radius_km: f32,
     rotation_rate_rad_s: f32,
     wind_scale: f32,
+    surface_seed: u32,
+    ocean_fraction: f32,
 }
 
 @group(0) @binding(0) var<uniform> params: WeatherSnapshot;
@@ -95,7 +97,7 @@ fn catalyst_center(index: u32) -> vec3<f32> {
     let angle = rank * 2.3999632 + phase;
     let base = vec3<f32>(sqrt(max(1.0 - z * z, 0.0)) * cos(angle), z, sqrt(max(1.0 - z * z, 0.0)) * sin(angle));
     let basis = tangent_basis(base);
-    let jitter = (noise_seed_offset(params.seed, 201u + index).xy * 2.0 - 1.0) * 0.12;
+    let jitter = (noise_seed_offset(params.seed, 201u + index).xy * 0.02 - 1.0) * 0.12;
     return normalize(base + basis[0] * jitter.x + basis[1] * jitter.y);
 }
 
@@ -159,7 +161,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let basis = tangent_basis(pos);
     let east = basis[0];
     let north = basis[1];
-    let diagnostic_step = clamp(300.0 / max(params.radius_km, 1.0), 0.02, 0.08);
+    let diagnostic_step = max(1.5 * 1.5707963 / f32(params.resolution), 0.004);
     let east_pos = normalize(pos + east * diagnostic_step);
     let west_pos = normalize(pos - east * diagnostic_step);
     let north_pos = normalize(pos + north * diagnostic_step);
@@ -183,14 +185,19 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let marine_fraction = 1.0 - smooth_step(0.15, 0.85, continentality);
     let moisture = clamp(params.moisture, 0.0, 1.0) * pressure_factor * marine_fraction;
 
-    let pressure_east = textureSampleLevel(pressure_tex, weather_sampler, east_pos, 0.0).r;
-    let pressure_west = textureSampleLevel(pressure_tex, weather_sampler, west_pos, 0.0).r;
-    let pressure_north = textureSampleLevel(pressure_tex, weather_sampler, north_pos, 0.0).r;
-    let pressure_south = textureSampleLevel(pressure_tex, weather_sampler, south_pos, 0.0).r;
+    let frontal_step = clamp(300.0 / max(params.radius_km, 1.0), 0.02, 0.08);
+    let frontal_east = normalize(pos + east * frontal_step);
+    let frontal_west = normalize(pos - east * frontal_step);
+    let frontal_north = normalize(pos + north * frontal_step);
+    let frontal_south = normalize(pos - north * frontal_step);
+    let pressure_east = textureSampleLevel(pressure_tex, weather_sampler, frontal_east, 0.0).r;
+    let pressure_west = textureSampleLevel(pressure_tex, weather_sampler, frontal_west, 0.0).r;
+    let pressure_north = textureSampleLevel(pressure_tex, weather_sampler, frontal_north, 0.0).r;
+    let pressure_south = textureSampleLevel(pressure_tex, weather_sampler, frontal_south, 0.0).r;
     let pressure_delta = vec2<f32>(pressure_east - pressure_west, pressure_north - pressure_south);
     let temperature_delta = vec2<f32>(
-        temperature_at(east_pos) - temperature_at(west_pos),
-        temperature_at(north_pos) - temperature_at(south_pos),
+        temperature_at(frontal_east) - temperature_at(frontal_west),
+        temperature_at(frontal_north) - temperature_at(frontal_south),
     );
     let pressure_gradient = length(pressure_delta);
     let zonal_structure = smooth_step(0.5, 3.0, abs(pressure_delta.x));
@@ -331,12 +338,8 @@ fn diagnose(@builtin(global_invocation_id) id: vec3<u32>) {
         anvil_left = max(anvil_left, textureSampleLevel(spinup_state, weather_sampler, left_pos, 0.0) * catalyst_support(left_pos, owner));
         anvil_right = max(anvil_right, textureSampleLevel(spinup_state, weather_sampler, right_pos, 0.0) * catalyst_support(right_pos, owner));
     }
-    // U14 frontal/local high remains bounded by occupied low/deep mass. Only
-    // the catalyst-supported anvil can extend beyond a deep response core.
-    let frontal_high = min(
-        clamp(state.w * (1.0 - marine_stability * 0.4), 0.0, 1.0),
-        max(low, deep),
-    );
+    // Transported ice can survive after its lower cloud bank evaporates.
+    let frontal_high = clamp(state.w * (1.0 - marine_stability * 0.4), 0.0, 1.0);
     let deep_support = max(
         anvil_near.z,
         max(anvil_far.z, max(anvil_left.z, anvil_right.z)),
