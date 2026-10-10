@@ -923,7 +923,7 @@ fn shade_planet(in: VertexOutput) -> vec4<f32> {
     let atm_radius = 1.0 + atm_h;
     let has_atm = uniforms.atmosphere_density > 0.001 && atm_h > 0.000001;
     let limb_direction = (uniforms.rotation * vec4<f32>(normalize(vec3<f32>(ndc, 0.0001)), 0.0)).xyz;
-    let limb_geometry = textureSample(weather_geometry_tex, height_sampler, limb_direction);
+    let limb_geometry = sample_weather_cube(weather_geometry_tex, limb_direction);
     let cloud_top_radius = 1.0 + limb_geometry.a / max(uniforms.planet_radius_km, 1.0);
     let visible_cloud_top = select(1.0, cloud_top_radius, cloud_display_scale() > 0.0);
     let outer_r = max(select(1.005, atm_radius + 0.015, has_atm), visible_cloud_top);
@@ -1182,7 +1182,7 @@ fn shade_planet(in: VertexOutput) -> vec4<f32> {
             }
             case 9u: {
                 // Integrated density, so debug visualizes the same volume as preview.
-                let debug_geometry = textureSample(weather_geometry_tex, height_sampler, rotated);
+                let debug_geometry = sample_weather_cube(weather_geometry_tex, rotated);
                 let debug_top = 1.0 + debug_geometry.a / max(uniforms.planet_radius_km, 1.0);
                 let z_debug_top = sqrt(max(debug_top * debug_top - r2, 0.0));
                 let z_surface = sqrt(max(1.0 - r2, 0.0));
@@ -1423,7 +1423,7 @@ fn shade_planet(in: VertexOutput) -> vec4<f32> {
         lit_color += city_glow_through * scatter_strength;
     }
 
-    let geometry = textureSample(weather_geometry_tex, height_sampler, rotated);
+    let geometry = sample_weather_cube(weather_geometry_tex, rotated);
     let top_radius = 1.0 + geometry.a / max(uniforms.planet_radius_km, 1.0);
     lit_color = composite_volumes(lit_color, ndc, sqrt(max(1.0 - r2, 0.0)), top_radius, sun_dir, angular_pixel_footprint);
 

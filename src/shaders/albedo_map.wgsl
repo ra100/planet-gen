@@ -92,7 +92,16 @@ fn albedo_relief(x: u32, y: u32, height: f32, uv: vec2<f32>) -> vec2<f32> {
         cube_to_sphere(params.face, uv - vec2<f32>(du, 0.0)));
     let dy = distance(cube_to_sphere(params.face, uv + vec2<f32>(0.0, du)),
         cube_to_sphere(params.face, uv - vec2<f32>(0.0, du)));
-    let slope = length(vec2<f32>((e - w) / max(dx, 0.00001), (n - s) / max(dy, 0.00001)));
+    let tangent_x = (cube_to_sphere(params.face, uv + vec2<f32>(du, 0.0))
+        - cube_to_sphere(params.face, uv - vec2<f32>(du, 0.0))) / max(dx, 0.00001);
+    let tangent_y = (cube_to_sphere(params.face, uv + vec2<f32>(0.0, du))
+        - cube_to_sphere(params.face, uv - vec2<f32>(0.0, du))) / max(dy, 0.00001);
+    let correlation = dot(tangent_x, tangent_y);
+    let gradient = vec2<f32>((e - w) / max(dx, 0.00001), (n - s) / max(dy, 0.00001));
+    // Cube-face axes are oblique away from their centers. The inverse metric
+    // keeps rock exposure and snow retention independent of the selected face.
+    let slope = sqrt(max((dot(gradient, gradient) - 2.0 * correlation * gradient.x * gradient.y)
+        / max(1.0 - correlation * correlation, 0.00001), 0.0));
     let valley = material_ramp(0.001, 0.012, max(min(e, w), min(n, s)) - height);
     return vec2<f32>(slope, valley);
 }

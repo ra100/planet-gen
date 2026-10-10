@@ -27,9 +27,8 @@ fn smooth_step(edge0: f32, edge1: f32, x: f32) -> f32 {
 }
 
 fn sample_height(gx: i32, gy: i32) -> f32 {
-    let full = i32(params.full_resolution);
-    let cx = clamp(clamp(gx, 0, full - 1) - i32(params.tile_offset_x), 0, i32(params.resolution) - 1);
-    let cy = clamp(clamp(gy, 0, full - 1) - i32(params.tile_offset_y), 0, i32(params.local_height) - 1);
+    let cx = clamp(gx - i32(params.tile_offset_x), 0, i32(params.resolution) - 1);
+    let cy = clamp(gy - i32(params.tile_offset_y), 0, i32(params.local_height) - 1);
     return heightmap[u32(cy) * params.resolution + u32(cx)];
 }
 

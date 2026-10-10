@@ -64,10 +64,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     // Slope & moisture-dependent roughness for land only
     if (!is_ocean) {
         // Compute slope from neighboring heights (central differences)
-        let x_left = select(global_x - 1u, 0u, global_x == 0u);
-        let x_right = min(global_x + 1u, full_res - 1u);
-        let y_up = select(global_y - 1u, 0u, global_y == 0u);
-        let y_down = min(global_y + 1u, full_res - 1u);
+        let x_left = global_x - 1u;
+        let x_right = global_x + 1u;
+        let y_up = global_y - 1u;
+        let y_down = global_y + 1u;
 
         let local_x_left = u32(clamp(i32(x_left) - i32(params.tile_offset_x), 0, i32(res) - 1));
         let local_x_right = u32(clamp(i32(x_right) - i32(params.tile_offset_x), 0, i32(res) - 1));

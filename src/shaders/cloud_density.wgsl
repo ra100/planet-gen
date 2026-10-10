@@ -140,10 +140,29 @@ fn low_cloud_segment(p0: vec3<f32>, p1: vec3<f32>, base: f32, top: f32, radius: 
 
 // Rendering follows transported condensate and diagnosed layer heights directly.
 // Seed and wind affect weather formation; they do not stamp an opacity texture.
+// Weather generation places the first/last samples on the face edges, while
+// hardware cube filtering assumes texel centers. Move face coordinates into
+// that center lattice so duplicate edge samples do not form a flat seam band.
+fn sample_weather_cube(field: texture_cube<f32>, direction: vec3<f32>) -> vec4<f32> {
+    let a = abs(direction);
+    let major = max(a.x, max(a.y, a.z));
+    var face_normal: vec3<f32>;
+    if (a.x >= a.y && a.x >= a.z) {
+        face_normal = vec3<f32>(select(-1.0, 1.0, direction.x >= 0.0), 0.0, 0.0);
+    } else if (a.y >= a.z) {
+        face_normal = vec3<f32>(0.0, select(-1.0, 1.0, direction.y >= 0.0), 0.0);
+    } else {
+        face_normal = vec3<f32>(0.0, 0.0, select(-1.0, 1.0, direction.z >= 0.0));
+    }
+    let res = f32(textureDimensions(field).x);
+    let centered = direction * ((res - 1.0) / res) + face_normal * (major / res);
+    return textureSampleLevel(field, height_sampler, centered, 0.0);
+}
+
 fn weather_cloud_sample(dir: vec3<f32>, altitude_km: f32, angular_pixel_footprint: f32) -> WeatherCloudSample {
     let direction = normalize(dir);
-    let mass = textureSampleLevel(weather_mass_tex, height_sampler, direction, 0.0);
-    let geometry = textureSampleLevel(weather_geometry_tex, height_sampler, direction, 0.0);
+    let mass = sample_weather_cube(weather_mass_tex, direction);
+    let geometry = sample_weather_cube(weather_geometry_tex, direction);
     let height = textureSampleLevel(height_tex, height_sampler, direction, 0.0).r;
     var sample = WeatherCloudSample(CloudLayers(0.0, 0.0, 0.0), mass, geometry, height, 1.0, 1.0, 0.28);
     if (max(max(mass.r, mass.g), mass.b) <= 0.0) { return sample; }
@@ -188,9 +207,9 @@ fn weather_cloud_layers_land_segment(
 
 fn weather_column_density_raw(dir: vec3<f32>, angular_pixel_footprint: f32) -> f32 {
     let direction = normalize(dir);
-    let mass = textureSampleLevel(weather_mass_tex, height_sampler, direction, 0.0);
+    let mass = sample_weather_cube(weather_mass_tex, direction);
     if (max(max(mass.r, mass.g), mass.b) <= 0.0) { return 0.0; }
-    let geometry = textureSampleLevel(weather_geometry_tex, height_sampler, direction, 0.0);
+    let geometry = sample_weather_cube(weather_geometry_tex, direction);
     let low_mid = (geometry.r + geometry.g) * 0.5;
     let deep_base = mix(geometry.r, geometry.g, 0.28);
     let deep_mid = (deep_base + max(geometry.b, deep_base + 0.5)) * 0.5;
@@ -259,10 +278,10 @@ fn cloud_surface_shadow(
     world_direction: vec3<f32>, sun_dir: vec3<f32>, radius_km: f32, angular_pixel_footprint: f32,
 ) -> f32 {
     let direction = normalize(world_direction);
-    let mass = textureSampleLevel(weather_mass_tex, height_sampler, direction, 0.0);
+    let mass = sample_weather_cube(weather_mass_tex, direction);
     let weight = mass.r + mass.g + mass.b;
     if (weight <= 0.0) { return 1.0; }
-    let geometry = textureSampleLevel(weather_geometry_tex, height_sampler, direction, 0.0);
+    let geometry = sample_weather_cube(weather_geometry_tex, direction);
     let deep_base = mix(geometry.r, geometry.g, 0.28);
     let deep_top = max(geometry.b, deep_base + 0.5);
     let high_base = max(geometry.b, geometry.a - 3.0);

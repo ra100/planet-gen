@@ -87,9 +87,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         f32(params.tile_offset_y + id.y) / f32(params.full_resolution - 1u),
     );
     let direction = cube_to_sphere(params.face, uv);
-    let mass = textureSampleLevel(weather_mass_tex, height_sampler, direction, 0.0);
+    let mass = sample_weather_cube(weather_mass_tex, direction);
     if (max(max(mass.r, mass.g), mass.b) <= 0.0) { output[pixel] = CloudOutput(0.0, 0.0, 0.0, 0.0, 0.0, 0.0); return; }
-    let geometry = textureSampleLevel(weather_geometry_tex, height_sampler, direction, 0.0);
+    let geometry = sample_weather_cube(weather_geometry_tex, direction);
     let radius_km = max(uniforms.planet_radius_km, 1.0);
     let top_km = max(geometry.a, 0.0);
     let step_km = top_km / 8.0;

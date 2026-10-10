@@ -2991,6 +2991,160 @@ fn layer_profile_oracle() {
     }
 
     #[test]
+    fn weather_sampling_preserves_gradients_across_all_cube_edges() {
+        use wgpu::util::DeviceExt;
+
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let renderer = PreviewRenderer::new(&gpu);
+        let resolution = 32;
+        let field = |p: [f32; 3]| 0.4 + 0.15 * p[0] + 0.10 * p[1] + 0.05 * p[2];
+        let terrain = TectonicTerrain {
+            faces: std::array::from_fn(|face| {
+                (0..resolution * resolution)
+                    .map(|index| {
+                        field(cube_to_sphere(
+                            face as u32,
+                            (index % resolution) as f32 / (resolution - 1) as f32,
+                            (index / resolution) as f32 / (resolution - 1) as f32,
+                        ))
+                    })
+                    .collect()
+            }),
+            resolution,
+        };
+        let view = renderer.upload_terrain(&gpu, &terrain);
+        let mut directions = Vec::new();
+        for (a, b) in [(0, 1), (0, 2), (1, 2)] {
+            for sign_a in [-1.0, 1.0] {
+                for sign_b in [-1.0, 1.0] {
+                    for delta in [-0.04, -0.02, 0.0, 0.02, 0.04] {
+                        let mut p = [0.0_f32; 4];
+                        p[a] = sign_a * (1.0 + delta);
+                        p[b] = sign_b;
+                        let length = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
+                        p[..3].iter_mut().for_each(|v| *v /= length);
+                        directions.push(p);
+                    }
+                }
+            }
+        }
+        let source = format!(
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}",
+            include_str!("shaders/noise.wgsl"),
+            include_str!("shaders/climate.wgsl"),
+            include_str!("shaders/surface_material.wgsl"),
+            include_str!("shaders/cloud_density.wgsl"),
+            include_str!("shaders/cloud_wind_fallback.wgsl"),
+            include_str!("shaders/preview_cubemap.wgsl"),
+            r#"
+@group(1) @binding(0) var<storage, read> directions: array<vec4<f32>>;
+@group(1) @binding(1) var<storage, read_write> samples: array<vec2<f32>>;
+@compute @workgroup_size(1)
+fn seam_oracle(@builtin(global_invocation_id) id: vec3<u32>) {
+    let p = directions[id.x].xyz;
+    samples[id.x] = vec2<f32>(sample_weather_cube(height_tex, p).r,
+        textureSampleLevel(height_tex, height_sampler, p, 0.0).r);
+}
+"#,
+        );
+        let shader = gpu
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("weather cube edge oracle"),
+                source: wgpu::ShaderSource::Wgsl(source.into()),
+            });
+        let pipeline = gpu
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("weather cube edge oracle"),
+                layout: None,
+                module: &shader,
+                entry_point: Some("seam_oracle"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        let input = gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("cube edge directions"),
+                contents: bytemuck::cast_slice(&directions),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+        let bytes = (directions.len() * 8) as u64;
+        let output = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cube edge samples"),
+            size: bytes,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cube edge readback"),
+            size: bytes,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let textures = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&renderer.sampler),
+                },
+            ],
+        });
+        let buffers = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &pipeline.get_bind_group_layout(1),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: input.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: output.as_entire_binding(),
+                },
+            ],
+        });
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &textures, &[]);
+            pass.set_bind_group(1, &buffers, &[]);
+            pass.dispatch_workgroups(directions.len() as u32, 1, 1);
+        }
+        encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, bytes);
+        gpu.queue.submit(Some(encoder.finish()));
+        readback.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        gpu.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
+        let mapped = readback.slice(..).get_mapped_range();
+        let samples: &[[f32; 2]] = bytemuck::cast_slice(&mapped);
+        let mut old_max_error = 0.0_f32;
+        let mut new_max_error = 0.0_f32;
+        for (p, [actual, old]) in directions.iter().zip(samples) {
+            let expected = field([p[0], p[1], p[2]]);
+            old_max_error = old_max_error.max((old - expected).abs());
+            new_max_error = new_max_error.max((actual - expected).abs());
+            assert!(
+                (actual - expected).abs() < 0.0007,
+                "edge {p:?}: {actual} vs {expected}"
+            );
+        }
+        assert!(
+            old_max_error > new_max_error * 3.0,
+            "{old_max_error} vs {new_max_error}"
+        );
+    }
+
+    #[test]
     fn height_closeup_filters_texel_noise_at_4k() {
         let gpu = GpuContext::new().expect("GPU init failed");
         let renderer = PreviewRenderer::new(&gpu);

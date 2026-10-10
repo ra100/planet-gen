@@ -1634,6 +1634,20 @@ impl ErosionPipeline {
                 drop(mapped);
                 staging.unmap();
             }
+            // Face-local drainage has no neighboring-face water state. Fade its
+            // height delta to zero with zero edge derivative so it cannot bake
+            // a discontinuity into the shared edge or the 8K meso reconstruction.
+            let edge_width = iterations.saturating_add(2).min(res / 8).max(2) as f32;
+            for y in 0..res {
+                for x in 0..res {
+                    let distance = x.min(res - 1 - x).min(y.min(res - 1 - y)) as f32;
+                    let t = (distance / edge_width).clamp(0.0, 1.0);
+                    let weight = t * t * (3.0 - 2.0 * t);
+                    let index = (y * res + x) as usize;
+                    let original = terrain.faces[face_idx][index];
+                    face[index] = original + (face[index] - original) * weight;
+                }
+            }
             terrain.faces[face_idx] = face;
         }
         Ok(())

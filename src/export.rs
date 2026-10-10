@@ -731,6 +731,46 @@ fn region_f32(region: TileRegion, data: &[f32], resolution: u32) -> Vec<f32> {
     output
 }
 
+fn surface_region(coordinator: &TileCoordinator, x: u32, y: u32) -> TileRegion {
+    let halo = coordinator.stencil_radius;
+    TileRegion {
+        // GPU integer addition wraps these signed origins back to global
+        // coordinates in the cropped core. Halo pixels themselves are discarded.
+        origin_x: (x * coordinator.tile_size).wrapping_sub(halo),
+        origin_y: (y * coordinator.tile_size).wrapping_sub(halo),
+        width: coordinator.tile_size + 2 * halo,
+        height: coordinator.tile_size + 2 * halo,
+        crop_x: halo,
+        crop_y: halo,
+        crop_width: coordinator.tile_size,
+        crop_height: coordinator.tile_size,
+    }
+}
+
+fn surface_height_region(region: TileRegion, terrain: &TectonicTerrain, face: usize) -> Vec<f32> {
+    let res = terrain.resolution as i32;
+    let mut values = Vec::with_capacity((region.width * region.height) as usize);
+    for local_y in 0..region.height as i32 {
+        let y = region.origin_y as i32 + local_y;
+        for local_x in 0..region.width as i32 {
+            let x = region.origin_x as i32 + local_x;
+            values.push(if (0..res).contains(&x) && (0..res).contains(&y) {
+                terrain.faces[face][(y * res + x) as usize]
+            } else {
+                sample_cubemap_height(
+                    terrain,
+                    face_uv_to_direction(
+                        face,
+                        x as f32 / (res - 1) as f32,
+                        y as f32 / (res - 1) as f32,
+                    ),
+                )
+            });
+        }
+    }
+    values
+}
+
 // ============ Map Pipeline Param Structs ============
 
 #[repr(C)]
@@ -2059,8 +2099,8 @@ fn stage_map_layer<P: Pod>(
                     .map_err(|_| "staged map output is not aligned f32 data")?;
                 stage.write_tile(
                     face,
-                    region.origin_x + region.crop_x,
-                    region.origin_y + region.crop_y,
+                    region.origin_x.wrapping_add(region.crop_x),
+                    region.origin_y.wrapping_add(region.crop_y),
                     region.crop_width,
                     region.crop_height,
                     values,
@@ -2075,13 +2115,9 @@ fn stage_map_layer<P: Pod>(
                 if cancel.load(Ordering::Relaxed) {
                     return Err("Cancelled".into());
                 }
-                let region = coordinator.region(tile_x, tile_y);
+                let region = surface_region(coordinator, tile_x, tile_y);
                 let params = make_params(face, region);
-                let height_tile = region_f32(
-                    region,
-                    &terrain.faces[face as usize],
-                    coordinator.face_resolution,
-                );
+                let height_tile = surface_height_region(region, terrain, face as usize);
                 let tile_bytes = map_tile_owned_bytes(
                     (height_tile.len() * std::mem::size_of::<f32>()) as u64,
                     bytemuck::bytes_of(&params).len() as u64,
