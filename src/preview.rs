@@ -2991,6 +2991,47 @@ fn layer_profile_oracle() {
     }
 
     #[test]
+    fn height_closeup_filters_texel_noise_at_4k() {
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let renderer = PreviewRenderer::new(&gpu);
+        let resolution = 64;
+        let terrain = TectonicTerrain {
+            faces: std::array::from_fn(|_| {
+                (0..resolution * resolution)
+                    .map(|index| {
+                        if (index % resolution + index / resolution) % 2 == 0 {
+                            0.2
+                        } else {
+                            0.6
+                        }
+                    })
+                    .collect()
+            }),
+            resolution,
+        };
+        let view = renderer.upload_terrain(&gpu, &terrain);
+        let settings = PreviewUniforms {
+            view_mode: 1,
+            zoom: 20.0,
+            show_clouds: 0.0,
+            show_atmosphere_layer: 0.0,
+            ..uniforms()
+        };
+        let pixels = renderer.render(&gpu, &settings, &view, None, None, 4096);
+        assert_eq!(pixels.len(), 4096 * 4096 * 4);
+        let (mut darkest, mut lightest) = (1.0_f32, 0.0_f32);
+        for pixel in pixels.chunks_exact(4) {
+            let value = srgb_to_linear(pixel[0]);
+            darkest = darkest.min(value);
+            lightest = lightest.max(value);
+        }
+        // A two-texel alternating signal must not become large squares when
+        // magnified. Raw bilinear reconstruction spans 0.60..0.80 here.
+        assert!(darkest > 0.68 && lightest < 0.72, "{darkest}..{lightest}");
+        assert!(lightest > darkest, "filter must retain resolved relief");
+    }
+
+    #[test]
     fn test_preview_renders_non_empty() {
         let gpu = GpuContext::new().expect("GPU init failed");
 

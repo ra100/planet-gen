@@ -86,6 +86,7 @@ pub struct PlanetGenApp {
     show_help: bool,
     weather_busy: bool,
     preview_resolution: u32,
+    viewport_render_size: u32,
     needs_terrain: bool,   // full terrain recompute (plates + compute + erosion)
     terrain_pending: bool, // true = overlay painted, next frame does the work
     terrain_start: Option<std::time::Instant>, // when terrain gen started (for overlay delay)
@@ -272,6 +273,7 @@ impl PlanetGenApp {
             show_help: false,
             weather_busy: false,
             preview_resolution: crate::preview::DEFAULT_PREVIEW_SIZE,
+            viewport_render_size: crate::preview::DEFAULT_PREVIEW_SIZE,
             needs_terrain: true,
             terrain_pending: false,
             terrain_start: None,
@@ -569,7 +571,7 @@ impl PlanetGenApp {
     fn render_preview(&mut self) {
         if let Some(ref cubemap_view) = self.cached_cubemap_view {
             let uniforms = self.build_uniforms();
-            let size = self.preview_resolution;
+            let size = self.viewport_render_size;
             // Debug views 16/17 use continentality/pressure cubemap in the cloud_tex slot
             let cloud_ref = self.dynamics.as_ref().map(|dynamics| match self.view_mode {
                 17 => &dynamics.pressure,
@@ -2602,6 +2604,14 @@ impl eframe::App for PlanetGenApp {
                 let side = all.width().min(all.height()).max(64.0);
                 let rect = egui::Rect::from_center_size(all.center(), egui::vec2(side, side));
                 self.hud_rect = rect;
+                let render_size = ((side * ctx.pixels_per_point()).ceil() as u32).clamp(
+                    64,
+                    self.gpu.device.limits().max_texture_dimension_2d.min(4096),
+                );
+                if self.viewport_render_size != render_size {
+                    self.viewport_render_size = render_size;
+                    self.needs_render = true;
+                }
 
                 if self.cached_cubemap_view.is_some() {
                     let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());

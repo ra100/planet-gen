@@ -89,10 +89,12 @@ fn surface_land_albedo(
 
     let drainage = surface_drainage(land_height, seasonal_temp, wetness, valley) * water_supply;
     let riparian = mix(vec3<f32>(0.055, 0.085, 0.033), forest, canopy);
-    color = mix(color, riparian, drainage * 0.65);
+    color = mix(color, riparian, drainage * 0.35);
     let channel = material_ramp(0.68, 0.97, drainage);
     let sediment = mix(vec3<f32>(0.018, 0.045, 0.041), province.soil * 0.40, material_ramp(120.0, 260.0, wetness));
-    color = mix(color, sediment, channel);
+    // Incision is a local relief proxy; keep it a tint rather than painting
+    // isolated depressions as opaque water without a connected river network.
+    color = mix(color, sediment, channel * 0.25);
 
     let beach = (1.0 - material_ramp(0.0, 0.004, land_height))
         * (1.0 - material_ramp(0.35, 1.6, slope)) * material_ramp(-3.0, 10.0, seasonal_temp);

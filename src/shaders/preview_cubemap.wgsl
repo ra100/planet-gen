@@ -56,6 +56,51 @@ const CLOUD_RAY_SAMPLES: u32 = 8u;
 @group(0) @binding(4) var weather_mass_tex: texture_cube<f32>;
 @group(0) @binding(5) var weather_geometry_tex: texture_cube<f32>;
 
+// Positive cubic B-spline weights remove bilinear grid creases without
+// ringing at coasts. Four filtered taps reconstruct the 4x4 neighborhood;
+// directions outside the current face sample the adjoining cube face.
+fn sample_surface_height(direction: vec3<f32>) -> f32 {
+    let p = normalize(direction);
+    let a = abs(p);
+    var face_normal: vec3<f32>;
+    var axis_u: vec3<f32>;
+    var axis_v: vec3<f32>;
+    if (a.x >= a.y && a.x >= a.z) {
+        let sign_x = select(-1.0, 1.0, p.x >= 0.0);
+        face_normal = vec3<f32>(sign_x, 0.0, 0.0);
+        axis_u = vec3<f32>(0.0, 0.0, -sign_x);
+        axis_v = vec3<f32>(0.0, -1.0, 0.0);
+    } else if (a.y >= a.z) {
+        let sign_y = select(-1.0, 1.0, p.y >= 0.0);
+        face_normal = vec3<f32>(0.0, sign_y, 0.0);
+        axis_u = vec3<f32>(1.0, 0.0, 0.0);
+        axis_v = vec3<f32>(0.0, 0.0, sign_y);
+    } else {
+        let sign_z = select(-1.0, 1.0, p.z >= 0.0);
+        face_normal = vec3<f32>(0.0, 0.0, sign_z);
+        axis_u = vec3<f32>(sign_z, 0.0, 0.0);
+        axis_v = vec3<f32>(0.0, -1.0, 0.0);
+    }
+    let res = f32(textureDimensions(height_tex).x);
+    let face_uv = vec2<f32>(dot(p, axis_u), dot(p, axis_v)) / dot(p, face_normal);
+    let texel = (face_uv * 0.5 + 0.5) * res - 0.5;
+    let base = floor(texel);
+    let f = fract(texel);
+    let w0 = (vec2<f32>(1.0) - f) * (vec2<f32>(1.0) - f) * (vec2<f32>(1.0) - f) / 6.0;
+    let w1 = (3.0 * f * f * f - 6.0 * f * f + 4.0) / 6.0;
+    let w2 = (-3.0 * f * f * f + 3.0 * f * f + 3.0 * f + 1.0) / 6.0;
+    let w3 = f * f * f / 6.0;
+    let low_weight = w0 + w1;
+    let high_weight = w2 + w3;
+    let low = ((base - 1.0 + w1 / low_weight + 0.5) / res) * 2.0 - 1.0;
+    let high = ((base + 1.0 + w3 / high_weight + 0.5) / res) * 2.0 - 1.0;
+    let h00 = textureSampleLevel(height_tex, height_sampler, face_normal + axis_u * low.x + axis_v * low.y, 0.0).r;
+    let h10 = textureSampleLevel(height_tex, height_sampler, face_normal + axis_u * high.x + axis_v * low.y, 0.0).r;
+    let h01 = textureSampleLevel(height_tex, height_sampler, face_normal + axis_u * low.x + axis_v * high.y, 0.0).r;
+    let h11 = textureSampleLevel(height_tex, height_sampler, face_normal + axis_u * high.x + axis_v * high.y, 0.0).r;
+    return mix(mix(h00, h10, high_weight.x), mix(h01, h11, high_weight.x), high_weight.y);
+}
+
 // Sample wind+continentality cubemap: RGBA = (wind.x, wind.y, wind.z, continentality)
 fn sample_wind_cont(dir: vec3<f32>) -> vec4<f32> {
     return textureSample(cloud_tex, height_sampler, dir);
@@ -618,10 +663,10 @@ fn compute_terrain_normal(sphere_pos: vec3<f32>, geo_normal: vec3<f32>, footprin
     let bitan_world = normalize(cross(sphere_pos, tan_world));
 
     // Sample 4 neighbors in cubemap space
-    let h_right = textureSample(height_tex, height_sampler, normalize(sphere_pos + tan_world * step)).r;
-    let h_left  = textureSample(height_tex, height_sampler, normalize(sphere_pos - tan_world * step)).r;
-    let h_up    = textureSample(height_tex, height_sampler, normalize(sphere_pos + bitan_world * step)).r;
-    let h_down  = textureSample(height_tex, height_sampler, normalize(sphere_pos - bitan_world * step)).r;
+    let h_right = sample_surface_height(sphere_pos + tan_world * step);
+    let h_left  = sample_surface_height(sphere_pos - tan_world * step);
+    let h_up    = sample_surface_height(sphere_pos + bitan_world * step);
+    let h_down  = sample_surface_height(sphere_pos - bitan_world * step);
 
     // Central differences → height gradient in cubemap space
     let height_scale = clamp(uniforms.height_scale, 0.0, 5.0) * 5.0 / max(uniforms.planet_radius_km, 1.0);
@@ -640,10 +685,10 @@ fn compute_terrain_normal(sphere_pos: vec3<f32>, geo_normal: vec3<f32>, footprin
 fn surface_relief(sphere_pos: vec3<f32>, height: f32) -> vec2<f32> {
     let step = max(0.004, 2.0 / f32(textureDimensions(height_tex).x));
     let frame = tangent_basis(sphere_pos);
-    let e = textureSample(height_tex, height_sampler, normalize(sphere_pos + frame[0] * step)).r;
-    let w = textureSample(height_tex, height_sampler, normalize(sphere_pos - frame[0] * step)).r;
-    let n = textureSample(height_tex, height_sampler, normalize(sphere_pos + frame[1] * step)).r;
-    let s = textureSample(height_tex, height_sampler, normalize(sphere_pos - frame[1] * step)).r;
+    let e = sample_surface_height(sphere_pos + frame[0] * step);
+    let w = sample_surface_height(sphere_pos - frame[0] * step);
+    let n = sample_surface_height(sphere_pos + frame[1] * step);
+    let s = sample_surface_height(sphere_pos - frame[1] * step);
     let slope = length(vec2<f32>(e - w, n - s)) / (2.0 * step);
     let incision = max(min(e, w), min(n, s)) - height;
     let valley = material_ramp(0.001, 0.012, incision);
@@ -651,7 +696,7 @@ fn surface_relief(sphere_pos: vec3<f32>, height: f32) -> vec2<f32> {
 }
 
 fn terrain_slope(sphere_pos: vec3<f32>) -> f32 {
-    return surface_relief(sphere_pos, textureSample(height_tex, height_sampler, sphere_pos).r).x;
+    return surface_relief(sphere_pos, sample_surface_height(sphere_pos)).x;
 }
 
 // Mountain snow needs elevation, sustained cold, terrain that can retain it,
@@ -967,7 +1012,7 @@ fn shade_planet(in: VertexOutput) -> vec4<f32> {
     let rotated = (uniforms.rotation * vec4<f32>(normal, 0.0)).xyz;
 
     // Sample height from pre-computed cubemap
-    let height = textureSample(height_tex, height_sampler, rotated).r;
+    let height = sample_surface_height(rotated);
     let is_ocean = height < uniforms.ocean_level;
 
     let color_var = snoise(rotated * 8.0 + noise_seed_offset(uniforms.surface_seed, 72u));
