@@ -121,6 +121,15 @@ struct PlateInfo {
     second_dist: f32,
     nearest_type: f32,
     second_type: f32,
+    elevation: f32,
+    character: vec3<f32>,
+}
+
+fn plate_distance(pos: vec3<f32>, index: u32) -> f32 {
+    let offset = vec3<f32>(f32(index) * 17.3, f32(index) * 31.7, f32(index) * 43.1);
+    return 1.0 - dot(pos, plates[index].center)
+        + snoise(pos * 2.0 + offset) * 0.08
+        + snoise(pos * 4.5 + offset * 2.0) * 0.04;
 }
 
 fn find_nearest_plates(sphere_pos: vec3<f32>) -> PlateInfo {
@@ -129,19 +138,26 @@ fn find_nearest_plates(sphere_pos: vec3<f32>) -> PlateInfo {
     info.second_dist = 100.0;
     info.nearest_idx = 0u;
     info.second_idx = 0u;
+    info.elevation = 0.0;
+    info.character = vec3<f32>(0.0);
+    var weight_sum = 0.0;
 
     for (var i = 0u; i < params.num_plates; i++) {
-        // Great-circle distance approximation using dot product
-        var d = 1.0 - dot(sphere_pos, plates[i].center);
-
-        // Per-plate noise bias: each plate has a unique noise field that
-        // pushes its boundary outward in some directions and inward in others.
-        // This creates concave coastlines, peninsulas, and bays instead of convex polygons.
-        // Three octaves: large-scale concavities + medium bends + fine irregularity.
-        let plate_offset = vec3<f32>(f32(i) * 17.3, f32(i) * 31.7, f32(i) * 43.1);
-        let bias = snoise(sphere_pos * 2.0 + plate_offset) * 0.08
-                 + snoise(sphere_pos * 4.5 + plate_offset * 2.0) * 0.04;
-        d += bias;
+        let d = plate_distance(sphere_pos, i);
+        // An online soft partition stays continuous when either of the two
+        // nearest plate indices changes, including three-plate junctions.
+        let minimum = min(d, info.nearest_dist);
+        let rescale = exp((minimum - info.nearest_dist) / 0.012);
+        let weight = exp((minimum - d) / 0.012);
+        weight_sum = weight_sum * rescale + weight;
+        info.elevation = info.elevation * rescale
+            + weight * select(-0.30, 0.30, plates[i].plate_type > 0.5);
+        let character = vec3<f32>(
+            hash_f32_01(params.seed + i * 7u + 100u),
+            hash_f32_01(params.seed + i * 7u + 101u),
+            hash_f32_01(params.seed + i * 7u + 102u),
+        );
+        info.character = info.character * rescale + weight * character;
 
         if (d < info.nearest_dist) {
             info.second_dist = info.nearest_dist;
@@ -156,6 +172,8 @@ fn find_nearest_plates(sphere_pos: vec3<f32>) -> PlateInfo {
             info.second_type = plates[i].plate_type;
         }
     }
+    info.elevation /= max(weight_sum, 0.000001);
+    info.character /= max(weight_sum, 0.000001);
     return info;
 }
 
@@ -175,6 +193,47 @@ fn classify_boundary(sphere_pos: vec3<f32>, plate_a: u32, plate_b: u32) -> f32 {
 fn boundary_influence(dist_diff: f32, sigma: f32) -> f32 {
     let d = dist_diff / max(sigma, 0.0001);
     return exp(-d * d);
+}
+
+fn boundary_plate_weight(distance: f32, minimum: f32) -> f32 {
+    let sigma = max(params.boundary_width, 0.0001);
+    let gap = max(distance - minimum, 0.0);
+    return boundary_influence(gap, sigma)
+        * (1.0 - smooth_step(2.0 * sigma, 3.0 * sigma, gap));
+}
+
+fn boundary_relief(pos: vec3<f32>, minimum: f32, ridge: f32) -> f32 {
+    var weight_sum = 0.0;
+    var relief = 0.0;
+    for (var i = 0u; i < params.num_plates; i++) {
+        let di = plate_distance(pos, i);
+        let wi = boundary_plate_weight(di, minimum);
+        weight_sum += wi;
+        if (wi == 0.0) { continue; }
+        for (var j = i + 1u; j < params.num_plates; j++) {
+            let dj = plate_distance(pos, j);
+            let wj = boundary_plate_weight(dj, minimum);
+            if (wj == 0.0) { continue; }
+            let stress = classify_boundary(pos, i, j);
+            let convergence = max(-stress, 0.0);
+            let divergence = max(stress, 0.0);
+            let ti = plates[i].plate_type;
+            let tj = plates[j].plate_type;
+            let continental_pair = (ti + tj) * 0.5;
+            let rel_v = cross(plates[i].velocity - plates[j].velocity, pos);
+            let shear = max(length(rel_v) * 2.0 - abs(stress), 0.0);
+            let collision = convergence * mix(0.10, 0.48, continental_pair) * (0.35 + ridge);
+            let spreading = divergence * mix(0.14, -0.12, continental_pair);
+            let ocean_side = 1.0 - (wi * ti + wj * tj) / (wi + wj);
+            let trench = convergence * (1.0 - abs(ti + tj - 1.0)) * ocean_side * 0.12
+                * smooth_step(0.0, 0.025, abs(di - dj));
+            relief += wi * wj * (collision + spreading - trench
+                + min(shear, 1.0) * (ridge - 0.4) * 0.05);
+        }
+    }
+    // Two equally weighted plates reproduce the pair's full boundary relief.
+    // Other pair contributions vanish smoothly as they leave the local belt.
+    return 4.0 * relief / max(weight_sum * weight_sum, 0.000001);
 }
 
 // Detail fBm noise (layered on top of plate structure)
@@ -225,15 +284,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let info = find_nearest_plates(wpos);
     let is_continental = info.nearest_type > 0.5;
 
-    // Each plate's elevation: continental = raised, oceanic = depressed
-    let elev_nearest = select(-0.30, 0.30, info.nearest_type > 0.5);
-    let elev_second = select(-0.30, 0.30, info.second_type > 0.5);
-
-    // Blend between plates at boundaries. At the edge (equidistant), use the average.
-    // Far from boundary, use the nearest plate's value fully.
-    // This ensures ocean-ocean boundaries stay negative, continent-continent stay positive.
-    let boundary_t = smooth_step(0.0, 0.06, info.second_dist - info.nearest_dist);
-    let plate_height = mix((elev_nearest + elev_second) * 0.5, elev_nearest, boundary_t);
+    let plate_height = info.elevation;
 
     // === Layer 1b: Noise adds coastline shape and surface texture (secondary) ===
     let cs = params.continental_scale;
@@ -247,14 +298,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 
     var height = plate_height * params.amplitude + noise_detail;
 
-    // === Per-plate terrain character ===
-    // Each plate gets a unique personality from its index (u32 wrapping is fine for hashing)
-    let plate_id = info.nearest_idx;
-    let plate_char = vec3<f32>(
-        hash_f32_01(params.seed + plate_id * 7u + 100u),  // roughness character (0=smooth, 1=rugged)
-        hash_f32_01(params.seed + plate_id * 7u + 101u),  // plateau tendency (0=peaked, 1=flat-top)
-        hash_f32_01(params.seed + plate_id * 7u + 102u)   // highland coverage (0=lowland, 1=highland)
-    );
+    let plate_char = info.character;
 
     // === Layer 2: Highland/lowland with valleys and foothills ===
     let on_land = smooth_step(-0.05, 0.05, height);
@@ -309,23 +353,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     // Active velocity-driven boundary relief. Relative Euler motion projected
     // onto the boundary normal separates compression, opening, and shear.
     // Symmetric plate-pair quantities keep the field continuous across the edge.
-    let stress = classify_boundary(wpos, info.nearest_idx, info.second_idx);
     let belt = boundary_influence(info.second_dist - info.nearest_dist, params.boundary_width);
-    let continental_pair = (info.nearest_type + info.second_type) * 0.5;
-    let convergence = max(-stress, 0.0);
-    let divergence = max(stress, 0.0);
-    let rel_v = cross(plates[info.nearest_idx].velocity - plates[info.second_idx].velocity, wpos);
-    let shear = max(length(rel_v) * 2.0 - abs(stress), 0.0);
     let boundary_ridges = ridged_multifractal(wpos * 18.0 + seed_offset(params.seed + 2200u), 4, 2.1, 2.0, 1.0);
-    // Collision belts on continents; island arcs/trenches at mixed boundaries;
-    // broad spreading ridges on the ocean floor, rifts on continental crust.
-    let collision = convergence * mix(0.10, 0.48, continental_pair) * (0.35 + boundary_ridges);
-    let spreading = divergence * mix(0.14, -0.12, continental_pair);
-    let mixed_pair = 1.0 - abs(info.nearest_type + info.second_type - 1.0);
-    let trench = convergence * mixed_pair * (1.0 - info.nearest_type) * 0.12
-        * smooth_step(0.0, 0.025, info.second_dist - info.nearest_dist);
     height += belt * tect * params.mountain_scale * gravity_factor
-        * (collision + spreading - trench + min(shear, 1.0) * (boundary_ridges - 0.4) * 0.05);
+        * boundary_relief(wpos, info.nearest_dist, boundary_ridges);
 
     // === Layer 4: Ocean floor variation ===
     let ocean_floor = smooth_step(0.0, -0.1, height);

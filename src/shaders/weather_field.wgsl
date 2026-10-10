@@ -60,6 +60,15 @@ fn sample_height(dir: vec3<f32>) -> f32 {
     return height_data[u32(fuv.x) * res * res + y * res + x];
 }
 
+fn sample_weather_input(field: texture_cube<f32>, dir: vec3<f32>) -> vec4<f32> {
+    let fuv = sphere_to_face_uv(dir);
+    let res = f32(textureDimensions(field).x);
+    // Input fields include both face endpoints; hardware filtering uses centers.
+    // Correct the lattice before diagnosis bakes the duplicate-edge band into mass.
+    let uv = (fuv.yz * (res - 1.0) + vec2<f32>(0.5)) / res;
+    return textureSampleLevel(field, weather_sampler, cube_to_sphere(u32(fuv.x), uv), 0.0);
+}
+
 fn tangent_basis(pos: vec3<f32>) -> mat2x3<f32> {
     let reference = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(pos.y) > 0.9);
     let east = normalize(cross(reference, pos));
@@ -104,7 +113,7 @@ fn catalyst_center(index: u32) -> vec3<f32> {
 fn catalyst_owner_steering(index: u32) -> vec3<f32> {
     let center = catalyst_center(index);
     let basis = tangent_basis(center);
-    let wind = textureSampleLevel(wind_tex, weather_sampler, center, 0.0).xyz;
+    let wind = sample_weather_input(wind_tex, center).xyz;
     let tangent_wind = wind - center * dot(wind, center);
     return normalize(tangent_wind + basis[0] * 0.0001);
 }
@@ -152,8 +161,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     if (id.x >= res || id.y >= res) { return; }
     let uv = vec2<f32>(f32(id.x) / f32(res - 1u), f32(id.y) / f32(res - 1u));
     let pos = cube_to_sphere(weather_face(), uv);
-    let wind = textureSampleLevel(wind_tex, weather_sampler, pos, 0.0);
-    let pressure = textureSampleLevel(pressure_tex, weather_sampler, pos, 0.0).r;
+    let wind = sample_weather_input(wind_tex, pos);
+    let pressure = sample_weather_input(pressure_tex, pos).r;
     let height = sample_height(pos);
     let wind_tangent = (wind.xyz - pos * dot(wind.xyz, pos)) * params.wind_scale;
     let wind_speed = length(wind_tangent);
@@ -166,10 +175,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let west_pos = normalize(pos - east * diagnostic_step);
     let north_pos = normalize(pos + north * diagnostic_step);
     let south_pos = normalize(pos - north * diagnostic_step);
-    let east_wind = textureSampleLevel(wind_tex, weather_sampler, east_pos, 0.0).xyz * params.wind_scale;
-    let west_wind = textureSampleLevel(wind_tex, weather_sampler, west_pos, 0.0).xyz * params.wind_scale;
-    let north_wind = textureSampleLevel(wind_tex, weather_sampler, north_pos, 0.0).xyz * params.wind_scale;
-    let south_wind = textureSampleLevel(wind_tex, weather_sampler, south_pos, 0.0).xyz * params.wind_scale;
+    let east_wind = sample_weather_input(wind_tex, east_pos).xyz * params.wind_scale;
+    let west_wind = sample_weather_input(wind_tex, west_pos).xyz * params.wind_scale;
+    let north_wind = sample_weather_input(wind_tex, north_pos).xyz * params.wind_scale;
+    let south_wind = sample_weather_input(wind_tex, south_pos).xyz * params.wind_scale;
     let divergence = (dot(east_wind - west_wind, east) + dot(north_wind - south_wind, north))
         / (2.0 * diagnostic_step);
     let convergence = clamp(-divergence * 0.2, -1.0, 1.0);
@@ -190,10 +199,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let frontal_west = normalize(pos - east * frontal_step);
     let frontal_north = normalize(pos + north * frontal_step);
     let frontal_south = normalize(pos - north * frontal_step);
-    let pressure_east = textureSampleLevel(pressure_tex, weather_sampler, frontal_east, 0.0).r;
-    let pressure_west = textureSampleLevel(pressure_tex, weather_sampler, frontal_west, 0.0).r;
-    let pressure_north = textureSampleLevel(pressure_tex, weather_sampler, frontal_north, 0.0).r;
-    let pressure_south = textureSampleLevel(pressure_tex, weather_sampler, frontal_south, 0.0).r;
+    let pressure_east = sample_weather_input(pressure_tex, frontal_east).r;
+    let pressure_west = sample_weather_input(pressure_tex, frontal_west).r;
+    let pressure_north = sample_weather_input(pressure_tex, frontal_north).r;
+    let pressure_south = sample_weather_input(pressure_tex, frontal_south).r;
     let pressure_delta = vec2<f32>(pressure_east - pressure_west, pressure_north - pressure_south);
     let temperature_delta = vec2<f32>(
         temperature_at(frontal_east) - temperature_at(frontal_west),
@@ -293,13 +302,13 @@ fn diagnose(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
 
-    let wind = textureSampleLevel(wind_tex, weather_sampler, pos, 0.0);
+    let wind = sample_weather_input(wind_tex, pos);
     let continentality = clamp(wind.a, 0.0, 1.0);
     let marine_fraction = 1.0 - smooth_step(0.15, 0.85, continentality);
     let thermal = smooth_step(-25.0, 30.0, temperature_at(pos));
     let marine_stability = marine_fraction * smooth_step(0.05, 0.8, 1.0 - thermal);
     let trade_cumulus = marine_fraction * thermal * (1.0 - marine_stability);
-    let state = textureSampleLevel(spinup_state, weather_sampler, pos, 0.0);
+    let state = sample_weather_input(spinup_state, pos);
 
     let wind_tangent = (wind.xyz - pos * dot(wind.xyz, pos)) * params.wind_scale;
     let wind_speed = length(wind_tangent);
@@ -333,10 +342,10 @@ fn diagnose(@builtin(global_invocation_id) id: vec3<u32>) {
         let far_pos = normalize(pos - steering * anvil_step * 2.2);
         let left_pos = normalize(near_pos + lateral * anvil_spread);
         let right_pos = normalize(near_pos - lateral * anvil_spread);
-        anvil_near = max(anvil_near, textureSampleLevel(spinup_state, weather_sampler, near_pos, 0.0) * catalyst_support(near_pos, owner));
-        anvil_far = max(anvil_far, textureSampleLevel(spinup_state, weather_sampler, far_pos, 0.0) * catalyst_support(far_pos, owner));
-        anvil_left = max(anvil_left, textureSampleLevel(spinup_state, weather_sampler, left_pos, 0.0) * catalyst_support(left_pos, owner));
-        anvil_right = max(anvil_right, textureSampleLevel(spinup_state, weather_sampler, right_pos, 0.0) * catalyst_support(right_pos, owner));
+        anvil_near = max(anvil_near, sample_weather_input(spinup_state, near_pos) * catalyst_support(near_pos, owner));
+        anvil_far = max(anvil_far, sample_weather_input(spinup_state, far_pos) * catalyst_support(far_pos, owner));
+        anvil_left = max(anvil_left, sample_weather_input(spinup_state, left_pos) * catalyst_support(left_pos, owner));
+        anvil_right = max(anvil_right, sample_weather_input(spinup_state, right_pos) * catalyst_support(right_pos, owner));
     }
     // Transported ice can survive after its lower cloud bank evaporates.
     let frontal_high = clamp(state.w * (1.0 - marine_stability * 0.4), 0.0, 1.0);
@@ -359,7 +368,7 @@ fn diagnose(@builtin(global_invocation_id) id: vec3<u32>) {
     // edges vary over hundreds of texels instead of coastline bands.
     let pressure_factor_diag = smooth_step(0.05, 0.3, params.surface_pressure_bar);
     let local_pressure_diag = clamp(
-        textureSampleLevel(pressure_tex, weather_sampler, pos, 0.0).r / 1013.0,
+        sample_weather_input(pressure_tex, pos).r / 1013.0,
         0.8,
         1.2,
     );
