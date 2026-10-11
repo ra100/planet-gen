@@ -724,15 +724,6 @@ pub fn crop_region_bytes(region: TileRegion, data: &[u8], element_bytes: usize) 
     output
 }
 
-fn region_f32(region: TileRegion, data: &[f32], resolution: u32) -> Vec<f32> {
-    let mut output = Vec::with_capacity((region.width * region.height) as usize);
-    for y in region.origin_y..region.origin_y + region.height {
-        let start = (y * resolution + region.origin_x) as usize;
-        output.extend_from_slice(&data[start..start + region.width as usize]);
-    }
-    output
-}
-
 fn surface_region(coordinator: &TileCoordinator, x: u32, y: u32) -> TileRegion {
     let halo = coordinator.stencil_radius;
     TileRegion {
