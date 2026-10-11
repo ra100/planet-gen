@@ -507,33 +507,19 @@ fn compute_sea_level_temperature(sphere_pos: vec3<f32>, season: f32) -> f32 {
     return climate_sea_level_temperature(sphere_pos, uniforms.base_temp_c, uniforms.axial_tilt_rad, season);
 }
 
-// Polar caps are a sea-level climate feature. Keeping altitude out of this
-// mask leaves mountain snow to its separate altitude treatment.
-fn polar_ice_coverage(sphere_pos: vec3<f32>, is_ocean: bool) -> f32 {
-    let annual_temp = compute_sea_level_temperature(sphere_pos, 0.5);
-    let seasonal_temp = compute_sea_level_temperature(sphere_pos, uniforms.season);
-    let climate_temp = mix(annual_temp, seasonal_temp, 0.35);
-    let thermal_lat = abs(thermal_latitude(sphere_pos, uniforms.season));
-    let polar_domain = smooth_step(0.80, 1.00, thermal_lat);
-    // Low-frequency breakup only; this is bounded to ±0.55°C at the edge.
-    let edge_temp = 0.5 + snoise(sphere_pos * 0.7 + vec3<f32>(31.0, 0.0, 0.0)) * 0.55;
-    var coverage = polar_domain * smooth_step(edge_temp, edge_temp - 5.0, climate_temp);
+fn preview_ice(p: vec3<f32>, bed: f32) -> IceSurface {
+    return climate_ice_surface(p, bed, uniforms.ocean_level, uniforms.base_temp_c,
+        uniforms.axial_tilt_rad, uniforms.season, uniforms.surface_seed, uniforms.ocean_fraction);
+}
 
-    if (!is_ocean) {
-        let height = textureSample(height_tex, height_sampler, sphere_pos).r;
-        let land_height = clamp(
-            (height - uniforms.ocean_level),
-            0.0,
-            1.0,
-        );
-        let lowland = 1.0 - smooth_step(0.15, 0.45, land_height);
-        // Polar-cap coverage ends below the alpine terrain bands; DS-027 owns those materials.
-        coverage *= lowland;
-        let moisture = compute_moisture(sphere_pos, height, 0.5);
-        // Dry lowlands remain polar desert/rock instead of becoming a white cap.
-        coverage *= mix(1.0, smooth_step(25.0, 65.0, moisture), lowland);
+fn sample_frozen_surface(direction: vec3<f32>) -> f32 {
+    let p = normalize(direction);
+    let bed = sample_surface_height(p);
+    if (uniforms.show_ice < 0.5 || (uniforms.show_biomes < 0.5 && uniforms.show_water < 0.5)) {
+        return bed;
     }
-    return coverage;
+    return climate_frozen_height(p, bed, uniforms.ocean_level, uniforms.base_temp_c,
+        uniforms.axial_tilt_rad, uniforms.season, uniforms.surface_seed, uniforms.ocean_fraction);
 }
 
 fn wind_height_sample(direction: vec3<f32>) -> f32 {
@@ -663,10 +649,10 @@ fn compute_terrain_normal(sphere_pos: vec3<f32>, geo_normal: vec3<f32>, footprin
     let bitan_world = normalize(cross(sphere_pos, tan_world));
 
     // Sample 4 neighbors in cubemap space
-    let h_right = sample_surface_height(sphere_pos + tan_world * step);
-    let h_left  = sample_surface_height(sphere_pos - tan_world * step);
-    let h_up    = sample_surface_height(sphere_pos + bitan_world * step);
-    let h_down  = sample_surface_height(sphere_pos - bitan_world * step);
+    let h_right = sample_frozen_surface(sphere_pos + tan_world * step);
+    let h_left  = sample_frozen_surface(sphere_pos - tan_world * step);
+    let h_up    = sample_frozen_surface(sphere_pos + bitan_world * step);
+    let h_down  = sample_frozen_surface(sphere_pos - bitan_world * step);
 
     // Central differences → height gradient in cubemap space
     let height_scale = clamp(uniforms.height_scale, 0.0, 5.0) * 5.0 / max(uniforms.planet_radius_km, 1.0);
@@ -719,13 +705,11 @@ fn compute_roughness(
     temp_c: f32,
     moisture_cm: f32,
     is_ocean: bool,
-    is_ice: bool,
     land_height: f32,
     slope: f32,
     mountain_snow: f32,
 ) -> f32 {
     if (is_ocean) {
-        if (is_ice) { return 0.15; }
         return 0.10;
     }
     // Climate supplies the base material; terrain exposes rough alpine rock on
@@ -738,7 +722,7 @@ fn compute_roughness(
     var roughness = 0.55 + highland_rough + exposed_rock + slope_rough;
     roughness += desert_rough * 0.25; // desert roughens
     roughness -= vegetation * 0.15; // dense vegetation slightly smoother
-    roughness = mix(roughness, 0.22, mountain_snow);
+    roughness = mix(roughness, 0.65, mountain_snow);
     // Per-pixel noise from spatial position (NOT temp/moisture which creates sharp biome edges)
     roughness += snoise(vec3<f32>(temp_c * 0.02 + moisture_cm * 0.005, moisture_cm * 0.01 - temp_c * 0.01, temp_c * 0.015)) * 0.06;
     return clamp(roughness, 0.15, 0.85);
@@ -747,7 +731,7 @@ fn compute_roughness(
 // ---- Terrain ambient occlusion ----
 // Samples height neighbors to darken valleys and crevices.
 fn compute_ao(sphere_pos: vec3<f32>) -> f32 {
-    let h_center = textureSample(height_tex, height_sampler, sphere_pos).r;
+    let h_center = sample_frozen_surface(sphere_pos);
 
     // Two-radius sampling: wide for broad valleys, narrow for crevices
     // Both use soft thresholds to avoid pixelated edges
@@ -760,7 +744,7 @@ fn compute_ao(sphere_pos: vec3<f32>) -> f32 {
         vec3<f32>(0.0, wide, 0.0), vec3<f32>(0.0, -wide, 0.0)
     );
     for (var i = 0; i < 4; i++) {
-        let neighbor = textureSample(height_tex, height_sampler, sphere_pos + w_offsets[i]).r;
+        let neighbor = sample_frozen_surface(sphere_pos + w_offsets[i]);
         let height_diff = max(neighbor - h_center, 0.0);
         occlusion += smooth_step(0.0, 0.15, height_diff) * 0.5; // gentle, wide contribution
     }
@@ -772,7 +756,7 @@ fn compute_ao(sphere_pos: vec3<f32>) -> f32 {
         vec3<f32>(narrow, -narrow, 0.0) * 0.707, vec3<f32>(-narrow, -narrow, 0.0) * 0.707
     );
     for (var j = 0; j < 4; j++) {
-        let neighbor = textureSample(height_tex, height_sampler, sphere_pos + n_offsets[j]).r;
+        let neighbor = sample_frozen_surface(sphere_pos + n_offsets[j]);
         let height_diff = max(neighbor - h_center, 0.0);
         occlusion += smooth_step(0.0, 0.10, height_diff) * 0.3; // subtle, tight contribution
     }
@@ -1019,7 +1003,8 @@ fn shade_planet(in: VertexOutput) -> vec4<f32> {
 
     let pure_elevation = uniforms.show_biomes < 0.5 && uniforms.show_water < 0.5;
     var surface_color: vec3<f32>;
-    let polar_ice = select(0.0, polar_ice_coverage(rotated, is_ocean), uniforms.show_ice > 0.5);
+    let ice_surface = preview_ice(rotated, height);
+    let polar_ice = select(0.0, ice_surface.coverage, uniforms.show_ice > 0.5);
     var terrain_land_height = 0.0;
     var terrain_slope_value = 0.0;
     var mountain_snow = 0.0;
@@ -1072,16 +1057,9 @@ fn shade_planet(in: VertexOutput) -> vec4<f32> {
 
     // One blue-white albedo for the shared ocean/land polar cap boundary.
     if (!pure_elevation && polar_ice > 0.0) {
-        let polar_ice_albedo = vec3<f32>(0.72, 0.82, 0.89) + vec3<f32>(color_var * 0.015);
+        let polar_ice_albedo = mix(vec3<f32>(0.56, 0.72, 0.82), vec3<f32>(0.90, 0.93, 0.96),
+            ice_surface.snow) + vec3<f32>(color_var * 0.012);
         surface_color = mix(surface_color, polar_ice_albedo, polar_ice);
-    }
-
-    // Polar coastline softening (gated by show_ice)
-    if (!pure_elevation && uniforms.show_ice > 0.5 && polar_ice > 0.3 && is_ocean == false) {
-        let coast_dist = abs(height - uniforms.ocean_level);
-        let coast_soften = 1.0 - smooth_step(0.0, 0.06, coast_dist);
-        let uniform_ice = vec3<f32>(0.72, 0.82, 0.89);
-        surface_color = mix(surface_color, uniform_ice, coast_soften * polar_ice * 0.8);
     }
 
     // Day-side urban grey patches (gated by show_cities)
@@ -1168,12 +1146,12 @@ fn shade_planet(in: VertexOutput) -> vec4<f32> {
                     rt,
                     rm,
                     is_ocean,
-                    is_ocean && rt < -2.0,
                     terrain_land_height,
                     terrain_slope_value,
                     mountain_snow,
                 );
-                debug_color = vec3<f32>(r, r, r);
+                let frozen_r = mix(r, ice_surface.roughness, polar_ice);
+                debug_color = vec3<f32>(frozen_r);
             }
             case 8u: {
                 // AO visualization
@@ -1331,24 +1309,24 @@ fn shade_planet(in: VertexOutput) -> vec4<f32> {
     let h_dot_v = max(dot(half_vec, view_dir), 0.0);
 
     // Roughness and Fresnel base reflectance
-    let ocean_ice = is_ocean && !pure_elevation && polar_ice > 0.01;
     let temp_for_rough = compute_temperature(rotated, height, uniforms.season);
     let moist_for_rough = compute_moisture(rotated, height, uniforms.season);
-    let roughness = select(
+    let substrate_roughness = select(
         0.55,
         compute_roughness(
             temp_for_rough,
             moist_for_rough,
             is_ocean,
-            ocean_ice || mountain_snow > 0.01,
             terrain_land_height,
             terrain_slope_value,
             mountain_snow,
         ),
         !pure_elevation,
     );
+    let roughness = mix(substrate_roughness, ice_surface.roughness,
+        select(polar_ice, 0.0, pure_elevation));
     // Air/water normal-incidence reflectance for n=1.333 is 0.0204.
-    let f0 = select(0.04, 0.0204, is_ocean);
+    let f0 = mix(select(0.04, 0.0204, is_ocean), 0.018, select(polar_ice, 0.0, pure_elevation));
 
     // GGX specular
     let d = ggx_distribution(n_dot_h, roughness);

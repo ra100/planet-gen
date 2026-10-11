@@ -130,12 +130,13 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 
     let color_var = snoise(sphere_pos * 8.0 + noise_seed_offset(params.seed, 72u));
     let temp = compute_temperature(sphere_pos, height);
+    let cap = climate_ice_surface(sphere_pos, height, params.ocean_level, params.base_temp_c,
+        params.axial_tilt_rad, params.season, params.seed, params.ocean_fraction);
     var surface_color: vec3<f32>;
     if (is_ocean) {
         let depth = clamp((params.ocean_level - height) / max(params.ocean_level + 1.0, 0.5), 0.0, 1.0);
         let ocean_color = surface_ocean_albedo(sphere_pos, params.seed, depth, temp);
-        let ice = material_ramp(1.0, -8.0, temp);
-        surface_color = mix(ocean_color, vec3<f32>(0.72, 0.82, 0.89), ice);
+        surface_color = ocean_color;
     } else {
         let mean_temp = climate_temperature(sphere_pos, height, params.ocean_level,
             params.base_temp_c, params.axial_tilt_rad, 0.5);
@@ -146,12 +147,11 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             moisture, temp, land_height, relief.x, relief.y, params.ocean_fraction);
         let snow = material_ramp(0.34, 0.82, land_height) * material_ramp(2.0, -14.0, temp)
             * material_ramp(5.5, 1.5, relief.x) * mix(0.12, 1.0, material_ramp(15.0, 75.0, moisture));
-        let polar = material_ramp(-8.0, -20.0, temp) * material_ramp(8.0, 30.0, moisture)
-            * (1.0 - material_ramp(0.2, 0.4, land_height));
         let snow_color = mix(vec3<f32>(0.90, 0.93, 0.96), vec3<f32>(0.78, 0.86, 0.93), land_height * snow);
         surface_color = mix(surface_color, snow_color + vec3<f32>(color_var * 0.012), snow);
-        surface_color = mix(surface_color, vec3<f32>(0.72, 0.82, 0.89), polar);
     }
+    let ice_color = mix(vec3<f32>(0.56, 0.72, 0.82), vec3<f32>(0.90, 0.93, 0.96), cap.snow);
+    surface_color = mix(surface_color, ice_color + vec3<f32>(color_var * 0.012), cap.coverage);
 
     albedo[idx] = vec4<f32>(surface_color, 1.0);
 }

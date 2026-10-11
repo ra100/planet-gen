@@ -11,6 +11,7 @@ struct AoParams {
     tile_offset_y: u32,
     resolution: u32,
     local_height: u32,
+    ice: IceMapClimate,
 }
 
 @group(0) @binding(0) var<storage, read> heightmap: array<f32>;
@@ -20,7 +21,12 @@ struct AoParams {
 fn read_height(lx: i32, ly: i32) -> f32 {
     let cx = clamp(lx, 0, i32(params.resolution) - 1);
     let cy = clamp(ly, 0, i32(params.local_height) - 1);
-    return heightmap[u32(cy) * params.resolution + u32(cx)];
+    let bed = heightmap[u32(cy) * params.resolution + u32(cx)];
+    let uv = vec2<f32>(f32(params.tile_offset_x) + f32(cx), f32(params.tile_offset_y) + f32(cy))
+        / f32(params.full_resolution - 1u);
+    let c = params.ice;
+    return climate_frozen_height(cube_to_sphere(params.face, uv), bed, c.ocean_level,
+        c.base_temp_c, c.axial_tilt_rad, c.season, c.seed, c.ocean_fraction);
 }
 
 // Compute curvature at a given radius by comparing center to ring average.

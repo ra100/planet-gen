@@ -792,6 +792,19 @@ fn surface_height_region(region: TileRegion, terrain: &TectonicTerrain, face: us
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
+pub struct IceMapClimate {
+    pub base_temp_c: f32,
+    pub ocean_level: f32,
+    pub ocean_fraction: f32,
+    pub axial_tilt_rad: f32,
+    pub season: f32,
+    pub seed: u32,
+    pub face: u32,
+    pub padding: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
 pub struct NormalMapParams {
     pub resolution: u32,
     pub height_scale: f32,
@@ -801,6 +814,7 @@ pub struct NormalMapParams {
     pub local_height: u32,
     pub _pad1: u32,
     pub _pad2: u32,
+    pub ice: IceMapClimate,
 }
 
 #[repr(C)]
@@ -831,6 +845,7 @@ pub struct AoMapParams {
     pub tile_offset_y: u32,
     pub resolution: u32,
     pub local_height: u32,
+    pub ice: IceMapClimate,
 }
 
 #[repr(C)]
@@ -3367,6 +3382,7 @@ pub fn run_export_with_timings_and_checkpoints(
     let layers = &config.layers;
     let tiles_per_face = coordinator.tiles_per_face();
     let map_count = [
+        layers.height,
         layers.normals,
         layers.roughness,
         layers.albedo,
@@ -3494,10 +3510,29 @@ pub fn run_export_with_timings_and_checkpoints(
 
     // --- Phase 4: Create map pipelines (only for selected layers) ---
     let export_started = Instant::now();
+    let ice_shader = |map: &str| {
+        format!(
+            "{}\n{}\n{}\n{}",
+            include_str!("shaders/cube_sphere.wgsl"),
+            include_str!("shaders/noise.wgsl"),
+            include_str!("shaders/climate.wgsl"),
+            map
+        )
+    };
+    let ice_climate = |face| IceMapClimate {
+        base_temp_c: derived.base_temperature_c,
+        ocean_level,
+        ocean_fraction: effective_ocean,
+        axial_tilt_rad: params.axial_tilt_deg.to_radians(),
+        season: config.weather.season,
+        seed: params.seed,
+        face,
+        padding: 0,
+    };
     let normal_pipeline = if layers.normals {
         Some(MapPipeline::new(
             gpu,
-            include_str!("shaders/normal_map.wgsl"),
+            &ice_shader(include_str!("shaders/normal_map.wgsl")),
             "normal map",
             16,
         ))
@@ -3540,7 +3575,7 @@ pub fn run_export_with_timings_and_checkpoints(
     let ao_pipeline = if layers.ao {
         Some(MapPipeline::new(
             gpu,
-            include_str!("shaders/ao_map.wgsl"),
+            &ice_shader(include_str!("shaders/ao_map.wgsl")),
             "ao map",
             8,
         ))
@@ -3571,7 +3606,35 @@ pub fn run_export_with_timings_and_checkpoints(
 
     if layers.height {
         progress.advance("Exporting height...");
-        let stage = stage_terrain_faces(&planet_dir, &terrain, &coordinator, cancel)?;
+        let pipeline = MapPipeline::new(
+            gpu,
+            &ice_shader(include_str!("shaders/ice_height_map.wgsl")),
+            "ice surface height",
+            16,
+        );
+        let stage = stage_map_layer(
+            gpu,
+            &pipeline,
+            &terrain,
+            &coordinator,
+            |face, region| NormalMapParams {
+                resolution: region.width,
+                height_scale: 0.0,
+                tile_offset_x: region.origin_x,
+                tile_offset_y: region.origin_y,
+                full_resolution: full_res,
+                local_height: region.height,
+                _pad1: 0,
+                _pad2: 0,
+                ice: ice_climate(face),
+            },
+            4,
+            &mut progress,
+            "Height",
+            cancel,
+            &planet_dir,
+            &mut timings.map_batch_metrics,
+        )?;
         merge_staged_export(
             timings,
             export_staged_equirect_exr(
@@ -3593,7 +3656,7 @@ pub fn run_export_with_timings_and_checkpoints(
             pipeline,
             &terrain,
             &coordinator,
-            |_, region| NormalMapParams {
+            |face, region| NormalMapParams {
                 resolution: region.width,
                 height_scale: 50.0,
                 tile_offset_x: region.origin_x,
@@ -3602,6 +3665,7 @@ pub fn run_export_with_timings_and_checkpoints(
                 local_height: region.height,
                 _pad1: 0,
                 _pad2: 0,
+                ice: ice_climate(face),
             },
             16,
             &mut progress,
@@ -3643,7 +3707,7 @@ pub fn run_export_with_timings_and_checkpoints(
                 tile_offset_y: region.origin_y,
                 full_resolution: full_res,
                 local_height: region.height,
-                axial_tilt_rad: config.weather.axial_tilt_rad,
+                axial_tilt_rad: params.axial_tilt_deg.to_radians(),
                 season: config.weather.season,
             },
             4,
@@ -3681,7 +3745,7 @@ pub fn run_export_with_timings_and_checkpoints(
                 seed: params.seed,
                 base_temp_c: derived.base_temperature_c,
                 ocean_level,
-                ocean_fraction: derived.ocean_fraction * config.weather.moisture,
+                ocean_fraction: effective_ocean,
                 axial_tilt_rad: params.axial_tilt_deg.to_radians(),
                 season: config.weather.season,
                 tile_offset_x: region.origin_x,
@@ -3727,6 +3791,7 @@ pub fn run_export_with_timings_and_checkpoints(
                 tile_offset_y: region.origin_y,
                 resolution: region.width,
                 local_height: region.height,
+                ice: ice_climate(face),
             },
             4,
             &mut progress,
@@ -6111,6 +6176,34 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             )
         };
 
+        let ice = IceMapClimate {
+            base_temp_c: -25.0,
+            ocean_level: 0.0,
+            ocean_fraction: 0.7,
+            axial_tilt_rad: 0.2,
+            season: 0.5,
+            seed: 42,
+            face: 0,
+            padding: 0,
+        };
+        assert_map_parity(
+            &gpu,
+            "ice height",
+            shader(include_str!("shaders/ice_height_map.wgsl")),
+            4,
+            |region| NormalMapParams {
+                resolution: region.width,
+                height_scale: 0.0,
+                tile_offset_x: region.origin_x,
+                tile_offset_y: region.origin_y,
+                full_resolution: resolution,
+                local_height: region.height,
+                _pad1: 0,
+                _pad2: 0,
+                ice,
+            },
+        );
+
         assert_map_parity(
             &gpu,
             "normal",
@@ -6125,6 +6218,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
                 local_height: region.height,
                 _pad1: 0,
                 _pad2: 0,
+                ice,
             },
         );
         assert_map_parity(
@@ -6181,6 +6275,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
                 tile_offset_y: region.origin_y,
                 resolution: region.width,
                 local_height: region.height,
+                ice,
             },
         );
         assert_map_parity(

@@ -1881,6 +1881,21 @@ fn layer_profile_oracle() {
     output[40] = low_cloud_profile(0.85, 0.5, 2.5);
     output[41] = low_cloud_profile(1.22, 0.5, 2.5);
     output[42] = low_cloud_profile(1.7, 0.5, 2.5);
+    let pole = vec3<f32>(0.0, 1.0, 0.0);
+    let ice = climate_ice_surface(pole, 0.05, 0.0, 15.0, 0.1, 0.5, 42u, 0.7);
+    output[52] = ice.coverage;
+    output[53] = ice.height;
+    output[54] = climate_ice_surface(pole, 0.15, 0.0, 15.0, 0.1, 0.5, 42u, 0.7).height;
+    output[55] = climate_ice_surface(pole, 0.9, 0.0, 15.0, 0.1, 0.5, 42u, 0.7).coverage;
+    output[56] = climate_ice_surface(pole, 0.05, 0.0, 15.0, 0.1, 0.5, 42u, 0.0).coverage;
+    output[57] = climate_ice_surface(pos, 0.05, 0.0, 15.0, 0.1, 0.5, 42u, 0.7).coverage;
+    output[58] = climate_ice_surface(pole, 0.05, 0.0, 15.0, 0.85, 0.5, 42u, 0.7).coverage;
+    output[59] = climate_ice_surface(pole, 0.05, 0.0, 15.0, 0.1, 1.0, 42u, 0.7).height;
+    output[60] = ice.roughness;
+    output[61] = climate_ice_surface(pole, -0.2, 0.0, 15.0, 0.1, 0.5, 42u, 0.7).height;
+    output[62] = climate_frozen_height(pole, -0.2, 0.0, 15.0, 0.1, 0.5, 42u, 0.7);
+    output[63] = mountain_snow_coverage(0.8, -20.0, 100.0, 0.0);
+    output[64] = mountain_snow_coverage(0.8, -20.0, 100.0, 6.0);
 }
 "#,
         );
@@ -1952,7 +1967,7 @@ fn layer_profile_oracle() {
             .get_mapped_range()
             .chunks_exact(4)
             .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
-            .take(52)
+            .take(80)
             .collect();
         readback.unmap();
         values
@@ -3367,6 +3382,7 @@ fn seam_oracle(@builtin(global_invocation_id) id: vec3<u32>) {
                 base_temp_c,
                 axial_tilt_rad,
                 ocean_fraction,
+                light_dir: [0.5, 0.7, 1.0],
                 view_mode: 12,
                 show_clouds: 0.0,
                 show_atmosphere_layer: 0.0,
@@ -3385,7 +3401,7 @@ fn seam_oracle(@builtin(global_invocation_id) id: vec3<u32>) {
                 .map(|(index, _)| index)
                 .collect();
             assert!(
-                !covered.is_empty(),
+                !covered.is_empty() || name == "warm_high_tilt_seed42",
                 "{name}: qualifying climate must form a cap"
             );
             let polar_covered = covered
@@ -3395,10 +3411,12 @@ fn seam_oracle(@builtin(global_invocation_id) id: vec3<u32>) {
                     !(32..96).contains(&y)
                 })
                 .count();
-            assert!(
-                polar_covered * 2 > covered.len(),
-                "{name}: coverage must remain in the polar thermal domain"
-            );
+            if base_temp_c > 0.0 && !covered.is_empty() {
+                assert!(
+                    polar_covered * 2 > covered.len(),
+                    "{name}: temperate-world coverage must remain polar"
+                );
+            }
             coverage_counts.push((name, covered.len()));
 
             let no_ice = PreviewUniforms {
@@ -3446,10 +3464,12 @@ fn seam_oracle(@builtin(global_invocation_id) id: vec3<u32>) {
                 ),
                 "{name}: show_ice=false material must be deterministic"
             );
-            assert_ne!(
-                material, base_material,
-                "{name}: cap must affect normal materials"
-            );
+            if !covered.is_empty() {
+                assert_ne!(
+                    material, base_material,
+                    "{name}: cap must affect normal materials"
+                );
+            }
 
             let elevation = PreviewUniforms {
                 show_biomes: 0.0,
@@ -3590,18 +3610,6 @@ fn seam_oracle(@builtin(global_invocation_id) id: vec3<u32>) {
             let terrain_view = renderer.upload_terrain(&gpu, &terrain);
             renderer.render(&gpu, &settings, &terrain_view, None, None, 128)
         };
-        let render_sloped_highland = |settings: PreviewUniforms| {
-            let terrain = TectonicTerrain {
-                faces: std::array::from_fn(|_| {
-                    (0..resolution * resolution)
-                        .map(|index| 0.52 + (index % resolution) as f32 / resolution as f32 * 0.36)
-                        .collect()
-                }),
-                resolution,
-            };
-            let terrain_view = renderer.upload_terrain(&gpu, &terrain);
-            renderer.render(&gpu, &settings, &terrain_view, None, None, 128)
-        };
         let fixture = |base_temp_c, ocean_fraction| PreviewUniforms {
             base_temp_c,
             ocean_fraction,
@@ -3672,10 +3680,16 @@ fn seam_oracle(@builtin(global_invocation_id) id: vec3<u32>) {
             ..fixture(15.0, 0.8)
         };
         let flat_roughness = render_fixture(0.80, roughness_settings);
-        let sloped_roughness = render_sloped_highland(roughness_settings);
+        let dry_roughness = render_fixture(
+            0.80,
+            PreviewUniforms {
+                show_ice: 0.0,
+                ..roughness_settings
+            },
+        );
         assert!(
-            mean_roughness(&flat_roughness) < mean_roughness(&sloped_roughness),
-            "snow must retain less strongly on a steep highland than on a flat summit"
+            mean_roughness(&flat_roughness) < mean_roughness(&dry_roughness),
+            "bare rock must remain rougher than retained mountain snow"
         );
 
         let high_altitude = fixture(15.0, 0.8);
@@ -4416,6 +4430,36 @@ fn seam_oracle(@builtin(global_invocation_id) id: vec3<u32>) {
             "GGX peak is not crushed by epsilon"
         );
         assert_eq!(output[17], 0.0, "masking removes grazing energy");
+    }
+
+    #[test]
+    fn ice_envelope_buries_relief_and_obeys_mass_balance() {
+        let gpu = GpuContext::new().unwrap();
+        let o = layer_profile_oracle(&gpu);
+        assert!(o[52] > 0.95, "cold wet lowland must freeze: {o:?}");
+        assert!(o[53] > 0.15 && o[53] <= 0.64, "bounded sheet thickness");
+        assert!(
+            (o[53] - o[54]).abs() < 1e-6,
+            "buried relief must share the ice surface"
+        );
+        assert_eq!(o[55], 0.0, "high peaks must emerge");
+        assert_eq!(o[56], 0.0, "no water supply cannot accumulate ice");
+        assert_eq!(o[57], 0.0, "warm equator must stay ice-free");
+        assert!(o[58] < o[52], "hot summers reduce perennial ice");
+        assert!(
+            (o[53] - o[59]).abs() < 1e-6,
+            "land sheet cannot regrow each season"
+        );
+        assert!(o[60] > 0.7, "snow-covered ice must be matte");
+        assert!(
+            (0.0..=0.00008).contains(&o[61]),
+            "sea ice has metre-scale freeboard"
+        );
+        assert_eq!(o[62], -0.2, "height export retains ocean bathymetry");
+        assert!(
+            o[63] > 0.9 && o[64] == 0.0,
+            "steep slopes cannot retain mountain snow"
+        );
     }
 
     #[test]

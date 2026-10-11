@@ -25,7 +25,6 @@ fn biome_roughness_value(temp_c: f32, moisture_cm: f32, is_ocean: bool) -> f32 {
     if (is_ocean) { return 0.05; } // Water is very smooth
 
     // Simplified Whittaker → roughness
-    if (temp_c < 0.0) { return 0.15; } // Ice
     if (temp_c < 10.0) { return 0.55; } // Tundra/Taiga
     if (moisture_cm < 25.0) { return 0.85; } // Desert
     if (moisture_cm < 100.0) { return 0.60; } // Grassland/Savanna
@@ -64,9 +63,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     // Slope & moisture-dependent roughness for land only
     if (!is_ocean) {
         // Compute slope from neighboring heights (central differences)
-        let x_left = global_x - 1u;
+        let x_left = i32(global_x) - 1;
         let x_right = global_x + 1u;
-        let y_up = global_y - 1u;
+        let y_up = i32(global_y) - 1;
         let y_down = global_y + 1u;
 
         let local_x_left = u32(clamp(i32(x_left) - i32(params.tile_offset_x), 0, i32(res) - 1));
@@ -97,5 +96,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 
     // Write to tile-local index
     let idx = id.y * res + id.x;
-    roughness[idx] = r;
+    let cap = climate_ice_surface(sphere_pos, height, params.ocean_level, params.base_temp_c,
+        params.axial_tilt_rad, params.season, params.seed, params.ocean_fraction);
+    roughness[idx] = mix(r, cap.roughness, cap.coverage);
 }

@@ -11,6 +11,7 @@ struct NormalParams {
     local_height: u32,
     _pad1: u32,
     _pad2: u32,
+    ice: IceMapClimate,
 }
 
 @group(0) @binding(0) var<storage, read> heightmap: array<f32>;
@@ -20,7 +21,12 @@ struct NormalParams {
 fn read_height(lx: u32, ly: u32) -> f32 {
     let cx = min(lx, params.resolution - 1u);
     let cy = min(ly, params.local_height - 1u);
-    return heightmap[cy * params.resolution + cx];
+    let bed = heightmap[cy * params.resolution + cx];
+    let uv = vec2<f32>(f32(params.tile_offset_x + cx), f32(params.tile_offset_y + cy))
+        / f32(params.full_resolution - 1u);
+    let c = params.ice;
+    return climate_frozen_height(cube_to_sphere(c.face, uv), bed, c.ocean_level,
+        c.base_temp_c, c.axial_tilt_rad, c.season, c.seed, c.ocean_fraction);
 }
 
 @compute @workgroup_size(16, 16)

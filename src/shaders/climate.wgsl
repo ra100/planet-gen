@@ -59,3 +59,81 @@ fn climate_regional_moisture(
     return (baseline * (0.55 + 0.45 * (local + 0.5)) + 50.0 * (local + 0.5) * ocean_scale)
         * (1.0 + region * 0.25) * (0.5 + ocean_fraction);
 }
+
+fn ice_ramp(a: f32, b: f32, x: f32) -> f32 {
+    let t = clamp((x - a) / (b - a), 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
+struct IceSurface {
+    coverage: f32,
+    height: f32,
+    snow: f32,
+    roughness: f32,
+}
+
+struct IceMapClimate {
+    base_temp_c: f32,
+    ocean_level: f32,
+    ocean_fraction: f32,
+    axial_tilt_rad: f32,
+    season: f32,
+    seed: u32,
+    face: u32,
+    padding: u32,
+}
+
+// Equilibrium envelope, not a time-integrated ice-flow solver. Land ice uses
+// annual snowfall minus warm-season melt; sea ice uses the saline freezing
+// point. Heights retain the climate convention of one terrain unit = 5 km.
+fn climate_ice_surface(
+    p: vec3<f32>, bed: f32, sea: f32, base_temp: f32,
+    tilt: f32, season: f32, seed: u32, ocean_fraction: f32,
+) -> IceSurface {
+    let elevation_cooling = 6.5 * climate_elevation_km(bed, sea);
+    let annual = climate_sea_level_temperature(p, base_temp, tilt, 0.5) - elevation_cooling;
+    let winter = min(climate_sea_level_temperature(p, base_temp, tilt, 0.0),
+        climate_sea_level_temperature(p, base_temp, tilt, 1.0)) - elevation_cooling;
+    let summer = max(climate_sea_level_temperature(p, base_temp, tilt, 0.0),
+        climate_sea_level_temperature(p, base_temp, tilt, 1.0)) - elevation_cooling;
+    let current = climate_sea_level_temperature(p, base_temp, tilt, season);
+    let latitude = climate_latitude(p, tilt);
+    let moisture = climate_regional_moisture(p, latitude, 30.0, 60.0, seed,
+        clamp(ocean_fraction, 0.0, 1.0));
+    let water = ice_ramp(0.01, 0.18, ocean_fraction);
+    var ice: IceSurface;
+    if (bed < sea) {
+        ice.coverage = ice_ramp(-1.8, -5.0, current) * water;
+        let thickness_m = clamp(0.3 + 0.12 * max(-1.8 - current, 0.0), 0.0, 4.0);
+        // Hydrostatic freeboard is about a tenth of total sea-ice thickness.
+        ice.height = sea + ice.coverage * thickness_m * 0.1 / 5000.0;
+        ice.snow = ice_ramp(-3.0, -14.0, current);
+        ice.roughness = mix(0.28, 0.68, ice.snow);
+        return ice;
+    }
+    let snowfall = max(moisture, 0.0) * 0.01 * ice_ramp(2.0, -12.0, winter) * water;
+    // Degree-day melt proxy (m water equivalent per year). Noise is in the
+    // climate/moisture fields, never an independent jagged latitude mask.
+    let balance = snowfall - max(summer, 0.0) * 0.16;
+    let stable = ice_ramp(0.0, 0.20, balance) * ice_ramp(2.0, -8.0, annual);
+    let depth_km = min(3.2, sqrt(max(balance, 0.0)) * 2.4)
+        * ice_ramp(2.0, -18.0, annual) * stable;
+    let envelope = sea + depth_km / 5.0;
+    let burial = ice_ramp(-0.015, 0.035, envelope - bed);
+    ice.coverage = stable * burial;
+    // Never lower bedrock; high peaks emerge as nunataks. The envelope fills
+    // valleys instead of adding the same thickness to every rocky ridge.
+    ice.height = max(bed, envelope);
+    ice.snow = ice_ramp(1.0, -8.0, current - 6.5 * max(ice.height - sea, 0.0) * 5.0);
+    ice.roughness = mix(0.32, 0.78, ice.snow);
+    return ice;
+}
+
+fn climate_frozen_height(
+    p: vec3<f32>, bed: f32, sea: f32, base_temp: f32,
+    tilt: f32, season: f32, seed: u32, ocean_fraction: f32,
+) -> f32 {
+    // Height exports retain bathymetry; floating sea ice is a surface material.
+    if (bed < sea) { return bed; }
+    return climate_ice_surface(p, bed, sea, base_temp, tilt, season, seed, ocean_fraction).height;
+}
