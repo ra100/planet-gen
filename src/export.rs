@@ -33,12 +33,13 @@ pub const TILE_SIZE: u32 = 1024;
 pub const MAX_AO_STENCIL_RADIUS: u32 = 6;
 pub const MIN_EMISSION_STENCIL_RADIUS: u32 = 3;
 pub const MAX_8K_OWNED_LIVE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+pub const MAX_16K_OWNED_LIVE_BYTES: u64 = 12 * 1024 * 1024 * 1024;
 pub const MAX_OWNED_LIVE_BYTES: u64 = MAX_8K_OWNED_LIVE_BYTES;
 pub const MESO_EROSION_RESOLUTION: u32 = 2048;
 const MAX_EXPORT_WEATHER_RESOLUTION: u32 = 384;
 
 pub const fn erosion_resolution_for_export(face_resolution: u32) -> u32 {
-    if face_resolution == 8192 {
+    if face_resolution >= 8192 {
         MESO_EROSION_RESOLUTION
     } else {
         face_resolution
@@ -153,6 +154,8 @@ pub const CLOUD_EXR_CHANNELS: [&str; 6] = [
     "character",
     "cirrus",
 ];
+pub const CLOUD_HEIGHT_EXR_CHANNELS: [&str; 2] = ["Y", "height_km"];
+pub const CLOUD_HEIGHT_SCALE_KM: f32 = 20.0;
 
 // ============ Progress ============
 
@@ -621,8 +624,16 @@ pub fn estimated_staged_export_peak_bytes(
     } else {
         0
     };
+    let stage_peak = height.max(normal).max(quantized).max(weather);
+    // At 16K the full terrain remains resident while parallel row workers use
+    // their separate 4 GiB resource budget.
+    let stage_peak = if face_resolution >= 16384 {
+        stage_peak.max(MAX_OWNED_LIVE_BYTES)
+    } else {
+        stage_peak
+    };
     terrain_faces
-        .checked_add(height.max(normal).max(quantized).max(weather))
+        .checked_add(stage_peak)
         .ok_or_else(|| "staged authoritative live-byte ledger overflows u64".into())
 }
 
@@ -682,7 +693,7 @@ pub fn estimated_export_preflight_bytes_with_erosion(
                 .map_err(|error| error.to_string())?,
         )
         .ok_or("erosion aggregate ledger overflows u64")?;
-    let reconstruction_peak = if face_resolution == 8192 {
+    let reconstruction_peak = if face_resolution >= 8192 {
         let meso_faces = u64::from(MESO_EROSION_RESOLUTION)
             .checked_mul(u64::from(MESO_EROSION_RESOLUTION))
             .and_then(|pixels| pixels.checked_mul(6))
@@ -708,6 +719,19 @@ pub fn validate_8k_owned_live_bytes(bytes: u64) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+pub fn validate_export_owned_live_bytes(face_resolution: u32, bytes: u64) -> Result<(), String> {
+    if face_resolution >= 16384 {
+        if bytes > MAX_16K_OWNED_LIVE_BYTES {
+            return Err(
+                "streaming and erosion buffers exceed the 16K owned live-byte budget".into(),
+            );
+        }
+        Ok(())
+    } else {
+        validate_8k_owned_live_bytes(bytes)
+    }
 }
 
 pub fn crop_region_bytes(region: TileRegion, data: &[u8], element_bytes: usize) -> Vec<u8> {
@@ -2817,18 +2841,21 @@ fn export_staged_cloud_exr(
 ) -> Result<StagedIoMetrics, Box<StagedExportFailure>> {
     let density_path = path.with_file_name("cloud_density.exr");
     let height_path = path.with_file_name("cloud_height.exr");
-    let create_scalar = |path: &Path| {
-        AtomicScanlineExrWriter::create(path, width, height, &["Y"]).map_err(|message| {
+    let create_texture = |path: &Path, channels: &[&str]| {
+        AtomicScanlineExrWriter::create(path, width, height, channels).map_err(|message| {
             Box::new(StagedExportFailure {
                 message,
                 metrics: StagedIoMetrics::default(),
             })
         })
     };
-    let density_writer = RefCell::new(Some(create_scalar(&density_path)?));
-    let height_writer = RefCell::new(Some(create_scalar(&height_path)?));
+    let density_writer = RefCell::new(Some(create_texture(&density_path, &["Y"])?));
+    let height_writer = RefCell::new(Some(create_texture(
+        &height_path,
+        &CLOUD_HEIGHT_EXR_CHANNELS,
+    )?));
     let density_row = RefCell::new(vec![0.0; width as usize]);
-    let height_row = RefCell::new(vec![0.0; width as usize]);
+    let height_row = RefCell::new(vec![0.0; width as usize * CLOUD_HEIGHT_EXR_CHANNELS.len()]);
     let writer = RefCell::new(Some(
         AtomicScanlineExrWriter::create(path, width, height, &CLOUD_EXR_CHANNELS).map_err(
             |message| {
@@ -2858,15 +2885,17 @@ fn export_staged_cloud_exr(
             let mut altitude = height_row.borrow_mut();
             for ((density, altitude), column) in density
                 .iter_mut()
-                .zip(altitude.iter_mut())
+                .zip(altitude.chunks_exact_mut(CLOUD_HEIGHT_EXR_CHANNELS.len()))
                 .zip(row.chunks_exact(CLOUD_EXR_CHANNELS.len()))
             {
                 *density = column[0];
-                *altitude = if column[0] > 0.0 {
+                let height_km = if column[0] > 0.0 {
                     column[2] + 0.5 * column[3]
                 } else {
                     0.0
                 };
+                altitude[0] = (height_km / CLOUD_HEIGHT_SCALE_KM).clamp(0.0, 1.0);
+                altitude[1] = height_km;
             }
             density_writer
                 .borrow_mut()
@@ -2906,7 +2935,7 @@ fn export_staged_cloud_exr(
         },
     )
     .map_err(Box::new)?;
-    metrics.output_write_bytes += u64::from(width) * u64::from(height) * 2 * 4;
+    metrics.output_write_bytes += u64::from(width) * u64::from(height) * 3 * 4;
     metrics.output_finish_ms = finish_elapsed.borrow().as_secs_f64() * 1000.0;
     metrics.published_file_bytes = std::fs::metadata(path)
         .map_err(|error| {
@@ -2944,6 +2973,110 @@ fn albedo_srgb(value: f32) -> f32 {
     }
 }
 
+fn encode_quantized_png_row(
+    format: PngRowFormat,
+    row: &[f32],
+    encoded: &mut [u8],
+) -> Result<(), String> {
+    match format {
+        PngRowFormat::Gray8 => {
+            for (output, value) in encoded.iter_mut().zip(row) {
+                *output = quantize_unit(*value, u8::MAX as u32)? as u8;
+            }
+        }
+        PngRowFormat::Gray16 => {
+            for (output, value) in encoded.chunks_exact_mut(2).zip(row) {
+                output.copy_from_slice(
+                    &(quantize_unit(*value, u16::MAX as u32)? as u16).to_be_bytes(),
+                );
+            }
+        }
+        PngRowFormat::Rgba8 => {
+            for (output, pixel) in encoded.chunks_exact_mut(4).zip(row.chunks_exact(4)) {
+                for channel in 0..4 {
+                    let value = if channel < 3 {
+                        albedo_srgb(pixel[channel])
+                    } else {
+                        pixel[channel]
+                    };
+                    output[channel] = quantize_unit(value, u8::MAX as u32)? as u8;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn export_staged_equirect_png_direct(
+    layer: &'static str,
+    stage: &ExportStage,
+    width: u32,
+    height: u32,
+    output_layer: QuantizedLayer,
+    path: &Path,
+    cancel: &AtomicBool,
+    checkpoints: &mut (
+             dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String> + '_
+         ),
+) -> Result<StagedIoMetrics, StagedExportFailure> {
+    let format = output_layer.png_format();
+    let bytes_per_value = match format {
+        PngRowFormat::Gray16 => 2,
+        _ => 1,
+    };
+    let writer = RefCell::new(Some(
+        AtomicScanlinePngWriter::create(path, width, height, format).map_err(|message| {
+            StagedExportFailure {
+                message,
+                metrics: StagedIoMetrics::default(),
+            }
+        })?,
+    ));
+    let mut encoded = vec![0; width as usize * output_layer.channels() as usize * bytes_per_value];
+    let finish_elapsed = RefCell::new(Duration::ZERO);
+    let mut metrics = consume_staged_equirect_rows_with_worker_cap(
+        layer,
+        stage,
+        width,
+        height,
+        output_layer.channels(),
+        cancel,
+        checkpoints,
+        std::thread::available_parallelism()
+            .map_or(1, std::num::NonZeroUsize::get)
+            .min(MAX_EQUIRECT_ROW_WORKERS),
+        false,
+        bytes_per_value as u64,
+        |row| {
+            encode_quantized_png_row(format, row, &mut encoded)?;
+            writer
+                .borrow_mut()
+                .as_mut()
+                .ok_or("PNG writer is already finalized")?
+                .write_scanline(&encoded)
+        },
+        || {
+            let started = Instant::now();
+            let result = writer
+                .borrow_mut()
+                .take()
+                .ok_or("PNG writer is already finalized")?
+                .finish();
+            *finish_elapsed.borrow_mut() = started.elapsed();
+            result
+        },
+    )?;
+    metrics.output_finish_ms = finish_elapsed.borrow().as_secs_f64() * 1000.0;
+    metrics.published_file_bytes = std::fs::metadata(path)
+        .map_err(|error| StagedExportFailure {
+            message: format!("published PNG metadata failed: {error}"),
+            metrics,
+        })?
+        .len();
+    Ok(metrics)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn export_staged_equirect_png(
     layer: &'static str,
@@ -2957,6 +3090,18 @@ fn export_staged_equirect_png(
              dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String> + '_
          ),
 ) -> Result<StagedIoMetrics, StagedExportFailure> {
+    if stage.metadata().face_resolution >= 16384 {
+        return export_staged_equirect_png_direct(
+            layer,
+            stage,
+            width,
+            height,
+            output_layer,
+            path,
+            cancel,
+            checkpoints,
+        );
+    }
     let channels = output_layer.channels();
     let output_dir = path.parent().ok_or_else(|| StagedExportFailure {
         message: "PNG output path has no parent directory".into(),
@@ -2984,16 +3129,6 @@ fn export_staged_equirect_png(
         PngRowFormat::Rgba8 => 4,
     };
     let mut encoded = vec![0; width as usize * bytes_per_pixel];
-    macro_rules! quantize_or_return {
-        ($value:expr, $max:expr) => {
-            match quantize_unit($value, $max) {
-                Ok(value) => value,
-                Err(message) => {
-                    return Err(StagedExportFailure { message, metrics });
-                }
-            }
-        };
-    }
     for y in 0..height {
         if cancel.load(Ordering::Relaxed) {
             return Err(StagedExportFailure {
@@ -3008,32 +3143,8 @@ fn export_staged_equirect_png(
             }
         };
         let write_started = Instant::now();
-        match format {
-            PngRowFormat::Gray8 => {
-                for (output, value) in encoded.iter_mut().zip(row) {
-                    *output = quantize_or_return!(value, u8::MAX as u32) as u8;
-                }
-            }
-            PngRowFormat::Gray16 => {
-                for (output, value) in encoded.chunks_exact_mut(2).zip(row) {
-                    output.copy_from_slice(
-                        &(quantize_or_return!(value, u16::MAX as u32) as u16).to_be_bytes(),
-                    );
-                }
-            }
-            PngRowFormat::Rgba8 => {
-                for (output, pixel) in encoded.chunks_exact_mut(4).zip(row.chunks_exact(4)) {
-                    for channel in 0..4 {
-                        let value = if channel < 3 {
-                            albedo_srgb(pixel[channel])
-                        } else {
-                            pixel[channel]
-                        };
-                        output[channel] = quantize_or_return!(value, u8::MAX as u32) as u8;
-                    }
-                }
-            }
-        }
+        encode_quantized_png_row(format, &row, &mut encoded)
+            .map_err(|message| StagedExportFailure { message, metrics })?;
         if let Err(message) = writer.write_scanline(&encoded) {
             return Err(StagedExportFailure { message, metrics });
         }
@@ -3087,9 +3198,9 @@ fn sample_cubemap_height(terrain: &TectonicTerrain, direction: [f32; 3]) -> f32 
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ReconstructionError {
-    #[error("reconstruction requires a full terrain four times the meso resolution")]
+    #[error("reconstruction requires matching meso terrains and 4x or 8x full resolution")]
     InvalidDimensions,
-    #[error("8K delta reconstruction cancelled")]
+    #[error("meso delta reconstruction cancelled")]
     Cancelled,
 }
 
@@ -3111,7 +3222,8 @@ fn reconstruct_8k_from_meso_delta_with_cancel(
     if cancel.load(Ordering::Relaxed) {
         return Err(ReconstructionError::Cancelled);
     }
-    if full_uneroded.resolution != meso_uneroded.resolution.saturating_mul(4)
+    if (full_uneroded.resolution != meso_uneroded.resolution.saturating_mul(4)
+        && full_uneroded.resolution != meso_uneroded.resolution.saturating_mul(8))
         || meso_uneroded.resolution != meso_eroded.resolution
     {
         return Err(ReconstructionError::InvalidDimensions);
@@ -3127,7 +3239,8 @@ fn reconstruct_meso_delta_in_place(
     meso_eroded: &TectonicTerrain,
     cancel: &AtomicBool,
 ) -> Result<(), ReconstructionError> {
-    if terrain.resolution != meso_uneroded.resolution.saturating_mul(4)
+    if (terrain.resolution != meso_uneroded.resolution.saturating_mul(4)
+        && terrain.resolution != meso_uneroded.resolution.saturating_mul(8))
         || meso_uneroded.resolution != meso_eroded.resolution
     {
         return Err(ReconstructionError::InvalidDimensions);
@@ -3240,7 +3353,7 @@ pub fn run_export_with_timings_and_checkpoints(
         config.erosion_iterations,
         &gpu.device.limits(),
     )?;
-    validate_8k_owned_live_bytes(projected_live_bytes)?;
+    validate_export_owned_live_bytes(config.face_resolution, projected_live_bytes)?;
 
     // Create output directory
     let planet_dir = config.output_dir.join(&config.planet_name);
@@ -3327,7 +3440,7 @@ pub fn run_export_with_timings_and_checkpoints(
         }
         progress.advance(&format!("Eroding face {face}"));
     }
-    if config.face_resolution == 8192 && config.erosion_iterations > 0 {
+    if config.face_resolution >= 8192 && config.erosion_iterations > 0 {
         let meso_tile_size = select_tile_size(
             MESO_EROSION_RESOLUTION,
             config.tile_size,
@@ -4092,19 +4205,22 @@ mod tests {
             },
         )
         .unwrap();
-        let read = |name: &str| {
+        let read = |name: &str, channel_name: &str, count| {
             let image = exr::prelude::read_first_flat_layer_from_file(root.join(name)).unwrap();
             assert_eq!(image.layer_data.size, exr::math::Vec2(8, 4));
             let channels = image.layer_data.channel_data.list;
-            assert_eq!(channels.len(), 1);
-            assert_eq!(channels[0].name.to_string(), "Y");
-            let exr::image::FlatSamples::F32(values) = &channels[0].sample_data else {
+            assert_eq!(channels.len(), count);
+            let channel = channels
+                .iter()
+                .find(|channel| channel.name.to_string() == channel_name)
+                .unwrap();
+            let exr::image::FlatSamples::F32(values) = &channel.sample_data else {
                 panic!("cloud texture must store FLOAT values");
             };
             values.clone()
         };
-        for density in [2.5, 0.0] {
-            let row = [density, 0.5, 2.0, 6.0, 0.2, 0.1];
+        for (density, base, thickness) in [(2.5, 2.0, 6.0), (2.5, 28.0, 4.0), (0.0, 2.0, 6.0)] {
+            let row = [density, 0.5, base, thickness, 0.2, 0.1];
             let data: Vec<_> = (0..16).flat_map(|_| row).collect();
             for face in 0..6 {
                 stage.write_tile(face, 0, 0, 4, 4, &data).unwrap();
@@ -4118,18 +4234,29 @@ mod tests {
                 &mut discard_layer_materialization_checkpoint,
             )
             .unwrap();
-            for value in read("cloud_density.exr") {
+            for value in read("cloud_density.exr", "Y", 1) {
                 assert!((value - density).abs() < 1.0e-6);
             }
-            for value in read("cloud_height.exr") {
-                assert!((value - if density > 0.0 { 5.0 } else { 0.0 }).abs() < 1.0e-6);
+            let expected_km = if density > 0.0 {
+                base + 0.5 * thickness
+            } else {
+                0.0
+            };
+            for value in read("cloud_height.exr", "Y", 2) {
+                assert!((0.0..=1.0).contains(&value));
+                assert!(
+                    (value - (expected_km / CLOUD_HEIGHT_SCALE_KM).clamp(0.0, 1.0)).abs() < 1.0e-6
+                );
+            }
+            for value in read("cloud_height.exr", "height_km", 2) {
+                assert!((value - expected_km).abs() < 1.0e-6);
             }
             let total_bytes: u64 = ["clouds.exr", "cloud_density.exr", "cloud_height.exr"]
                 .iter()
                 .map(|name| std::fs::metadata(root.join(name)).unwrap().len())
                 .sum();
             assert_eq!(metrics.published_file_bytes, total_bytes);
-            assert_eq!(metrics.output_write_bytes, 8 * 4 * 8 * 4);
+            assert_eq!(metrics.output_write_bytes, 8 * 4 * 9 * 4);
         }
         let _ = std::fs::remove_dir_all(root);
     }
@@ -5352,6 +5479,154 @@ mod tests {
     fn owned_live_gate_accepts_four_gib_and_rejects_more_at_8k() {
         assert!(validate_8k_owned_live_bytes(MAX_8K_OWNED_LIVE_BYTES).is_ok());
         assert!(validate_8k_owned_live_bytes(MAX_8K_OWNED_LIVE_BYTES + 1).is_err());
+    }
+
+    #[test]
+    fn sixteen_k_direct_png_path_matches_staged_pixels_and_cancels_atomically() {
+        let root =
+            std::env::temp_dir().join(format!("planet-gen-direct-png-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        for layer in [
+            QuantizedLayer::Albedo,
+            QuantizedLayer::Roughness,
+            QuantizedLayer::AmbientOcclusion,
+            QuantizedLayer::WaterMask,
+        ] {
+            let (stage, _) = normalized_staged_fixture(&root, 8, layer.channels());
+            let staged = root.join("staged.png");
+            let direct = root.join("direct.png");
+            export_staged_equirect_png(
+                "fixture",
+                &stage,
+                16,
+                8,
+                layer,
+                &staged,
+                &AtomicBool::new(false),
+                &mut discard_layer_materialization_checkpoint,
+            )
+            .unwrap();
+            let metrics = export_staged_equirect_png_direct(
+                "fixture",
+                &stage,
+                16,
+                8,
+                layer,
+                &direct,
+                &AtomicBool::new(false),
+                &mut discard_layer_materialization_checkpoint,
+            )
+            .unwrap();
+            assert_eq!(read_png(&staged), read_png(&direct));
+            assert_eq!(metrics.intermediate_write_bytes, 0);
+            let cancelled = root.join("cancelled.png");
+            assert!(
+                export_staged_equirect_png_direct(
+                    "fixture",
+                    &stage,
+                    16,
+                    8,
+                    layer,
+                    &cancelled,
+                    &AtomicBool::new(true),
+                    &mut discard_layer_materialization_checkpoint
+                )
+                .is_err()
+            );
+            assert!(!cancelled.exists());
+            assert!(!cancelled.with_extension("png.part").exists());
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn sixteen_k_exr_supports_a_full_output_scanline() {
+        let path = std::env::temp_dir().join(format!(
+            "planet-gen-16k-scanline-{}.exr",
+            std::process::id()
+        ));
+        let width = 16384 * 2;
+        let row: Vec<_> = (0..width)
+            .flat_map(|x| {
+                let height = x as f32 / (width - 1) as f32;
+                [height, height * CLOUD_HEIGHT_SCALE_KM]
+            })
+            .collect();
+        let mut writer =
+            AtomicScanlineExrWriter::create(&path, width, 1, &CLOUD_HEIGHT_EXR_CHANNELS).unwrap();
+        writer.write_scanline(&row).unwrap();
+        writer.finish().unwrap();
+        let image = exr::prelude::read_first_flat_layer_from_file(&path).unwrap();
+        assert_eq!(image.layer_data.size, exr::math::Vec2(width as usize, 1));
+        for channel in image.layer_data.channel_data.list {
+            let exr::image::FlatSamples::F32(values) = channel.sample_data else {
+                panic!("expected FLOAT");
+            };
+            assert_eq!(values.len(), width as usize);
+            assert_eq!(values[0], 0.0);
+            assert_eq!(
+                values[width as usize - 1],
+                if channel.name.to_string() == "Y" {
+                    1.0
+                } else {
+                    CLOUD_HEIGHT_SCALE_KM
+                }
+            );
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn sixteen_k_export_preflight_keeps_erosion_and_row_workers_bounded() {
+        let limits = wgpu::Limits::default();
+        let layers = ExportLayers::default();
+        assert_eq!(erosion_resolution_for_export(4096), 4096);
+        assert_eq!(erosion_resolution_for_export(8192), MESO_EROSION_RESOLUTION);
+        assert_eq!(
+            erosion_resolution_for_export(16384),
+            MESO_EROSION_RESOLUTION
+        );
+        let projected =
+            estimated_export_preflight_bytes_with_erosion(16384, &layers, 25, &limits).unwrap();
+        let terrain_bytes = 6 * 16384_u64.pow(2) * 4;
+        assert_eq!(projected, terrain_bytes + MAX_OWNED_LIVE_BYTES);
+        assert!(validate_export_owned_live_bytes(16384, projected).is_ok());
+        assert!(validate_export_owned_live_bytes(8192, projected).is_err());
+        assert!(validate_export_owned_live_bytes(16384, MAX_16K_OWNED_LIVE_BYTES).is_ok());
+        assert!(validate_export_owned_live_bytes(16384, MAX_16K_OWNED_LIVE_BYTES + 1).is_err());
+        let tile_size = select_tile_size(16384, 1024, &limits, 16).unwrap();
+        let coordinator = TileCoordinator::try_new(16384, tile_size).unwrap();
+        let last = coordinator.region(
+            coordinator.tiles_per_axis - 1,
+            coordinator.tiles_per_axis - 1,
+        );
+        assert_eq!(last.origin_x + last.crop_x + last.crop_width, 16384);
+        assert_eq!(last.origin_y + last.crop_y + last.crop_height, 16384);
+        assert!(coordinator.tile_fits_device_limits(&limits, 16));
+    }
+
+    #[test]
+    fn sixteen_k_ratio_reconstruction_preserves_detail_and_applies_meso_delta() {
+        let mut full = TectonicTerrain {
+            resolution: 32,
+            faces: std::array::from_fn(|_| (0..1024).map(|i| i as f32 * 0.001).collect()),
+        };
+        let original = full.faces.clone();
+        let meso = TectonicTerrain {
+            resolution: 4,
+            faces: std::array::from_fn(|_| vec![0.2; 16]),
+        };
+        let eroded = TectonicTerrain {
+            resolution: 4,
+            faces: std::array::from_fn(|_| vec![0.3; 16]),
+        };
+        reconstruct_meso_delta_in_place(&mut full, &meso, &eroded, &AtomicBool::new(false))
+            .unwrap();
+        for (before, after) in original.iter().zip(&full.faces) {
+            for (before, after) in before.iter().zip(after) {
+                assert!((after - before - 0.1).abs() < 1.0e-6);
+            }
+        }
     }
 
     #[test]

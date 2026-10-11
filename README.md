@@ -27,7 +27,7 @@ Requires a GPU with Vulkan, Metal, or DX12 support (most GPUs from 2018+).
 - **Night lights** — procedural city lights with cloud occlusion and scattered glow
 - **GPU-rendered preview** — real-time cubemap-sampled sphere with diffuse + specular lighting, AO, normal mapping
 - **Progressive erosion** — GPU hydraulic erosion with moisture-weighted intensity
-- **Selective EXR export** — height, albedo, normal, roughness, AO, water mask, emission, plus a six-channel `clouds.exr` (optical depth and reconstruction data) at up to 8K resolution
+- **Selective texture export** — height, albedo, normal, roughness, AO, water mask, emission, plus cloud density, height, and reconstruction data at up to 16K resolution
 - **Pressure-based wind** — continentality, pressure gradient, Coriolis deflection, terrain deflection
 - **Lava glow** — volcanic emission at plate boundaries with adjustable intensity
 - **Ocean sun glint** — PBR-correct specular reflection on water surface
@@ -77,6 +77,8 @@ The app opens with a sidebar of planet parameters and a 3D preview.
 
 **Export:** Select layers via checkboxes (height, albedo, normals, roughness, water mask, clouds, emission), choose resolution, and export as equirectangular EXR files.
 
+Export resolution denotes image height: **16K** writes 32,768 × 16,384 pixels. Both 8K and 16K use a bounded 2,048px erosion pass whose delta is reconstructed onto the full-resolution terrain. GPU tiles and row workers remain bounded; 16K PNG layers stream directly to scanlines instead of materializing a full floating-point intermediate. 16K allows up to 12 GiB of owned working memory, including the 6 GiB terrain. Weather simulation remains capped at 384px per face; cloud geometry filtering and normalized height channels also apply to 16K exports.
+
 **Blender addon:** Install `blender_addon/` in Blender 4.x:
 1. Zip the addon: `cd blender_addon && zip -r ../planet_gen_blender.zip .`
 2. In Blender: Edit > Preferences > Add-ons > Install from Disk > select `planet_gen_blender.zip`
@@ -114,9 +116,11 @@ TerrainComputePipeline   preview_cubemap.wgsl
 
 **Weather and preview pipeline:** `weather.rs` publishes bounded, revisioned mass and geometry cubemaps from an immutable snapshot. The fragment shader samples those fields with the height cubemap, computes temperature/moisture/biomes, and ray marches the bounded cloud volume with lighting, atmosphere, and night lights. Disabling clouds exits the density path early.
 
-**Cloud textures:** Export regenerates the same weather inputs at bounded resolution from its immutable snapshot and writes two single-channel FLOAT textures: `cloud_density.exr` stores radial optical depth in `Y`; `cloud_height.exr` stores the density-weighted cloud layer midpoint in kilometres above the planet surface in `Y`. Clear texels are zero in both maps. The Maps menu offers **CLOUD DENSITY** (black to white as optical depth increases, using `1 - exp(-Y)`) and **CLOUD HEIGHT** (black = 0 km, white = 20 km; higher altitudes saturate only in the preview). Both views use the same radial column sampling as export and work independently of cloud visibility and opacity. The lit cloud preview continues to use the generated density and geometry cubemaps for volumetric rendering.
+**Cloud textures:** Export regenerates the same weather inputs at bounded resolution from its immutable snapshot and writes two FLOAT textures: `cloud_density.exr` stores radial optical depth in `Y`; `cloud_height.exr` stores normalized altitude in `Y` (0–1 represents 0–20 km) and the density-weighted cloud layer midpoint in kilometres above the planet surface in `height_km`. Clear texels are zero in both maps. Altitudes above 20 km saturate the normalized channel while the physical channel preserves their full value. The Maps menu offers **CLOUD DENSITY** (black to white as optical depth increases, using `1 - exp(-Y)`) and **CLOUD HEIGHT** (black = 0 km, white = 20 km). Both views use the same radial column sampling as export and work independently of cloud visibility and opacity. The lit cloud preview continues to use the generated density and geometry cubemaps for volumetric rendering. In Blender, use Non-Color data and multiply the height texture's normalized value by 20 to recover kilometres below the normalization ceiling; use `height_km` for exact altitude beyond that ceiling. Older height exports stored kilometres directly in `Y`, so their values above 1 appear white in the image editor.
 
 For compatibility, `clouds.exr` also retains direct optical depth (`Y`) and reconstruction channels (`coverage`, `base_km`, `thickness_km`, `character`, `cirrus`). The Clouds export checkbox writes all three files together. The Blender importer loads the two new textures as Non-Color data.
+
+Cloud altitude blends neighbouring weather cells using their optical mass, filtering base and thickness moments before normalizing. This prevents almost-empty high cirrus cells from producing abrupt altitude spikes beside dense low banks when the map is used for displacement. The filter spans one weather-cell neighbourhood at every export resolution; density and cloud coverage remain unchanged. Use the density texture for cloud opacity, rather than treating height as an opacity mask.
 
 ## Project Structure
 

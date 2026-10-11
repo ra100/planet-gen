@@ -2312,7 +2312,7 @@ impl PlanetGenApp {
                 ),
                 21 => widgets::dim(
                     ui,
-                    "Cloud height: black = clear / 0 km, white = 20 km. Export stores cloud layer midpoint in km.",
+                    "Cloud height: black = clear / 0 km, white = 20 km. Export: Y = 0–1, height_km = altitude.",
                 ),
                 _ => {}
             }
@@ -2406,8 +2406,14 @@ impl PlanetGenApp {
                         );
 
                         widgets::section_header(ui, "resolution");
-                        let res_opts: Vec<(u32, &'static str)> =
-                            [(2048u32, "2K"), (4096, "4K"), (8192, "8K")].into_iter().collect();
+                        let res_opts: Vec<(u32, &'static str)> = [
+                            (2048u32, "2K"),
+                            (4096, "4K"),
+                            (8192, "8K"),
+                            (16384, "16K"),
+                        ]
+                        .into_iter()
+                        .collect();
                         if let Some(res) =
                             widgets::chip_bar(ui, &res_opts, self.export_resolution)
                         {
@@ -2454,7 +2460,7 @@ impl PlanetGenApp {
                         }
                         widgets::dim(
                             ui,
-                            "Clouds export: cloud_density.exr (optical depth), cloud_height.exr (km), and clouds.exr (reconstruction).",
+                            "Clouds export: cloud_density.exr (optical depth), cloud_height.exr (0–1 + km), and clouds.exr (reconstruction).",
                         );
 
                         let is_exporting = self.export_handle.is_some();

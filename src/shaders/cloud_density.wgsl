@@ -26,11 +26,38 @@ fn cloud_layer_geometry(geometry: vec4<f32>, layers: CloudLayers) -> vec4<f32> {
     let deep_weight = layers.deep * 1.65;
     let high_weight = layers.high * 0.32;
     let weight = low_weight + deep_weight + high_weight;
-    let base = (low_weight * geometry.r + deep_weight * deep_base + high_weight * high_base) / max(weight, 1.0e-6);
+    let base = (low_weight * geometry.r + deep_weight * deep_base + high_weight * high_base) / max(weight, 1.0e-12);
     let thickness = (low_weight * max(geometry.g - geometry.r, 0.0)
         + deep_weight * max(deep_top - deep_base, 0.0)
-        + high_weight * max(geometry.a - high_base, 0.0)) / max(weight, 1.0e-6);
+        + high_weight * max(geometry.a - high_base, 0.0)) / max(weight, 1.0e-12);
     return vec4<f32>(weight, base, thickness, deep_weight);
+}
+
+fn cloud_geometry_moments(direction: vec3<f32>) -> vec3<f32> {
+    let mass = sample_weather_cube(weather_mass_tex, direction);
+    let geometry = sample_weather_cube(weather_geometry_tex, direction);
+    let packed = cloud_layer_geometry(geometry, CloudLayers(
+        mass.r * LOW_OPTICAL_WEIGHT, mass.g, mass.b * 0.28,
+    ));
+    return vec3<f32>(packed.x, packed.x * packed.y, packed.x * packed.z);
+}
+
+// Filter optical moments before dividing by mass. Filtering altitude alone lets
+// nearly empty high clouds pull a low cloud bank upward by kilometres.
+fn filtered_cloud_geometry(direction: vec3<f32>) -> vec2<f32> {
+    let reference = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(direction.y) > 0.9);
+    let tangent_x = normalize(cross(reference, direction));
+    let tangent_y = cross(direction, tangent_x);
+    let step = 2.0 / f32(textureDimensions(weather_mass_tex).x);
+    var moments = vec3<f32>(0.0);
+    for (var y = -1; y <= 1; y++) {
+        for (var x = -1; x <= 1; x++) {
+            let weight = select(1.0, 2.0, x == 0) * select(1.0, 2.0, y == 0);
+            let sample_direction = normalize(direction + step * (f32(x) * tangent_x + f32(y) * tangent_y));
+            moments += weight * cloud_geometry_moments(sample_direction);
+        }
+    }
+    return moments.yz / max(moments.x, 1.0e-12);
 }
 
 // Radial columns give texture inspection and export the same camera-independent values.
@@ -42,8 +69,6 @@ fn cloud_column_sample(direction: vec3<f32>, footprint: f32) -> CloudColumn {
     let step_km = max(geometry.a, 0.0) / 8.0;
     var optical_depth = 0.0;
     var geometry_weight = 0.0;
-    var base_sum = 0.0;
-    var thickness_sum = 0.0;
     var low_sum = 0.0;
     var deep_sum = 0.0;
     for (var sample_index = 0u; sample_index < 8u; sample_index++) {
@@ -56,17 +81,16 @@ fn cloud_column_sample(direction: vec3<f32>, footprint: f32) -> CloudColumn {
         let packed = cloud_layer_geometry(sample.geometry, sample.layers);
         optical_depth += packed.x * step_km * CLOUD_LIGHT_EXTINCTION;
         geometry_weight += packed.x;
-        base_sum += packed.x * packed.y;
-        thickness_sum += packed.x * packed.z;
         low_sum += sample.layers.low;
         deep_sum += sample.layers.deep;
     }
     if (geometry_weight <= 0.0) { return CloudColumn(0.0, 0.0, 0.0, 0.0, 0.0, 0.0); }
+    let filtered_geometry = filtered_cloud_geometry(direction);
     return CloudColumn(
         optical_depth,
         clamp(mass.r + mass.g + mass.b, 0.0, 1.0),
-        base_sum / geometry_weight,
-        thickness_sum / geometry_weight,
+        filtered_geometry.x,
+        filtered_geometry.y,
         select(0.0, clamp(deep_sum / (low_sum + deep_sum), 0.0, 1.0), low_sum + deep_sum > 0.0),
         clamp(mass.b, 0.0, 1.0),
     );

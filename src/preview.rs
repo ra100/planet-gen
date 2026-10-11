@@ -1558,6 +1558,57 @@ mod tests {
     }
 
     #[test]
+    fn cloud_height_filter_does_not_turn_tiny_cirrus_into_altitude_spikes() {
+        let gpu = GpuContext::new().unwrap();
+        let renderer = PreviewRenderer::new(&gpu);
+        let resolution = 16;
+        let terrain = TectonicTerrain {
+            faces: std::array::from_fn(|_| vec![-0.2; 256]),
+            resolution,
+        };
+        let terrain = renderer.upload_terrain(&gpu, &terrain);
+        let mass = std::array::from_fn(|_| {
+            (0..256)
+                .flat_map(|i| {
+                    if (i / 16 / 2 + i % 16 / 2) % 2 == 0 {
+                        [0.3, 0.0, 0.0, 0.3]
+                    } else {
+                        [0.0, 0.0, 0.000001, 0.000001]
+                    }
+                })
+                .collect()
+        });
+        let geometry =
+            std::array::from_fn(|_| (0..256).flat_map(|_| [1.0, 3.0, 7.0, 16.0]).collect());
+        let mass = renderer.upload_cubemap_rgba16(&gpu, &mass, resolution);
+        let geometry = renderer.upload_cubemap_rgba16(&gpu, &geometry, resolution);
+        let settings = PreviewUniforms {
+            view_mode: 21,
+            cloud_coverage: 1.0,
+            ..uniforms()
+        };
+        let image = renderer.render(
+            &gpu,
+            &settings,
+            &terrain,
+            None,
+            Some((&mass, &geometry)),
+            256,
+        );
+        let mut min = u8::MAX;
+        let mut max = 0;
+        for y in 96..160 {
+            for x in 96..160 {
+                let value = image[(y * 256 + x) * 4];
+                min = min.min(value);
+                max = max.max(value);
+            }
+        }
+        assert!(max < 120, "near-empty cirrus raised cloud height: {max}");
+        assert!(max - min <= 3, "source grid remains visible: {min}..{max}");
+    }
+
+    #[test]
     fn cloud_texture_views_show_density_and_altitude_without_display_controls() {
         let gpu = GpuContext::new().unwrap();
         let renderer = PreviewRenderer::new(&gpu);
