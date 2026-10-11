@@ -23,6 +23,8 @@ TEXTURE_FILES = {
     "height": "height.exr",
     "ao": "ao.exr",
     "clouds": "clouds.exr",
+    "cloud_density": "cloud_density.exr",
+    "cloud_height": "cloud_height.exr",
     "emission": "emission.exr",
     "water_mask": "water_mask.exr",
 }

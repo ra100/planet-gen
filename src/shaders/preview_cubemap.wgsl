@@ -1296,6 +1296,15 @@ fn shade_planet(in: VertexOutput) -> vec4<f32> {
                 // Legacy: merged into view 14 (sample_wind_tangent shows cubemap when available)
                 debug_color = vec3<f32>(0.3, 0.3, 0.3);
             }
+            case 20u: {
+                let column = cloud_column_sample(rotated, angular_pixel_footprint);
+                debug_color = vec3<f32>(1.0 - exp(-column.y));
+            }
+            case 21u: {
+                let column = cloud_column_sample(rotated, angular_pixel_footprint);
+                let altitude = select(0.0, column.base_km + 0.5 * column.thickness_km, column.y > 0.0);
+                debug_color = vec3<f32>(clamp(altitude / 20.0, 0.0, 1.0));
+            }
             default: { debug_color = surface_color; }
         }
         return vec4<f32>(debug_color, 1.0);

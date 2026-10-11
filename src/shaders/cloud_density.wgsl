@@ -14,6 +14,64 @@ struct CloudLayers {
     high: f32,
 }
 
+struct CloudColumn {
+    y: f32, coverage: f32, base_km: f32, thickness_km: f32, character: f32, cirrus: f32,
+}
+
+fn cloud_layer_geometry(geometry: vec4<f32>, layers: CloudLayers) -> vec4<f32> {
+    let deep_base = mix(geometry.r, geometry.g, 0.28);
+    let deep_top = max(geometry.b, deep_base + 0.5);
+    let high_base = max(geometry.b, geometry.a - 3.0);
+    let low_weight = layers.low * 0.90;
+    let deep_weight = layers.deep * 1.65;
+    let high_weight = layers.high * 0.32;
+    let weight = low_weight + deep_weight + high_weight;
+    let base = (low_weight * geometry.r + deep_weight * deep_base + high_weight * high_base) / max(weight, 1.0e-6);
+    let thickness = (low_weight * max(geometry.g - geometry.r, 0.0)
+        + deep_weight * max(deep_top - deep_base, 0.0)
+        + high_weight * max(geometry.a - high_base, 0.0)) / max(weight, 1.0e-6);
+    return vec4<f32>(weight, base, thickness, deep_weight);
+}
+
+// Radial columns give texture inspection and export the same camera-independent values.
+fn cloud_column_sample(direction: vec3<f32>, footprint: f32) -> CloudColumn {
+    let mass = sample_weather_cube(weather_mass_tex, direction);
+    if (max(max(mass.r, mass.g), mass.b) <= 0.0) { return CloudColumn(0.0, 0.0, 0.0, 0.0, 0.0, 0.0); }
+    let geometry = sample_weather_cube(weather_geometry_tex, direction);
+    let radius_km = max(uniforms.planet_radius_km, 1.0);
+    let step_km = max(geometry.a, 0.0) / 8.0;
+    var optical_depth = 0.0;
+    var geometry_weight = 0.0;
+    var base_sum = 0.0;
+    var thickness_sum = 0.0;
+    var low_sum = 0.0;
+    var deep_sum = 0.0;
+    for (var sample_index = 0u; sample_index < 8u; sample_index++) {
+        let altitude_km = (f32(sample_index) + 0.5) * step_km;
+        let segment_start = direction * (1.0 + f32(sample_index) * step_km / radius_km);
+        let segment_end = direction * (1.0 + (f32(sample_index) + 1.0) * step_km / radius_km);
+        let sample = weather_cloud_layers_land_segment(
+            direction, altitude_km, segment_start, segment_end, radius_km, footprint,
+        );
+        let packed = cloud_layer_geometry(sample.geometry, sample.layers);
+        optical_depth += packed.x * step_km * CLOUD_LIGHT_EXTINCTION;
+        geometry_weight += packed.x;
+        base_sum += packed.x * packed.y;
+        thickness_sum += packed.x * packed.z;
+        low_sum += sample.layers.low;
+        deep_sum += sample.layers.deep;
+    }
+    if (geometry_weight <= 0.0) { return CloudColumn(0.0, 0.0, 0.0, 0.0, 0.0, 0.0); }
+    return CloudColumn(
+        optical_depth,
+        clamp(mass.r + mass.g + mass.b, 0.0, 1.0),
+        base_sum / geometry_weight,
+        thickness_sum / geometry_weight,
+        select(0.0, clamp(deep_sum / (low_sum + deep_sum), 0.0, 1.0), low_sum + deep_sum > 0.0),
+        clamp(mass.b, 0.0, 1.0),
+    );
+}
+
 struct WeatherCloudSample {
     layers: CloudLayers,
     mass: vec4<f32>,

@@ -114,7 +114,9 @@ TerrainComputePipeline   preview_cubemap.wgsl
 
 **Weather and preview pipeline:** `weather.rs` publishes bounded, revisioned mass and geometry cubemaps from an immutable snapshot. The fragment shader samples those fields with the height cubemap, computes temperature/moisture/biomes, and ray marches the bounded cloud volume with lighting, atmosphere, and night lights. Disabling clouds exits the density path early.
 
-**Cloud export:** Export regenerates the same weather inputs at bounded resolution from its immutable snapshot, then writes direct optical depth (`Y`) and reconstruction channels (`coverage`, `base_km`, `thickness_km`, `character`, `cirrus`) to `clouds.exr` without depending on preview visibility or opacity.
+**Cloud textures:** Export regenerates the same weather inputs at bounded resolution from its immutable snapshot and writes two single-channel FLOAT textures: `cloud_density.exr` stores radial optical depth in `Y`; `cloud_height.exr` stores the density-weighted cloud layer midpoint in kilometres above the planet surface in `Y`. Clear texels are zero in both maps. The Maps menu offers **CLOUD DENSITY** (black to white as optical depth increases, using `1 - exp(-Y)`) and **CLOUD HEIGHT** (black = 0 km, white = 20 km; higher altitudes saturate only in the preview). Both views use the same radial column sampling as export and work independently of cloud visibility and opacity. The lit cloud preview continues to use the generated density and geometry cubemaps for volumetric rendering.
+
+For compatibility, `clouds.exr` also retains direct optical depth (`Y`) and reconstruction channels (`coverage`, `base_km`, `thickness_km`, `character`, `cirrus`). The Clouds export checkbox writes all three files together. The Blender importer loads the two new textures as Non-Color data.
 
 ## Project Structure
 

@@ -1002,6 +1002,16 @@ const VIEW_MODES: &[ViewMode] = &[
         group: ViewGroup::Maps,
     },
     ViewMode {
+        id: 20,
+        label: "CLOUD DENSITY",
+        group: ViewGroup::Maps,
+    },
+    ViewMode {
+        id: 21,
+        label: "CLOUD HEIGHT",
+        group: ViewGroup::Maps,
+    },
+    ViewMode {
         id: 10,
         label: "EMISSION",
         group: ViewGroup::Maps,
@@ -1094,7 +1104,7 @@ const EXPORT_LAYERS: &[(&str, &str)] = &[
     ("Albedo", "albedo.png"),
     ("Ambient occlusion", "ao.png"),
     ("Roughness", "roughness.png"),
-    ("Clouds", "clouds.exr · 6ch"),
+    ("Clouds", "density + height EXR"),
     ("Height", "height.exr"),
     ("Emission", "emission.exr"),
     ("Water mask", "water_mask.png"),
@@ -2295,6 +2305,17 @@ impl PlanetGenApp {
                     }
                 });
             });
+            match self.view_mode {
+                20 => widgets::dim(
+                    ui,
+                    "Cloud density: black = clear, white = optically thick. Export stores optical depth.",
+                ),
+                21 => widgets::dim(
+                    ui,
+                    "Cloud height: black = clear / 0 km, white = 20 km. Export stores cloud layer midpoint in km.",
+                ),
+                _ => {}
+            }
         });
     }
 
@@ -2433,7 +2454,7 @@ impl PlanetGenApp {
                         }
                         widgets::dim(
                             ui,
-                            "Clouds export writes a six-channel reconstruction EXR, not the composited preview.",
+                            "Clouds export: cloud_density.exr (optical depth), cloud_height.exr (km), and clouds.exr (reconstruction).",
                         );
 
                         let is_exporting = self.export_handle.is_some();

@@ -1660,7 +1660,14 @@ fn generate_map_tiled<P: Pod>(
 
             let region = coordinator.region(tx, ty);
             let params = make_params(region);
-            let height_tile = region_f32(region, heightmap, full_res);
+            let height_tile: Vec<f32> = (region.origin_y..region.origin_y + region.height)
+                .flat_map(|y| {
+                    let start = (y * full_res + region.origin_x) as usize;
+                    heightmap[start..start + region.width as usize]
+                        .iter()
+                        .copied()
+                })
+                .collect();
             let tile_bytes = map_tile_owned_bytes(
                 (height_tile.len() * std::mem::size_of::<f32>()) as u64,
                 bytemuck::bytes_of(&params).len() as u64,
@@ -2808,6 +2815,20 @@ fn export_staged_cloud_exr(
              dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String> + '_
          ),
 ) -> Result<StagedIoMetrics, Box<StagedExportFailure>> {
+    let density_path = path.with_file_name("cloud_density.exr");
+    let height_path = path.with_file_name("cloud_height.exr");
+    let create_scalar = |path: &Path| {
+        AtomicScanlineExrWriter::create(path, width, height, &["Y"]).map_err(|message| {
+            Box::new(StagedExportFailure {
+                message,
+                metrics: StagedIoMetrics::default(),
+            })
+        })
+    };
+    let density_writer = RefCell::new(Some(create_scalar(&density_path)?));
+    let height_writer = RefCell::new(Some(create_scalar(&height_path)?));
+    let density_row = RefCell::new(vec![0.0; width as usize]);
+    let height_row = RefCell::new(vec![0.0; width as usize]);
     let writer = RefCell::new(Some(
         AtomicScanlineExrWriter::create(path, width, height, &CLOUD_EXR_CHANNELS).map_err(
             |message| {
@@ -2833,6 +2854,30 @@ fn export_staged_cloud_exr(
         false,
         std::mem::size_of::<f32>() as u64,
         |row| {
+            let mut density = density_row.borrow_mut();
+            let mut altitude = height_row.borrow_mut();
+            for ((density, altitude), column) in density
+                .iter_mut()
+                .zip(altitude.iter_mut())
+                .zip(row.chunks_exact(CLOUD_EXR_CHANNELS.len()))
+            {
+                *density = column[0];
+                *altitude = if column[0] > 0.0 {
+                    column[2] + 0.5 * column[3]
+                } else {
+                    0.0
+                };
+            }
+            density_writer
+                .borrow_mut()
+                .as_mut()
+                .ok_or_else(|| "density EXR writer is already finalized".to_owned())?
+                .write_scanline(&density)?;
+            height_writer
+                .borrow_mut()
+                .as_mut()
+                .ok_or_else(|| "height EXR writer is already finalized".to_owned())?
+                .write_scanline(&altitude)?;
             writer
                 .borrow_mut()
                 .as_mut()
@@ -2841,6 +2886,16 @@ fn export_staged_cloud_exr(
         },
         || {
             let started = Instant::now();
+            density_writer
+                .borrow_mut()
+                .take()
+                .ok_or_else(|| "density EXR writer is already finalized".to_owned())?
+                .finish()?;
+            height_writer
+                .borrow_mut()
+                .take()
+                .ok_or_else(|| "height EXR writer is already finalized".to_owned())?
+                .finish()?;
             let writer = writer
                 .borrow_mut()
                 .take()
@@ -2851,6 +2906,7 @@ fn export_staged_cloud_exr(
         },
     )
     .map_err(Box::new)?;
+    metrics.output_write_bytes += u64::from(width) * u64::from(height) * 2 * 4;
     metrics.output_finish_ms = finish_elapsed.borrow().as_secs_f64() * 1000.0;
     metrics.published_file_bytes = std::fs::metadata(path)
         .map_err(|error| {
@@ -2860,6 +2916,16 @@ fn export_staged_cloud_exr(
             })
         })?
         .len();
+    for path in [&density_path, &height_path] {
+        metrics.published_file_bytes += std::fs::metadata(path)
+            .map_err(|error| {
+                Box::new(StagedExportFailure {
+                    message: format!("published cloud texture metadata failed: {error}"),
+                    metrics,
+                })
+            })?
+            .len();
+    }
     Ok(metrics)
 }
 
@@ -4005,6 +4071,66 @@ mod tests {
         assert!(!path.exists());
         assert!(!path.with_extension("exr.part").exists());
         assert!(!path.with_extension("png").exists());
+        for name in ["cloud_density.exr", "cloud_height.exr"] {
+            assert!(!root.join(name).exists());
+            assert!(!root.join(name).with_extension("exr.part").exists());
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cloud_textures_preserve_density_and_height_in_float_channels() {
+        let root =
+            std::env::temp_dir().join(format!("planet-gen-cloud-pair-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let stage = ExportStage::create(
+            &root,
+            StageMetadata {
+                face_resolution: 4,
+                components: 6,
+                halo: 0,
+            },
+        )
+        .unwrap();
+        let read = |name: &str| {
+            let image = exr::prelude::read_first_flat_layer_from_file(root.join(name)).unwrap();
+            assert_eq!(image.layer_data.size, exr::math::Vec2(8, 4));
+            let channels = image.layer_data.channel_data.list;
+            assert_eq!(channels.len(), 1);
+            assert_eq!(channels[0].name.to_string(), "Y");
+            let exr::image::FlatSamples::F32(values) = &channels[0].sample_data else {
+                panic!("cloud texture must store FLOAT values");
+            };
+            values.clone()
+        };
+        for density in [2.5, 0.0] {
+            let row = [density, 0.5, 2.0, 6.0, 0.2, 0.1];
+            let data: Vec<_> = (0..16).flat_map(|_| row).collect();
+            for face in 0..6 {
+                stage.write_tile(face, 0, 0, 4, 4, &data).unwrap();
+            }
+            let metrics = export_staged_cloud_exr(
+                &stage,
+                &root.join("clouds.exr"),
+                8,
+                4,
+                &AtomicBool::new(false),
+                &mut discard_layer_materialization_checkpoint,
+            )
+            .unwrap();
+            for value in read("cloud_density.exr") {
+                assert!((value - density).abs() < 1.0e-6);
+            }
+            for value in read("cloud_height.exr") {
+                assert!((value - if density > 0.0 { 5.0 } else { 0.0 }).abs() < 1.0e-6);
+            }
+            let total_bytes: u64 = ["clouds.exr", "cloud_density.exr", "cloud_height.exr"]
+                .iter()
+                .map(|name| std::fs::metadata(root.join(name)).unwrap().len())
+                .sum();
+            assert_eq!(metrics.published_file_bytes, total_bytes);
+            assert_eq!(metrics.output_write_bytes, 8 * 4 * 8 * 4);
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -4388,9 +4514,8 @@ mod tests {
         // FE-089: export must use the shared land-segment path (which samples
         // weather_cloud_sample internally in cloud_density.wgsl), not a bare
         // point sample — this is what keeps preview and export over land in step.
-        assert!(
-            include_str!("shaders/cloud_export.wgsl").contains("weather_cloud_layers_land_segment")
-        );
+        assert!(include_str!("shaders/cloud_export.wgsl").contains("cloud_column_sample"));
+        assert!(shared_density.contains("weather_cloud_layers_land_segment"));
 
         let (y_mae, coverage_delta, directional_correlation, y_p95) = u5_y_metrics(&direct, &tiled);
         assert!(y_mae <= 0.03, "shared-ray Y MAE={y_mae}");
@@ -5958,6 +6083,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         assert!(planet_dir.join("ao.png").exists());
         let clouds = planet_dir.join("clouds.exr");
         assert!(clouds.exists());
+        assert!(planet_dir.join("cloud_density.exr").exists());
+        assert!(planet_dir.join("cloud_height.exr").exists());
         assert!(!planet_dir.join("clouds.png").exists());
         let image = exr::prelude::read_first_flat_layer_from_file(&clouds).unwrap();
         let channels = image.layer_data.channel_data.list;

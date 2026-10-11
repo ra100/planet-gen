@@ -1558,6 +1558,58 @@ mod tests {
     }
 
     #[test]
+    fn cloud_texture_views_show_density_and_altitude_without_display_controls() {
+        let gpu = GpuContext::new().unwrap();
+        let renderer = PreviewRenderer::new(&gpu);
+        let resolution = 16;
+        let terrain = TectonicTerrain {
+            faces: std::array::from_fn(|_| vec![-0.2; 256]),
+            resolution,
+        };
+        let terrain = renderer.upload_terrain(&gpu, &terrain);
+        let render = |mode, density, base, top, visible| {
+            let mass = std::array::from_fn(|_| {
+                (0..256)
+                    .flat_map(|_| [density, 0.0, 0.0, density])
+                    .collect()
+            });
+            let geometry =
+                std::array::from_fn(|_| (0..256).flat_map(|_| [base, top, top, top]).collect());
+            let mass = renderer.upload_cubemap_rgba16(&gpu, &mass, resolution);
+            let geometry = renderer.upload_cubemap_rgba16(&gpu, &geometry, resolution);
+            renderer.render(
+                &gpu,
+                &PreviewUniforms {
+                    view_mode: mode,
+                    cloud_coverage: 1.0,
+                    show_clouds: visible,
+                    cloud_opacity: visible,
+                    ..uniforms()
+                },
+                &terrain,
+                None,
+                Some((&mass, &geometry)),
+                64,
+            )
+        };
+        let center = |pixels: &[u8]| pixels[(32 * 64 + 32) * 4];
+        for mode in [20, 21] {
+            let empty = render(mode, 0.0, 1.0, 3.0, 1.0);
+            assert_eq!(center(&empty), 0);
+            let shown = render(mode, 0.3, 1.0, 3.0, 1.0);
+            let hidden = render(mode, 0.3, 1.0, 3.0, 0.0);
+            assert_eq!(shown, hidden, "map {mode} must ignore display controls");
+            assert!(center(&shown) > 0);
+        }
+        let thin = render(20, 0.1, 1.0, 3.0, 0.0);
+        let dense = render(20, 0.6, 1.0, 3.0, 0.0);
+        assert!(center(&dense) > center(&thin));
+        let low = render(21, 0.3, 1.0, 3.0, 0.0);
+        let high = render(21, 0.3, 7.0, 9.0, 0.0);
+        assert!(center(&high) > center(&low));
+    }
+
+    #[test]
     fn cloud_density_excludes_atmosphere_extinction() {
         let gpu = GpuContext::new().unwrap();
         let renderer = PreviewRenderer::new(&gpu);
