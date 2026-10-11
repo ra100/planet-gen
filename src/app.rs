@@ -102,6 +102,7 @@ pub struct PlanetGenApp {
     export_resolution: u32,
     // Export layer toggles
     export_albedo: bool,
+    export_ao: bool,
     export_roughness: bool,
     export_clouds: bool,
     export_height: bool,
@@ -286,6 +287,7 @@ impl PlanetGenApp {
             planet_name: format!("planet_{}", PlanetParams::default().seed),
             export_resolution: export::DEFAULT_EXPORT_RESOLUTION,
             export_albedo: true,
+            export_ao: true,
             export_roughness: true,
             export_clouds: true,
             export_height: true,
@@ -731,6 +733,7 @@ impl PlanetGenApp {
             layers: ExportLayers {
                 height: self.export_height,
                 albedo: self.export_albedo,
+                ao: self.export_ao,
                 normals: self.export_normals,
                 roughness: self.export_roughness,
                 water_mask: self.export_water_mask,
@@ -1088,7 +1091,8 @@ fn view_opts(group: ViewGroup) -> Vec<(u32, &'static str)> {
 /// Single source of truth for export layers: drives the checklist and the
 /// summary string. Order must match `export_layer_flags`.
 const EXPORT_LAYERS: &[(&str, &str)] = &[
-    ("Albedo", "albedo.exr + ao.png"),
+    ("Albedo", "albedo.png"),
+    ("Ambient occlusion", "ao.png"),
     ("Roughness", "roughness.png"),
     ("Clouds", "clouds.exr · 6ch"),
     ("Height", "height.exr"),
@@ -1107,6 +1111,7 @@ impl PlanetGenApp {
     fn export_layer_flags(&self) -> [bool; EXPORT_LAYERS.len()] {
         [
             self.export_albedo,
+            self.export_ao,
             self.export_roughness,
             self.export_clouds,
             self.export_height,
@@ -2387,11 +2392,21 @@ impl PlanetGenApp {
                         {
                             self.export_resolution = res;
                         }
+                        ui.label(
+                            RichText::new(format!(
+                                "{} × {} pixels",
+                                self.export_resolution * 2,
+                                self.export_resolution,
+                            ))
+                            .small()
+                            .color(theme::TEXT_FAINT),
+                        );
 
                         widgets::section_header(ui, "layers");
                         {
                             let flags = [
                                 &mut self.export_albedo,
+                                &mut self.export_ao,
                                 &mut self.export_roughness,
                                 &mut self.export_clouds,
                                 &mut self.export_height,
@@ -2963,6 +2978,7 @@ mod tests {
             layers: ExportLayers {
                 height: true,
                 albedo: false,
+                ao: false,
                 normals: false,
                 roughness: false,
                 water_mask: false,

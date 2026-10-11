@@ -133,6 +133,7 @@ fn main() {
             layers: ExportLayers {
                 height: false,
                 albedo: true,
+                ao: true,
                 normals: false,
                 roughness: false,
                 water_mask: false,

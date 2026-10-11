@@ -119,6 +119,7 @@ fn u2_8k_layers() -> ExportLayers {
     ExportLayers {
         height: true,
         albedo: true,
+        ao: true,
         normals: true,
         roughness: true,
         water_mask: true,
@@ -139,6 +140,7 @@ fn u2_8k_enabled_layers(layers: &ExportLayers) -> String {
     [
         ("height", layers.height),
         ("albedo", layers.albedo),
+        ("ao", layers.ao),
         ("normal", layers.normals),
         ("roughness", layers.roughness),
         ("water_mask", layers.water_mask),
@@ -746,7 +748,7 @@ mod tests {
         assert!(!layers.emission);
         assert_eq!(
             u2_8k_enabled_layers(&layers),
-            "height,albedo,normal,roughness,water_mask,clouds"
+            "height,albedo,ao,normal,roughness,water_mask,clouds"
         );
 
         let limits = wgpu::Limits::default();

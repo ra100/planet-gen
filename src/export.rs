@@ -110,6 +110,7 @@ pub const fn max_map_stencil_radius(face_resolution: u32) -> u32 {
 pub struct ExportLayers {
     pub height: bool,
     pub albedo: bool,
+    pub ao: bool,
     pub normals: bool,
     pub roughness: bool,
     pub water_mask: bool,
@@ -122,6 +123,7 @@ impl Default for ExportLayers {
         Self {
             height: true,
             albedo: true,
+            ao: true,
             normals: true,
             roughness: true,
             water_mask: true,
@@ -609,7 +611,7 @@ pub fn estimated_staged_export_peak_bytes(
     };
     let quantized = if layers.albedo {
         estimated_staged_equirect_bytes(face_resolution, 4)?
-    } else if layers.roughness || layers.water_mask {
+    } else if layers.ao || layers.roughness || layers.water_mask {
         estimated_staged_equirect_bytes(face_resolution, 1)?
     } else {
         0
@@ -3198,7 +3200,7 @@ pub fn run_export_with_timings_and_checkpoints(
         layers.normals,
         layers.roughness,
         layers.albedo,
-        layers.albedo, /*ao bundled with albedo*/
+        layers.ao,
     ]
     .iter()
     .filter(|&&b| b)
@@ -3208,7 +3210,7 @@ pub fn run_export_with_timings_and_checkpoints(
         layers.albedo,
         layers.normals,
         layers.roughness,
-        layers.albedo, /*ao*/
+        layers.ao,
         layers.water_mask,
         layers.clouds,
     ]
@@ -3365,7 +3367,7 @@ pub fn run_export_with_timings_and_checkpoints(
     } else {
         None
     };
-    let ao_pipeline = if layers.albedo {
+    let ao_pipeline = if layers.ao {
         Some(MapPipeline::new(
             gpu,
             include_str!("shaders/ao_map.wgsl"),
@@ -5242,6 +5244,7 @@ mod tests {
         let layers = ExportLayers {
             height: true,
             albedo: true,
+            ao: true,
             normals: true,
             roughness: true,
             water_mask: true,
@@ -5401,6 +5404,7 @@ mod tests {
         let layers = ExportLayers {
             height: true,
             albedo: false,
+            ao: false,
             normals: true,
             roughness: false,
             water_mask: false,
