@@ -445,6 +445,13 @@ impl PlanetGenApp {
         let effective_ocean = self.derived.ocean_fraction * (1.0 - self.water_loss);
         let ocean_level = -0.5 + 1.7 * effective_ocean;
 
+        self.preview_renderer.upload_plates(
+            &self.gpu,
+            &plates,
+            terrain_params.seed,
+            terrain_params.warp_strength,
+        );
+
         // Show un-eroded terrain immediately
         self.cached_cubemap_view = Some(self.preview_renderer.upload_terrain(&self.gpu, &terrain));
 
