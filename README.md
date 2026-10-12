@@ -1,5 +1,9 @@
 # Planet Gen
 
+<p align="center">
+  <img src="assets/planet-gen-icon.png" width="96" alt="Planet Gen app icon">
+</p>
+
 GPU-accelerated procedural planet generator for VFX. Produces physically plausible rocky planets with plate tectonics, terrain, biomes, climate, clouds, and oceans from a handful of input parameters.
 
 Built with Rust, wgpu (WebGPU), and egui.

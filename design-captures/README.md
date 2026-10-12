@@ -1,9 +1,8 @@
 # UI captures
 
-`capture.sh <out.png> [wait_secs]` runs the app and grabs a screenshot.
+`capture.sh <out.png> [wait_secs]` runs the app and captures only its window
+with `xdotool` and ImageMagick's `import`.
 
-**Sandbox caveat:** this agent's sandbox cannot host X11 windows (winit
-panics on `XMapRaised: BadDrawable`, and Xvfb segfaults), so captures taken
-here show only the desktop — they are not usable for visual review. Run
-`./design-captures/capture.sh design-captures/ui_v2.png 20` on a real
-workstation display to produce before/after evidence.
+**Sandbox caveat:** the default sandbox cannot host X11 windows (winit
+panics on `XMapRaised: BadDrawable`, and Xvfb segfaults). Run the capture on a
+workstation display to produce usable before/after evidence.

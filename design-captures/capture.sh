@@ -7,7 +7,8 @@ APID=$!
 sleep "$WAIT"
 if ! kill -0 $APID 2>/dev/null; then echo "APP_DIED"; tail -8 design-captures/run.log; exit 1; fi
 for i in 1 2 3; do
-  DISPLAY=:0.0 import -window root "$OUT" 2>/dev/null && break
+  WIN=$(DISPLAY=:0.0 xdotool search --onlyvisible --name '^Planet Gen$' 2>/dev/null | head -1)
+  if [ -n "$WIN" ] && DISPLAY=:0.0 import -window "$WIN" "$OUT" 2>/dev/null; then break; fi
   sleep 2
 done
 if [ -s "$OUT" ]; then echo "CAPTURED $OUT ($(stat -c%s "$OUT") bytes)"; else echo "CAPTURE_FAILED"; fi
