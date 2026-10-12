@@ -295,7 +295,7 @@ Three-tier tectonic simulation with UI toggle between modes.
 | Task | 内容 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
 | 9b.1 | Research: plate motion algorithms (Euler poles, velocity fields, collision detection) | Research doc | Phase 9a | cc:完了 (covered by [docs/research/tectonic-algorithms.md](docs/research/tectonic-algorithms.md) §3 Euler poles, §4.5 PlaTec collision, §11 implementations) |
-| 9b.2 | Plate velocity field: motion vectors per plate, relative velocities at boundaries | Velocity vectors in Plates debug view | 9b.1 | cc:完了 [PENDING] (Plates view re-derives the terrain's plate assignment from an uploaded plate buffer: plate tint, boundaries colored by the terrain's own classify_boundary — convergent red / transform yellow / divergent cyan — and Euler velocity arrows on a cube-face grid) |
+| 9b.2 | Plate velocity field: motion vectors per plate, relative velocities at boundaries | Velocity vectors in Plates debug view | 9b.1 | cc:完了 [f4bfcd4] (Plates view re-derives the terrain's plate assignment from an uploaded plate buffer: plate tint, boundaries colored by the terrain's own classify_boundary — convergent red / transform yellow / divergent cyan — and Euler velocity arrows on a cube-face grid) |
 | 9b.3 | Time-stepping: N geological timesteps, accumulate collision/rift history | Geological age slider | 9b.2 | cc:TODO |
 | 9b.4 | Collision history → terrain | Older planets = more complex terrain | 9b.3 | cc:TODO |
 | 9b.5 | Continental assembly/breakup | Supercontinents form and break with age | 9b.4 | cc:TODO |
