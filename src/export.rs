@@ -903,6 +903,30 @@ struct CloudExportPipeline {
 
 impl CloudExportPipeline {
     fn new(gpu: &GpuContext) -> Self {
+        Self::with_entry_point(
+            gpu,
+            include_str!("shaders/cloud_export_columns.wgsl"),
+            "main",
+            "cloud export",
+        )
+    }
+
+    /// Cloud driver maps share the column pass bindings; only the output record differs.
+    fn drivers(gpu: &GpuContext) -> Self {
+        Self::with_entry_point(
+            gpu,
+            include_str!("shaders/cloud_drivers.wgsl"),
+            "drivers",
+            "cloud drivers",
+        )
+    }
+
+    fn with_entry_point(
+        gpu: &GpuContext,
+        stage_source: &str,
+        entry_point: &str,
+        label: &str,
+    ) -> Self {
         let layout = gpu
             .device
             .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -933,15 +957,17 @@ impl CloudExportPipeline {
         let shader = gpu
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("cloud export shader"),
+                label: Some(label),
                 source: wgpu::ShaderSource::Wgsl(
                     format!(
-                        "{}\n{}\n{}\n{}\n{}",
+                        "{}\n{}\n{}\n{}\n{}\n{}\n{}",
                         include_str!("shaders/cube_sphere.wgsl"),
                         include_str!("shaders/noise.wgsl"),
+                        include_str!("shaders/climate.wgsl"),
                         cloud_density,
                         include_str!("shaders/cloud_wind_fallback.wgsl"),
                         include_str!("shaders/cloud_export.wgsl"),
+                        stage_source,
                     )
                     .into(),
                 ),
@@ -956,10 +982,10 @@ impl CloudExportPipeline {
         let pipeline = gpu
             .device
             .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("cloud export pipeline"),
+                label: Some(label),
                 layout: Some(&pipeline_layout),
                 module: &shader,
-                entry_point: Some("main"),
+                entry_point: Some(entry_point),
                 compilation_options: Default::default(),
                 cache: None,
             });
@@ -987,9 +1013,34 @@ impl CloudExportPipeline {
         params: CloudExportParams,
         cancel: &AtomicBool,
     ) -> Result<Vec<f32>, String> {
+        self.dispatch(
+            gpu,
+            uniforms,
+            height,
+            dynamics,
+            weather,
+            params,
+            CLOUD_EXR_CHANNELS.len(),
+            cancel,
+        )
+    }
+
+    /// Runs one `tile_width` x `tile_height` grid writing `components` floats per invocation.
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch(
+        &self,
+        gpu: &GpuContext,
+        uniforms: &PreviewUniforms,
+        height: &wgpu::TextureView,
+        dynamics: &crate::terrain_compute::DynamicsTextures,
+        weather: &WeatherTextures,
+        params: CloudExportParams,
+        components: usize,
+        cancel: &AtomicBool,
+    ) -> Result<Vec<f32>, String> {
         let values = u64::from(params.tile_width)
             .checked_mul(u64::from(params.tile_height))
-            .and_then(|pixels| pixels.checked_mul(CLOUD_EXR_CHANNELS.len() as u64))
+            .and_then(|pixels| pixels.checked_mul(components as u64))
             .ok_or("cloud export tile size overflows u64")?;
         let bytes = values
             .checked_mul(4)
@@ -2973,6 +3024,97 @@ fn export_staged_cloud_exr(
     Ok(metrics)
 }
 
+/// Driver maps written next to `clouds.exr`, each RGBA in one equirectangular frame.
+pub const CLOUD_DRIVER_FILES: [&str; 3] = [
+    "cloud_drivers.exr",
+    "climate_drivers.exr",
+    "wind_drivers.exr",
+];
+const CLOUD_DRIVER_COMPONENTS: usize = 4 * CLOUD_DRIVER_FILES.len();
+const CLOUD_DRIVER_BAND_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Driver maps stay at weather resolution: twice the face size in height covers
+/// the 90-degree face span without undersampling, independent of export size.
+pub const fn cloud_driver_dimensions(weather_resolution: u32) -> (u32, u32) {
+    let height = weather_resolution * 2;
+    (height * 2, height)
+}
+
+/// Writes the weather solver's low-frequency cloud, climate and wind fields so a
+/// renderer can place its own high-frequency cloud detail without a full-size export.
+#[allow(clippy::too_many_arguments)]
+fn export_cloud_drivers(
+    gpu: &GpuContext,
+    output_dir: &Path,
+    terrain: &TectonicTerrain,
+    dynamics: &crate::terrain_compute::DynamicsTextures,
+    weather: &WeatherTextures,
+    snapshot: WeatherSnapshot,
+    cancel: &AtomicBool,
+) -> Result<(), String> {
+    let (width, height) = cloud_driver_dimensions(weather.resolution);
+    let (_height_texture, height_view) = create_cloud_export_height_texture(gpu, terrain)?;
+    let pipeline = CloudExportPipeline::drivers(gpu);
+    let uniforms = cloud_export_uniforms(snapshot);
+    let mut writers = CLOUD_DRIVER_FILES
+        .iter()
+        .map(|name| {
+            AtomicScanlineExrWriter::create(
+                &output_dir.join(name),
+                width,
+                height,
+                &["R", "G", "B", "A"],
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let row_bytes = u64::from(width) * (CLOUD_DRIVER_COMPONENTS * 4) as u64;
+    let band_rows = u32::try_from((CLOUD_DRIVER_BAND_BYTES / row_bytes).max(1))
+        .unwrap_or(height)
+        .min(height);
+    let mut rows = vec![vec![0.0f32; width as usize * 4]; CLOUD_DRIVER_FILES.len()];
+    let mut band_start = 0;
+    while band_start < height {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("Cancelled while exporting cloud drivers".into());
+        }
+        let band_height = band_rows.min(height - band_start);
+        let values = pipeline.dispatch(
+            gpu,
+            &uniforms,
+            &height_view,
+            dynamics,
+            weather,
+            CloudExportParams {
+                face: 0,
+                tile_offset_x: 0,
+                tile_offset_y: band_start,
+                tile_width: width,
+                tile_height: band_height,
+                full_resolution: height,
+                _pad0: 0,
+                _pad1: 0,
+            },
+            CLOUD_DRIVER_COMPONENTS,
+            cancel,
+        )?;
+        for texel_row in values.chunks_exact(width as usize * CLOUD_DRIVER_COMPONENTS) {
+            for (x, texel) in texel_row.chunks_exact(CLOUD_DRIVER_COMPONENTS).enumerate() {
+                for (row, rgba) in rows.iter_mut().zip(texel.chunks_exact(4)) {
+                    row[x * 4..x * 4 + 4].copy_from_slice(rgba);
+                }
+            }
+            for (writer, row) in writers.iter_mut().zip(&rows) {
+                writer.write_scanline(row)?;
+            }
+        }
+        band_start += band_height;
+    }
+    for writer in writers {
+        writer.finish()?;
+    }
+    Ok(())
+}
+
 fn quantize_unit(value: f32, max: u32) -> Result<u32, String> {
     if !value.is_finite() || !(0.0..=1.0).contains(&value) {
         return Err("quantized PNG source value must be finite and within [0, 1]".into());
@@ -3406,7 +3548,8 @@ pub fn run_export_with_timings_and_checkpoints(
     let total_steps = coordinator.total_tiles() // terrain generation
         + 6 // erosion
         + map_count * 6 * tiles_per_face // map tiles for selected layers
-        + 6 * export_count; // file writes
+        + 6 * export_count // file writes
+        + u32::from(layers.clouds); // cloud driver maps
     let mut progress = ProgressTracker::new(progress_tx, total_steps);
 
     let generation_started = Instant::now();
@@ -3898,6 +4041,16 @@ pub fn run_export_with_timings_and_checkpoints(
                 checkpoints,
             )
             .map_err(|failure| *failure),
+        )?;
+        progress.advance("Exporting cloud drivers...");
+        export_cloud_drivers(
+            gpu,
+            &planet_dir,
+            &weather_terrain,
+            &dynamics,
+            &weather,
+            snapshot,
+            cancel,
         )?;
     }
 
@@ -4706,7 +4859,7 @@ mod tests {
         // FE-089: export must use the shared land-segment path (which samples
         // weather_cloud_sample internally in cloud_density.wgsl), not a bare
         // point sample — this is what keeps preview and export over land in step.
-        assert!(include_str!("shaders/cloud_export.wgsl").contains("cloud_column_sample"));
+        assert!(include_str!("shaders/cloud_export_columns.wgsl").contains("cloud_column_sample"));
         assert!(shared_density.contains("weather_cloud_layers_land_segment"));
 
         let (y_mae, coverage_delta, directional_correlation, y_p95) = u5_y_metrics(&direct, &tiled);

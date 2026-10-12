@@ -356,3 +356,17 @@ Diagnosis of the 8K export crash: not an app leak (measured VRAM delta ~350MB). 
 | 12.1 | Graceful GPU OOM: `on_uncaptured_error` flag + one-shot update-loop cleanup (cancel export, clear pending work, error banner) + per-site same-frame guards | App stays alive with banner after VRAM OOM; no panic on next device call | - | cc:完了 [8005917] |
 | 12.2 | Export worker `catch_unwind`: wgpu panic in export thread becomes `ExportProgress::Error`, not a dead channel | Worker panic surfaces as UI error event | 12.1 | cc:完了 [8005917] |
 | 12.3 | Staged face reads via per-face `mmap` (memmap2): region read = memcpy from page cache, no per-row syscalls; skip f32 zero-fill | `perf_bench --u2-8k` layer staging well under the 240s gate; staged tests green | - | cc:完了 [fb7d295] |
+
+---
+
+## Phase 13: Blender Cloud Bridge
+
+Planet Gen exports low-resolution cloud, climate and wind driver maps; the Blender add-on keeps the v10 shader's procedural cloud detail and takes placement from the drivers, so close-range clouds stay sharp without a 16K export.
+
+Plan: [docs/plans/2026-10-12-001-feat-blender-cloud-bridge-plan.md](docs/plans/2026-10-12-001-feat-blender-cloud-bridge-plan.md)
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 13.1 | Driver map export (`cloud_drivers.wgsl`, three RGBA EXRs at weather resolution) | Streaming export test reads all three maps at expected size | - | cc:TODO |
+| 13.2 | Blender bridge (`cloud_bridge.py`, Drive Clouds / Aligned Surface operators, CLI) | Drive Strength 0 renders identical to v10 | 13.1 | cc:TODO |
+

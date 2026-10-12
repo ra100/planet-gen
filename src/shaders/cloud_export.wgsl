@@ -28,7 +28,6 @@ fn smooth_step(edge0: f32, edge1: f32, value: f32) -> f32 {
 @group(0) @binding(4) var weather_mass_tex: texture_cube<f32>;
 @group(0) @binding(5) var weather_geometry_tex: texture_cube<f32>;
 @group(0) @binding(6) var<uniform> params: CloudExportParams;
-@group(0) @binding(7) var<storage, read_write> output: array<CloudColumn>;
 
 struct WindTangent { direction: vec3<f32>, magnitude: f32, }
 
@@ -57,16 +56,4 @@ fn sample_wind_tangent_data(sphere_pos: vec3<f32>) -> WindTangent {
     let tilted_y = sphere_pos.y * cos(uniforms.axial_tilt_rad) + sphere_pos.z * sin(uniforms.axial_tilt_rad);
     let latitude = asin(clamp(tilted_y, -1.0, 1.0));
     return WindTangent(wind_direction_at(sphere_pos, latitude), 0.0);
-}
-
-@compute @workgroup_size(8, 8)
-fn main(@builtin(global_invocation_id) id: vec3<u32>) {
-    if (id.x >= params.tile_width || id.y >= params.tile_height) { return; }
-    let pixel = id.y * params.tile_width + id.x;
-    let uv = vec2<f32>(
-        f32(params.tile_offset_x + id.x) / f32(params.full_resolution - 1u),
-        f32(params.tile_offset_y + id.y) / f32(params.full_resolution - 1u),
-    );
-    let direction = cube_to_sphere(params.face, uv);
-    output[pixel] = cloud_column_sample(direction, 2.0 / f32(params.full_resolution));
 }

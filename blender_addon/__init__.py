@@ -1,8 +1,8 @@
 bl_info = {
     "name": "Planet Gen Importer",
     "author": "Planet Gen",
-    "version": (1, 0, 0),
-    "blender": (4, 0, 0),
+    "version": (1, 1, 0),
+    "blender": (4, 1, 0),
     "location": "View3D > Sidebar > Planet Gen",
     "description": "Import procedurally generated planet textures and set up materials",
     "category": "Import-Export",
@@ -10,6 +10,8 @@ bl_info = {
 
 import bpy
 import os
+
+from . import cloud_bridge
 from bpy.props import StringProperty, EnumProperty, FloatProperty
 from bpy_extras.io_utils import ImportHelper
 
@@ -256,6 +258,53 @@ class PLANETGEN_OT_apply_to_selected(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class PLANETGEN_OT_drive_clouds(bpy.types.Operator):
+    """Drive the selected cloud shell with Planet Gen's cloud, climate and wind maps"""
+    bl_idname = "planetgen.drive_clouds"
+    bl_label = "Drive Clouds"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        directory = context.scene.planetgen_dir
+        obj = context.active_object
+        if not directory or not os.path.isdir(directory):
+            self.report({"ERROR"}, "Import planet textures first")
+            return {"CANCELLED"}
+        if not obj or obj.type != "MESH":
+            self.report({"ERROR"}, "Select the cloud shell mesh first")
+            return {"CANCELLED"}
+        try:
+            cloud_bridge.apply(directory, obj)
+        except FileNotFoundError as error:
+            self.report({"ERROR"}, str(error))
+            return {"CANCELLED"}
+        self.report({"INFO"}, f"Driving {obj.name} with Planet Gen cloud maps")
+        return {"FINISHED"}
+
+
+class PLANETGEN_OT_aligned_surface(bpy.types.Operator):
+    """Put the exported albedo on the selected planet in the cloud drivers' frame"""
+    bl_idname = "planetgen.aligned_surface"
+    bl_label = "Aligned Surface"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        directory = context.scene.planetgen_dir
+        obj = context.active_object
+        if not directory or not os.path.isdir(directory):
+            self.report({"ERROR"}, "Import planet textures first")
+            return {"CANCELLED"}
+        if not obj or obj.type != "MESH":
+            self.report({"ERROR"}, "Select the planet mesh first")
+            return {"CANCELLED"}
+        try:
+            cloud_bridge.apply_surface(directory, obj)
+        except FileNotFoundError as error:
+            self.report({"ERROR"}, str(error))
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
 # ============ Panel ============
 
 class PLANETGEN_PT_panel(bpy.types.Panel):
@@ -290,6 +339,15 @@ class PLANETGEN_PT_panel(bpy.types.Panel):
         row.operator("planetgen.apply_to_selected", icon="MATERIAL")
         row.enabled = context.active_object is not None and context.active_object.type == "MESH"
 
+        layout.separator()
+
+        # Cloud bridge: solver placement, procedural detail
+        layout.label(text="Clouds", icon="OUTLINER_DATA_VOLUME")
+        col = layout.column(align=True)
+        col.operator("planetgen.drive_clouds", icon="MOD_FLUIDSIM")
+        col.operator("planetgen.aligned_surface", icon="WORLD_DATA")
+        col.enabled = context.active_object is not None and context.active_object.type == "MESH"
+
 
 # ============ Registration ============
 
@@ -297,6 +355,8 @@ classes = (
     PLANETGEN_OT_import,
     PLANETGEN_OT_create_planet,
     PLANETGEN_OT_apply_to_selected,
+    PLANETGEN_OT_drive_clouds,
+    PLANETGEN_OT_aligned_surface,
     PLANETGEN_PT_panel,
 )
 
