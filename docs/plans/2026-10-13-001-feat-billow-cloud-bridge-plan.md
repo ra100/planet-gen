@@ -1,7 +1,7 @@
 ---
 title: "feat: Billow edge-erosion cloud bridge"
 type: feat
-status: active
+status: completed
 date: 2026-10-13
 origin: "User request: implement the edge-erosion (billow) cloud detail validated on the Risa scene for the Planet Gen -> Blender path; drop or default-exclude unused cloud outputs"
 ---
