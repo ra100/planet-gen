@@ -2646,10 +2646,17 @@ mod tests {
             land_provenance < provenance_total(&ocean_p, resolution),
             "all-land provenance not bounded under marine minting: {land_provenance}"
         );
+        let out_of_range: Vec<_> = mixed_p
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| !(p.is_finite() && (0.0..=1.0).contains(*p)))
+            .map(|(index, p)| (index, *p))
+            .collect();
         assert!(
-            mixed_p
-                .iter()
-                .all(|p| p.is_finite() && (0.0..=1.0).contains(p))
+            out_of_range.is_empty(),
+            "{} provenance texels outside [0, 1], first {:?}",
+            out_of_range.len(),
+            &out_of_range[..out_of_range.len().min(8)]
         );
         assert!(
             mixed_p
