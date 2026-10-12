@@ -788,7 +788,8 @@ impl FaceStage {
             self.metadata.face_resolution as u64 * self.metadata.components as u64 * 4;
         for row in 0..height {
             let offset = ((origin_y + row) as u64 * face_row_bytes
-                + origin_x as u64 * self.metadata.components as u64 * 4) as usize;
+                + origin_x as u64 * self.metadata.components as u64 * 4)
+                as usize;
             // validate() bounds the region inside the face; guard the mapping
             // length anyway so a truncated file errors instead of panicking.
             let end = offset

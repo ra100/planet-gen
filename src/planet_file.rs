@@ -314,11 +314,13 @@ mod tests {
 
     #[test]
     fn viewport_state_roundtrips() {
-        let mut file = PlanetFile::default();
-        file.view_mode = 2;
-        file.rot = [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]];
-        file.zoom = 3.5;
-        file.pan = [-0.25, 0.75];
+        let file = PlanetFile {
+            view_mode: 2,
+            rot: [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+            zoom: 3.5,
+            pan: [-0.25, 0.75],
+            ..Default::default()
+        };
         let json = serde_json::to_string_pretty(&file).unwrap();
         let loaded = checked_load(&json).unwrap();
         assert_eq!(file, loaded);

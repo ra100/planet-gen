@@ -191,13 +191,14 @@ impl PlanetGenApp {
         let gpu_failed = Arc::new(AtomicBool::new(false));
         {
             let failed = Arc::clone(&gpu_failed);
-            gpu.device.on_uncaptured_error(Arc::new(move |error: wgpu::Error| {
-                log::error!("uncaptured GPU error: {error:?}");
-                // OutOfMemory invalidates the whole device; later calls panic.
-                if matches!(error, wgpu::Error::OutOfMemory { .. }) {
-                    failed.store(true, Ordering::Relaxed);
-                }
-            }));
+            gpu.device
+                .on_uncaptured_error(Arc::new(move |error: wgpu::Error| {
+                    log::error!("uncaptured GPU error: {error:?}");
+                    // OutOfMemory invalidates the whole device; later calls panic.
+                    if matches!(error, wgpu::Error::OutOfMemory { .. }) {
+                        failed.store(true, Ordering::Relaxed);
+                    }
+                }));
         }
         let preview_renderer = PreviewRenderer::new(&gpu);
         let texture_id = render_state.renderer.write().register_native_texture(
@@ -834,8 +835,7 @@ impl PlanetGenApp {
         let Some(terrain) = self.weather_terrain.as_ref() else {
             return;
         };
-        self.cached_cubemap_view =
-            Some(self.preview_renderer.upload_terrain(&self.gpu, terrain));
+        self.cached_cubemap_view = Some(self.preview_renderer.upload_terrain(&self.gpu, terrain));
         let cloud_res = (self.preview_resolution / 2).max(192);
         if self.dynamics.as_ref().map(|d| d.resolution) != Some(cloud_res) {
             let ocean_level = self.ocean_level();
@@ -1434,9 +1434,15 @@ impl PlanetGenApp {
                 return;
             }
         };
-        let stem = base.file_stem().and_then(|s| s.to_str()).unwrap_or("planet");
+        let stem = base
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("planet");
         let ext = base.extension().and_then(|e| e.to_str()).unwrap_or("json");
-        let dir = base.parent().map(std::path::Path::to_path_buf).unwrap_or_default();
+        let dir = base
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_default();
         for n in 1..=999u32 {
             let candidate = dir.join(format!("{stem}.{n:03}.{ext}"));
             if !candidate.exists() {
@@ -1445,7 +1451,10 @@ impl PlanetGenApp {
                 return;
             }
         }
-        self.set_file_msg(false, "incremental save failed: 999 versions already exist".into());
+        self.set_file_msg(
+            false,
+            "incremental save failed: 999 versions already exist".into(),
+        );
         ctx.request_repaint();
     }
 
@@ -2727,9 +2736,9 @@ impl eframe::App for PlanetGenApp {
                     .map(|t| t.elapsed().as_secs_f32())
                     .unwrap_or(0.0);
                 if (self.terrain_pending || self.erosion_remaining > 0)
-            && self.export_handle.is_none()
-            && gen_elapsed > 1.0
-        {
+                    && self.export_handle.is_none()
+                    && gen_elapsed > 1.0
+                {
                     ui.painter().rect_filled(
                         ui.max_rect(),
                         0.0,
@@ -2804,13 +2813,12 @@ impl eframe::App for PlanetGenApp {
         }
         // Weather spinup is paused while an export runs: start_export released
         // the weather cubemaps, and restore_preview_after_export re-requests them.
-        let weather_busy = if self.gpu_failed.load(Ordering::Relaxed)
-            || self.export_handle.is_some()
-        {
-            false
-        } else {
-            self.poll_weather()
-        };
+        let weather_busy =
+            if self.gpu_failed.load(Ordering::Relaxed) || self.export_handle.is_some() {
+                false
+            } else {
+                self.poll_weather()
+            };
         self.weather_busy = weather_busy;
         if weather_busy {
             ctx.request_repaint();
