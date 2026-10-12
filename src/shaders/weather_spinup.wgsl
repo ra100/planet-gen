@@ -42,6 +42,8 @@ const DIAGNOSTIC_NO_SINK: u32 = 2u;
 const DIAGNOSTIC_NO_PHASE_CHANGE: u32 = 4u;
 const DIAGNOSTIC_NO_RELAXATION: u32 = 8u;
 const DIAGNOSTIC_ALL_OCEAN_COMPAT: u32 = 32u;
+// Keeps q_bl and q_ft uncoupled so single-reservoir invariants stay testable.
+const DIAGNOSTIC_NO_VERTICAL_EXCHANGE: u32 = 64u;
 const PHYSICAL_INTERVAL_SECONDS: f32 = 1280.0;
 const ALL_OCEAN_PHYSICAL_INTERVAL_SECONDS: f32 = 1600.0;
 const MAX_WIND_MPS: f32 = 50.0;
@@ -187,6 +189,10 @@ fn convective_catalyst(pos: vec3<f32>) -> f32 {
 
 fn all_ocean_compat() -> bool {
     return (params.diagnostic_flags & DIAGNOSTIC_ALL_OCEAN_COMPAT) != 0u;
+}
+
+fn vertical_exchange_enabled() -> bool {
+    return !all_ocean_compat() && (params.diagnostic_flags & DIAGNOSTIC_NO_VERTICAL_EXCHANGE) == 0u;
 }
 
 fn physical_interval_seconds() -> f32 {
@@ -1321,7 +1327,7 @@ fn transport(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     // Provenance texture may be unbound in this pass: neutral mass keeps the
     // local humidity target (0 share → no blend).
-    let advance = advance_state(direction(id, res), 0.0, !all_ocean_compat());
+    let advance = advance_state(direction(id, res), 0.0, vertical_exchange_enabled());
     textureStore(state_out, vec2<i32>(id.xy), i32(id.z), advance.state);
     textureStore(aux_out, vec2<i32>(id.xy), i32(id.z), advance.aux);
     textureStore(provenance_tail_out, vec2<i32>(id.xy), i32(id.z), advance.tail);
@@ -1346,7 +1352,7 @@ fn transport_with_provenance(@builtin(global_invocation_id) id: vec3<u32>) {
     // production.
     let pos = direction(id, res);
     let transported = max(provenance_transport(pos), 0.0);
-    let advance = advance_state(pos, transported, !all_ocean_compat());
+    let advance = advance_state(pos, transported, vertical_exchange_enabled());
     let state = advance.state;
     // q_target already carries the open-ocean gate; add the recorded evaporation once.
     let p_after_source = transported + provenance_source_evaporation;
