@@ -1249,6 +1249,7 @@ impl ErosionPipeline {
         self.erode_batched(gpu, terrain, iterations, ocean_level, climate, cancel, 32)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn erode_batched(
         &self,
         gpu: &GpuContext,

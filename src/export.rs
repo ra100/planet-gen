@@ -6230,9 +6230,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
                     .all(|v| v.is_finite() && (0.0..=1.0).contains(v))
             );
             for row in pixels.chunks_exact(128) {
-                for channel in 0..3 {
+                for (first, last) in row[0].iter().zip(&row[127]).take(3) {
                     assert!(
-                        (row[0][channel] - row[127][channel]).abs() < 0.002,
+                        (first - last).abs() < 0.002,
                         "longitude seam in material field"
                     );
                 }
