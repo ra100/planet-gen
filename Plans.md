@@ -367,6 +367,6 @@ Plan: [docs/plans/2026-10-12-001-feat-blender-cloud-bridge-plan.md](docs/plans/2
 
 | Task | 内容 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
-| 13.1 | Driver map export (`cloud_drivers.wgsl`, three RGBA EXRs at weather resolution) | Streaming export test reads all three maps at expected size | - | cc:TODO |
-| 13.2 | Blender bridge (`cloud_bridge.py`, Drive Clouds / Aligned Surface operators, CLI) | Drive Strength 0 renders identical to v10 | 13.1 | cc:TODO |
+| 13.1 | Driver map export (`cloud_drivers.wgsl`, three RGBA EXRs at weather resolution) | Streaming export test reads all three maps at expected size | - | cc:完了 [22601eb] |
+| 13.2 | Blender bridge (`cloud_bridge.py`, Drive Clouds / Aligned Surface operators, CLI) | Drive Strength 0 renders identical to v10 | 13.1 | cc:完了 [22601eb] |
 
