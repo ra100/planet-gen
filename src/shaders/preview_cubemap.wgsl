@@ -56,6 +56,150 @@ const CLOUD_RAY_SAMPLES: u32 = 8u;
 @group(0) @binding(4) var weather_mass_tex: texture_cube<f32>;
 @group(0) @binding(5) var weather_geometry_tex: texture_cube<f32>;
 
+// Plate motion for the Plates debug view (view 6). Mirrors the terrain
+// pipeline's plate assignment so the overlay lines up with the generated
+// terrain: same warp, same per-plate boundary bias, same Euler velocities.
+struct PreviewPlate {
+    center: vec3<f32>,
+    plate_type: f32,
+    omega: vec3<f32>, // Euler angular velocity; local velocity is cross(omega, pos)
+    _pad: f32,
+}
+
+struct PlateMotion {
+    count: u32,
+    seed: u32,
+    warp_strength: f32,
+    max_speed: f32, // largest |omega| across plates, for arrow normalization
+    plates: array<PreviewPlate>,
+}
+
+@group(0) @binding(6) var<storage, read> plate_motion: PlateMotion;
+
+fn plate_pcg_hash(input: u32) -> u32 {
+    var h = input * 747796405u + 2891336453u;
+    h = ((h >> ((h >> 28u) + 4u)) ^ h) * 277803737u;
+    h = (h >> 22u) ^ h;
+    return h;
+}
+
+fn plate_seed_offset(s: u32) -> vec3<f32> {
+    return vec3<f32>(
+        f32(plate_pcg_hash(s) & 0xFFFFu) / 655.35,
+        f32(plate_pcg_hash(s + 1u) & 0xFFFFu) / 655.35,
+        f32(plate_pcg_hash(s + 2u) & 0xFFFFu) / 655.35
+    );
+}
+
+// Same domain warp as plate_assign.wgsl / terrain_from_plates.wgsl.
+fn plate_warp_position(pos: vec3<f32>) -> vec3<f32> {
+    let seed = plate_motion.seed;
+    let warp1 = vec3<f32>(
+        snoise(pos * 1.2 + plate_seed_offset(seed + 5000u)),
+        snoise(pos * 1.2 + plate_seed_offset(seed + 5001u)),
+        snoise(pos * 1.2 + plate_seed_offset(seed + 5002u))
+    ) * 0.20;
+    let warp2 = vec3<f32>(
+        snoise(pos * 3.0 + plate_seed_offset(seed + 5010u)),
+        snoise(pos * 3.0 + plate_seed_offset(seed + 5011u)),
+        snoise(pos * 3.0 + plate_seed_offset(seed + 5012u))
+    ) * 0.10;
+    return normalize(pos + (warp1 + warp2) * plate_motion.warp_strength);
+}
+
+struct PlatePair {
+    a: u32,
+    b: u32,
+    gap: f32, // biased distance to the second-nearest plate minus the nearest
+}
+
+// Nearest and second-nearest plate, with plate_assign.wgsl's distance bias.
+fn plate_nearest_pair(warped: vec3<f32>) -> PlatePair {
+    var best = PlatePair(0u, 0u, 0.0);
+    var d_a = 100.0;
+    var d_b = 100.0;
+    for (var i = 0u; i < plate_motion.count; i++) {
+        let plate_offset = vec3<f32>(f32(i) * 17.3, f32(i) * 31.7, f32(i) * 43.1);
+        let d = 1.0 - dot(warped, plate_motion.plates[i].center)
+            + snoise(warped * 2.0 + plate_offset) * 0.03
+            + snoise(warped * 3.5 + plate_offset * 2.0) * 0.01;
+        if (d < d_a) {
+            d_b = d_a;
+            best.b = best.a;
+            d_a = d;
+            best.a = i;
+        } else if (d < d_b) {
+            d_b = d;
+            best.b = i;
+        }
+    }
+    best.gap = d_b - d_a;
+    return best;
+}
+
+// Boundary type at pos, identical to terrain_from_plates.wgsl classify_boundary:
+// convergent (-1), transform (0), divergent (+1).
+fn plate_boundary_type(pos: vec3<f32>, a: u32, b: u32) -> f32 {
+    let rel_velocity = cross(plate_motion.plates[a].omega, pos) - cross(plate_motion.plates[b].omega, pos);
+    let boundary_normal = normalize(plate_motion.plates[b].center - plate_motion.plates[a].center);
+    return -clamp(dot(rel_velocity, boundary_normal) * 5.0, -1.0, 1.0);
+}
+
+fn plate_tint(index: u32) -> vec3<f32> {
+    let h = plate_pcg_hash(index * 2654435761u + 97u);
+    return vec3<f32>(
+        f32(h & 0xFFu),
+        f32((h >> 8u) & 0xFFu),
+        f32((h >> 16u) & 0xFFu)
+    ) / 255.0;
+}
+
+// Coverage of a velocity arrow glyph at pos. Arrows sit on a cube-face grid so
+// they stay evenly spread without a lat/long pole pinch; each arrow shows the
+// owning plate's local velocity cross(omega, cell_center).
+fn plate_arrow_coverage(pos: vec3<f32>, cells_per_face: f32) -> f32 {
+    let a = abs(pos);
+    let major = max(a.x, max(a.y, a.z));
+    let on_cube = pos / major;
+    let snapped = (floor((on_cube * 0.5 + 0.5) * cells_per_face) + 0.5) / cells_per_face * 2.0 - 1.0;
+    // Keep the dominant axis on the face plane; snap only the in-face axes.
+    let keep = vec3<f32>(
+        select(0.0, 1.0, a.x >= major),
+        select(0.0, 1.0, a.y >= major && a.x < major),
+        select(0.0, 1.0, a.z >= major && a.x < major && a.y < major)
+    );
+    let center = normalize(mix(snapped, sign(on_cube), keep));
+
+    let pair = plate_nearest_pair(plate_warp_position(center));
+    let velocity = cross(plate_motion.plates[pair.a].omega, center);
+    let speed = length(velocity);
+    let cell = 1.6 / cells_per_face;
+    let d = pos - center;
+    let width = cell * 0.045;
+
+    if (speed <= 1e-6 || plate_motion.max_speed <= 1e-6) {
+        // Stationary plate: a dot instead of an arrow.
+        return 1.0 - smooth_step(width * 1.2, width * 2.0, length(d));
+    }
+
+    let dir = velocity / speed;
+    let half_len = cell * 0.42 * (0.3 + 0.7 * clamp(speed / plate_motion.max_speed, 0.0, 1.0));
+    let along = dot(d, dir);
+    let across = length(d - dir * along);
+    let head_len = min(half_len * 0.7, cell * 0.16);
+
+    var reach = -1.0;
+    if (along >= -half_len && along <= half_len - head_len) {
+        reach = width;
+    } else if (along > half_len - head_len && along <= half_len) {
+        reach = (half_len - along) / head_len * width * 3.2;
+    }
+    if (reach <= 0.0) {
+        return 0.0;
+    }
+    return 1.0 - smooth_step(reach * 0.75, reach, across);
+}
+
 // Positive cubic B-spline weights remove bilinear grid creases without
 // ringing at coasts. Four filtered taps reconstruct the 4x4 neighborhood;
 // directions outside the current face sample the adjoining cube face.
@@ -1111,31 +1255,48 @@ fn shade_planet(in: VertexOutput) -> vec4<f32> {
                 }
             }
             case 6u: {
-                // Plate structure: height with contour lines at boundaries
-                // Sample neighboring heights to detect edges (plate boundaries)
-                let step = 0.01;
-                let h_r = textureSample(height_tex, height_sampler, rotated + vec3<f32>(step, 0.0, 0.0)).r;
-                let h_u = textureSample(height_tex, height_sampler, rotated + vec3<f32>(0.0, step, 0.0)).r;
-                let gradient = abs(h_r - height) + abs(h_u - height);
-
-                // Base: color by elevation (blue ocean, tan/green land)
-                let h = (height + 0.5) / 1.0;
+                // Plate motion: plates tinted over elevation, boundaries colored
+                // by type (convergent red, transform yellow, divergent cyan),
+                // and arrows for each plate's local Euler velocity.
                 if (height < uniforms.ocean_level) {
-                    debug_color = mix(vec3<f32>(0.05, 0.1, 0.3), vec3<f32>(0.1, 0.2, 0.5), clamp(h + 0.5, 0.0, 1.0));
+                    debug_color = vec3<f32>(0.10, 0.16, 0.32);
                 } else {
-                    debug_color = mix(vec3<f32>(0.3, 0.5, 0.2), vec3<f32>(0.7, 0.6, 0.4), clamp((height - uniforms.ocean_level) * 3.0, 0.0, 1.0));
+                    debug_color = mix(vec3<f32>(0.32, 0.42, 0.24), vec3<f32>(0.62, 0.56, 0.42), clamp((height - uniforms.ocean_level) * 3.0, 0.0, 1.0));
                 }
+                if (plate_motion.count > 0u) {
+                    let pair = plate_nearest_pair(plate_warp_position(rotated));
+                    debug_color = mix(debug_color, plate_tint(pair.a) * 0.75, 0.22);
+                    if (plate_motion.plates[pair.a].plate_type > 0.5) {
+                        debug_color *= 1.08;
+                    }
 
-                // Overlay bright lines at plate boundaries (sharp height gradients)
-                if (gradient > 0.02) {
-                    let edge_strength = clamp((gradient - 0.02) * 20.0, 0.0, 1.0);
-                    debug_color = mix(debug_color, vec3<f32>(1.0, 0.3, 0.1), edge_strength);
-                }
+                    let zoom = max(uniforms.zoom, 1.0);
+                    let edge = 1.0 - smooth_step(0.006 / zoom, 0.012 / zoom, pair.gap);
+                    if (edge > 0.0 && pair.a != pair.b) {
+                        let btype = plate_boundary_type(rotated, pair.a, pair.b);
+                        let convergent = vec3<f32>(1.0, 0.22, 0.12);
+                        let transform = vec3<f32>(1.0, 0.85, 0.2);
+                        let divergent = vec3<f32>(0.2, 0.85, 1.0);
+                        let boundary_color = select(
+                            mix(transform, divergent, btype),
+                            mix(transform, convergent, -btype),
+                            btype < 0.0
+                        );
+                        debug_color = mix(debug_color, boundary_color, edge);
+                    }
 
-                // Contour lines at regular height intervals
-                let contour = fract(height * 8.0);
-                if (contour < 0.05 || contour > 0.95) {
-                    debug_color *= 0.7;
+                    let cells = 7.0 * clamp(round(zoom), 1.0, 6.0);
+                    let arrow = plate_arrow_coverage(rotated, cells);
+                    debug_color = mix(debug_color, vec3<f32>(0.97, 0.97, 0.94), arrow * 0.9);
+                } else {
+                    // No plate data uploaded: fall back to height-gradient edges.
+                    let step = 0.01;
+                    let h_r = textureSampleLevel(height_tex, height_sampler, rotated + vec3<f32>(step, 0.0, 0.0), 0.0).r;
+                    let h_u = textureSampleLevel(height_tex, height_sampler, rotated + vec3<f32>(0.0, step, 0.0), 0.0).r;
+                    let gradient = abs(h_r - height) + abs(h_u - height);
+                    if (gradient > 0.02) {
+                        debug_color = mix(debug_color, vec3<f32>(1.0, 0.3, 0.1), clamp((gradient - 0.02) * 20.0, 0.0, 1.0));
+                    }
                 }
             }
             case 7u: {

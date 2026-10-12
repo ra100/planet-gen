@@ -1,4 +1,5 @@
 use crate::gpu::GpuContext;
+use crate::plates::PlateGpu;
 use crate::terrain_compute::TectonicTerrain;
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
@@ -53,11 +54,49 @@ pub struct PreviewUniforms {
     pub surface_seed: u32,
 }
 
+/// Header of the Plates-view storage buffer; `PlateGpu` records follow it.
+/// Matches `PlateMotion` in preview_cubemap.wgsl.
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+struct PlateMotionHeader {
+    count: u32,
+    seed: u32,
+    warp_strength: f32,
+    max_speed: f32,
+}
+
+/// Serialize plates for the Plates debug view. `seed` and `warp_strength` must
+/// be the values the terrain pipeline used, so the overlay matches the terrain.
+fn plate_motion_bytes(plates: &[PlateGpu], seed: u32, warp_strength: f32) -> Vec<u8> {
+    let max_speed = plates
+        .iter()
+        .map(|plate| {
+            let [x, y, z] = plate.velocity;
+            (x * x + y * y + z * z).sqrt()
+        })
+        .fold(0.0_f32, f32::max);
+    let header = PlateMotionHeader {
+        count: plates.len() as u32,
+        seed,
+        warp_strength,
+        max_speed,
+    };
+    let mut bytes = bytemuck::bytes_of(&header).to_vec();
+    if plates.is_empty() {
+        // A runtime-sized array binding needs at least one element.
+        bytes.extend_from_slice(bytemuck::bytes_of(&PlateGpu::zeroed()));
+    } else {
+        bytes.extend_from_slice(bytemuck::cast_slice(plates));
+    }
+    bytes
+}
+
 pub struct PreviewRenderer {
     pipeline: wgpu::RenderPipeline,
     interactive_pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    plate_buffer: wgpu::Buffer,
     target: wgpu::Texture,
     target_view: wgpu::TextureView,
     pub size: u32,
@@ -169,6 +208,17 @@ impl PreviewRenderer {
                             },
                             count: None,
                         },
+                        // Plate motion for the Plates debug view
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 6,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
                     ],
                 });
 
@@ -228,12 +278,14 @@ impl PreviewRenderer {
         });
 
         let (target, target_view) = Self::create_target(gpu, DEFAULT_PREVIEW_SIZE);
+        let plate_buffer = Self::create_plate_buffer(gpu, &[], 0, 0.0);
 
         Self {
             pipeline,
             interactive_pipeline,
             bind_group_layout,
             sampler,
+            plate_buffer,
             target,
             target_view,
             size: DEFAULT_PREVIEW_SIZE,
@@ -259,6 +311,32 @@ impl PreviewRenderer {
         });
         let view = target.create_view(&Default::default());
         (target, view)
+    }
+
+    fn create_plate_buffer(
+        gpu: &GpuContext,
+        plates: &[PlateGpu],
+        seed: u32,
+        warp_strength: f32,
+    ) -> wgpu::Buffer {
+        gpu.device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("preview plate motion"),
+                contents: &plate_motion_bytes(plates, seed, warp_strength),
+                usage: wgpu::BufferUsages::STORAGE,
+            })
+    }
+
+    /// Plates shown by the Plates debug view: per-plate tint, boundary type and
+    /// Euler velocity arrows. Pass the seed and warp the terrain was built with.
+    pub fn upload_plates(
+        &mut self,
+        gpu: &GpuContext,
+        plates: &[PlateGpu],
+        seed: u32,
+        warp_strength: f32,
+    ) {
+        self.plate_buffer = Self::create_plate_buffer(gpu, plates, seed, warp_strength);
     }
 
     pub fn target_view(&self) -> &wgpu::TextureView {
@@ -418,6 +496,10 @@ impl PreviewRenderer {
                 wgpu::BindGroupEntry {
                     binding: 5,
                     resource: wgpu::BindingResource::TextureView(effective_geometry_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: self.plate_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -3347,6 +3429,83 @@ fn seam_oracle(@builtin(global_invocation_id) id: vec3<u32>) {
             non_background > total_pixels / 4,
             "preview should have visible sphere pixels ({non_background}/{total_pixels})"
         );
+    }
+
+    #[test]
+    fn plate_motion_bytes_match_shader_layout() {
+        assert_eq!(std::mem::size_of::<PlateMotionHeader>(), 16);
+        let empty = plate_motion_bytes(&[], 7, 0.5);
+        assert_eq!(empty.len(), 16 + 32, "empty upload keeps one array element");
+        assert_eq!(&empty[0..4], &0u32.to_ne_bytes());
+
+        let plates = [
+            PlateGpu {
+                center: [1.0, 0.0, 0.0],
+                plate_type: 1.0,
+                velocity: [0.0, 0.3, 0.4],
+                _pad: 0.0,
+            },
+            PlateGpu {
+                center: [0.0, 1.0, 0.0],
+                plate_type: 0.0,
+                velocity: [0.0, 0.0, 0.2],
+                _pad: 0.0,
+            },
+        ];
+        let bytes = plate_motion_bytes(&plates, 42, 1.0);
+        assert_eq!(bytes.len(), 16 + 2 * 32);
+        let header: PlateMotionHeader = bytemuck::pod_read_unaligned(&bytes[0..16]);
+        assert_eq!(header.count, 2);
+        assert_eq!(header.seed, 42);
+        assert_eq!(header.warp_strength, 1.0);
+        assert!((header.max_speed - 0.5).abs() < 1e-6);
+        assert_eq!(&bytes[16..], bytemuck::cast_slice::<PlateGpu, u8>(&plates));
+    }
+
+    #[test]
+    fn plates_view_draws_boundary_types_and_velocity_arrows() {
+        let gpu = GpuContext::new().unwrap();
+        let compute = TerrainComputePipeline::new(&gpu);
+        let plates = generate_plates(&PlateGenParams {
+            seed: 42,
+            mass_earth: 1.0,
+            ocean_fraction: 0.7,
+            tectonics_factor: 0.85,
+            continental_scale: 1.0,
+            num_plates_override: 0,
+            num_continents: 0,
+            continent_size_variety: 0.0,
+        });
+        let terrain = compute.generate(
+            &gpu, &plates, 64, 42, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0, 9.81, 0.85, 0.2, 1.0,
+        );
+        let mut renderer = PreviewRenderer::new(&gpu);
+        let cubemap_view = renderer.upload_terrain(&gpu, &terrain);
+        let settings = PreviewUniforms {
+            view_mode: 6,
+            ..uniforms()
+        };
+        let size = 256;
+        let count = |pixels: &[u8], test: fn(&[u8]) -> bool| {
+            pixels.chunks_exact(4).filter(|px| test(px)).count()
+        };
+        let convergent = |px: &[u8]| px[0] > 220 && px[1] < 150 && px[2] < 120;
+        let divergent = |px: &[u8]| px[0] < 150 && px[1] > 200 && px[2] > 220;
+        let arrow = |px: &[u8]| px[0] > 230 && px[1] > 230 && px[2] > 225;
+
+        let without = renderer.render(&gpu, &settings, &cubemap_view, None, None, size);
+        assert_eq!(count(&without, arrow), 0, "no arrows without plate data");
+
+        renderer.upload_plates(&gpu, &plates, 42, 1.0);
+        let with = renderer.render(&gpu, &settings, &cubemap_view, None, None, size);
+        let (c, d, a) = (
+            count(&with, convergent),
+            count(&with, divergent),
+            count(&with, arrow),
+        );
+        assert!(c > 20, "convergent boundaries drawn: {c}");
+        assert!(d > 20, "divergent boundaries drawn: {d}");
+        assert!(a > 100, "velocity arrows drawn: {a}");
     }
 
     #[test]
