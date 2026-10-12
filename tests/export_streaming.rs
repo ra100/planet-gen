@@ -1,7 +1,8 @@
 use planet_gen::{
     export::{
-        ExportConfig, ExportLayers, MAP_BATCH_SIZE, MAX_OWNED_LIVE_BYTES, TILE_SIZE,
-        TileCoordinator, crop_region_bytes, emission_stencil_radius, erosion_resolution_for_export,
+        CLOUD_DRIVER_FILES, ExportConfig, ExportLayers, MAP_BATCH_SIZE, MAX_OWNED_LIVE_BYTES,
+        TILE_SIZE, TileCoordinator, cloud_driver_dimensions, crop_region_bytes,
+        emission_stencil_radius, erosion_resolution_for_export,
         estimated_export_preflight_bytes_with_erosion, estimated_peak_streaming_bytes,
         map_batch_fits, map_tile_fits_device, map_tile_owned_bytes, max_map_stencil_radius,
         reconstruct_8k_from_meso_delta, run_export, select_tile_size,
@@ -315,6 +316,33 @@ fn streamed_layers_release_previous_face_buffers() {
         "emission.exr",
     ] {
         assert!(output.join(name).is_file(), "missing {name}");
+    }
+    let (driver_width, driver_height) = cloud_driver_dimensions(32);
+    for name in CLOUD_DRIVER_FILES {
+        let image = exr::prelude::read_first_rgba_layer_from_file(
+            output.join(name),
+            |resolution, _| vec![[0.0f32; 4]; resolution.width() * resolution.height()],
+            |pixels, position, (r, g, b, a): (f32, f32, f32, f32)| {
+                pixels[position.y() * position.width() + position.x()] = [r, g, b, a];
+            },
+        )
+        .unwrap_or_else(|error| panic!("{name} is not a readable RGBA EXR: {error}"));
+        let size = image.layer_data.size;
+        assert_eq!(
+            (size.width() as u32, size.height() as u32),
+            (driver_width, driver_height),
+            "{name} has the wrong size"
+        );
+        assert!(
+            image
+                .layer_data
+                .channel_data
+                .pixels
+                .iter()
+                .flatten()
+                .all(|value| value.is_finite()),
+            "{name} contains non-finite values"
+        );
     }
     let _ = std::fs::remove_dir_all(root);
 }
