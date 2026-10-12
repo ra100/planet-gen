@@ -24,9 +24,6 @@ TEXTURE_FILES = {
     "roughness": "roughness.exr",
     "height": "height.exr",
     "ao": "ao.exr",
-    "clouds": "clouds.exr",
-    "cloud_density": "cloud_density.exr",
-    "cloud_height": "cloud_height.exr",
     "emission": "emission.exr",
     "water_mask": "water_mask.exr",
 }
@@ -259,7 +256,7 @@ class PLANETGEN_OT_apply_to_selected(bpy.types.Operator):
 
 
 class PLANETGEN_OT_drive_clouds(bpy.types.Operator):
-    """Drive the selected cloud shell with Planet Gen's cloud, climate and wind maps"""
+    """Build billow clouds on the selected shell from Planet Gen's cloud density and wind maps"""
     bl_idname = "planetgen.drive_clouds"
     bl_label = "Drive Clouds"
     bl_options = {"REGISTER", "UNDO"}

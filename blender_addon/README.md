@@ -7,31 +7,37 @@ panel is under **View3D > Sidebar > Planet Gen**.
 ## Cloud bridge
 
 Planet Gen decides *where* clouds are from its weather solver (land, sea,
-temperature, pressure, wind, terrain lift). A 16K `clouds.exr` is the only way
-to get that placement sharp at close range. The bridge avoids it: Planet Gen
-exports small driver maps, and Blender generates the fine detail procedurally at
-render time with the multi-octave noise recipe from the v10 planet shader.
+temperature, pressure, wind, terrain lift). `cloud_density.exr` carries that
+placement, but at any export size it is too soft at close range. The bridge keeps
+the solver's clouds and adds detail at render time by *edge erosion*: inverted
+Worley billows (Schneider / Horizon Zero Dawn style) eat into thin areas and
+edges, while thick cores stay smooth. No pattern is laid over the cloud, so the
+detail always follows the solver's shapes.
 
-Every export with the **clouds** layer writes three extra maps next to
-`clouds.exr`. They come from the weather field, so their size depends only on
-the weather resolution (1536 x 768 for any export with faces of 384 px or more), never on the
-export size:
+Every export with the **clouds** layer writes:
 
-| File | R | G | B | A |
-|------|---|---|---|---|
-| `cloud_drivers.exr` | low mass | deep (convective) mass | high (cirrus) mass | coverage |
-| `climate_drivers.exr` | land fraction | thermal (0 at -25 C, 1 at 30 C) | cloud top / 20 km | continentality |
-| `wind_drivers.exr` | wind x | wind y | wind z | wind speed |
+| File | Content | Used by the bridge |
+|------|---------|--------------------|
+| `cloud_density.exr` | Y optical depth, export size | yes, the cloud |
+| `cloud_height.exr` | Y cloud top / 20 km, `height_km` | no (volumetric/PCO setups) |
+| `wind_drivers.exr` | RGB tangent wind (Y-up planet space), A speed, weather resolution | yes, streaks the detail |
 
-Wind is the tangent wind in Planet Gen's Y-up planet space. All three maps are
-equirectangular, sampled at pixel centres, with longitude 0 in the centre
-column.
+Opt-in under the clouds layer (off by default):
+
+| File | Content |
+|------|---------|
+| `clouds.exr` | Six-channel reconstruction (optical depth + geometry), large |
+| `cloud_drivers.exr` | R low, G deep (convective), B high (cirrus) mass, A coverage |
+| `climate_drivers.exr` | R land, G thermal (0 at -25 C, 1 at 30 C), B cloud top / 20 km, A continentality |
+
+Driver maps are equirectangular at weather resolution (1536 x 768 for faces of
+384 px or more), sampled at pixel centres, with longitude 0 in the centre column.
 
 ### Use
 
 1. **Import Planet** and pick the export folder.
 2. Select the cloud shell (a sphere slightly larger than the planet) and press
-   **Drive Clouds**. It builds the `PlanetGen Driven Clouds` material.
+   **Drive Clouds**. It builds the `PlanetGen Billow Clouds` material.
 3. Optionally select the planet and press **Aligned Surface** to put the
    exported albedo on it in the same frame, so clouds sit over the right land.
 
@@ -49,17 +55,19 @@ rebuilds the node groups, so every material using them picks up the change.
 
 | Input | Effect |
 |-------|--------|
-| W, Roughness, Distortion, Detail, Scale | The v10 detail noise, unchanged |
-| Drive Strength | 0 is the original v10 look exactly; 1 is fully Planet Gen placed |
-| Coverage Gain | Scales solver coverage. Set automatically so the 98th percentile of cloudy texels reads as full cover |
-| Fill Boost | How much dense coverage fills gaps in the detail, and sparse coverage thins it |
-| Background Cover | Share of the v10 procedural mask kept in clear regions |
-| Wind Streak | Stretches detail along the solver's wind |
-| Longitude Offset | Turns the drivers around the pole (in turns) if the surface is rotated |
+| Density Low / High | Contrast on the solver's optical depth: below Low is clear, above High full |
+| Scale | Base billow cell frequency (250 ~ 50 km cells on an Earth-size planet); six octaves down to 1/32 |
+| Erosion | How far billows eat into thin areas and edges; cores are kept |
+| Variety Scale | Planet-scale noise that varies Erosion 0.5-1.5x, so some systems are puffier |
+| Wisps | Fine FBM added to the billows |
+| Zonal Stretch | Compresses the detail along the pole axis; elongates billows east-west |
+| Wind Streak | Displaces the detail along the solver wind |
+| Opacity | `opacity = 1 - exp(-Opacity * density)` |
+| Longitude Offset | Turns the maps around the pole (in turns) if the surface is rotated |
 
-Cloud top height raises the bump strength where columns are tall. The sampler
-group (`PlanetGen Driver Sampler`) also exposes land, thermal, continentality
-and the individual cloud families for custom node work.
+The group also outputs the eroded `Density`. The sampler group
+(`PlanetGen Driver Sampler`) exposes density, wind and, when the opt-in maps
+were exported, the cloud families and climate fields for custom node work.
 
 ### Frame
 

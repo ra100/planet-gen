@@ -363,10 +363,12 @@ Diagnosis of the 8K export crash: not an app leak (measured VRAM delta ~350MB). 
 
 Planet Gen exports low-resolution cloud, climate and wind driver maps; the Blender add-on keeps the v10 shader's procedural cloud detail and takes placement from the drivers, so close-range clouds stay sharp without a 16K export.
 
-Plan: [docs/plans/2026-10-12-001-feat-blender-cloud-bridge-plan.md](docs/plans/2026-10-12-001-feat-blender-cloud-bridge-plan.md)
+Plan: [docs/plans/2026-10-12-001-feat-blender-cloud-bridge-plan.md](docs/plans/2026-10-12-001-feat-blender-cloud-bridge-plan.md), billow follow-up: [docs/plans/2026-10-13-001-feat-billow-cloud-bridge-plan.md](docs/plans/2026-10-13-001-feat-billow-cloud-bridge-plan.md)
 
 | Task | 内容 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
 | 13.1 | Driver map export (`cloud_drivers.wgsl`, three RGBA EXRs at weather resolution) | Streaming export test reads all three maps at expected size | - | cc:完了 [22601eb] |
 | 13.2 | Blender bridge (`cloud_bridge.py`, Drive Clouds / Aligned Surface operators, CLI) | Drive Strength 0 renders identical to v10 | 13.1 | cc:完了 [22601eb] |
+| 13.3 | Billow edge-erosion bridge: `cloud_density.exr` is the cloud, inverted Worley octaves + wisps erode edges only, wind-warped and zonally stretched; v10 recipe removed | Headless Risa render: same placement as the map, puffy edges, smooth cores | 13.2 | cc:WIP |
+| 13.4 | Unused cloud outputs opt-in: `clouds.exr` (`cloud_reconstruction`) and cloud/climate drivers (`cloud_drivers`) off by default; add-on no longer loads cloud EXRs on import | `cloud_maps_skip_reconstruction_unless_requested`; streaming tests green | - | cc:WIP |
 

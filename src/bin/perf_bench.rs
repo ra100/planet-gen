@@ -126,6 +126,8 @@ fn u2_8k_layers() -> ExportLayers {
         clouds: true,
         // U2-012: emission still requires the legacy full-equirect path.
         emission: false,
+        cloud_reconstruction: false,
+        cloud_drivers: false,
     }
 }
 
@@ -762,6 +764,8 @@ mod tests {
 
         let legacy_emission = ExportLayers {
             emission: true,
+            cloud_reconstruction: false,
+            cloud_drivers: false,
             ..layers
         };
         assert!(u2_8k_bounded_ledger(&limits, &legacy_emission).is_err());

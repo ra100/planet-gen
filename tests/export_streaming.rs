@@ -209,12 +209,21 @@ fn eight_k_all_layers_with_erosion() {
         "albedo.png",
         "ao.png",
         "water_mask.png",
-        "clouds.exr",
+        "cloud_density.exr",
+        "cloud_height.exr",
+        "wind_drivers.exr",
         "emission.exr",
     ] {
         assert!(
             std::fs::metadata(output.join(name)).unwrap().len() > 0,
             "missing {name}"
+        );
+    }
+    // Opt-in cloud outputs stay off by default.
+    for name in ["clouds.exr", "cloud_drivers.exr", "climate_drivers.exr"] {
+        assert!(
+            !output.join(name).exists(),
+            "{name} written without opting in"
         );
     }
     eprintln!(
@@ -285,7 +294,11 @@ fn streamed_layers_release_previous_face_buffers() {
         output_dir: root.clone(),
         planet_name: "streaming".into(),
         erosion_iterations: 0,
-        layers: ExportLayers::default(),
+        layers: ExportLayers {
+            cloud_reconstruction: true,
+            cloud_drivers: true,
+            ..ExportLayers::default()
+        },
         weather: WeatherSnapshot {
             seed: params.seed,
             ..WeatherSnapshot::default()

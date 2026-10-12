@@ -109,6 +109,8 @@ pub struct PlanetGenApp {
     export_emission: bool,
     export_water_mask: bool,
     export_normals: bool,
+    export_cloud_reconstruction: bool,
+    export_cloud_drivers: bool,
     export_handle: Option<ExportHandle>,
     export_status: String,
     export_progress: f32,
@@ -295,6 +297,8 @@ impl PlanetGenApp {
             export_emission: true,
             export_water_mask: false,
             export_normals: false,
+            export_cloud_reconstruction: false,
+            export_cloud_drivers: false,
             export_handle: None,
             export_status: String::new(),
             export_progress: 0.0,
@@ -740,6 +744,8 @@ impl PlanetGenApp {
                 water_mask: self.export_water_mask,
                 clouds: self.export_clouds,
                 emission: self.export_emission,
+                cloud_reconstruction: self.export_cloud_reconstruction,
+                cloud_drivers: self.export_cloud_drivers,
             },
             weather,
             night_lights: self.night_lights,
@@ -2467,9 +2473,21 @@ impl PlanetGenApp {
                                 });
                             }
                         }
+                        if self.export_clouds {
+                            ui.indent("cloud_extras", |ui| {
+                                ui.checkbox(
+                                    &mut self.export_cloud_reconstruction,
+                                    RichText::new("Reconstruction (clouds.exr)").color(theme::TEXT),
+                                );
+                                ui.checkbox(
+                                    &mut self.export_cloud_drivers,
+                                    RichText::new("Cloud + climate drivers").color(theme::TEXT),
+                                );
+                            });
+                        }
                         widgets::dim(
                             ui,
-                            "Clouds export: cloud_density.exr (optical depth), cloud_height.exr (0–1 + km), and clouds.exr (reconstruction).",
+                            "Clouds export: cloud_density.exr (optical depth), cloud_height.exr (0–1 + km) and wind_drivers.exr; clouds.exr and the cloud/climate drivers are optional.",
                         );
 
                         let is_exporting = self.export_handle.is_some();
@@ -3019,6 +3037,8 @@ mod tests {
                 water_mask: false,
                 clouds: false,
                 emission: false,
+                cloud_reconstruction: false,
+                cloud_drivers: false,
             },
             weather: WeatherSnapshot::default(),
             night_lights: 0.0,

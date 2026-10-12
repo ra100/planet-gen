@@ -139,6 +139,8 @@ fn main() {
                 water_mask: false,
                 clouds: false,
                 emission: false,
+                cloud_reconstruction: false,
+                cloud_drivers: false,
             },
             weather: WeatherSnapshot {
                 season: 0.5,

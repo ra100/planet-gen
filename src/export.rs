@@ -117,6 +117,14 @@ pub struct ExportLayers {
     pub water_mask: bool,
     pub clouds: bool,
     pub emission: bool,
+    /// `clouds.exr`, the six-channel reconstruction export (optical depth plus
+    /// geometry). Large and only needed to rebuild the solver's clouds elsewhere;
+    /// `cloud_density.exr`, `cloud_height.exr` and `wind_drivers.exr` are written
+    /// with `clouds` regardless.
+    pub cloud_reconstruction: bool,
+    /// `cloud_drivers.exr` and `climate_drivers.exr`, the per-family cloud mass
+    /// and climate fields. The Blender bridge only needs `wind_drivers.exr`.
+    pub cloud_drivers: bool,
 }
 
 impl Default for ExportLayers {
@@ -130,6 +138,8 @@ impl Default for ExportLayers {
             water_mask: true,
             clouds: true,
             emission: true,
+            cloud_reconstruction: false,
+            cloud_drivers: false,
         }
     }
 }
@@ -2895,11 +2905,29 @@ fn export_staged_equirect_exr(
     Ok(metrics)
 }
 
+#[cfg(test)]
 fn export_staged_cloud_exr(
     stage: &ExportStage,
     path: &Path,
     width: u32,
     height: u32,
+    cancel: &AtomicBool,
+    checkpoints: &mut (
+             dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String> + '_
+         ),
+) -> Result<StagedIoMetrics, Box<StagedExportFailure>> {
+    export_staged_cloud_maps(stage, path, width, height, true, cancel, checkpoints)
+}
+
+/// Writes `cloud_density.exr` and `cloud_height.exr` next to `path`, and `path`
+/// itself (`clouds.exr`, the reconstruction channels) only when `reconstruction`.
+#[allow(clippy::too_many_arguments)]
+fn export_staged_cloud_maps(
+    stage: &ExportStage,
+    path: &Path,
+    width: u32,
+    height: u32,
+    reconstruction: bool,
     cancel: &AtomicBool,
     checkpoints: &mut (
              dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String> + '_
@@ -2922,16 +2950,20 @@ fn export_staged_cloud_exr(
     )?));
     let density_row = RefCell::new(vec![0.0; width as usize]);
     let height_row = RefCell::new(vec![0.0; width as usize * CLOUD_HEIGHT_EXR_CHANNELS.len()]);
-    let writer = RefCell::new(Some(
-        AtomicScanlineExrWriter::create(path, width, height, &CLOUD_EXR_CHANNELS).map_err(
-            |message| {
-                Box::new(StagedExportFailure {
-                    message,
-                    metrics: StagedIoMetrics::default(),
-                })
-            },
-        )?,
-    ));
+    let writer = RefCell::new(if reconstruction {
+        Some(
+            AtomicScanlineExrWriter::create(path, width, height, &CLOUD_EXR_CHANNELS).map_err(
+                |message| {
+                    Box::new(StagedExportFailure {
+                        message,
+                        metrics: StagedIoMetrics::default(),
+                    })
+                },
+            )?,
+        )
+    } else {
+        None
+    });
     let finish_elapsed = RefCell::new(Duration::ZERO);
     let mut metrics = consume_staged_equirect_rows_with_worker_cap(
         "clouds",
@@ -2973,6 +3005,9 @@ fn export_staged_cloud_exr(
                 .as_mut()
                 .ok_or_else(|| "height EXR writer is already finalized".to_owned())?
                 .write_scanline(&altitude)?;
+            if !reconstruction {
+                return Ok(());
+            }
             writer
                 .borrow_mut()
                 .as_mut()
@@ -2991,26 +3026,39 @@ fn export_staged_cloud_exr(
                 .take()
                 .ok_or_else(|| "height EXR writer is already finalized".to_owned())?
                 .finish()?;
-            let writer = writer
-                .borrow_mut()
-                .take()
-                .ok_or_else(|| "EXR writer is already finalized".to_owned())?;
-            let result = writer.finish();
+            let result = if reconstruction {
+                writer
+                    .borrow_mut()
+                    .take()
+                    .ok_or_else(|| "EXR writer is already finalized".to_owned())?
+                    .finish()
+            } else {
+                Ok(())
+            };
             *finish_elapsed.borrow_mut() = started.elapsed();
             result
         },
     )
     .map_err(Box::new)?;
     metrics.output_write_bytes += u64::from(width) * u64::from(height) * 3 * 4;
+    if !reconstruction {
+        // The row consumer counted the reconstruction channels it no longer writes.
+        metrics.output_write_bytes -=
+            u64::from(width) * u64::from(height) * CLOUD_EXR_CHANNELS.len() as u64 * 4;
+    }
     metrics.output_finish_ms = finish_elapsed.borrow().as_secs_f64() * 1000.0;
-    metrics.published_file_bytes = std::fs::metadata(path)
-        .map_err(|error| {
-            Box::new(StagedExportFailure {
-                message: format!("published EXR metadata failed: {error}"),
-                metrics,
-            })
-        })?
-        .len();
+    metrics.published_file_bytes = if reconstruction {
+        std::fs::metadata(path)
+            .map_err(|error| {
+                Box::new(StagedExportFailure {
+                    message: format!("published EXR metadata failed: {error}"),
+                    metrics,
+                })
+            })?
+            .len()
+    } else {
+        0
+    };
     for path in [&density_path, &height_path] {
         metrics.published_file_bytes += std::fs::metadata(path)
             .map_err(|error| {
@@ -3025,6 +3073,8 @@ fn export_staged_cloud_exr(
 }
 
 /// Driver maps written next to `clouds.exr`, each RGBA in one equirectangular frame.
+/// `wind_drivers.exr` is always written with the clouds layer; the other two only
+/// with `ExportLayers::cloud_drivers`.
 pub const CLOUD_DRIVER_FILES: [&str; 3] = [
     "cloud_drivers.exr",
     "climate_drivers.exr",
@@ -3050,17 +3100,24 @@ fn export_cloud_drivers(
     dynamics: &crate::terrain_compute::DynamicsTextures,
     weather: &WeatherTextures,
     snapshot: WeatherSnapshot,
+    all_drivers: bool,
     cancel: &AtomicBool,
 ) -> Result<(), String> {
+    // Indices into CLOUD_DRIVER_FILES that get written; the pass computes all three.
+    let selected: Vec<usize> = if all_drivers {
+        (0..CLOUD_DRIVER_FILES.len()).collect()
+    } else {
+        vec![CLOUD_DRIVER_FILES.len() - 1]
+    };
     let (width, height) = cloud_driver_dimensions(weather.resolution);
     let (_height_texture, height_view) = create_cloud_export_height_texture(gpu, terrain)?;
     let pipeline = CloudExportPipeline::drivers(gpu);
     let uniforms = cloud_export_uniforms(snapshot);
-    let mut writers = CLOUD_DRIVER_FILES
+    let mut writers = selected
         .iter()
-        .map(|name| {
+        .map(|&index| {
             AtomicScanlineExrWriter::create(
-                &output_dir.join(name),
+                &output_dir.join(CLOUD_DRIVER_FILES[index]),
                 width,
                 height,
                 &["R", "G", "B", "A"],
@@ -3103,8 +3160,8 @@ fn export_cloud_drivers(
                     row[x * 4..x * 4 + 4].copy_from_slice(rgba);
                 }
             }
-            for (writer, row) in writers.iter_mut().zip(&rows) {
-                writer.write_scanline(row)?;
+            for (writer, &index) in writers.iter_mut().zip(&selected) {
+                writer.write_scanline(&rows[index])?;
             }
         }
         band_start += band_height;
@@ -4032,11 +4089,12 @@ pub fn run_export_with_timings_and_checkpoints(
             cloud_tiles_started.elapsed().as_secs_f64() * 1000.0;
         merge_staged_export(
             timings,
-            export_staged_cloud_exr(
+            export_staged_cloud_maps(
                 &stage,
                 &planet_dir.join("clouds.exr"),
                 eq_w,
                 eq_ht,
+                layers.cloud_reconstruction,
                 cancel,
                 checkpoints,
             )
@@ -4050,6 +4108,7 @@ pub fn run_export_with_timings_and_checkpoints(
             &dynamics,
             &weather,
             snapshot,
+            layers.cloud_drivers,
             cancel,
         )?;
     }
@@ -4406,6 +4465,47 @@ mod tests {
             assert!(!root.join(name).exists());
             assert!(!root.join(name).with_extension("exr.part").exists());
         }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cloud_maps_skip_reconstruction_unless_requested() {
+        let defaults = ExportLayers::default();
+        assert!(defaults.clouds && !defaults.cloud_reconstruction && !defaults.cloud_drivers);
+        let root =
+            std::env::temp_dir().join(format!("planet-gen-cloud-maps-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let stage = ExportStage::create(
+            &root,
+            StageMetadata {
+                face_resolution: 4,
+                components: 6,
+                halo: 0,
+            },
+        )
+        .unwrap();
+        let row = [2.5, 0.5, 2.0, 6.0, 0.2, 0.1];
+        let data: Vec<_> = (0..16).flat_map(|_| row).collect();
+        for face in 0..6 {
+            stage.write_tile(face, 0, 0, 4, 4, &data).unwrap();
+        }
+        let metrics = export_staged_cloud_maps(
+            &stage,
+            &root.join("clouds.exr"),
+            8,
+            4,
+            false,
+            &AtomicBool::new(false),
+            &mut discard_layer_materialization_checkpoint,
+        )
+        .unwrap();
+        assert!(!root.join("clouds.exr").exists());
+        let total_bytes: u64 = ["cloud_density.exr", "cloud_height.exr"]
+            .iter()
+            .map(|name| std::fs::metadata(root.join(name)).unwrap().len())
+            .sum();
+        assert_eq!(metrics.published_file_bytes, total_bytes);
+        assert_eq!(metrics.output_write_bytes, 8 * 4 * 3 * 4);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -5859,6 +5959,8 @@ mod tests {
             water_mask: true,
             clouds: true,
             emission: false,
+            cloud_reconstruction: false,
+            cloud_drivers: false,
         };
         let staged = estimated_export_preflight_bytes(8192, &layers).unwrap();
         let with_erosion =
@@ -6019,6 +6121,8 @@ mod tests {
             water_mask: false,
             clouds: false,
             emission: false,
+            cloud_reconstruction: false,
+            cloud_drivers: false,
         };
         assert!(staged < MAX_OWNED_LIVE_BYTES);
         assert!(staged < full);
