@@ -21,7 +21,9 @@ fn add_imath_include(build: &mut cc::Build, include_dir: &str) {
 /// `lib_dir`. OpenEXR's CMake appends a version suffix to output names by
 /// default (`OPENEXR_LIB_SUFFIX`), so vcpkg installs e.g. `OpenEXR-3_4.lib`
 /// instead of `OpenEXR.lib`; plain `-lOpenEXR` would not find it. An exact
-/// name wins over a suffixed one when both are present.
+/// name wins over a suffixed one when both are present. When several suffixed
+/// versions sit side by side (a cached vcpkg tree after a port upgrade), the
+/// newest wins, since it matches the installed headers.
 fn link_name_for(base: &str, lib_dir: &str) -> String {
     let mut suffixed: Option<String> = None;
     if let Ok(entries) = std::fs::read_dir(lib_dir) {
@@ -39,16 +41,25 @@ fn link_name_for(base: &str, lib_dir: &str) -> String {
             if stem.eq_ignore_ascii_case(base) {
                 return base.to_string();
             }
-            if suffixed.is_none()
-                && let Some(rest) = stem.strip_prefix(base)
+            if let Some(rest) = stem.strip_prefix(base)
                 && rest.starts_with('-')
                 && !rest[1..].is_empty()
+                && suffixed
+                    .as_deref()
+                    .is_none_or(|best| version_key(&stem) > version_key(best))
             {
                 suffixed = Some(stem);
             }
         }
     }
     suffixed.unwrap_or_else(|| base.to_string())
+}
+
+/// Numeric version components of a suffixed stem: `OpenEXR-3_10` -> [3, 10].
+fn version_key(stem: &str) -> Vec<u32> {
+    stem.rsplit_once('-')
+        .map(|(_, v)| v.split('_').filter_map(|p| p.parse().ok()).collect())
+        .unwrap_or_default()
 }
 
 fn main() {
