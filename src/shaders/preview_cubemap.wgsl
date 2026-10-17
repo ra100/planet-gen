@@ -36,7 +36,7 @@ struct Uniforms {
     cloud_advection: f32,
     rotation_rate: f32,    // relative to Earth (1.0 = 24h day)
     atm_pressure: f32,     // atmospheric pressure in bar (1.0 = Earth)
-    _pad4: f32,
+    cloud_detail: f32,     // sub-texel cloud structure, 0 = solver field only
     lava_glow: f32,        // tectonic emission intensity (0.0-1.0)
     ring_inner: f32,       // ring inner radius (planet radii, 0 = disabled)
     ring_outer: f32,       // ring outer radius
@@ -518,6 +518,208 @@ fn ray_march_atmosphere(ndc: vec2<f32>, z_start: f32, z_end: f32, sun_dir: vec3<
     return result;
 }
 
+// ---- Sub-texel cloud detail (preview only) ----
+// The weather field resolves clouds at one texel (~26 km on Earth at 384)
+// and its normalized condensate renders as thin gray veils. Real liquid
+// clouds are optically thick (tau ~ 10-100) and cover only part of such an
+// area: thin columns are broken cumulus, thick ones closed decks. Detail
+// maps the solver's column optical depth to a physical one, shades it with
+// two-stream reflectance and, like the Blender bridge, lets multi-octave
+// Worley billows erode thin columns and margins while thick cores keep the
+// solver's own structure. Ice keeps the solver's swirls; real sheets gain
+// depth. Detail only scales existing condensate: empty weather stays empty,
+// the pattern never depends on the cloud seed, and `cloud_detail` = 0
+// renders the solver field unchanged. Export never uses this path.
+const CLOUD_DETAIL_CELL_TEXELS: f32 = 4.0;
+// Column optical depth below which liquid stays clear, and the depth above
+// which billows no longer erode it (the bridge's 0-1 thickness window).
+const CLOUD_CONTRAST_LOW: f32 = 0.02;
+const CLOUD_CONTRAST_HIGH: f32 = 0.35;
+// Physical optical depth per unit of solver depth above the clear level: a
+// 0.35 solver column becomes tau ~16, a typical stratocumulus deck.
+const CLOUD_DEPTH_GAIN: f32 = 50.0;
+// Two-stream diffusion with asymmetry g = 0.85: a non-absorbing layer of
+// optical depth tau reflects R = a tau / (1 + a tau), a = (1 - g) / 2, and
+// diffusely transmits 1 - R. The compositor's Beer-Lambert segment then needs
+// tau' = ln(1 + a tau), so thin cloud stays translucent and brightness keeps
+// following the solver's condensate instead of clipping to flat white.
+const CLOUD_DIFFUSION: f32 = 0.075;
+// Largest share of a column's thickness that billows can erode.
+const CLOUD_EROSION: f32 = 0.35;
+// Inverted Worley F1 mean for unit jitter, and the p5-p95 range of the
+// summed billows (shared with the Blender bridge), mapped to 0-1.
+const CLOUD_BILLOW_MEAN: f32 = 0.48;
+const CLOUD_BILLOW_RANGE: vec2<f32> = vec2<f32>(0.31, 0.65);
+// Ice column optical depth over which a real cirrus sheet or anvil forms,
+// and its depth gain; fainter ice keeps the solver's value.
+const CLOUD_ICE_SHEET: vec2<f32> = vec2<f32>(0.004, 0.04);
+const CLOUD_ICE_GAIN: f32 = 1.6;
+// Skylight on cloud tops relative to the direct beam's irradiance scale.
+const CLOUD_SKYLIGHT: f32 = 0.16;
+
+fn cloud_detail_amount() -> f32 {
+    return clamp(uniforms.cloud_detail, 0.0, 1.0);
+}
+
+fn cloud_pcg3d(input: vec3<u32>) -> vec3<u32> {
+    var v = input * 1664525u + 1013904223u;
+    v.x += v.y * v.z;
+    v.y += v.z * v.x;
+    v.z += v.x * v.y;
+    v ^= v >> vec3<u32>(16u);
+    v.x += v.y * v.z;
+    v.y += v.z * v.x;
+    v.z += v.x * v.y;
+    return v;
+}
+
+fn cloud_worley_f1(p: vec3<f32>, seed: u32) -> f32 {
+    let cell = floor(p);
+    let local = p - cell;
+    let base = vec3<i32>(cell);
+    var best = 9.0;
+    for (var z = -1; z <= 1; z++) {
+        for (var y = -1; y <= 1; y++) {
+            for (var x = -1; x <= 1; x++) {
+                let offset = vec3<i32>(x, y, z);
+                let h = cloud_pcg3d(bitcast<vec3<u32>>(base + offset) ^ vec3<u32>(seed, seed * 3u, seed * 7u));
+                let jitter = vec3<f32>(h & vec3<u32>(0xffffu)) / 65535.0;
+                let d = vec3<f32>(offset) + jitter - local;
+                best = min(best, dot(d, d));
+            }
+        }
+    }
+    return sqrt(best);
+}
+
+// Share of an octave the pixel resolves. Unresolved octaves fall back to
+// their mean, so distant clouds erode evenly instead of sparkling.
+fn cloud_octave_resolution(footprint_cells: f32) -> f32 {
+    return 1.0 - smooth_step(0.25, 0.75, footprint_cells);
+}
+
+// Billows: inverted Worley F1 octaves plus faint zero-mean wisps, 0-1.
+fn cloud_billow(p: vec3<f32>, footprint_cells: f32) -> f32 {
+    var total = 0.0;
+    var frequency = 1.0;
+    let weights = array<f32, 5>(0.5, 0.24, 0.13, 0.07, 0.04);
+    for (var k = 0u; k < 5u; k++) {
+        let resolved = cloud_octave_resolution(footprint_cells * frequency);
+        var value = CLOUD_BILLOW_MEAN;
+        if (resolved > 0.0) {
+            let q = p * frequency + vec3<f32>(f32(k) * 17.31, f32(k) * 7.13, f32(k) * 3.37);
+            value = mix(CLOUD_BILLOW_MEAN, 1.0 - cloud_worley_f1(q, 0x9e3779b9u + k * 131u), resolved);
+        }
+        total += weights[k] * value;
+        frequency *= 2.0;
+    }
+    // The bridge's finest (32x) octave, always below the preview footprint.
+    total += 0.02 * CLOUD_BILLOW_MEAN;
+    let wisp_resolved = cloud_octave_resolution(footprint_cells * 12.0);
+    if (wisp_resolved > 0.0) {
+        let q = p * 12.0 + vec3<f32>(11.0);
+        total += 0.04 * wisp_resolved * (0.65 * snoise(q) + 0.35 * snoise(q * 2.03));
+    }
+    return clamp((total - CLOUD_BILLOW_RANGE.x) / (CLOUD_BILLOW_RANGE.y - CLOUD_BILLOW_RANGE.x), 0.0, 1.0);
+}
+
+// Compress the domain along `axis` so features elongate along it.
+fn cloud_stretch(p: vec3<f32>, axis: vec3<f32>, stretch: f32) -> vec3<f32> {
+    return p + axis * dot(p, axis) * (1.0 / stretch - 1.0);
+}
+
+fn cloud_detail_texel_angle() -> f32 {
+    return 1.5707963 / f32(textureDimensions(weather_mass_tex).x);
+}
+
+// Detail noise for one pixel. It is evaluated once per ray: the columns one
+// ray crosses differ by far less than a billow cell except near the limb,
+// where the octaves are unresolved anyway.
+struct CloudDetailNoise {
+    // World-space weather lookup offset (up to ~0.7 texel) that hides the
+    // bilinear texel lattice.
+    warp: vec3<f32>,
+    billow: f32,
+    // Regional scale on how far billows eat in.
+    variety: f32,
+}
+
+fn cloud_detail_noise(direction: vec3<f32>, angular_pixel_footprint: f32) -> CloudDetailNoise {
+    let texel = cloud_detail_texel_angle();
+    let basis = tangent_basis(direction);
+    let p = direction / (texel * 6.0);
+    let offset = vec2<f32>(snoise(p + vec3<f32>(5.1)), snoise(p + vec3<f32>(-9.7)));
+    let warp = (basis[0] * offset.x + basis[1] * offset.y) * texel * 0.7;
+
+    let cell_angle = texel * CLOUD_DETAIL_CELL_TEXELS;
+    var domain = direction / cell_angle;
+    if (uniforms.cloud_advection > 0.5) {
+        let wind = textureSampleLevel(cloud_tex, height_sampler, direction, 0.0).xyz;
+        let tangent = wind - direction * dot(wind, direction);
+        let speed = length(tangent);
+        // Faster flow draws billows out into streets along the wind.
+        if (speed > 1.0e-4) {
+            domain = cloud_stretch(domain, tangent / speed, 1.0 + 1.6 * smooth_step(0.1, 0.8, speed));
+        }
+    }
+    let billow = cloud_billow(domain, angular_pixel_footprint / cell_angle);
+    let q = direction * 2.5 + vec3<f32>(73.0);
+    let variety = clamp(1.0 + 1.1 * (0.65 * snoise(q) + 0.35 * snoise(q * 2.03)), 0.4, 1.6);
+    return CloudDetailNoise(warp, billow, variety);
+}
+
+// Per-family optical depth multipliers (low, deep, high) for one column.
+fn cloud_detail_multipliers(noise: CloudDetailNoise, mass: vec4<f32>) -> vec3<f32> {
+    var multipliers = vec3<f32>(1.0);
+    let liquid_depth = (mass.r * LOW_OPTICAL_WEIGHT * 0.90 + mass.g * 1.65) * CLOUD_LIGHT_EXTINCTION;
+    if (liquid_depth > 0.0) {
+        let thickness = clamp(
+            (liquid_depth - CLOUD_CONTRAST_LOW) / (CLOUD_CONTRAST_HIGH - CLOUD_CONTRAST_LOW), 0.0, 1.0,
+        );
+        let solid = 1.0 - exp(-3.0 * thickness);
+        let erosion = CLOUD_EROSION * noise.variety * (1.0 - noise.billow);
+        let kept = clamp((solid - erosion) / (1.0 - erosion), 0.0, 1.0) / max(solid, 1.0e-3);
+        let physical_depth = CLOUD_DEPTH_GAIN * max(liquid_depth - CLOUD_CONTRAST_LOW, 0.0) * kept;
+        let render_depth = log(1.0 + CLOUD_DIFFUSION * physical_depth);
+        multipliers = vec3<f32>(vec2<f32>(render_depth / liquid_depth), 1.0);
+    }
+    let ice_depth = mass.b * 0.28 * 0.32 * CLOUD_LIGHT_EXTINCTION;
+    multipliers.z = mix(1.0, CLOUD_ICE_GAIN, smooth_step(CLOUD_ICE_SHEET.x, CLOUD_ICE_SHEET.y, ice_depth));
+    return mix(vec3<f32>(1.0), multipliers, cloud_detail_amount());
+}
+
+// Surface shadow of the detailed clouds. The smooth solver shadow remains
+// the `cloud_detail` = 0 result; detail casts each column's own billows.
+fn cloud_detail_surface_shadow(
+    world_direction: vec3<f32>, sun_dir: vec3<f32>, radius_km: f32, angular_pixel_footprint: f32,
+) -> f32 {
+    let solver_shadow = cloud_surface_shadow(world_direction, sun_dir, radius_km, angular_pixel_footprint);
+    let amount = cloud_detail_amount();
+    if (amount <= 0.0) { return solver_shadow; }
+    let direction = normalize(world_direction);
+    let local_mass = sample_weather_cube(weather_mass_tex, direction);
+    let weight = local_mass.r + local_mass.g + local_mass.b;
+    var height_km = 1.0;
+    if (weight > 0.0) {
+        let g = sample_weather_cube(weather_geometry_tex, direction);
+        let deep_base = mix(g.r, g.g, 0.28);
+        height_km = (local_mass.r * (g.r + g.g) * 0.5 + local_mass.g * (deep_base + max(g.b, deep_base + 0.5)) * 0.5
+            + local_mass.b * (max(g.b, g.a - 3.0) + g.a) * 0.5) / weight;
+    }
+    // The column that casts this shadow, as in cloud_surface_shadow.
+    let center = normalize(direction + sun_dir * cloud_surface_shadow_offset(height_km, radius_km));
+    let noise = cloud_detail_noise(center, angular_pixel_footprint);
+    let lookup = normalize(center + noise.warp * amount);
+    let mass = sample_weather_cube(weather_mass_tex, lookup);
+    let detail = cloud_detail_multipliers(noise, mass);
+    let depth = (mass.r * LOW_OPTICAL_WEIGHT * 0.90 * detail.x + mass.g * 1.65 * detail.y
+        + mass.b * 0.28 * 0.32 * detail.z) * CLOUD_LIGHT_EXTINCTION;
+    let shadow_scale = clamp(uniforms.cloud_coverage, 0.0, 1.0) * clamp(uniforms.cloud_opacity, 0.0, 1.0);
+    // Slant path through the layer toward the sun.
+    let slant = 1.0 / max(dot(direction, sun_dir), 0.15);
+    return mix(solver_shadow, exp(-depth * shadow_scale * slant), amount);
+}
+
 fn ray_march_clouds(
     ndc: vec2<f32>,
     z_start: f32,
@@ -532,6 +734,8 @@ fn ray_march_clouds(
     let sun_world = normalize((uniforms.rotation * vec4<f32>(sun_dir, 0.0)).xyz);
     var transmittance = vec3<f32>(1.0);
     var in_scatter = vec3<f32>(0.0);
+    let detail_amount = cloud_detail_amount();
+    var detail_noise = CloudDetailNoise(vec3<f32>(0.0), 1.0, 0.0);
 
     for (var i = 0u; i < CLOUD_RAY_SAMPLES; i++) {
         let segment_start = vec3<f32>(ndc, z_start - f32(i) * step_len);
@@ -541,9 +745,24 @@ fn ray_march_clouds(
         let altitude_km = max((length(pos) - 1.0) * radius_km, 0.0);
         let direction = normalize(pos);
         let world = (uniforms.rotation * vec4<f32>(direction, 0.0)).xyz;
-        let sample = weather_cloud_layers_land_segment(
-            world, altitude_km, segment_start, segment_end, radius_km, angular_pixel_footprint,
+        var lookup = world;
+        if (detail_amount > 0.0) {
+            if (i == 0u) { detail_noise = cloud_detail_noise(world, angular_pixel_footprint); }
+            lookup = normalize(world + detail_noise.warp * detail_amount);
+        }
+        var sample = weather_cloud_layers_land_segment(
+            lookup, altitude_km, segment_start, segment_end, radius_km, angular_pixel_footprint,
         );
+        if (detail_amount > 0.0) {
+            let detail = cloud_detail_multipliers(detail_noise, sample.mass);
+            sample.layers.low *= detail.x;
+            sample.layers.deep *= detail.y;
+            sample.layers.high *= detail.z;
+            // The sun path sees the same eroded column, so puffs shade themselves.
+            sample.low_multiplier *= detail.x;
+            sample.deep_multiplier *= detail.y;
+            sample.high_multiplier *= detail.z;
+        }
         let layers = sample.layers;
         let extinction = (layers.low * 0.90 + layers.deep * 1.65 + layers.high * 0.32) * display_scale;
         // Density diagnostics measure condensate, not air extinction. Sharing
@@ -597,10 +816,14 @@ fn ray_march_clouds(
             + 0.30 * (1.0 - light_transmittance);
         let direct_energy = sun_facing * (light_transmittance * (0.8 + 0.2 * min(phase, 2.5))
             + multiple_scatter) * (SUN_IRRADIANCE / 1.36);
+        // Skylight: cloud tops also see the blue sky dome, which lifts shaded
+        // sides and offsets the reddened direct beam (detail only).
+        let sky_light = vec3<f32>(0.42, 0.58, 1.0) * star * sun_facing * CLOUD_SKYLIGHT
+            * clamp(uniforms.atmosphere_density, 0.0, 1.5) * cloud_detail_amount() * (SUN_IRRADIANCE / 1.36);
         let night_ambient = vec3<f32>(0.0015, 0.0020, 0.0035);
-        let low_color = night_ambient + vec3<f32>(1.0, 1.0, 0.99) * star * sun_transmit * direct_energy * 1.08;
-        let deep_color = night_ambient * 0.55 + vec3<f32>(0.97, 0.98, 1.0) * star * sun_transmit * direct_energy * 1.0;
-        let high_color = night_ambient * 1.3 + vec3<f32>(0.92, 0.96, 1.0) * star * sun_transmit * direct_energy * 0.85;
+        let low_color = night_ambient + sky_light + vec3<f32>(1.0, 1.0, 0.99) * star * sun_transmit * direct_energy * 1.08;
+        let deep_color = night_ambient * 0.55 + sky_light + vec3<f32>(0.97, 0.98, 1.0) * star * sun_transmit * direct_energy * 1.0;
+        let high_color = night_ambient * 1.3 + sky_light + vec3<f32>(0.92, 0.96, 1.0) * star * sun_transmit * direct_energy * 0.85;
         let cloud_color = (low_color * layers.low * 0.90
             + deep_color * layers.deep * 1.65
             + high_color * layers.high * 0.32) / max(extinction / display_scale, 0.0001);
@@ -1578,7 +1801,7 @@ fn shade_planet(in: VertexOutput) -> vec4<f32> {
     // Cloud shadow on surface (independent from visible cloud self-shading)
     if (uniforms.show_cloud_shadows > 0.5) {
         let sun_world = normalize((uniforms.rotation * vec4<f32>(sun_dir, 0.0)).xyz);
-        let surface_shadow = cloud_surface_shadow(rotated, sun_world, max(uniforms.planet_radius_km, 1.0), angular_pixel_footprint);
+        let surface_shadow = cloud_detail_surface_shadow(rotated, sun_world, max(uniforms.planet_radius_km, 1.0), angular_pixel_footprint);
         lit_color *= mix(1.0, surface_shadow, 0.85);
     }
 
