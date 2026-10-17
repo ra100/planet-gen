@@ -15,17 +15,18 @@ use crate::terrain_compute::TectonicTerrain;
 /// Face resolution of the occlusion field (about 0.18° per texel).
 pub const BROAD_AO_RESOLUTION: u32 = 512;
 /// Terrain level of each scale, as a divisor of the field resolution. Rings
-/// sit at about 8, 16 and 32 field texels (roughly 1.5°–6° of arc), so the AO
-/// follows whole hills and basins; bumps smaller than the finest level never
+/// sit at about 2 to 32 field texels (roughly 0.4°–6° of arc). The fine
+/// scales keep some terrain texture; the broad ones carry most of the weight
+/// so whole hills and basins read. Bumps smaller than a field texel never
 /// reach it.
-const LEVEL_DIVISORS: [u32; 3] = [4, 8, 16];
-const SCALE_WEIGHTS: [f32; 3] = [0.3, 0.4, 0.3];
+const LEVEL_DIVISORS: [u32; 5] = [1, 2, 4, 8, 16];
+const SCALE_WEIGHTS: [f32; 5] = [0.1, 0.15, 0.2, 0.25, 0.3];
 /// Ring radius in texels of each scale's own level.
 const RING_RADIUS_TEXELS: f32 = 2.0;
 const RING_DIRECTIONS: usize = 16;
 /// Height (terrain units) a ring must rise above the centre for that scale to
 /// count as fully occluded. Wider rings span more relief, so they need more.
-const OCCLUSION_DEPTH: [f32; 3] = [0.05, 0.08, 0.11];
+const OCCLUSION_DEPTH: [f32; 5] = [0.03, 0.04, 0.05, 0.08, 0.11];
 /// AO value of a point fully enclosed at every scale.
 const MIN_AO: f32 = 0.25;
 const MIN_LEVEL_RESOLUTION: u32 = 4;
