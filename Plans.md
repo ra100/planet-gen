@@ -385,7 +385,7 @@ Requirements: [docs/brainstorms/2026-10-17-preview-cloud-detail-requirements.md]
 
 | Task | 内容 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
-| 14.1 | Physical optical depth (`50 * (d - 0.02)`, two-stream `ln(1 + 0.075 tau)`) and bridge billow erosion per column in `preview_cubemap.wgsl`; sun path uses the same column | Thin uniform veil breaks into cloud and clear sky; thick decks keep no holes and under 6% ripple | 13.3 | cc:TODO |
-| 14.2 | Sub-texel lookup warp, footprint octave filtering, wind-aligned billow stretch, ice sheet gain without noise | Seeds 42/73/137 captures: no texel blocks or shimmer, storm and cirrus swirls kept | 14.1 | cc:TODO |
-| 14.3 | Skylight on cloud tops; surface shadows from the detailed column | Clear sky gets no cloud light or shadow (bit-identical with detail 0 and 1) | 14.1 | cc:TODO |
-| 14.4 | Clouds > Detail slider, `PlanetFile::cloud_detail`, `_pad4` slot becomes `cloud_detail`; export pins 0 | Detail 0 matches the previous preview; cloud seed does not change the detailed render | 14.1 | cc:TODO |
+| 14.1 | Physical optical depth (`50 * (d - 0.02)`, two-stream `ln(1 + 0.075 tau)`) and bridge billow erosion per column in `preview_cubemap.wgsl`; sun path uses the same column | Thin uniform veil breaks into cloud and clear sky; thick decks keep no holes and under 6% ripple | 13.3 | cc:完了 [2c8d14e] |
+| 14.2 | Sub-texel lookup warp, footprint octave filtering, wind-aligned billow stretch, ice sheet gain without noise | Seeds 42/73/137 captures: no texel blocks or shimmer, storm and cirrus swirls kept | 14.1 | cc:完了 [2c8d14e] |
+| 14.3 | Skylight on cloud tops; surface shadows from the detailed column | Clear sky gets no cloud light or shadow (bit-identical with detail 0 and 1) | 14.1 | cc:完了 [2c8d14e] |
+| 14.4 | Clouds > Detail slider, `PlanetFile::cloud_detail`, `_pad4` slot becomes `cloud_detail`; export pins 0 | Detail 0 matches the previous preview; cloud seed does not change the detailed render | 14.1 | cc:完了 [2c8d14e] |
