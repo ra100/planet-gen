@@ -375,3 +375,17 @@ Plan: [docs/plans/2026-10-12-001-feat-blender-cloud-bridge-plan.md](docs/plans/2
 | 13.3 | Billow edge-erosion bridge: `cloud_density.exr` is the cloud, inverted Worley octaves + wisps erode edges only, wind-warped and zonally stretched; v10 recipe removed | Headless Risa render: same placement as the map, puffy edges, smooth cores | 13.2 | cc:完了 [6d9259e] |
 | 13.4 | Unused cloud outputs opt-in: `clouds.exr` (`cloud_reconstruction`) and cloud/climate drivers (`cloud_drivers`) off by default; add-on no longer loads cloud EXRs on import | `cloud_maps_skip_reconstruction_unless_requested`; streaming tests green | - | cc:完了 [6d9259e] |
 
+---
+
+## Phase 14: Preview Cloud Detail
+
+The preview drew the solver's normalized condensate as thin gray veils. Detail maps each column to a physical optical depth with two-stream shading and erodes thin columns and margins with the bridge's billows, so clouds read as bright decks and broken cumulus over clear sky. Preview only: `cloud_detail` = 0 renders the previous field exactly; export and the Blender bridge are unchanged.
+
+Requirements: [docs/brainstorms/2026-10-17-preview-cloud-detail-requirements.md](docs/brainstorms/2026-10-17-preview-cloud-detail-requirements.md), plan: [docs/plans/2026-10-17-002-feat-preview-cloud-detail-plan.md](docs/plans/2026-10-17-002-feat-preview-cloud-detail-plan.md)
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 14.1 | Physical optical depth (`50 * (d - 0.02)`, two-stream `ln(1 + 0.075 tau)`) and bridge billow erosion per column in `preview_cubemap.wgsl`; sun path uses the same column | Thin uniform veil breaks into cloud and clear sky; thick decks keep no holes and under 6% ripple | 13.3 | cc:TODO |
+| 14.2 | Sub-texel lookup warp, footprint octave filtering, wind-aligned billow stretch, ice sheet gain without noise | Seeds 42/73/137 captures: no texel blocks or shimmer, storm and cirrus swirls kept | 14.1 | cc:TODO |
+| 14.3 | Skylight on cloud tops; surface shadows from the detailed column | Clear sky gets no cloud light or shadow (bit-identical with detail 0 and 1) | 14.1 | cc:TODO |
+| 14.4 | Clouds > Detail slider, `PlanetFile::cloud_detail`, `_pad4` slot becomes `cloud_detail`; export pins 0 | Detail 0 matches the previous preview; cloud seed does not change the detailed render | 14.1 | cc:TODO |

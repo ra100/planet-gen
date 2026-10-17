@@ -43,7 +43,7 @@ pub struct PreviewUniforms {
     pub cloud_advection: f32,
     pub rotation_rate: f32, // relative to Earth (1.0 = 24h day)
     pub atm_pressure: f32,  // atmospheric pressure in bar (1.0 = Earth)
-    pub _pad4: f32,         // retained uniform slot after U15 removes render-only wind strength
+    pub cloud_detail: f32,  // sub-texel cloud structure (0 = solver field only)
     pub lava_glow: f32,     // tectonic emission intensity (0.0-1.0)
     pub ring_inner: f32,    // ring system inner radius (planet radii, 0 = no rings)
     pub ring_outer: f32,    // ring system outer radius
@@ -109,7 +109,8 @@ impl PreviewRenderer {
         Self::new_with_cloud_config(gpu, 8)
     }
 
-    // Retained for capture callers; cloud structure now comes from weather.
+    // Retained for older capture and test callers: sub-texel cloud detail is
+    // the `cloud_detail` uniform, so these constructors render the solver field.
     pub fn new_with_cloud_detail(gpu: &GpuContext, _detail_strength: f32) -> Self {
         Self::new(gpu)
     }
@@ -840,7 +841,7 @@ mod tests {
             cloud_advection: 0.0,
             rotation_rate: 1.0,
             atm_pressure: 0.7,
-            _pad4: 0.0,
+            cloud_detail: 0.0,
             lava_glow: 0.0,
             ring_inner: 0.0,
             ring_outer: 0.0,
@@ -1576,69 +1577,206 @@ mod tests {
         );
     }
 
-    #[test]
-    fn cloud_detail_does_not_turn_uniform_decks_into_noise_masks() {
-        let gpu = GpuContext::new().unwrap();
-        let detailed = PreviewRenderer::new_with_cloud_detail(&gpu, 1.0);
-        let smooth = PreviewRenderer::new_with_cloud_detail(&gpu, 0.0);
+    fn uniform_deck_renders(
+        gpu: &GpuContext,
+        renderer: &PreviewRenderer,
+        column: [f32; 4],
+        settings: &PreviewUniforms,
+        size: usize,
+    ) -> (Vec<f32>, Vec<f32>) {
         let resolution = 16;
-        let size = 128usize;
         let terrain = TectonicTerrain {
             faces: std::array::from_fn(|_| vec![-0.2; 16 * 16]),
             resolution,
         };
-        let height = detailed.upload_terrain(&gpu, &terrain);
+        let height = renderer.upload_terrain(gpu, &terrain);
         let geometry =
             std::array::from_fn(|_| (0..16 * 16).flat_map(|_| [1.0, 3.0, 7.0, 12.0]).collect());
-        let geometry = detailed.upload_cubemap_rgba16(&gpu, &geometry, resolution);
-        let settings = PreviewUniforms {
-            view_mode: 9,
-            show_clouds: 1.0,
-            cloud_advection: 1.0,
-            cloud_coverage: 1.0,
-            // A saturated white byte cannot measure small optical-depth drift.
-            cloud_opacity: 0.4,
-            ..uniforms()
+        let geometry = renderer.upload_cubemap_rgba16(gpu, &geometry, resolution);
+        let mass = std::array::from_fn(|_| (0..16 * 16).flat_map(|_| column).collect());
+        let mass = renderer.upload_cubemap_rgba16(gpu, &mass, resolution);
+        let render = |cloud_detail| {
+            density_values(&renderer.render(
+                gpu,
+                &PreviewUniforms {
+                    cloud_detail,
+                    ..*settings
+                },
+                &height,
+                None,
+                Some((&mass, &geometry)),
+                size as u32,
+            ))
         };
-        for channel in 0..3 {
-            let mass = std::array::from_fn(|_| {
-                (0..16 * 16)
-                    .flat_map(|_| {
-                        let mut value = [0.0; 4];
-                        value[channel] = 0.8;
-                        value[3] = if channel < 2 { 0.8 } else { 0.0 };
-                        value
-                    })
-                    .collect()
-            });
-            let mass = detailed.upload_cubemap_rgba16(&gpu, &mass, resolution);
-            let render = |renderer: &PreviewRenderer| {
-                density_values(&renderer.render(
-                    &gpu,
-                    &settings,
-                    &height,
-                    None,
-                    Some((&mass, &geometry)),
-                    size as u32,
-                ))
+        (render(0.0), render(1.0))
+    }
+
+    fn deck_center(size: usize) -> impl Iterator<Item = usize> {
+        (size / 4..3 * size / 4)
+            .flat_map(move |y| (size / 4..3 * size / 4).map(move |x| y * size + x))
+    }
+
+    #[test]
+    fn cloud_detail_does_not_turn_uniform_decks_into_noise_masks() {
+        let gpu = GpuContext::new().unwrap();
+        let renderer = PreviewRenderer::new(&gpu);
+        let size = 128usize;
+        // A saturated white byte cannot measure small optical-depth drift, so
+        // each layer's opacity keeps its deck mid-gray in the readback.
+        for (channel, cloud_opacity) in [0.4, 0.12, 1.0].into_iter().enumerate() {
+            let settings = PreviewUniforms {
+                view_mode: 9,
+                show_clouds: 1.0,
+                cloud_advection: 1.0,
+                cloud_coverage: 1.0,
+                cloud_opacity,
+                ..uniforms()
             };
-            let reference = render(&smooth);
-            let candidate = render(&detailed);
-            let mut max_relative_change = 0.0_f32;
-            for y in size / 4..3 * size / 4 {
-                for x in size / 4..3 * size / 4 {
-                    let i = y * size + x;
+            let mut column = [0.0; 4];
+            column[channel] = 0.8;
+            column[3] = if channel < 2 { 0.8 } else { 0.0 };
+            let (reference, candidate) =
+                uniform_deck_renders(&gpu, &renderer, column, &settings, size);
+            // Detail rescales a thick deck's optical depth as a whole; it may
+            // ripple it slightly but must not punch holes or texture it.
+            let mut ratios = deck_center(size)
+                .map(|i| {
                     let before = optical_depth(reference[i]);
                     let after = optical_depth(candidate[i]);
                     assert!(before > 0.01 && after > 0.01, "no punched-out core holes");
-                    max_relative_change = max_relative_change.max((after / before - 1.0).abs());
-                }
-            }
-            assert_eq!(
-                max_relative_change, 0.0,
-                "layer {channel}: renderer textured a uniform deck"
+                    after / before
+                })
+                .collect::<Vec<_>>();
+            ratios.sort_by(f32::total_cmp);
+            let median = ratios[ratios.len() / 2];
+            let max_relative_change = ratios
+                .iter()
+                .map(|ratio| (ratio / median - 1.0).abs())
+                .fold(0.0_f32, f32::max);
+            assert!(
+                max_relative_change < 0.06,
+                "layer {channel}: renderer textured a uniform deck ({max_relative_change})"
             );
         }
+    }
+
+    #[test]
+    fn cloud_detail_breaks_thin_uniform_veils_into_cloud_and_clear_sky() {
+        let gpu = GpuContext::new().unwrap();
+        let renderer = PreviewRenderer::new(&gpu);
+        let size = 128usize;
+        let settings = PreviewUniforms {
+            view_mode: 9,
+            show_clouds: 1.0,
+            cloud_coverage: 1.0,
+            ..uniforms()
+        };
+        let (reference, candidate) =
+            uniform_deck_renders(&gpu, &renderer, [0.03, 0.0, 0.0, 0.03], &settings, size);
+        let center = deck_center(size).collect::<Vec<_>>();
+        let (mut clear, mut cloud) = (0usize, 0usize);
+        for &i in &center {
+            let before = optical_depth(reference[i]);
+            let after = optical_depth(candidate[i]);
+            assert!(before > 0.005, "solver veil must cover the deck");
+            clear += usize::from(after < 0.25 * before);
+            cloud += usize::from(after > 1.5 * before);
+        }
+        // A thin column is a field of broken cloud, not a uniform haze: some
+        // sky clears while the remaining cloud is optically thicker.
+        let clear = clear as f32 / center.len() as f32;
+        let cloud = cloud as f32 / center.len() as f32;
+        assert!(clear > 0.05, "thin veil kept no clear sky ({clear})");
+        assert!(cloud > 0.2, "thin veil kept no thicker cloud ({cloud})");
+    }
+
+    #[test]
+    fn cloud_detail_adds_no_cloud_or_shadow_to_clear_sky_and_ignores_cloud_seed() {
+        let gpu = GpuContext::new().unwrap();
+        let renderer = PreviewRenderer::new(&gpu);
+        let resolution = 64;
+        let size = 128usize;
+        let terrain = TectonicTerrain {
+            faces: std::array::from_fn(|_| vec![0.2; (resolution * resolution) as usize]),
+            resolution,
+        };
+        let terrain_view = renderer.upload_terrain(&gpu, &terrain);
+        let (mass, geometry) = contour_fixture(resolution);
+        let mass_view = renderer.upload_cubemap_rgba16(&gpu, &mass, resolution);
+        let geometry_view = renderer.upload_cubemap_rgba16(&gpu, &geometry, resolution);
+        let zero_mass = std::array::from_fn(|_| vec![0.0; (resolution * resolution * 4) as usize]);
+        let zero_mass_view = renderer.upload_cubemap_rgba16(&gpu, &zero_mass, resolution);
+        let settings = PreviewUniforms {
+            show_clouds: 1.0,
+            show_cloud_shadows: 1.0,
+            cloud_coverage: 1.0,
+            cloud_advection: 1.0,
+            atmosphere_density: 1.0,
+            cloud_detail: 1.0,
+            ..uniforms()
+        };
+        let render = |settings: &PreviewUniforms, mass_view| {
+            renderer.render(
+                &gpu,
+                settings,
+                &terrain_view,
+                None,
+                Some((mass_view, &geometry_view)),
+                size as u32,
+            )
+        };
+        let density = render(
+            &PreviewUniforms {
+                view_mode: 9,
+                ..settings
+            },
+            &zero_mass_view,
+        );
+        assert!(
+            density
+                .chunks_exact(4)
+                .enumerate()
+                .all(|(index, pixel)| !sphere_mask(size, index) || pixel[0..3] == [0, 0, 0]),
+            "detail created density outside weather mass"
+        );
+        assert_eq!(
+            render(&settings, &zero_mass_view),
+            render(
+                &PreviewUniforms {
+                    cloud_detail: 0.0,
+                    ..settings
+                },
+                &zero_mass_view,
+            ),
+            "detail changed a cloudless planet (skylight or surface shadow leak)"
+        );
+        // The billow pattern belongs to the planet, not the cloud seed: the
+        // same weather renders identically whatever seed the controls carry.
+        let reference = render(&settings, &mass_view);
+        for cloud_seed in [7, 9001, u32::MAX] {
+            assert_eq!(
+                render(
+                    &PreviewUniforms {
+                        cloud_seed,
+                        ..settings
+                    },
+                    &mass_view,
+                ),
+                reference,
+                "cloud seed {cloud_seed} changed the detailed render"
+            );
+        }
+        assert_ne!(
+            reference,
+            render(
+                &PreviewUniforms {
+                    cloud_detail: 0.0,
+                    ..settings
+                },
+                &mass_view,
+            ),
+            "detail must change cloudy weather"
+        );
     }
 
     #[test]

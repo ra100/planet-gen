@@ -257,7 +257,7 @@ fn generate_planet_png(
         cloud_advection: 0.0,
         rotation_rate: 1.0,
         atm_pressure: 0.7,
-        _pad4: 0.0,
+        cloud_detail: 0.0,
         lava_glow: 0.0,
         ring_inner: 0.0,
         ring_outer: 0.0,
@@ -7680,7 +7680,7 @@ fn run_weather_validation_with_pipeline(
     base_uniforms.cloud_advection = 1.0;
     base_uniforms.rotation_rate = 1.0;
     base_uniforms.atm_pressure = scene.derived.surface_pressure_bar;
-    base_uniforms._pad4 = 0.0;
+    base_uniforms.cloud_detail = 0.0;
     base_uniforms.planet_radius_km = scene.derived.radius_km;
     base_uniforms.show_cloud_shadows = 1.0;
     gate_failures.extend(run_u3_local_validation(
@@ -8809,7 +8809,7 @@ fn main() {
         cloud_advection: 0.0,
         rotation_rate: 1.0,
         atm_pressure: 0.7,
-        _pad4: 0.0,
+        cloud_detail: 0.0,
         lava_glow: 0.0,
         ring_inner: 0.0,
         ring_outer: 0.0,

@@ -174,7 +174,7 @@ fn main() {
                 cloud_advection: 0.0,
                 rotation_rate: 1.0,
                 atm_pressure: 0.7,
-                _pad4: 0.0,
+                cloud_detail: 0.0,
                 lava_glow: 0.0,
                 ring_inner: 0.0,
                 ring_outer: 0.0,
