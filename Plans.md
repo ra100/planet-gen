@@ -275,6 +275,7 @@ Pure-Python Blender addon that imports generated textures and sets up materials.
 | 8.3 | Ocean specular / sun glint: bright reflection on water surface toward sun | Visible sun glint on oceans, PBR-correct | Phase 4 | cc:完了 [eff66f0] |
 | 8.4 | Ring system: Saturn-like rings with color gradients, transparency, shadow casting on planet | Configurable ring tilt, inner/outer radius, color gradient, planet shadow on rings | Phase 5 | cc:完了 [eff66f0] |
 | 8.5 | Ring export: single pixel width gradient texture (at least 4K) for Blender use | Exported 4K+ gradient PNG with transparency for ring shader | 8.4, Phase 7 | cc:完了 [eff66f0] |
+| 8.6 | Broad hill-scale AO: `ao.png` from a smooth, band-passed CPU field (`terrain_ao.rs`) instead of per-pixel curvature; optional "Bake AO into albedo" export toggle with strength | `terrain_ao` tests green; ao.png has no pixel speckle and no cube-face seams | 8.5 | cc:TODO |
 
 ---
 

@@ -104,6 +104,9 @@ pub struct PlanetGenApp {
     // Export layer toggles
     export_albedo: bool,
     export_ao: bool,
+    /// Bake the broad AO into albedo.png.
+    export_bake_ao: bool,
+    export_bake_ao_strength: f32,
     export_roughness: bool,
     export_clouds: bool,
     export_height: bool,
@@ -295,6 +298,8 @@ impl PlanetGenApp {
             export_resolution: export::DEFAULT_EXPORT_RESOLUTION,
             export_albedo: true,
             export_ao: true,
+            export_bake_ao: false,
+            export_bake_ao_strength: 0.6,
             export_roughness: true,
             export_clouds: true,
             export_height: true,
@@ -768,6 +773,8 @@ impl PlanetGenApp {
             },
             weather,
             night_lights: self.night_lights,
+            albedo_ao: (self.export_albedo && self.export_bake_ao)
+                .then_some(self.export_bake_ao_strength),
         };
 
         let terrain_params = self.terrain_params();
@@ -2510,6 +2517,30 @@ impl PlanetGenApp {
                                 });
                             }
                         }
+                        if self.export_albedo {
+                            ui.indent("albedo_extras", |ui| {
+                                ui.checkbox(
+                                    &mut self.export_bake_ao,
+                                    RichText::new("Bake AO into albedo").color(theme::TEXT),
+                                )
+                                .on_hover_text(
+                                    "Darken albedo.png in valleys and basins using the smooth, hill-scale AO",
+                                );
+                                if self.export_bake_ao {
+                                    widgets::slider_row(
+                                        ui,
+                                        &mut self.export_bake_ao_strength,
+                                        0.0..=1.0,
+                                        Param::new(
+                                            "AO strength",
+                                            "How strongly the AO darkens albedo. 1 multiplies albedo by the full AO",
+                                            0.6,
+                                        )
+                                        .with(2, ""),
+                                    );
+                                }
+                            });
+                        }
                         if self.export_clouds {
                             ui.indent("cloud_extras", |ui| {
                                 ui.checkbox(
@@ -3079,6 +3110,7 @@ mod tests {
             },
             weather: WeatherSnapshot::default(),
             night_lights: 0.0,
+            albedo_ao: None,
         }
     }
 

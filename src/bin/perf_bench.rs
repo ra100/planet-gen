@@ -402,6 +402,7 @@ fn run_u2_8k() {
             ..WeatherSnapshot::default()
         },
         night_lights: 0.0,
+        albedo_ao: None,
     };
     let (progress, _progress_rx) = std::sync::mpsc::channel();
     let started = Instant::now();
