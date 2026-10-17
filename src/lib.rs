@@ -11,6 +11,7 @@ pub mod planet_file;
 pub mod plates;
 pub mod png_writer;
 pub mod preview;
+pub mod tectonic_history;
 pub mod terrain_compute;
 pub mod ui;
 pub mod weather;

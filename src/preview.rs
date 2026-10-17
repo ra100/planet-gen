@@ -65,10 +65,12 @@ struct PlateMotionHeader {
     max_speed: f32,
 }
 
-/// Serialize plates for the Plates debug view. `seed` and `warp_strength` must
-/// be the values the terrain pipeline used, so the overlay matches the terrain.
+/// Serialize plates for the Plates debug view. `plates` is the terrain's
+/// plate buffer (real plates, then any plate-history records); `seed` and
+/// `warp_strength` must be the values the terrain used.
 fn plate_motion_bytes(plates: &[PlateGpu], seed: u32, warp_strength: f32) -> Vec<u8> {
-    let max_speed = plates
+    let count = crate::tectonic_history::plate_count(plates);
+    let max_speed = plates[..count]
         .iter()
         .map(|plate| {
             let [x, y, z] = plate.velocity;
@@ -76,7 +78,7 @@ fn plate_motion_bytes(plates: &[PlateGpu], seed: u32, warp_strength: f32) -> Vec
         })
         .fold(0.0_f32, f32::max);
     let header = PlateMotionHeader {
-        count: plates.len() as u32,
+        count: count as u32,
         seed,
         warp_strength,
         max_speed,
@@ -3506,6 +3508,59 @@ fn seam_oracle(@builtin(global_invocation_id) id: vec3<u32>) {
         assert!(c > 20, "convergent boundaries drawn: {c}");
         assert!(d > 20, "divergent boundaries drawn: {d}");
         assert!(a > 100, "velocity arrows drawn: {a}");
+    }
+
+    #[test]
+    fn plates_view_draws_plate_history_features() {
+        let gpu = GpuContext::new().unwrap();
+        let compute = TerrainComputePipeline::new(&gpu);
+        let plates = generate_plates(&PlateGenParams {
+            seed: 42,
+            mass_earth: 1.0,
+            ocean_fraction: 0.7,
+            tectonics_factor: 0.85,
+            continental_scale: 1.0,
+            num_plates_override: 0,
+            num_continents: 0,
+            continent_size_variety: 0.0,
+        });
+        let records = crate::tectonic_history::plate_records(&plates, 42, 1500.0);
+        let terrain = compute.generate(
+            &gpu, &records, 64, 42, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0, 9.81, 0.85, 0.2,
+            1.0,
+        );
+        let mut renderer = PreviewRenderer::new(&gpu);
+        let cubemap_view = renderer.upload_terrain(&gpu, &terrain);
+        renderer.upload_plates(&gpu, &records, 42, 1.0);
+        let size = 256;
+        let history_pixels = |rotation: [[f32; 4]; 4]| {
+            let settings = PreviewUniforms {
+                view_mode: 6,
+                rotation,
+                ..uniforms()
+            };
+            let pixels = renderer.render(&gpu, &settings, &cubemap_view, None, None, size);
+            pixels
+                .chunks_exact(4)
+                .filter(|px| {
+                    let suture = px[0] > 170 && px[1] < 180 && px[2] > 230;
+                    let arc = px[0] > 230 && px[1] > 140 && px[1] < 200 && px[2] < 110;
+                    let rift = px[0] < 120 && px[1] > 210 && px[2] > 160 && px[2] < 210;
+                    suture || arc || rift
+                })
+                .count()
+        };
+        let front = history_pixels(uniforms().rotation);
+        let back = history_pixels([
+            [-1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, -1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ]);
+        assert!(
+            front + back > 40,
+            "history lines drawn: {front} front, {back} back"
+        );
     }
 
     #[test]

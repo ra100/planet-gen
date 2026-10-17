@@ -66,6 +66,7 @@ pub struct PlanetGenApp {
     num_plates_override: u32,  // 0 = auto from physics
     num_continents: u32,       // target number of distinct landmasses (1-10)
     continent_size_variety: f32, // 0 = equal sizes, 1 = heavily skewed
+    geologic_time_myr: f32,    // simulated plate history (0 = present-day plates only)
     cloud_coverage: f32,
     cloud_seed: u32,
     cloud_opacity: f32,
@@ -149,6 +150,7 @@ fn derive_terrain_params(
     num_plates_override: u32,
     num_continents: u32,
     continent_size_variety: f32,
+    geologic_time_myr: f32,
 ) -> TerrainGenerationParams {
     let dist_factor = (params.star_distance_au.ln() / 3.0_f32.ln()).clamp(0.0, 1.0);
     let beta = (1.47 + 0.91 * dist_factor + 0.3 * params.metallicity).clamp(1.2, 3.0);
@@ -176,6 +178,7 @@ fn derive_terrain_params(
         num_plates_override,
         num_continents,
         continent_size_variety,
+        geologic_time_myr,
     }
 }
 
@@ -258,6 +261,7 @@ impl PlanetGenApp {
             num_plates_override: 0,
             num_continents: 4,
             continent_size_variety: 0.35,
+            geologic_time_myr: 0.0,
             cloud_coverage: 0.5,
             cloud_seed: default_cloud_seed,
             cloud_opacity: 1.0,
@@ -399,6 +403,7 @@ impl PlanetGenApp {
             self.num_plates_override,
             self.num_continents,
             self.continent_size_variety,
+            self.geologic_time_myr,
         )
     }
 
@@ -420,6 +425,11 @@ impl PlanetGenApp {
             num_continents: self.num_continents,
             continent_size_variety: self.continent_size_variety,
         });
+        let plates = crate::tectonic_history::plate_records(
+            &plates,
+            self.params.seed,
+            self.geologic_time_myr,
+        );
 
         let terrain_params = self.terrain_params();
         let terrain = self.terrain_compute.generate(
@@ -490,13 +500,15 @@ impl PlanetGenApp {
             self.erosion_remaining = 0;
         }
 
+        let real_plates = &plates[..crate::tectonic_history::plate_count(&plates)];
         log::info!(
-            "[terrain {}px] plates+compute: {:.0}ms, {} plates ({}c/{}o), continents={}, variety={:.2}, scheduling {} erosion iters",
+            "[terrain {}px] plates+compute: {:.0}ms, {} plates ({}c/{}o), history {} Myr, continents={}, variety={:.2}, scheduling {} erosion iters",
             self.preview_resolution,
             t0.elapsed().as_secs_f64() * 1000.0,
-            plates.len(),
-            plates.iter().filter(|p| p.plate_type > 0.5).count(),
-            plates.iter().filter(|p| p.plate_type <= 0.5).count(),
+            real_plates.len(),
+            real_plates.iter().filter(|p| p.plate_type > 0.5).count(),
+            real_plates.iter().filter(|p| p.plate_type <= 0.5).count(),
+            self.geologic_time_myr,
             self.num_continents,
             self.continent_size_variety,
             self.erosion_remaining,
@@ -1161,6 +1173,7 @@ impl PlanetGenApp {
         self.num_plates_override = 0;
         self.num_continents = 4;
         self.continent_size_variety = 0.35;
+        self.geologic_time_myr = 0.0;
         self.cloud_coverage = 0.5;
         self.cloud_opacity = 1.0;
         self.wind_scale = 1.0;
@@ -1290,6 +1303,7 @@ impl PlanetGenApp {
             num_plates_override: self.num_plates_override,
             num_continents: self.num_continents,
             continent_size_variety: self.continent_size_variety,
+            geologic_time_myr: self.geologic_time_myr,
             cloud_coverage: self.cloud_coverage,
             cloud_seed: self.cloud_seed,
             cloud_opacity: self.cloud_opacity,
@@ -1352,6 +1366,9 @@ impl PlanetGenApp {
         self.num_plates_override = file.num_plates_override;
         self.num_continents = file.num_continents;
         self.continent_size_variety = file.continent_size_variety;
+        self.geologic_time_myr = file
+            .geologic_time_myr
+            .clamp(0.0, crate::tectonic_history::MAX_GEOLOGIC_TIME_MYR);
         self.cloud_coverage = file.cloud_coverage;
         self.cloud_seed = file.cloud_seed;
         self.cloud_opacity = file.cloud_opacity;
@@ -1837,6 +1854,19 @@ impl PlanetGenApp {
             ),
         ) {
             self.num_plates_override = plates as u32;
+            self.needs_terrain = true;
+        }
+        if widgets::slider_row(
+            ui,
+            &mut self.geologic_time_myr,
+            0.0..=crate::tectonic_history::MAX_GEOLOGIC_TIME_MYR,
+            Param::new(
+                "Geologic time",
+                "Simulate plate motion for this long: continents drift, collide into supercontinents and rift apart, leaving eroded mountain belts, volcanic arcs and rifts. 0 = present-day plates only",
+                0.0,
+            )
+            .with(0, "Myr"),
+        ) {
             self.needs_terrain = true;
         }
         if widgets::slider_row(
@@ -3071,8 +3101,10 @@ mod tests {
             13,
             7,
             0.8,
+            900.0,
         );
         assert_eq!(preview.num_plates_override, 13);
+        assert_eq!(preview.geologic_time_myr, 900.0);
         assert_eq!(preview.num_continents, 7);
         assert_eq!(preview.continent_size_variety, 0.8);
 
