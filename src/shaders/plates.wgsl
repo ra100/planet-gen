@@ -125,11 +125,105 @@ struct PlateInfo {
     character: vec3<f32>,
 }
 
+// Plate history (tectonic_history.rs) appends records after the real plates:
+// a meta record (seed and feature counts as u32 bits), one record per seed
+// (position, owning plate) and two per feature. A plate with several seeds
+// stores seed_start | seed_count << 16 in _pad; _pad == 0 means the plate is
+// its center alone, which is every plate when no history was simulated.
+fn has_history() -> bool {
+    return arrayLength(&plates) > params.num_plates;
+}
+
+fn history_seed_total() -> u32 {
+    return bitcast<u32>(plates[params.num_plates].center.x);
+}
+
+fn history_seed(index: u32) -> vec3<f32> {
+    return plates[params.num_plates + 1u + index].center;
+}
+
+// 1 - cos(angle) to the plate's nearest seed.
+fn plate_seed_gap(pos: vec3<f32>, index: u32) -> f32 {
+    let packed = bitcast<u32>(plates[index]._pad);
+    if (packed == 0u) {
+        return 1.0 - dot(pos, plates[index].center);
+    }
+    let start = packed & 0xffffu;
+    let count = packed >> 16u;
+    var nearest = -2.0;
+    for (var k = 0u; k < count; k++) {
+        nearest = max(nearest, dot(pos, history_seed(start + k)));
+    }
+    return 1.0 - nearest;
+}
+
+// The plate's seed nearest to pos (its center when it has a single seed).
+fn plate_anchor(pos: vec3<f32>, index: u32) -> vec3<f32> {
+    let packed = bitcast<u32>(plates[index]._pad);
+    if (packed == 0u) {
+        return plates[index].center;
+    }
+    let start = packed & 0xffffu;
+    let count = packed >> 16u;
+    var anchor = history_seed(start);
+    var nearest = dot(pos, anchor);
+    for (var k = 1u; k < count; k++) {
+        let seed = history_seed(start + k);
+        let d = dot(pos, seed);
+        if (d > nearest) {
+            nearest = d;
+            anchor = seed;
+        }
+    }
+    return anchor;
+}
+
 fn plate_distance(pos: vec3<f32>, index: u32) -> f32 {
     let offset = vec3<f32>(f32(index) * 17.3, f32(index) * 31.7, f32(index) * 43.1);
-    return 1.0 - dot(pos, plates[index].center)
+    return plate_seed_gap(pos, index)
         + snoise(pos * 2.0 + offset) * 0.08
         + snoise(pos * 4.5 + offset * 2.0) * 0.04;
+}
+
+// Angle from p to the great-circle segment a-b.
+fn segment_angle(p: vec3<f32>, a: vec3<f32>, b: vec3<f32>) -> f32 {
+    let n_raw = cross(a, b);
+    let n_len = length(n_raw);
+    if (n_len < 0.000001) {
+        return acos(clamp(dot(p, a), -1.0, 1.0));
+    }
+    let n = n_raw / n_len;
+    let off = dot(p, n);
+    let q = p - n * off;
+    if (dot(cross(a, q), n) >= 0.0 && dot(cross(q, b), n) >= 0.0) {
+        return asin(clamp(abs(off), 0.0, 1.0));
+    }
+    return acos(clamp(max(dot(p, a), dot(p, b)), -1.0, 1.0));
+}
+
+// Relief left by the plate history: eroded sutures where continents
+// collided, volcanic arcs over old subduction zones, and rift troughs where
+// continents split. Amplitude already includes erosion with age.
+fn history_relief(pos: vec3<f32>, ridge: f32) -> f32 {
+    let base = params.num_plates + 1u + history_seed_total();
+    let features = bitcast<u32>(plates[params.num_plates].center.y);
+    var relief = 0.0;
+    for (var f = 0u; f < features; f++) {
+        let shape = plates[base + 2u * f];
+        let extent = plates[base + 2u * f + 1u];
+        let d = segment_angle(pos, shape.center, shape.velocity) / max(extent.center.x, 0.0001);
+        if (d > 3.0) { continue; }
+        let belt = exp(-d * d) * shape._pad;
+        let kind = u32(shape.plate_type + 0.5);
+        if (kind == 0u) {
+            relief += belt * (0.06 + 0.10 * ridge);
+        } else if (kind == 1u) {
+            relief += belt * (0.06 + 0.22 * ridge);
+        } else {
+            relief -= belt * 0.05;
+        }
+    }
+    return relief;
 }
 
 fn find_nearest_plates(sphere_pos: vec3<f32>) -> PlateInfo {
@@ -184,7 +278,7 @@ fn classify_boundary(sphere_pos: vec3<f32>, plate_a: u32, plate_b: u32) -> f32 {
     let velocity_b = cross(plates[plate_b].velocity, sphere_pos);
     let rel_velocity = velocity_a - velocity_b;
     // Boundary normal: direction from one plate center to the other
-    let boundary_normal = normalize(plates[plate_b].center - plates[plate_a].center);
+    let boundary_normal = normalize(plate_anchor(sphere_pos, plate_b) - plate_anchor(sphere_pos, plate_a));
     let approach_speed = dot(rel_velocity, boundary_normal);
     return -clamp(approach_speed * 5.0, -1.0, 1.0);
 }
@@ -357,6 +451,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let boundary_ridges = ridged_multifractal(wpos * 18.0 + seed_offset(params.seed + 2200u), 4, 2.1, 2.0, 1.0);
     height += belt * tect * params.mountain_scale * gravity_factor
         * boundary_relief(wpos, info.nearest_dist, boundary_ridges);
+    if (has_history()) {
+        height += history_relief(wpos, ridge) * params.mountain_scale * gravity_factor;
+    }
 
     // === Layer 4: Ocean floor variation ===
     let ocean_floor = smooth_step(0.0, -0.1, height);

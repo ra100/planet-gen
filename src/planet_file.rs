@@ -62,6 +62,8 @@ pub struct PlanetFile {
     pub num_plates_override: u32,
     pub num_continents: u32,
     pub continent_size_variety: f32,
+    /// Simulated plate history in Myr; files without it load as 0.
+    pub geologic_time_myr: f32,
     // Clouds / weather
     pub cloud_coverage: f32,
     pub cloud_seed: u32,
@@ -130,6 +132,7 @@ impl Default for PlanetFile {
             num_plates_override: 0,
             num_continents: 4,
             continent_size_variety: 0.35,
+            geologic_time_myr: 0.0,
             cloud_coverage: 0.5,
             cloud_seed: params.seed.wrapping_add(1000),
             cloud_opacity: 1.0,
@@ -208,6 +211,7 @@ pub fn checked_load(json: &str) -> Result<PlanetFile, String> {
         finite("age_override", age)?;
     }
     finite("continent_size_variety", file.continent_size_variety)?;
+    finite("geologic_time_myr", file.geologic_time_myr)?;
     finite("cloud_coverage", file.cloud_coverage)?;
     finite("cloud_opacity", file.cloud_opacity)?;
     finite("wind_scale", file.wind_scale)?;
@@ -310,6 +314,7 @@ mod tests {
         );
         assert_eq!(file.zoom, 1.0);
         assert_eq!(file.pan, [0.0, 0.0]);
+        assert_eq!(file.geologic_time_myr, 0.0);
     }
 
     #[test]

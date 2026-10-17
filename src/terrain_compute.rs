@@ -53,6 +53,8 @@ pub struct TerrainGenerationParams {
     pub num_plates_override: u32,
     pub num_continents: u32,
     pub continent_size_variety: f32,
+    /// Simulated plate motion history in Myr (0 = present-day plates only).
+    pub geologic_time_myr: f32,
 }
 
 impl TerrainGenParams {
@@ -387,7 +389,7 @@ impl TerrainComputePipeline {
             let params = TerrainGenParams {
                 face: face_idx,
                 resolution,
-                num_plates: plates.len() as u32,
+                num_plates: crate::tectonic_history::plate_count(plates) as u32,
                 seed,
                 amplitude,
                 frequency,
@@ -741,7 +743,7 @@ impl MultiPassTerrainPipeline {
             let assign_params = AssignParams {
                 face: face_idx,
                 resolution,
-                num_plates: plates.len() as u32,
+                num_plates: crate::tectonic_history::plate_count(plates) as u32,
                 seed,
                 warp_strength,
                 _pad0: 0,
@@ -863,7 +865,7 @@ impl MultiPassTerrainPipeline {
             let terrain_params = TerrainGenParams {
                 face: face_idx,
                 resolution,
-                num_plates: plates.len() as u32,
+                num_plates: crate::tectonic_history::plate_count(plates) as u32,
                 seed,
                 amplitude,
                 frequency,
@@ -2771,6 +2773,60 @@ mod tests {
             max_height > 0.2,
             "Should have peaks > 0.2, max is {}",
             max_height
+        );
+    }
+
+    #[test]
+    fn plate_history_keeps_zero_time_identical_and_reshapes_old_planets() {
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let pipeline = TerrainComputePipeline::new(&gpu);
+        let plates = generate_plates(&PlateGenParams {
+            seed: 42,
+            mass_earth: 1.0,
+            ocean_fraction: 0.7,
+            tectonics_factor: 0.85,
+            continental_scale: 1.0,
+            num_plates_override: 0,
+            num_continents: 0,
+            continent_size_variety: 0.0,
+        });
+        let generate = |records: &[PlateGpu]| {
+            pipeline
+                .generate(
+                    &gpu, records, 64, 42, 1.0, 1.2, 8, 0.5, 2.0, 1.0, 0.10, 1.0, 1.0, 9.81, 0.85,
+                    0.2, 1.0,
+                )
+                .faces
+                .concat()
+        };
+        let land = |heights: &[f32]| {
+            heights.iter().filter(|h| **h > 0.0).count() as f32 / heights.len() as f32
+        };
+        let present = generate(&plates);
+        let zero = generate(&crate::tectonic_history::plate_records(&plates, 42, 0.0));
+        assert_eq!(
+            bytemuck::cast_slice::<f32, u8>(&present),
+            bytemuck::cast_slice::<f32, u8>(&zero),
+            "0 Myr must not change the terrain"
+        );
+
+        let old = generate(&crate::tectonic_history::plate_records(&plates, 42, 1500.0));
+        assert!(old.iter().all(|h| h.is_finite()));
+        let changed = present
+            .iter()
+            .zip(&old)
+            .filter(|(a, b)| (*a - *b).abs() > 1e-3)
+            .count();
+        assert!(
+            changed > present.len() / 4,
+            "1500 Myr should move the continents: {changed}/{} texels changed",
+            present.len()
+        );
+        assert!(
+            (land(&old) - land(&present)).abs() < 0.15,
+            "land fraction {:.3} -> {:.3}",
+            land(&present),
+            land(&old)
         );
     }
 

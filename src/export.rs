@@ -20,6 +20,7 @@ use crate::planet::{DerivedProperties, PlanetParams};
 use crate::plates::{PlateGenParams, generate_plates};
 use crate::png_writer::{AtomicScanlinePngWriter, PngRowFormat};
 use crate::preview::PreviewUniforms;
+use crate::tectonic_history::{plate_count, plate_records};
 use crate::terrain_compute::{
     ErosionClimate, ErosionPipeline, TectonicTerrain, TerrainComputePipeline, TerrainGenParams,
     TerrainGenerationParams, WindFieldPipeline, earth_relative_rotation_rate,
@@ -3621,6 +3622,8 @@ pub fn run_export_with_timings_and_checkpoints(
         num_continents: terrain_params.num_continents,
         continent_size_variety: terrain_params.continent_size_variety,
     });
+    let plates = plate_records(&plates, params.seed, terrain_params.geologic_time_myr);
+    let num_plates = plate_count(&plates) as u32;
 
     // --- Phase 2: Generate terrain (tiled) ---
     let terrain_pipeline = TerrainComputePipeline::new(gpu);
@@ -3631,7 +3634,7 @@ pub fn run_export_with_timings_and_checkpoints(
         &terrain_pipeline,
         &plates_buffer,
         &coordinator,
-        plates.len() as u32,
+        num_plates,
         &terrain_params,
         &mut progress,
         cancel,
@@ -3669,7 +3672,7 @@ pub fn run_export_with_timings_and_checkpoints(
             &terrain_pipeline,
             &plates_buffer,
             &meso_coordinator,
-            plates.len() as u32,
+            num_plates,
             &terrain_params,
             &mut progress,
             cancel,
@@ -5255,6 +5258,7 @@ mod tests {
             num_plates_override: 0,
             num_continents: 0,
             continent_size_variety: 0.0,
+            geologic_time_myr: 0.0,
         }
     }
 

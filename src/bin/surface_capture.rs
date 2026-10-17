@@ -167,6 +167,7 @@ fn main() {
             num_plates_override: 0,
             num_continents: 4,
             continent_size_variety: 0.35,
+            geologic_time_myr: 0.0,
         };
         let (tx, _rx) = std::sync::mpsc::channel();
         run_export(

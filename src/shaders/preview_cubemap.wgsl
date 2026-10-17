@@ -56,18 +56,19 @@ const CLOUD_RAY_SAMPLES: u32 = 8u;
 @group(0) @binding(4) var weather_mass_tex: texture_cube<f32>;
 @group(0) @binding(5) var weather_geometry_tex: texture_cube<f32>;
 
-// Plate motion for the Plates debug view (view 6). Mirrors the terrain
-// pipeline's plate assignment so the overlay lines up with the generated
-// terrain: same warp, same per-plate boundary bias, same Euler velocities.
+// Plate motion for the Plates debug view (view 6). Mirrors plates.wgsl, the
+// terrain shader, so the overlay lines up with the generated terrain: same
+// warp, same per-plate boundary bias, same Euler velocities, and the same
+// plate history records (seeds and features) trailing the real plates.
 struct PreviewPlate {
     center: vec3<f32>,
     plate_type: f32,
     omega: vec3<f32>, // Euler angular velocity; local velocity is cross(omega, pos)
-    _pad: f32,
+    _pad: f32,        // seed_start | seed_count << 16 for multi-seed plates
 }
 
 struct PlateMotion {
-    count: u32,
+    count: u32, // real plates; history records follow them
     seed: u32,
     warp_strength: f32,
     max_speed: f32, // largest |omega| across plates, for arrow normalization
@@ -91,7 +92,7 @@ fn plate_seed_offset(s: u32) -> vec3<f32> {
     );
 }
 
-// Same domain warp as plate_assign.wgsl / terrain_from_plates.wgsl.
+// Same domain warp as plates.wgsl warp_position.
 fn plate_warp_position(pos: vec3<f32>) -> vec3<f32> {
     let seed = plate_motion.seed;
     let warp1 = vec3<f32>(
@@ -104,7 +105,41 @@ fn plate_warp_position(pos: vec3<f32>) -> vec3<f32> {
         snoise(pos * 3.0 + plate_seed_offset(seed + 5011u)),
         snoise(pos * 3.0 + plate_seed_offset(seed + 5012u))
     ) * 0.10;
-    return normalize(pos + (warp1 + warp2) * plate_motion.warp_strength);
+    let warp3 = vec3<f32>(
+        snoise(pos * 7.0 + plate_seed_offset(seed + 5020u)),
+        snoise(pos * 7.0 + plate_seed_offset(seed + 5021u)),
+        snoise(pos * 7.0 + plate_seed_offset(seed + 5022u))
+    ) * 0.04;
+    return normalize(pos + (warp1 + warp2 + warp3) * plate_motion.warp_strength);
+}
+
+fn plate_has_history() -> bool {
+    return arrayLength(&plate_motion.plates) > plate_motion.count;
+}
+
+fn plate_history_seed(index: u32) -> vec3<f32> {
+    return plate_motion.plates[plate_motion.count + 1u + index].center;
+}
+
+// Nearest seed of a plate (its center when it has one seed), as plates.wgsl.
+fn plate_anchor_of(pos: vec3<f32>, index: u32) -> vec3<f32> {
+    let packed = bitcast<u32>(plate_motion.plates[index]._pad);
+    if (packed == 0u) {
+        return plate_motion.plates[index].center;
+    }
+    let start = packed & 0xffffu;
+    let count = packed >> 16u;
+    var anchor = plate_history_seed(start);
+    var nearest = dot(pos, anchor);
+    for (var k = 1u; k < count; k++) {
+        let seed = plate_history_seed(start + k);
+        let d = dot(pos, seed);
+        if (d > nearest) {
+            nearest = d;
+            anchor = seed;
+        }
+    }
+    return anchor;
 }
 
 struct PlatePair {
@@ -113,16 +148,16 @@ struct PlatePair {
     gap: f32, // biased distance to the second-nearest plate minus the nearest
 }
 
-// Nearest and second-nearest plate, with plate_assign.wgsl's distance bias.
+// Nearest and second-nearest plate, with plates.wgsl's plate_distance.
 fn plate_nearest_pair(warped: vec3<f32>) -> PlatePair {
     var best = PlatePair(0u, 0u, 0.0);
     var d_a = 100.0;
     var d_b = 100.0;
     for (var i = 0u; i < plate_motion.count; i++) {
         let plate_offset = vec3<f32>(f32(i) * 17.3, f32(i) * 31.7, f32(i) * 43.1);
-        let d = 1.0 - dot(warped, plate_motion.plates[i].center)
-            + snoise(warped * 2.0 + plate_offset) * 0.03
-            + snoise(warped * 3.5 + plate_offset * 2.0) * 0.01;
+        let d = 1.0 - dot(warped, plate_anchor_of(warped, i))
+            + snoise(warped * 2.0 + plate_offset) * 0.08
+            + snoise(warped * 4.5 + plate_offset * 2.0) * 0.04;
         if (d < d_a) {
             d_b = d_a;
             best.b = best.a;
@@ -137,12 +172,43 @@ fn plate_nearest_pair(warped: vec3<f32>) -> PlatePair {
     return best;
 }
 
-// Boundary type at pos, identical to terrain_from_plates.wgsl classify_boundary:
-// convergent (-1), transform (0), divergent (+1).
+// Boundary type at the warped position, identical to plates.wgsl
+// classify_boundary: convergent (-1), transform (0), divergent (+1).
 fn plate_boundary_type(pos: vec3<f32>, a: u32, b: u32) -> f32 {
     let rel_velocity = cross(plate_motion.plates[a].omega, pos) - cross(plate_motion.plates[b].omega, pos);
-    let boundary_normal = normalize(plate_motion.plates[b].center - plate_motion.plates[a].center);
+    let boundary_normal = normalize(plate_anchor_of(pos, b) - plate_anchor_of(pos, a));
     return -clamp(dot(rel_velocity, boundary_normal) * 5.0, -1.0, 1.0);
+}
+
+// History features (sutures, arcs, rifts) as thin colored lines; alpha in w.
+fn plate_history_lines(pos: vec3<f32>, zoom: f32) -> vec4<f32> {
+    if (!plate_has_history()) {
+        return vec4<f32>(0.0);
+    }
+    let counts = plate_motion.plates[plate_motion.count].center;
+    let seeds = bitcast<u32>(counts.x);
+    let features = bitcast<u32>(counts.y);
+    let base = plate_motion.count + 1u + seeds;
+    let half_width = 0.006 / zoom;
+    var color = vec4<f32>(0.0);
+    for (var f = 0u; f < features; f++) {
+        let shape = plate_motion.plates[base + 2u * f];
+        let a = shape.center;
+        let b = shape.omega;
+        let n_raw = cross(a, b);
+        if (length(n_raw) < 0.000001) { continue; }
+        let n = normalize(n_raw);
+        let q = pos - n * dot(pos, n);
+        if (dot(cross(a, q), n) < 0.0 || dot(cross(q, b), n) < 0.0) { continue; }
+        let coverage = 1.0 - smooth_step(half_width, half_width * 1.8, abs(dot(pos, n)));
+        if (coverage * 0.75 <= color.w) { continue; }
+        let kind = u32(shape.plate_type + 0.5);
+        var tint = vec3<f32>(0.75, 0.35, 1.0); // suture
+        if (kind == 1u) { tint = vec3<f32>(1.0, 0.55, 0.1); } // arc
+        if (kind == 2u) { tint = vec3<f32>(0.1, 0.9, 0.7); }  // rift
+        color = vec4<f32>(tint, coverage * 0.75);
+    }
+    return color;
 }
 
 fn plate_tint(index: u32) -> vec3<f32> {
@@ -1264,7 +1330,8 @@ fn shade_planet(in: VertexOutput) -> vec4<f32> {
                     debug_color = mix(vec3<f32>(0.32, 0.42, 0.24), vec3<f32>(0.62, 0.56, 0.42), clamp((height - uniforms.ocean_level) * 3.0, 0.0, 1.0));
                 }
                 if (plate_motion.count > 0u) {
-                    let pair = plate_nearest_pair(plate_warp_position(rotated));
+                    let warped = plate_warp_position(rotated);
+                    let pair = plate_nearest_pair(warped);
                     debug_color = mix(debug_color, plate_tint(pair.a) * 0.75, 0.22);
                     if (plate_motion.plates[pair.a].plate_type > 0.5) {
                         debug_color *= 1.08;
@@ -1273,7 +1340,7 @@ fn shade_planet(in: VertexOutput) -> vec4<f32> {
                     let zoom = max(uniforms.zoom, 1.0);
                     let edge = 1.0 - smooth_step(0.006 / zoom, 0.012 / zoom, pair.gap);
                     if (edge > 0.0 && pair.a != pair.b) {
-                        let btype = plate_boundary_type(rotated, pair.a, pair.b);
+                        let btype = plate_boundary_type(warped, pair.a, pair.b);
                         let convergent = vec3<f32>(1.0, 0.22, 0.12);
                         let transform = vec3<f32>(1.0, 0.85, 0.2);
                         let divergent = vec3<f32>(0.2, 0.85, 1.0);
@@ -1286,6 +1353,8 @@ fn shade_planet(in: VertexOutput) -> vec4<f32> {
                     }
 
                     let cells = 7.0 * clamp(round(zoom), 1.0, 6.0);
+                    let history = plate_history_lines(warped, zoom);
+                    debug_color = mix(debug_color, history.rgb, history.w);
                     let arrow = plate_arrow_coverage(rotated, cells);
                     debug_color = mix(debug_color, vec3<f32>(0.97, 0.97, 0.94), arrow * 0.9);
                 } else {
