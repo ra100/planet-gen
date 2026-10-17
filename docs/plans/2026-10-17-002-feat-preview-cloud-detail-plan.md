@@ -76,6 +76,15 @@ noise.
   (missing field loads as 1.0).
 - `realism_capture` renders `*-no-detail` with `cloud_detail = 0`.
 
+## Captures
+
+Seed 42 at 768 px from `realism_capture`: left `cloud_detail` = 0 (the
+previous preview), right the default detail.
+
+![Globe, before and after](../images/cloud-detail-review/globe-42.jpg)
+
+![Orbital crop, before and after](../images/cloud-detail-review/orbital-42.jpg)
+
 ## Verification
 
 - `cloud_detail_does_not_turn_uniform_decks_into_noise_masks`: 0.8 decks of
