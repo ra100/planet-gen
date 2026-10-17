@@ -58,7 +58,7 @@ jobs:
             C:\vcpkg\packages
             C:\vcpkg\downloads
             C:\vcpkg\installed\x64-windows
-          key: vcpkg-openexr-1
+          key: vcpkg-openexr-2
 
       - name: Install OpenEXR (Windows)
         if: runner.os == 'Windows'
