@@ -68,6 +68,7 @@ pub struct PlanetFile {
     pub cloud_coverage: f32,
     pub cloud_seed: u32,
     pub cloud_opacity: f32,
+    pub cloud_detail: f32,
     pub wind_scale: f32,
     pub storm_count: u32,
     pub storm_size: f32,
@@ -136,6 +137,7 @@ impl Default for PlanetFile {
             cloud_coverage: 0.5,
             cloud_seed: params.seed.wrapping_add(1000),
             cloud_opacity: 1.0,
+            cloud_detail: 1.0,
             wind_scale: 1.0,
             lava_glow: 0.0,
             ring_inner: 0.0,
@@ -214,6 +216,7 @@ pub fn checked_load(json: &str) -> Result<PlanetFile, String> {
     finite("geologic_time_myr", file.geologic_time_myr)?;
     finite("cloud_coverage", file.cloud_coverage)?;
     finite("cloud_opacity", file.cloud_opacity)?;
+    finite("cloud_detail", file.cloud_detail)?;
     finite("wind_scale", file.wind_scale)?;
     finite("storm_size", file.storm_size)?;
     finite("lava_glow", file.lava_glow)?;

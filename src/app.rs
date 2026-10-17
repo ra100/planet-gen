@@ -70,6 +70,7 @@ pub struct PlanetGenApp {
     cloud_coverage: f32,
     cloud_seed: u32,
     cloud_opacity: f32,
+    cloud_detail: f32,
     wind_scale: f32,
     lava_glow: f32,    // tectonic emission intensity (0.0-1.0)
     ring_inner: f32,   // ring inner radius (planet radii)
@@ -268,6 +269,7 @@ impl PlanetGenApp {
             cloud_coverage: 0.5,
             cloud_seed: default_cloud_seed,
             cloud_opacity: 1.0,
+            cloud_detail: 1.0,
             wind_scale: 1.0,
             lava_glow: 0.0,
             ring_inner: 0.0,
@@ -381,7 +383,7 @@ impl PlanetGenApp {
             cloud_advection: if self.show_wind_effects { 1.0 } else { 0.0 },
             rotation_rate: self.derived.rotation_rate_rad_s / (std::f32::consts::TAU / 86400.0),
             atm_pressure: self.derived.surface_pressure_bar,
-            _pad4: 0.0,
+            cloud_detail: self.cloud_detail,
             lava_glow: self.lava_glow,
             ring_inner: self.ring_inner,
             ring_outer: self.ring_outer,
@@ -1183,6 +1185,7 @@ impl PlanetGenApp {
         self.geologic_time_myr = 0.0;
         self.cloud_coverage = 0.5;
         self.cloud_opacity = 1.0;
+        self.cloud_detail = 1.0;
         self.wind_scale = 1.0;
         self.lava_glow = 0.0;
         self.ring_inner = 0.0;
@@ -1314,6 +1317,7 @@ impl PlanetGenApp {
             cloud_coverage: self.cloud_coverage,
             cloud_seed: self.cloud_seed,
             cloud_opacity: self.cloud_opacity,
+            cloud_detail: self.cloud_detail,
             wind_scale: self.wind_scale,
             lava_glow: self.lava_glow,
             ring_inner: self.ring_inner,
@@ -1379,6 +1383,7 @@ impl PlanetGenApp {
         self.cloud_coverage = file.cloud_coverage;
         self.cloud_seed = file.cloud_seed;
         self.cloud_opacity = file.cloud_opacity;
+        self.cloud_detail = file.cloud_detail;
         self.wind_scale = file.wind_scale;
         self.lava_glow = file.lava_glow;
         self.ring_inner = file.ring_inner;
@@ -2029,6 +2034,19 @@ impl PlanetGenApp {
             Param::new(
                 "Opacity",
                 "Cloud layer transparency: 0 = invisible, 1 = fully opaque",
+                1.0,
+            )
+            .with(2, ""),
+        ) {
+            self.needs_render = true;
+        }
+        if widgets::slider_row(
+            ui,
+            &mut self.cloud_detail,
+            0.0..=1.0,
+            Param::new(
+                "Detail",
+                "Sub-texel cloud structure: 0 = raw weather field, 1 = billowed margins, broken thin cloud and bright thick cores",
                 1.0,
             )
             .with(2, ""),

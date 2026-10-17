@@ -275,6 +275,7 @@ fn main() {
     u.show_atmosphere_layer = 1.0;
     u.show_cities = 1.0;
     u.cloud_opacity = setting("cloud_opacity", 1.0);
+    u.cloud_detail = setting("cloud_detail", 1.0);
     u.cloud_advection = 1.0;
     u.rotation_rate = 1.0;
     u.atm_pressure = derived.surface_pressure_bar;
@@ -397,7 +398,6 @@ fn main() {
             },
         ),
     ];
-    let no_detail = PreviewRenderer::new_with_cloud_detail(&gpu, 0.0);
     // Isolated authored families: compare morphology without formation changes
     // or different geography concealing whether the layer types are distinct.
     for (name, column, geometry) in [
@@ -488,9 +488,13 @@ fn main() {
                 | "daylight-closeup"
                 | "daylight-orbital"
         ) {
-            let smooth = no_detail.render(
+            // The same weather with sub-texel detail off: the raw solver field.
+            let smooth = renderer.render(
                 &gpu,
-                &settings,
+                &PreviewUniforms {
+                    cloud_detail: 0.0,
+                    ..settings
+                },
                 &terrain_view,
                 Some(&dynamics.wind_continentality),
                 Some((&weather.mass, &weather.geometry)),

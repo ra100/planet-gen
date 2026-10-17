@@ -1943,7 +1943,7 @@ fn cloud_export_uniforms(snapshot: WeatherSnapshot) -> PreviewUniforms {
         cloud_advection: if snapshot.wind_scale > 0.0 { 1.0 } else { 0.0 },
         rotation_rate: snapshot.rotation_rate_rad_s / (std::f32::consts::TAU / 86_400.0),
         atm_pressure: snapshot.surface_pressure_bar,
-        _pad4: 0.0,
+        cloud_detail: 0.0,
         lava_glow: 0.0,
         ring_inner: 0.0,
         ring_outer: 0.0,
@@ -5211,6 +5211,8 @@ mod tests {
         let exported_uniforms = cloud_export_uniforms(snapshot);
         assert_eq!(exported_uniforms.show_clouds, 1.0);
         assert_eq!(exported_uniforms.cloud_opacity, 1.0);
+        // Sub-texel detail is a preview presentation; export keeps the solver field.
+        assert_eq!(exported_uniforms.cloud_detail, 0.0);
         assert_eq!(exported_uniforms.show_cloud_shadows, 0.0);
     }
 

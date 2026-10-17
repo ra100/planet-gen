@@ -1233,7 +1233,7 @@ fn preview_uniforms(params: &PlanetParams, derived: &DerivedProperties) -> Previ
             derived.rotation_rate_rad_s,
         ),
         atm_pressure: derived.surface_pressure_bar,
-        _pad4: 0.,
+        cloud_detail: 0.,
         lava_glow: 0.,
         ring_inner: 0.,
         ring_outer: 0.,
