@@ -21,6 +21,7 @@ use crate::plates::{PlateGenParams, generate_plates};
 use crate::png_writer::{AtomicScanlinePngWriter, PngRowFormat};
 use crate::preview::PreviewUniforms;
 use crate::tectonic_history::{plate_count, plate_records};
+use crate::terrain_ao::{BroadAoField, albedo_bake_factor};
 use crate::terrain_compute::{
     ErosionClimate, ErosionPipeline, TectonicTerrain, TerrainComputePipeline, TerrainGenParams,
     TerrainGenerationParams, WindFieldPipeline, earth_relative_rotation_rate,
@@ -155,6 +156,9 @@ pub struct ExportConfig {
     /// Copied at export start so UI changes cannot alter the queued weather inputs.
     pub weather: WeatherSnapshot,
     pub night_lights: f32,
+    /// Bake the broad AO into `albedo.png` at this strength (0–1); `None`
+    /// leaves albedo unshaded.
+    pub albedo_ao: Option<f32>,
 }
 
 pub const CLOUD_EXR_CHANNELS: [&str; 6] = [
@@ -843,20 +847,6 @@ pub struct RoughnessMapParams {
     pub local_height: u32,
     pub axial_tilt_rad: f32,
     pub season: f32,
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, Pod, Zeroable)]
-pub struct AoMapParams {
-    pub face: u32,
-    pub full_resolution: u32,
-    pub ao_strength: f32,
-    pub ocean_level: f32,
-    pub tile_offset_x: u32,
-    pub tile_offset_y: u32,
-    pub resolution: u32,
-    pub local_height: u32,
-    pub ice: IceMapClimate,
 }
 
 #[repr(C)]
@@ -2136,6 +2126,94 @@ fn stage_ocean_mask_faces(
     Ok(stage)
 }
 
+/// Broad AO at one full-resolution face pixel; open water is never occluded.
+fn broad_ao_at(
+    field: &BroadAoField,
+    terrain: &TectonicTerrain,
+    ocean_level: f32,
+    face: u32,
+    x: u32,
+    y: u32,
+) -> f32 {
+    let resolution = terrain.resolution;
+    if terrain.faces[face as usize][(y * resolution + x) as usize] < ocean_level {
+        return 1.0;
+    }
+    let scale = 1.0 / (resolution - 1) as f32;
+    field.sample(face as usize, x as f32 * scale, y as f32 * scale)
+}
+
+fn stage_broad_ao(
+    field: &BroadAoField,
+    terrain: &TectonicTerrain,
+    coordinator: &TileCoordinator,
+    ocean_level: f32,
+    progress: &mut ProgressTracker,
+    cancel: &AtomicBool,
+    output_dir: &Path,
+) -> Result<ExportStage, String> {
+    let stage = ExportStage::create(
+        output_dir,
+        StageMetadata {
+            face_resolution: coordinator.face_resolution,
+            components: 1,
+            halo: 0,
+        },
+    )?;
+    let tile = coordinator.tile_size;
+    for face in 0..6u32 {
+        for tile_y in 0..coordinator.tiles_per_axis {
+            for tile_x in 0..coordinator.tiles_per_axis {
+                if cancel.load(Ordering::Relaxed) {
+                    return Err("Cancelled".into());
+                }
+                let origin_x = tile_x * tile;
+                let origin_y = tile_y * tile;
+                let mut values = Vec::with_capacity((tile * tile) as usize);
+                for y in origin_y..origin_y + tile {
+                    values.extend(
+                        (origin_x..origin_x + tile)
+                            .map(|x| broad_ao_at(field, terrain, ocean_level, face, x, y)),
+                    );
+                }
+                stage.write_tile(face, origin_x, origin_y, tile, tile, &values)?;
+                progress.advance(&format!("AO face {face}"));
+            }
+        }
+    }
+    Ok(stage)
+}
+
+/// Darkens one cropped RGBA albedo tile by the broad AO at `strength`.
+/// `tile` is face, global origin x/y, width and height.
+fn bake_ao_into_albedo_tile(
+    field: &BroadAoField,
+    terrain: &TectonicTerrain,
+    ocean_level: f32,
+    strength: f32,
+    tile: [u32; 5],
+    values: &mut [f32],
+) {
+    let [face, origin_x, origin_y, width, height] = tile;
+    for row in 0..height {
+        for column in 0..width {
+            let ao = broad_ao_at(
+                field,
+                terrain,
+                ocean_level,
+                face,
+                origin_x + column,
+                origin_y + row,
+            );
+            let factor = albedo_bake_factor(ao, strength);
+            let pixel = ((row * width + column) * 4) as usize;
+            for channel in &mut values[pixel..pixel + 3] {
+                *channel *= factor;
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn stage_map_layer<P: Pod>(
     gpu: &GpuContext,
@@ -2149,6 +2227,41 @@ fn stage_map_layer<P: Pod>(
     cancel: &AtomicBool,
     output_dir: &Path,
     metrics: &mut MapBatchMetrics,
+) -> Result<ExportStage, String> {
+    stage_map_layer_with(
+        gpu,
+        pipeline,
+        terrain,
+        coordinator,
+        make_params,
+        output_element_bytes,
+        progress,
+        map_name,
+        cancel,
+        output_dir,
+        metrics,
+        None,
+    )
+}
+
+/// Adjusts one cropped tile in place before it is staged: face, global
+/// origin x/y, width, height and the tile's f32 components.
+type TilePostprocess<'a> = &'a dyn Fn(u32, u32, u32, u32, u32, &mut [f32]);
+
+#[allow(clippy::too_many_arguments)]
+fn stage_map_layer_with<P: Pod>(
+    gpu: &GpuContext,
+    pipeline: &MapPipeline,
+    terrain: &TectonicTerrain,
+    coordinator: &TileCoordinator,
+    make_params: impl Fn(u32, TileRegion) -> P,
+    output_element_bytes: usize,
+    progress: &mut ProgressTracker,
+    map_name: &str,
+    cancel: &AtomicBool,
+    output_dir: &Path,
+    metrics: &mut MapBatchMetrics,
+    postprocess: Option<TilePostprocess>,
 ) -> Result<ExportStage, String> {
     let components = u32::try_from(output_element_bytes / std::mem::size_of::<f32>())
         .map_err(|_| "staged map component count exceeds u32")?;
@@ -2196,12 +2309,31 @@ fn stage_map_layer<P: Pod>(
             metrics.dispatch_readback_wall_ms += elapsed_ms;
             for ((face, region), tile_data) in regions.into_iter().zip(read.results) {
                 let cropped = crop_region_bytes(region, &tile_data, output_element_bytes);
-                let values = bytemuck::try_cast_slice(&cropped)
+                let values: &[f32] = bytemuck::try_cast_slice(&cropped)
                     .map_err(|_| "staged map output is not aligned f32 data")?;
+                let origin_x = region.origin_x.wrapping_add(region.crop_x);
+                let origin_y = region.origin_y.wrapping_add(region.crop_y);
+                let adjusted;
+                let values = match postprocess {
+                    Some(postprocess) => {
+                        let mut owned = values.to_vec();
+                        postprocess(
+                            face,
+                            origin_x,
+                            origin_y,
+                            region.crop_width,
+                            region.crop_height,
+                            &mut owned,
+                        );
+                        adjusted = owned;
+                        &adjusted[..]
+                    }
+                    None => values,
+                };
                 stage.write_tile(
                     face,
-                    region.origin_x.wrapping_add(region.crop_x),
-                    region.origin_y.wrapping_add(region.crop_y),
+                    origin_x,
+                    origin_y,
                     region.crop_width,
                     region.crop_height,
                     values,
@@ -3382,7 +3514,7 @@ fn export_staged_equirect_png(
 
 // ============ Main Export Orchestrator ============
 
-fn face_uv_to_direction(face: usize, u: f32, v: f32) -> [f32; 3] {
+pub(crate) fn face_uv_to_direction(face: usize, u: f32, v: f32) -> [f32; 3] {
     let s = u.mul_add(2.0, -1.0);
     let t = v.mul_add(2.0, -1.0);
     match face {
@@ -3607,7 +3739,8 @@ pub fn run_export_with_timings_and_checkpoints(
         + 6 // erosion
         + map_count * 6 * tiles_per_face // map tiles for selected layers
         + 6 * export_count // file writes
-        + u32::from(layers.clouds); // cloud driver maps
+        + u32::from(layers.clouds) // cloud driver maps
+        + u32::from(layers.ao || (layers.albedo && config.albedo_ao.is_some())); // broad AO field
     let mut progress = ProgressTracker::new(progress_tx, total_steps);
 
     let generation_started = Instant::now();
@@ -3775,13 +3908,10 @@ pub fn run_export_with_timings_and_checkpoints(
     } else {
         None
     };
-    let ao_pipeline = if layers.ao {
-        Some(MapPipeline::new(
-            gpu,
-            &ice_shader(include_str!("shaders/ao_map.wgsl")),
-            "ao map",
-            8,
-        ))
+    let bake_ao = layers.albedo && config.albedo_ao.is_some();
+    let broad_ao = if layers.ao || bake_ao {
+        progress.advance("Computing broad AO...");
+        Some(BroadAoField::from_terrain(&terrain, ocean_level, cancel)?)
     } else {
         None
     };
@@ -3937,10 +4067,26 @@ pub fn run_export_with_timings_and_checkpoints(
     }
 
     if let Some(pipeline) = albedo_pipeline.as_ref() {
-        let stage = stage_map_layer(
+        let terrain = &terrain;
+        let albedo_bake = match (broad_ao.as_ref(), config.albedo_ao) {
+            (Some(field), Some(strength)) => Some(
+                move |face: u32, x0: u32, y0: u32, width: u32, height: u32, values: &mut [f32]| {
+                    bake_ao_into_albedo_tile(
+                        field,
+                        terrain,
+                        ocean_level,
+                        strength,
+                        [face, x0, y0, width, height],
+                        values,
+                    );
+                },
+            ),
+            _ => None,
+        };
+        let stage = stage_map_layer_with(
             gpu,
             pipeline,
-            &terrain,
+            terrain,
             &coordinator,
             |face, region| AlbedoMapParams {
                 face,
@@ -3962,6 +4108,7 @@ pub fn run_export_with_timings_and_checkpoints(
             cancel,
             &planet_dir,
             &mut timings.map_batch_metrics,
+            albedo_bake.as_ref().map(|bake| bake as TilePostprocess),
         )?;
         progress.advance("Exporting albedo...");
         merge_staged_export(
@@ -3979,29 +4126,15 @@ pub fn run_export_with_timings_and_checkpoints(
         )?;
     }
 
-    if let Some(pipeline) = ao_pipeline.as_ref() {
-        let stage = stage_map_layer(
-            gpu,
-            pipeline,
+    if let Some(field) = broad_ao.as_ref().filter(|_| layers.ao) {
+        let stage = stage_broad_ao(
+            field,
             &terrain,
             &coordinator,
-            |face, region| AoMapParams {
-                face,
-                full_resolution: full_res,
-                ao_strength: 30.0,
-                ocean_level,
-                tile_offset_x: region.origin_x,
-                tile_offset_y: region.origin_y,
-                resolution: region.width,
-                local_height: region.height,
-                ice: ice_climate(face),
-            },
-            4,
+            ocean_level,
             &mut progress,
-            "AO",
             cancel,
             &planet_dir,
-            &mut timings.map_batch_metrics,
         )?;
         progress.advance("Exporting AO...");
         merge_staged_export(
@@ -4294,6 +4427,7 @@ mod tests {
             layers: ExportLayers::default(),
             weather: source,
             night_lights: 0.0,
+            albedo_ao: None,
         };
         let mut changed_after_queue = source;
         changed_after_queue.coverage = 0.0;
@@ -6524,23 +6658,6 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         );
         assert_map_parity(
             &gpu,
-            "ao",
-            shader(include_str!("shaders/ao_map.wgsl")),
-            4,
-            |region| AoMapParams {
-                face: 0,
-                full_resolution: resolution,
-                ao_strength: 30.0,
-                ocean_level: 0.0,
-                tile_offset_x: region.origin_x,
-                tile_offset_y: region.origin_y,
-                resolution: region.width,
-                local_height: region.height,
-                ice,
-            },
-        );
-        assert_map_parity(
-            &gpu,
             "emission",
             shader(include_str!("shaders/emission_map.wgsl")),
             4,
@@ -6685,6 +6802,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
                 ..WeatherSnapshot::default()
             },
             night_lights: 0.5,
+            albedo_ao: None,
         };
 
         let (tx, rx) = std::sync::mpsc::channel();
@@ -6774,6 +6892,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             layers: ExportLayers::default(),
             weather: WeatherSnapshot::default(),
             night_lights: 0.5,
+            albedo_ao: None,
         };
 
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -6817,6 +6936,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             layers: ExportLayers::default(),
             weather: WeatherSnapshot::default(),
             night_lights: 0.5,
+            albedo_ao: None,
         };
         assert_eq!(config.tile_size, TILE_SIZE);
 

@@ -173,6 +173,7 @@ fn eight_k_all_layers_with_erosion() {
         layers: ExportLayers::default(),
         weather: WeatherSnapshot::default(),
         night_lights: 1.0,
+        albedo_ao: None,
     };
     let (tx, rx) = channel();
     let monitor = std::thread::spawn(move || {
@@ -305,6 +306,7 @@ fn streamed_layers_release_previous_face_buffers() {
             ..WeatherSnapshot::default()
         },
         night_lights: 0.0,
+        albedo_ao: None,
     };
     let (progress, _) = channel();
     let result = run_export(
@@ -394,6 +396,7 @@ fn invalid_tile_sizes_are_export_errors() {
                 ..WeatherSnapshot::default()
             },
             night_lights: 0.0,
+            albedo_ao: None,
         };
         let (progress, _) = channel();
         assert!(

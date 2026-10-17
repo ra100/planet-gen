@@ -148,6 +148,10 @@ fn main() {
                 ..Default::default()
             },
             night_lights: 0.0,
+            // PLANET_GEN_BAKE_AO=0.6 bakes the broad AO into albedo.png.
+            albedo_ao: std::env::var("PLANET_GEN_BAKE_AO")
+                .ok()
+                .and_then(|value| value.parse().ok()),
         };
         let terrain_params = TerrainGenerationParams {
             seed,
