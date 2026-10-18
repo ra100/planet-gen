@@ -530,14 +530,15 @@ fn ray_march_atmosphere(ndc: vec2<f32>, z_start: f32, z_end: f32, sun_dir: vec3<
 // depth. Detail only scales existing condensate: empty weather stays empty,
 // the pattern never depends on the cloud seed, and `cloud_detail` = 0
 // renders the solver field unchanged. Export never uses this path.
-const CLOUD_DETAIL_CELL_TEXELS: f32 = 4.0;
+const CLOUD_DETAIL_CELL_TEXELS: f32 = 2.0;
 // Column optical depth below which liquid stays clear, and the depth above
 // which billows no longer erode it (the bridge's 0-1 thickness window).
 const CLOUD_CONTRAST_LOW: f32 = 0.02;
 const CLOUD_CONTRAST_HIGH: f32 = 0.35;
 // Physical optical depth per unit of solver depth above the clear level: a
-// 0.35 solver column becomes tau ~16, a typical stratocumulus deck.
-const CLOUD_DEPTH_GAIN: f32 = 50.0;
+// 0.35 solver column becomes tau ~4, a moderate stratocumulus deck. Higher
+// gains turned the solver's fine ripples into dense white blocks.
+const CLOUD_DEPTH_GAIN: f32 = 12.0;
 // Two-stream diffusion with asymmetry g = 0.85: a non-absorbing layer of
 // optical depth tau reflects R = a tau / (1 + a tau), a = (1 - g) / 2, and
 // diffusely transmits 1 - R. The compositor's Beer-Lambert segment then needs
@@ -545,7 +546,7 @@ const CLOUD_DEPTH_GAIN: f32 = 50.0;
 // following the solver's condensate instead of clipping to flat white.
 const CLOUD_DIFFUSION: f32 = 0.075;
 // Largest share of a column's thickness that billows can erode.
-const CLOUD_EROSION: f32 = 0.35;
+const CLOUD_EROSION: f32 = 0.2;
 // Inverted Worley F1 mean for unit jitter, and the p5-p95 range of the
 // summed billows (shared with the Blender bridge), mapped to 0-1.
 const CLOUD_BILLOW_MEAN: f32 = 0.48;
@@ -636,7 +637,7 @@ fn cloud_detail_texel_angle() -> f32 {
 // ray crosses differ by far less than a billow cell except near the limb,
 // where the octaves are unresolved anyway.
 struct CloudDetailNoise {
-    // World-space weather lookup offset (up to ~0.7 texel) that hides the
+    // World-space weather lookup offset (up to ~0.25 texel) that hides the
     // bilinear texel lattice.
     warp: vec3<f32>,
     billow: f32,
@@ -649,7 +650,7 @@ fn cloud_detail_noise(direction: vec3<f32>, angular_pixel_footprint: f32) -> Clo
     let basis = tangent_basis(direction);
     let p = direction / (texel * 6.0);
     let offset = vec2<f32>(snoise(p + vec3<f32>(5.1)), snoise(p + vec3<f32>(-9.7)));
-    let warp = (basis[0] * offset.x + basis[1] * offset.y) * texel * 0.7;
+    let warp = (basis[0] * offset.x + basis[1] * offset.y) * texel * 0.25;
 
     let cell_angle = texel * CLOUD_DETAIL_CELL_TEXELS;
     var domain = direction / cell_angle;

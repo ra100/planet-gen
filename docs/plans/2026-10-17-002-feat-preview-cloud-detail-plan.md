@@ -23,8 +23,8 @@ families per column:
 - liquid column depth `d = (0.45 low + 1.65 deep) * 4.5`, the solver's own
   optical weights;
 - thickness window `t = clamp((d - 0.02) / 0.33)`, the bridge's contrast map;
-- physical depth `tau = 50 (d - 0.02) * kept`: a 0.35 solver column becomes
-  tau ~16, a stratocumulus deck;
+- physical depth `tau = 12 (d - 0.02) * kept`: a 0.35 solver column becomes
+  tau ~4 (review found gain 50 too dense: it hid the solver's fine ripples);
 - two-stream shading with g = 0.85: a layer reflects `a tau / (1 + a tau)`,
   a = 0.075, so the Beer-Lambert compositor gets `tau' = ln(1 + a tau)`. Thick
   decks turn bright without clipping to flat white; thin cloud stays
@@ -36,10 +36,10 @@ The sun path is scaled by the same multipliers, so puffs shade themselves.
 
 Same recipe as the bridge (13.3), on the preview's sphere direction:
 
-- five inverted Worley F1 octaves (cell = 4 weather texels, weights
+- five inverted Worley F1 octaves (cell = 2 weather texels, weights
   0.5/0.24/0.13/0.07/0.04) plus zero-mean wisps, mapped to 0-1 over the
   sums' p5-p95 range;
-- `solid = 1 - exp(-3t)`, `erosion = 0.35 * variety * (1 - billow)`,
+- `solid = 1 - exp(-3t)`, `erosion = 0.2 * variety * (1 - billow)`,
   `kept = clamp((solid - erosion) / (1 - erosion)) / solid`.
 
 Thin columns break into cumulus over clear sky, margins billow, thick cores
@@ -48,7 +48,7 @@ seed.
 
 ## U3: Lattice, filtering and wind
 
-- The weather lookup is warped by up to 0.7 texel along the tangent plane,
+- The weather lookup is warped by up to 0.25 texel along the tangent plane,
   which hides the bilinear texel lattice.
 - Octaves fade to their mean once smaller than the pixel footprint, so orbit
   views do not shimmer.
@@ -90,7 +90,7 @@ previous preview), right the default detail.
 - `cloud_detail_does_not_turn_uniform_decks_into_noise_masks`: 0.8 decks of
   each family keep no holes and under 6% ripple in optical depth.
 - `cloud_detail_breaks_thin_uniform_veils_into_cloud_and_clear_sky`: a 0.03
-  low deck becomes clear sky and thicker cloud.
+  low deck becomes clear sky between surviving cloud.
 - `cloud_detail_adds_no_cloud_or_shadow_to_clear_sky_and_ignores_cloud_seed`:
   empty weather renders bit-identically with detail 0 and 1; cloud seeds do
   not change the detailed render.
