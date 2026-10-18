@@ -88,6 +88,23 @@ noise.
   (missing field loads as 1.0).
 - `realism_capture` renders `*-no-detail` with `cloud_detail = 0`.
 
+## U7: Blender bridge
+
+Review found the exported clouds turned into structureless blobs in Blender
+although `cloud_density.exr` keeps the solver's ripples. The bridge mapped the
+contrast window straight to `opacity = 1 - exp(-6 m)`, so everything above a
+modest thickness became flat, near-opaque white. It now uses the preview's
+mapping: `tau = Depth Gain (d - Low) * kept * m^Contrast` with two-stream
+opacity `a tau / (1 + a tau)`, so brightness keeps rising with thickness, and a
+bump from that opacity shades the sunward and lee sides of the solver's ripples.
+Billow octaves stay out of the bump: Blender does not filter them by pixel
+footprint, and even the broadest is a few pixels wide at globe distances, which
+shades as sandpaper grain. `a` defaults to 0.3 rather than the droplet value
+0.075 because a flat shell lacks the preview's multiple scattering. Export is
+unchanged.
+
+![Blender bridge, before and after](../images/cloud-detail-review/blender-42.jpg)
+
 ## Captures
 
 Seed 42 at 768 px from `realism_capture`: left `cloud_detail` = 0 (the

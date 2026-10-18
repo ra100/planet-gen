@@ -55,14 +55,17 @@ rebuilds the node groups, so every material using them picks up the change.
 
 | Input | Effect |
 |-------|--------|
-| Density Low / High | Contrast on the solver's optical depth: below Low is clear, above High full |
+| Density Low / High | Contrast on the solver's optical depth: below Low is clear, above High a full column that billows no longer erode |
 | Scale | Base billow cell frequency (250 ~ 50 km cells on an Earth-size planet); six octaves down to 1/32 |
 | Erosion | How far billows eat into thin areas and edges; cores are kept |
 | Variety Scale | Planet-scale noise that varies Erosion 0.5-1.5x, so some systems are puffier |
 | Wisps | Fine FBM added to the billows |
 | Zonal Stretch | Compresses the detail along the pole axis; elongates billows east-west |
 | Wind Streak | Displaces the detail along the solver wind |
-| Opacity | `opacity = 1 - exp(-Opacity * density)` |
+| Depth Gain | Physical optical depth per unit of solver depth above Low (36: a 0.35 column is tau ~11), as in the app preview |
+| Contrast | Depth scales by thickness^Contrast, so haze between the solver's ripples stays faint and their cores turn bright |
+| Diffusion | Two-stream reflectance `opacity = a tau / (1 + a tau)`: brightness keeps rising with thickness instead of clipping to flat white, so structure inside decks stays visible |
+| Relief | Bump from the visible cloud: sunlit and shaded sides on the solver's ripples and cells |
 | Longitude Offset | Turns the maps around the pole (in turns) if the surface is rotated |
 
 The group also outputs the eroded `Density`. The sampler group
