@@ -53,8 +53,8 @@ const CS_GAIN: f32 = 0.64;
 const CS_SIMPLEX_SIGMA: f32 = 0.373;
 // Mean and standard deviation of the cs_blobs fields below on a sphere slice
 // of unit cells (measured offline, ragged = 0).
-const CS_MCS_STATS: vec2<f32> = vec2<f32>(0.162, 0.289);
-const CS_FLOWER_STATS: vec2<f32> = vec2<f32>(0.131, 0.247);
+const CS_MCS_STATS: vec2<f32> = vec2<f32>(0.117, 0.226);
+const CS_FLOWER_STATS: vec2<f32> = vec2<f32>(0.149, 0.260);
 // Meridional compression of the noise domain by the zonal jets.
 const CS_ZONAL_STRETCH: f32 = 2.2;
 const CS_CIRRUS_STRETCH: f32 = 6.0;
@@ -142,10 +142,14 @@ fn cs_worley(p: vec3<f32>, seed: u32) -> vec3<f32> {
 // Union of random elliptical blobs, one per firing cell (probability
 // `firing`), radius `radius.x`-`radius.y` cells, soft inner core `inner`.
 // Every neighbour cell contributes, so a blob reaching past its own Voronoi
-// cell is never cut along the boundary. `ragged` perturbs the edges. Blobs
-// two cells away are never evaluated, so each one fades out before one cell
-// from its centre; otherwise elongated or ragged-swollen blobs were cut
-// along the lattice planes (straight edges with teeth on the map).
+// cell is never cut along the boundary. Blobs two cells away are never
+// evaluated, so each one fades out before one cell from its centre;
+// otherwise elongated or swollen blobs would be cut along the lattice planes.
+// `ragged` > 0 swells a blob and < 0 shrinks it. It must follow the noise the
+// blob is added to: with the opposite sign, blobs eroded exactly where the
+// noise rose around them and read as rings (the "soap bubbles"). Callers use
+// mostly the fine band, which frays the edges without doubling the bands
+// the macro shape already has.
 fn cs_blobs(p: vec3<f32>, seed: u32, firing: f32, radius: vec2<f32>, inner: f32, ragged: f32) -> f32 {
     let cell = floor(p);
     let local = p - cell;
@@ -167,7 +171,7 @@ fn cs_blobs(p: vec3<f32>, seed: u32, firing: f32, radius: vec2<f32>, inner: f32,
                 let along = dot(d, axis);
                 let stretched = d + axis * along * (1.0 / (1.0 + 0.8 * shape) - 1.0);
                 let r = mix(radius.x, radius.y, fract(id * 7.31 + shape));
-                let distance = length(stretched) * (1.0 + ragged);
+                let distance = length(stretched) * max(1.0 - ragged, 0.6);
                 let reach = 1.0 - smooth_step(0.8, 1.0, length(d));
                 // Probabilistic union: overlapping blobs merge without creases.
                 clear *= 1.0 - reach * (1.0 - smooth_step(r * inner, r, distance));
@@ -807,17 +811,19 @@ fn cs_synthesize(p: vec3<f32>, footprint: f32, solver: vec4<f32>) -> vec4<f32> {
         if (resolved > 0.0) {
             let q_cluster = cs_zonal_stretch(synoptic.point_meso, pole, 1.4) + warp_1 * 0.6 + warp_2;
             // Mesoscale convective systems: about half the cells host one,
-            // 250-450 km across, elongated, with anvil-soft ragged edges.
-            let ragged = 0.18 * octaves.mid * (1.0 - octaves.mid_unresolved) + 0.12 * octaves.lo;
+            // 130-510 km across, elongated, with ragged anvil edges; they
+            // swell where the synoptic band is moist, so they gather in
+            // groups instead of a string of pearls.
+            let ragged = 0.1 * octaves.lo + 0.25 * octaves.hi * (1.0 - octaves.hi_unresolved);
             let blob = cs_blobs(q_cluster / size + vec3<f32>(-23.0), seed ^ 0x77u, 0.42,
-                vec2<f32>(0.3, 0.75), 0.35, ragged);
+                vec2<f32>(0.2, 0.8), 0.15, ragged);
             var small = 0.0;
             let small_size = 85.0 / radius_km;
             let small_resolved = cs_cells_resolved(fp_cells, small_size);
             if (small_resolved > 0.0) {
                 // Isolated cumulonimbus between the systems.
                 small = small_resolved * cs_blobs(q_cells / small_size + vec3<f32>(5.0), seed ^ 0x99u, 0.2,
-                    vec2<f32>(0.3, 0.45), 0.3, ragged);
+                    vec2<f32>(0.2, 0.55), 0.3, ragged);
             }
             // Mean and deviation measured on a sphere slice of unit cells.
             clusters = resolved * (max(blob, 0.7 * small) - CS_MCS_STATS.x) / CS_MCS_STATS.y;
@@ -831,12 +837,13 @@ fn cs_synthesize(p: vec3<f32>, footprint: f32, solver: vec4<f32>) -> vec4<f32> {
     var flowers_unres = 1.0;
     if (morph.w > 0.02) {
         let size = 110.0 / radius_km;
-        let resolved = cs_cells_resolved(fp_cells, size * 2.0);
+        let resolved = cs_cells_resolved(cs_stretch_footprint(footprint, 1.8), size * 2.0);
         if (resolved > 0.0) {
-            let ragged = 0.3 * octaves.mid * (1.0 - octaves.mid_unresolved)
-                + 0.2 * octaves.hi * (1.0 - octaves.hi_unresolved);
-            let blob = cs_blobs(q_cells / size + vec3<f32>(41.0), seed ^ 0x3bu, 0.6,
-                vec2<f32>(0.35, 0.65), 0.2, ragged);
+            // Drawn out along the trades into short streets.
+            let q_flowers = cs_zonal_stretch(synoptic.point_meso, pole, 1.8) + warp_1 * 0.5 + warp_2 * 0.8;
+            let ragged = 0.3 * octaves.hi * (1.0 - octaves.hi_unresolved);
+            let blob = cs_blobs(q_flowers / size + vec3<f32>(41.0), seed ^ 0x3bu, 0.6,
+                vec2<f32>(0.25, 0.75), 0.2, ragged);
             flowers = resolved * (blob - CS_FLOWER_STATS.x) / CS_FLOWER_STATS.y;
             flowers_unres = 1.0 - resolved * resolved;
         }
@@ -856,12 +863,12 @@ fn cs_synthesize(p: vec3<f32>, footprint: f32, solver: vec4<f32>) -> vec4<f32> {
     // cumulus clusters follow the synoptic and mesoscale bands (the flowers
     // only texture them: alone, their peaked field reads as a star field),
     // the cellular regimes add their cells.
-    let c_lo = wm.x * 0.97 + wm.y * 0.5 + wm.z * 0.45 + wm.w * 0.6 + wc * 0.28;
-    let c_mid = wm.x * 0.25 + wm.y * 0.2 + wm.z * 0.2 + wm.w * 0.55 + wc * 0.15;
+    let c_lo = wm.x * 0.97 + wm.y * 0.5 + wm.z * 0.45 + wm.w * 0.6 + wc * 0.5;
+    let c_mid = wm.x * 0.25 + wm.y * 0.2 + wm.z * 0.2 + wm.w * 0.55 + wc * 0.45;
     let c_cl = wm.y * 0.84;
     let c_op = wm.z * 0.87;
     let c_fl = wm.w * 0.45;
-    let c_cv = wc * 0.95;
+    let c_cv = wc * 0.8;
     let variance = c_lo * c_lo + c_mid * c_mid + c_cl * c_cl + c_op * c_op + c_fl * c_fl + c_cv * c_cv;
     let norm = inverseSqrt(max(variance, 1.0e-6));
     let shape = (c_lo * octaves.lo + c_mid * octaves.mid + c_cl * closed_cells + c_op * open_cells
