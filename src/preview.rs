@@ -52,6 +52,8 @@ pub struct PreviewUniforms {
     pub planet_radius_km: f32,
     pub show_cloud_shadows: f32,
     pub surface_seed: u32,
+    pub cloud_thin_lift: f32, // raises thin cloud optical depth (0 = solver field)
+    pub _pad6: [f32; 3],
 }
 
 /// Header of the Plates-view storage buffer; `PlateGpu` records follow it.
@@ -850,6 +852,8 @@ mod tests {
             planet_radius_km: 6371.0,
             show_cloud_shadows: 1.0,
             surface_seed: 42,
+            cloud_thin_lift: 0.0,
+            _pad6: [0.0; 3],
         }
     }
 
@@ -1614,6 +1618,39 @@ mod tests {
     fn deck_center(size: usize) -> impl Iterator<Item = usize> {
         (size / 4..3 * size / 4)
             .flat_map(move |y| (size / 4..3 * size / 4).map(move |x| y * size + x))
+    }
+
+    #[test]
+    fn thin_cloud_lift_raises_thin_columns_and_leaves_thick_decks_and_clear_sky() {
+        let gpu = GpuContext::new().unwrap();
+        let renderer = PreviewRenderer::new(&gpu);
+        let size = 64usize;
+        let settings = PreviewUniforms {
+            view_mode: 9,
+            show_clouds: 1.0,
+            cloud_coverage: 1.0,
+            ..uniforms()
+        };
+        let lifted = PreviewUniforms {
+            cloud_thin_lift: 1.0,
+            ..settings
+        };
+        // Mean optical depth over the deck centre, solver field (detail 0).
+        let depth = |column, settings: &PreviewUniforms| {
+            let (field, _) = uniform_deck_renders(&gpu, &renderer, column, settings, size);
+            let center = deck_center(size).collect::<Vec<_>>();
+            center.iter().map(|&i| optical_depth(field[i])).sum::<f32>() / center.len() as f32
+        };
+        let thin = [0.02, 0.0, 0.0, 0.02];
+        let thin_ratio = depth(thin, &lifted) / depth(thin, &settings);
+        assert!(thin_ratio > 1.8, "thin cloud barely lifted ({thin_ratio})");
+        let thick = [0.4, 0.3, 0.0, 1.0];
+        let thick_ratio = depth(thick, &lifted) / depth(thick, &settings);
+        assert!(
+            (1.0..1.01).contains(&thick_ratio),
+            "thick deck changed ({thick_ratio})"
+        );
+        assert_eq!(depth([0.0; 4], &lifted), 0.0, "clear sky gained cloud");
     }
 
     #[test]

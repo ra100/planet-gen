@@ -9,6 +9,7 @@ struct Uniforms {
     cloud_advection: f32, rotation_rate: f32, atm_pressure: f32, _pad4: f32,
     lava_glow: f32, ring_inner: f32, ring_outer: f32, ring_tilt: f32,
     ring_opacity: f32, planet_radius_km: f32, show_cloud_shadows: f32, _pad5: f32,
+    cloud_thin_lift: f32, _pad6: f32, _pad7: f32, _pad8: f32,
 }
 
 struct CloudExportParams {

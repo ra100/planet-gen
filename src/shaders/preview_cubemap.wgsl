@@ -45,6 +45,10 @@ struct Uniforms {
     planet_radius_km: f32,
     show_cloud_shadows: f32,
     surface_seed: u32,
+    cloud_thin_lift: f32,  // raises thin cloud optical depth, 0 = solver field
+    _pad6: f32,
+    _pad7: f32,
+    _pad8: f32,
 }
 
 const CLOUD_RAY_SAMPLES: u32 = 8u;
@@ -733,7 +737,7 @@ fn cloud_detail_surface_shadow(
     let amount = cloud_detail_amount();
     if (amount <= 0.0) { return solver_shadow; }
     let direction = normalize(world_direction);
-    let local_mass = sample_weather_cube(weather_mass_tex, direction);
+    let local_mass = sample_weather_mass(direction);
     let weight = local_mass.r + local_mass.g + local_mass.b;
     var height_km = 1.0;
     if (weight > 0.0) {
@@ -746,7 +750,7 @@ fn cloud_detail_surface_shadow(
     let center = normalize(direction + sun_dir * cloud_surface_shadow_offset(height_km, radius_km));
     let noise = cloud_detail_noise(center, angular_pixel_footprint);
     let lookup = normalize(center + noise.warp * amount);
-    let mass = sample_weather_cube(weather_mass_tex, lookup);
+    let mass = sample_weather_mass(lookup);
     let detail = cloud_detail_multipliers(noise, mass);
     let depth = (mass.r * LOW_OPTICAL_WEIGHT * 0.90 * detail.x + mass.g * 1.65 * detail.y
         + mass.b * 0.28 * 0.32 * detail.z) * CLOUD_LIGHT_EXTINCTION;

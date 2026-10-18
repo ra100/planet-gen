@@ -152,6 +152,7 @@ fn main() {
             albedo_ao: std::env::var("PLANET_GEN_BAKE_AO")
                 .ok()
                 .and_then(|value| value.parse().ok()),
+            cloud_thin_lift: 0.0,
         };
         let terrain_params = TerrainGenerationParams {
             seed,

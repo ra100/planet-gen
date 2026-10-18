@@ -71,6 +71,7 @@ pub struct PlanetGenApp {
     cloud_seed: u32,
     cloud_opacity: f32,
     cloud_detail: f32,
+    cloud_thin_lift: f32,
     wind_scale: f32,
     lava_glow: f32,    // tectonic emission intensity (0.0-1.0)
     ring_inner: f32,   // ring inner radius (planet radii)
@@ -272,6 +273,7 @@ impl PlanetGenApp {
             cloud_seed: default_cloud_seed,
             cloud_opacity: 1.0,
             cloud_detail: 1.0,
+            cloud_thin_lift: 0.0,
             wind_scale: 1.0,
             lava_glow: 0.0,
             ring_inner: 0.0,
@@ -391,6 +393,8 @@ impl PlanetGenApp {
             rotation_rate: self.derived.rotation_rate_rad_s / (std::f32::consts::TAU / 86400.0),
             atm_pressure: self.derived.surface_pressure_bar,
             cloud_detail: self.cloud_detail,
+            cloud_thin_lift: self.cloud_thin_lift,
+            _pad6: [0.0; 3],
             lava_glow: self.lava_glow,
             ring_inner: self.ring_inner,
             ring_outer: self.ring_outer,
@@ -802,6 +806,7 @@ impl PlanetGenApp {
             night_lights: self.night_lights,
             albedo_ao: (self.export_albedo && self.export_bake_ao)
                 .then_some(self.export_bake_ao_strength),
+            cloud_thin_lift: self.cloud_thin_lift,
         };
 
         let terrain_params = self.terrain_params();
@@ -1214,6 +1219,7 @@ impl PlanetGenApp {
         self.cloud_coverage = 0.5;
         self.cloud_opacity = 1.0;
         self.cloud_detail = 1.0;
+        self.cloud_thin_lift = 0.0;
         self.wind_scale = 1.0;
         self.lava_glow = 0.0;
         self.ring_inner = 0.0;
@@ -1346,6 +1352,7 @@ impl PlanetGenApp {
             cloud_seed: self.cloud_seed,
             cloud_opacity: self.cloud_opacity,
             cloud_detail: self.cloud_detail,
+            cloud_thin_lift: self.cloud_thin_lift,
             wind_scale: self.wind_scale,
             lava_glow: self.lava_glow,
             ring_inner: self.ring_inner,
@@ -1412,6 +1419,7 @@ impl PlanetGenApp {
         self.cloud_seed = file.cloud_seed;
         self.cloud_opacity = file.cloud_opacity;
         self.cloud_detail = file.cloud_detail;
+        self.cloud_thin_lift = file.cloud_thin_lift.clamp(0.0, 1.0);
         self.wind_scale = file.wind_scale;
         self.lava_glow = file.lava_glow;
         self.ring_inner = file.ring_inner;
@@ -2081,6 +2089,23 @@ impl PlanetGenApp {
         ) {
             self.needs_render = true;
         }
+        egui::CollapsingHeader::new("Advanced")
+            .id_salt("clouds_advanced")
+            .show(ui, |ui| {
+                if widgets::slider_row(
+                    ui,
+                    &mut self.cloud_thin_lift,
+                    0.0..=1.0,
+                    Param::new(
+                        "Thin lift",
+                        "Raises faint, thin cloud (up to 3x) while thick decks stay as they are. Applies to the preview and exported cloud density; 0 = weather field as solved",
+                        0.0,
+                    )
+                    .with(2, ""),
+                ) {
+                    self.needs_render = true;
+                }
+            });
         if widgets::slider_row(
             ui,
             &mut self.wind_scale,
@@ -3197,6 +3222,7 @@ mod tests {
             weather: WeatherSnapshot::default(),
             night_lights: 0.0,
             albedo_ao: None,
+            cloud_thin_lift: 0.0,
         }
     }
 

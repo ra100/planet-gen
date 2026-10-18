@@ -34,7 +34,7 @@ fn cloud_layer_geometry(geometry: vec4<f32>, layers: CloudLayers) -> vec4<f32> {
 }
 
 fn cloud_geometry_moments(direction: vec3<f32>) -> vec3<f32> {
-    let mass = sample_weather_cube(weather_mass_tex, direction);
+    let mass = sample_weather_mass(direction);
     let geometry = sample_weather_cube(weather_geometry_tex, direction);
     let packed = cloud_layer_geometry(geometry, CloudLayers(
         mass.r * LOW_OPTICAL_WEIGHT, mass.g, mass.b * 0.28,
@@ -62,7 +62,7 @@ fn filtered_cloud_geometry(direction: vec3<f32>) -> vec2<f32> {
 
 // Radial columns give texture inspection and export the same camera-independent values.
 fn cloud_column_sample(direction: vec3<f32>, footprint: f32) -> CloudColumn {
-    let mass = sample_weather_cube(weather_mass_tex, direction);
+    let mass = sample_weather_mass(direction);
     if (max(max(mass.r, mass.g), mass.b) <= 0.0) { return CloudColumn(0.0, 0.0, 0.0, 0.0, 0.0, 0.0); }
     let geometry = sample_weather_cube(weather_geometry_tex, direction);
     let radius_km = max(uniforms.planet_radius_km, 1.0);
@@ -241,9 +241,24 @@ fn sample_weather_cube(field: texture_cube<f32>, direction: vec3<f32>) -> vec4<f
     return textureSampleLevel(field, height_sampler, centered, 0.0);
 }
 
+// Thin cloud lift: an artistic tweak that raises the condensate of thin columns
+// (up to 1 + THIN_LIFT_GAIN times at `cloud_thin_lift` = 1) and fades out for
+// thick ones, so faint cloud reads without thickening decks. Empty columns stay
+// empty and 0 returns the solver's field unchanged. Occupancy (alpha) is kept.
+const THIN_LIFT_GAIN: f32 = 2.0;
+const THIN_LIFT_SCALE: f32 = 0.05;
+
+fn sample_weather_mass(direction: vec3<f32>) -> vec4<f32> {
+    let mass = sample_weather_cube(weather_mass_tex, direction);
+    let lift = clamp(uniforms.cloud_thin_lift, 0.0, 1.0);
+    let column = mass.r + mass.g + mass.b;
+    let gain = 1.0 + lift * THIN_LIFT_GAIN * exp(-max(column, 0.0) / THIN_LIFT_SCALE);
+    return vec4<f32>(mass.rgb * gain, mass.a);
+}
+
 fn weather_cloud_sample(dir: vec3<f32>, altitude_km: f32, angular_pixel_footprint: f32) -> WeatherCloudSample {
     let direction = normalize(dir);
-    let mass = sample_weather_cube(weather_mass_tex, direction);
+    let mass = sample_weather_mass(direction);
     let geometry = sample_weather_cube(weather_geometry_tex, direction);
     let height = textureSampleLevel(height_tex, height_sampler, direction, 0.0).r;
     var sample = WeatherCloudSample(CloudLayers(0.0, 0.0, 0.0), mass, geometry, height, 1.0, 1.0, 0.28);
@@ -289,7 +304,7 @@ fn weather_cloud_layers_land_segment(
 
 fn weather_column_density_raw(dir: vec3<f32>, angular_pixel_footprint: f32) -> f32 {
     let direction = normalize(dir);
-    let mass = sample_weather_cube(weather_mass_tex, direction);
+    let mass = sample_weather_mass(direction);
     if (max(max(mass.r, mass.g), mass.b) <= 0.0) { return 0.0; }
     let geometry = sample_weather_cube(weather_geometry_tex, direction);
     let low_mid = (geometry.r + geometry.g) * 0.5;
@@ -360,7 +375,7 @@ fn cloud_surface_shadow(
     world_direction: vec3<f32>, sun_dir: vec3<f32>, radius_km: f32, angular_pixel_footprint: f32,
 ) -> f32 {
     let direction = normalize(world_direction);
-    let mass = sample_weather_cube(weather_mass_tex, direction);
+    let mass = sample_weather_mass(direction);
     let weight = mass.r + mass.g + mass.b;
     if (weight <= 0.0) { return 1.0; }
     let geometry = sample_weather_cube(weather_geometry_tex, direction);

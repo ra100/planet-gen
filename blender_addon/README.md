@@ -18,7 +18,7 @@ Every export with the **clouds** layer writes:
 
 | File | Content | Used by the bridge |
 |------|---------|--------------------|
-| `cloud_density.exr` | Y optical depth, export size | yes, the cloud |
+| `cloud_density.exr` | Y optical depth, export size (includes the app's Clouds > Advanced > Thin lift) | yes, the cloud |
 | `cloud_height.exr` | Y cloud top / 20 km, `height_km` | no (volumetric/PCO setups) |
 | `wind_drivers.exr` | RGB tangent wind (Y-up planet space), A speed, weather resolution | yes, streaks the detail |
 
