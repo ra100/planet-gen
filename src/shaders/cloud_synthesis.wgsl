@@ -20,7 +20,8 @@
 //     and ice.
 //  3. Mesoscale morphology: fBm in three bands (synoptic, mesoscale, fine;
 //     fractal edges with the area-perimeter dimension of real clouds),
-//     sheared zonally, domain-warped and wound around each system, blended
+//     sheared zonally, domain-warped and advected through a steady flow of
+//     the systems' circulation and the storm-track jets (cs_advect), blended
 //     with Worley closed and open cells, cumulus "flowers" and convective
 //     systems.
 //
@@ -55,7 +56,7 @@ const CS_SIMPLEX_SIGMA: f32 = 0.373;
 const CS_MCS_STATS: vec2<f32> = vec2<f32>(0.162, 0.289);
 const CS_FLOWER_STATS: vec2<f32> = vec2<f32>(0.131, 0.247);
 // Meridional compression of the noise domain by the zonal jets.
-const CS_ZONAL_STRETCH: f32 = 3.2;
+const CS_ZONAL_STRETCH: f32 = 2.2;
 const CS_CIRRUS_STRETCH: f32 = 6.0;
 
 struct CloudSystem {
@@ -221,18 +222,13 @@ struct CsTemplate {
     closed: f32,
     open: f32,
     cu: f32,
-    // Wind-up angle at this point, radians, cyclonic in the local frame.
-    twirl: f32,
     // How strongly the system's own structure (shield, fronts, sectors, dry
     // slot) sets the cloud here; elsewhere the background regime holds.
     feature: f32,
-    // Broad circulation that bends the surrounding cloud field (noise only),
-    // radians in the local frame; tapers to zero inside the system's reach.
-    swirl: f32,
 }
 
 fn cs_empty_template() -> CsTemplate {
-    return CsTemplate(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    return CsTemplate(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
 }
 
 // Angular reach of a system, radians: everything it does fades to zero
@@ -240,6 +236,51 @@ fn cs_empty_template() -> CsTemplate {
 // evaluation stops.
 fn cs_reach(radius: f32) -> f32 {
     return min(radius * 4.6, 1.5);
+}
+
+// Local coordinates of `q` in a system's frame (x east, y poleward, system
+// radius 1) and, in z, the taper that fades everything the system does to
+// zero at its reach (0 outside it).
+fn cs_local(q: vec3<f32>, system: CloudSystem) -> vec3<f32> {
+    let center = system.center.xyz;
+    let radius = max(system.center.w, 1.0e-4);
+    let cos_distance = dot(q, center);
+    let reach = cs_reach(radius);
+    if (cos_distance < cos(reach)) { return vec3<f32>(0.0); }
+    let taper = 1.0 - smooth_step(0.75, 1.0, acos(clamp(cos_distance, -1.0, 1.0)) / reach);
+    let east = system.frame.xyz;
+    let north = cross(center, east);
+    let tangent = q - center * cos_distance;
+    return vec3<f32>(dot(tangent, east) / radius, dot(tangent, north) * system.shape.z / radius, taper);
+}
+
+// Extratropical cyclone frame: tilted with its fronts, east-west aspect.
+fn cs_extratropical_frame(local: vec2<f32>, system: CloudSystem) -> vec2<f32> {
+    let ct = cos(system.extra.w);
+    let st = sin(system.extra.w);
+    return vec2<f32>((ct * local.x + st * local.y) / system.extra.z, -st * local.x + ct * local.y);
+}
+
+// A system's circulation at a local point, before the taper: x the wind-up
+// of its own cloud (radians, cyclonic in the local frame), y the broad
+// circulation that bends the surrounding field.
+fn cs_circulation(local: vec2<f32>, system: CloudSystem) -> vec2<f32> {
+    let intensity = system.shape.y;
+    if (system.frame.w > 1.5) {
+        let r2 = dot(local, local * vec2<f32>(1.0 / (system.extra.z * system.extra.z), 1.0));
+        return vec2<f32>(0.0, -0.9 * intensity * exp(-r2 / (1.1 * 1.1)));
+    }
+    if (system.frame.w > 0.5) {
+        let r2 = dot(local, local);
+        return vec2<f32>(3.2 * intensity * exp(-r2 / (0.5 * 0.5)), 0.8 * intensity * exp(-r2 / (1.2 * 1.2)));
+    }
+    let q = cs_extratropical_frame(local, system);
+    let r2 = dot(q, q);
+    let stage = system.shape.x;
+    return vec2<f32>(
+        (0.45 + 2.7 * stage) * (0.6 + 0.4 * intensity) * exp(-r2 / (0.85 * 0.85)),
+        0.6 * intensity * exp(-r2 / (1.5 * 1.5)),
+    );
 }
 
 // Extratropical cyclone in local coordinates (x east, y poleward, radius 1).
@@ -253,18 +294,13 @@ fn cs_extratropical(local: vec2<f32>, system: CloudSystem) -> CsTemplate {
     let intensity = system.shape.y;
     let front_length = system.extra.x;
     let curvature = system.extra.y;
-    let aspect = system.extra.z;
-    let tilt = system.extra.w;
-    let ct = cos(tilt);
-    let st = sin(tilt);
-    var q = vec2<f32>(ct * local.x + st * local.y, -st * local.x + ct * local.y);
-    q.x /= aspect;
+    let q = cs_extratropical_frame(local, system);
     let r = length(q);
     var tpl = cs_empty_template();
-    tpl.twirl = (0.45 + 2.7 * stage) * (0.6 + 0.4 * intensity) * exp(-(r * r) / (0.85 * 0.85));
     // Un-wind: the open-wave pattern that the circulation carried here.
-    let c = cos(tpl.twirl);
-    let s = sin(tpl.twirl);
+    let twirl = cs_circulation(local, system).x;
+    let c = cos(twirl);
+    let s = sin(twirl);
     let w = vec2<f32>(c * q.x + s * q.y, -s * q.x + c * q.y);
 
     // Cold front: from just east of the low, equatorward, bowing east and
@@ -314,12 +350,11 @@ fn cs_extratropical(local: vec2<f32>, system: CloudSystem) -> CsTemplate {
     let core = 1.0 - smooth_step(1.35, 2.1, r);
     let tail = along * (1.0 - smooth_step(0.25, 0.7, abs(ahead + 0.05)));
     tpl.env = max(core, tail) * intensity;
-    tpl.swirl = 0.6 * intensity * exp(-(r * r) / (1.5 * 1.5));
     return tpl;
 }
 
 // Ridge between lows: subsiding air clears or flattens cloud into a thin
-// stratocumulus sheet, and its anticyclonic flow bends the field around it.
+// stratocumulus sheet (its anticyclonic flow is in cs_circulation).
 fn cs_anticyclone(local: vec2<f32>, system: CloudSystem) -> CsTemplate {
     let intensity = system.shape.y;
     var q = local;
@@ -333,7 +368,6 @@ fn cs_anticyclone(local: vec2<f32>, system: CloudSystem) -> CsTemplate {
     tpl.thick = 0.6;
     tpl.closed = 0.5;
     tpl.cu = 0.5;
-    tpl.swirl = -0.9 * intensity * exp(-(r * r) / (1.1 * 1.1));
     return tpl;
 }
 
@@ -351,8 +385,6 @@ fn cs_tropical(local: vec2<f32>, system: CloudSystem) -> CsTemplate {
     let overcast = 1.0 - smooth_step(0.14 + 0.1 * stage, 0.34, r);
     let eye = (1.0 - smooth_step(0.022, 0.05, r)) * smooth_step(0.6, 0.85, intensity);
     var tpl = cs_empty_template();
-    tpl.twirl = 3.2 * intensity * exp(-(r * r) / (0.5 * 0.5));
-    tpl.swirl = 0.8 * intensity * exp(-(r * r) / (1.2 * 1.2));
     tpl.cover = max(max(overcast, 0.92 * bands), 0.12) * (1.0 - eye);
     tpl.feature = 1.0;
     tpl.thick = 0.8 + 2.4 * overcast + 1.2 * bands;
@@ -366,55 +398,82 @@ fn cs_tropical(local: vec2<f32>, system: CloudSystem) -> CsTemplate {
 
 struct CsSynoptic {
     tpl: CsTemplate,
-    // Noise domain points carried back along each system's circulation: the
-    // full wind-up for synoptic-scale structure, and partial ones for
-    // mesoscale and fine detail, which live too briefly to be wound into
-    // coherent spirals.
+    // Noise domain points carried back along the flow (see cs_advect).
     point: vec3<f32>,
     point_meso: vec3<f32>,
     point_fine: vec3<f32>,
+}
+
+// Backward steps of the flow that advects the noise domain.
+const CS_FLOW_STEPS: i32 = 6;
+// Westerly jet along each storm track, radians of rotation about the
+// circulation pole over the whole advection, and its latitude scale.
+const CS_JET_ANGLE: f32 = 0.6;
+const CS_JET_WIDTH_DEG: f32 = 12.0;
+// Polar easterlies poleward of the subpolar low, radians.
+const CS_EASTERLY_ANGLE: f32 = 0.2;
+
+// Carries a point backward through a steady flow made of every system's
+// circulation and the storm-track jets (advected texture, Neyret 2003), so
+// the noise is stretched along the streamlines: filaments and tilted bands
+// in the saddles between lows and ridges, streaks in the jets' shear. Each
+// step rotates about every system centre by its rate at the current point,
+// which is exact for an isolated vortex. The flow is seen from the lows,
+// which travel with the jet core: the jet's flanks and the easterlies lag
+// behind them, and the cores keep their own clean wind-up. Fine detail lives
+// too briefly to be wound into coherent spirals: it takes half the first
+// step, mesoscale the first step, synoptic structure all of them.
+fn cs_advect(p: vec3<f32>) -> CsSynoptic {
+    let count = min(u32(cloud_synthesis.control.y), CS_MAX_SYSTEMS);
+    let pole = cs_pole();
+    let track = cloud_synthesis.climate.z;
+    let subpolar = max(cloud_synthesis.climate.y, cloud_synthesis.climate.x + 10.0);
+    let dt = 1.0 / f32(CS_FLOW_STEPS);
+    var q = p;
+    var meso = p;
+    var fine = p;
+    for (var step = 0; step < CS_FLOW_STEPS; step++) {
+        let alat = abs(asin(clamp(dot(q, pole), -1.0, 1.0)) * 57.29578);
+        let jet_offset = (alat - track) / CS_JET_WIDTH_DEG;
+        let lag = CS_JET_ANGLE * (1.0 - exp(-jet_offset * jet_offset))
+            + CS_EASTERLY_ANGLE * smooth_step(subpolar - 4.0, subpolar + 8.0, alat);
+        var next = cs_rotate(q, pole, lag * dt);
+        for (var i = 0u; i < count; i++) {
+            let system = cloud_synthesis.systems[i];
+            let local = cs_local(q, system);
+            if (local.z <= 0.0) { continue; }
+            // Cyclonic in the local frame is counter-clockwise seen from above
+            // in the north and clockwise in the south.
+            let rate = cs_circulation(local.xy, system) * local.z;
+            next = cs_rotate(next, system.center.xyz, -(0.55 * rate.x + rate.y) * system.shape.z * dt);
+        }
+        q = normalize(next);
+        if (step == 0) {
+            fine = normalize(p + q);
+            meso = q;
+        }
+    }
+    return CsSynoptic(cs_empty_template(), q, meso, fine);
 }
 
 fn cs_synoptic(p: vec3<f32>) -> CsSynoptic {
     var acc = cs_empty_template();
     var weight = 0.0;
     var clear = 1.0;
-    var cirrus_weight = 0.0;
-    var point = p;
-    var point_meso = p;
-    var point_fine = p;
     let count = min(u32(cloud_synthesis.control.y), CS_MAX_SYSTEMS);
     for (var i = 0u; i < count; i++) {
         let system = cloud_synthesis.systems[i];
-        let center = system.center.xyz;
-        let radius = max(system.center.w, 1.0e-4);
-        let cos_distance = dot(p, center);
-        let reach = cs_reach(radius);
-        if (cos_distance < cos(reach)) { continue; }
-        let taper = 1.0 - smooth_step(0.75, 1.0, acos(clamp(cos_distance, -1.0, 1.0)) / reach);
-        let east = system.frame.xyz;
-        let hemisphere = system.shape.z;
-        let north = cross(center, east);
-        let tangent = p - center * cos_distance;
-        let local = vec2<f32>(dot(tangent, east), dot(tangent, north) * hemisphere) / radius;
+        let local = cs_local(p, system);
+        if (local.z <= 0.0) { continue; }
         var tpl: CsTemplate;
         if (system.frame.w > 1.5) {
-            tpl = cs_anticyclone(local, system);
+            tpl = cs_anticyclone(local.xy, system);
         } else if (system.frame.w > 0.5) {
-            tpl = cs_tropical(local, system);
+            tpl = cs_tropical(local.xy, system);
         } else {
-            tpl = cs_extratropical(local, system);
+            tpl = cs_extratropical(local.xy, system);
         }
-        tpl.env *= taper;
-        tpl.twirl *= taper;
-        tpl.swirl *= taper;
-        // Cyclonic in the local frame is counter-clockwise seen from above in
-        // the north and clockwise in the south; carry the point backward.
-        let angle = -tpl.twirl * hemisphere;
-        let swirl = -tpl.swirl * hemisphere;
-        point = cs_rotate(point, center, angle * 0.55 + swirl);
-        point_meso = cs_rotate(point_meso, center, angle * 0.15 + swirl * 0.45);
-        point_fine = cs_rotate(point_fine, center, angle * 0.1 + swirl * 0.1);
+        tpl.env *= local.z;
         if (tpl.env > 0.0) {
             let w = tpl.env * tpl.feature;
             weight += w;
@@ -440,7 +499,9 @@ fn cs_synoptic(p: vec3<f32>) -> CsSynoptic {
         acc.cu *= inv;
     }
     acc.env = 1.0 - clear;
-    return CsSynoptic(acc, normalize(point), normalize(point_meso), normalize(point_fine));
+    var result = cs_advect(p);
+    result.tpl = acc;
+    return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -516,10 +577,11 @@ fn cs_fbm(
     var unresolved = vec3<f32>(0.0);
     for (var k = 0; k < CS_OCTAVES; k++) {
         let size = CS_LARGEST_KM * exp2(-f32(k)) / radius_km;
-        // Damped 2400 km, full 1200-300 km (systems and regimes set larger
-        // scales; real cloud fraction is bimodal at 100-500 km), then the
-        // fractal gain.
-        let amp = select(pow(CS_GAIN, f32(k - 3)), select(1.0, 0.5, k == 0), k < 3);
+        // The synoptic band falls off from 1200 km, so thresholding it
+        // leaves large clear and cloudy areas for the flow to draw into
+        // bands rather than a camouflage of blotches; then the fractal gain.
+        var lo_amp = array<f32, 4>(0.7, 0.8, 0.55, 0.38);
+        let amp = select(pow(CS_GAIN, f32(k - 3)), lo_amp[min(k, 3)], k < 4);
         var band = 0;
         var q = q_lo;
         if (k >= CS_FINE_OCTAVE) {
@@ -822,11 +884,13 @@ fn cs_synthesize(p: vec3<f32>, footprint: f32, solver: vec4<f32>) -> vec4<f32> {
         filled = mix(fill, holes, fine_resolved);
     }
     let mask = clustered * filled;
-    // Cores are thicker than margins; resolved mesoscale and fine structure
-    // varies brightness, most in broken cumulus and open cells.
-    let interior = smooth_step(0.0, 1.4, shape - threshold);
+    // Optical depth grows with distance above the threshold, so margins are
+    // thin and cores thick (roughly lognormal, as observed) instead of flat
+    // gray patches; resolved mesoscale and fine structure varies brightness,
+    // most in broken cumulus and open cells.
+    let interior = exp(clamp(1.1 * (shape - threshold) - 0.5, -2.5, 1.2));
     let texture = 0.12 + 0.35 * (wm.w + 0.5 * wm.z);
-    let tau_in = tau * (0.5 + 0.5 * interior) * exp(texture * (
+    let tau_in = tau * interior * exp(texture * (
         0.4 * octaves.mid * (1.0 - octaves.mid_unresolved) + 0.6 * octaves.hi * (1.0 - octaves.hi_unresolved)));
     let tau_liquid = mask * tau_in * (1.0 - 0.45 * frozen);
 

@@ -26,7 +26,8 @@ def wmean(x, m=None):
     w = wt if m is None else wt*m
     return (x*w).sum()/max(w.sum(),1e-9)
 print(f"cloud fraction (R>0.1): global {wmean(cloudy):.3f} ocean {wmean(cloudy,~land):.3f} land {wmean(cloudy,land):.3f}")
-print(f"bright fraction (R>0.4): {wmean(R>0.4):.3f}   mean R {wmean(R):.3f}")
+print(f"bright fraction (R>0.4): {wmean(R>0.4):.3f}   mean R {wmean(R):.3f}   "
+      f"clear (R<0.01): {wmean(R<0.01):.3f}   veil (0.01<R<0.1): {wmean((R>=0.01)&(R<=0.1)):.3f}")
 out=[]
 for b in range(18):
     hi_, lo_ = 90-b*10, 80-b*10
