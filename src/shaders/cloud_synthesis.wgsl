@@ -18,16 +18,19 @@
 //     stratus, dry subtropical land, jet-stream cirrus. The solver's own
 //     condensate modulates coverage regionally and adds its convective storms
 //     and ice.
-//  3. Mesoscale morphology: one fBm field (fractal edges with the
-//     area-perimeter dimension of real clouds) sheared zonally, domain-warped
-//     and twirled around each system, blended with Worley closed cells, open
-//     cells and convective clusters.
+//  3. Mesoscale morphology: fBm in three bands (synoptic, mesoscale, fine;
+//     fractal edges with the area-perimeter dimension of real clouds),
+//     sheared zonally, domain-warped and wound around each system, blended
+//     with Worley closed and open cells, cumulus "flowers" and convective
+//     systems.
 //
-// Coverage is a probability remap: the field is thresholded at the quantile
-// of the regime's cloud fraction, and octaves finer than the pixel turn into
-// edge softness instead of aliasing. The expected cloud fraction therefore
-// does not depend on resolution: a 2K and an 8K map agree once averaged, the
-// 8K one resolving cells, streets and filaments the 2K one shows as gray.
+// Coverage is a two-level probability remap: the macro field is thresholded
+// at the quantile of cover / fill (where decks, cells and clusters are), the
+// fine band at the quantile of the fill (how solid each is), and structure
+// finer than the pixel turns into edge softness or brightness instead of
+// aliasing. The expected cloud fraction therefore does not depend on
+// resolution: a 2K and an 8K map agree once averaged, the 8K one resolving
+// cells, clusters and filaments the 2K one shows as gray.
 //
 // Output is the column's low, deep and high mass in solver units: physical
 // optical depth is mapped back through the preview/bridge curve
@@ -42,15 +45,15 @@ const CS_LARGEST_KM: f32 = 2400.0;
 const CS_MID_OCTAVE: i32 = 4;
 const CS_FINE_OCTAVE: i32 = 7;
 // fBm gain for the cloud boundary's area-perimeter dimension D ~ 1.35
-// (Lovejoy 1982), i.e. Hurst exponent 0.65: gain 2^-0.65. The two largest
-// octaves are damped: regimes and systems already own that scale.
+// (Lovejoy 1982), i.e. Hurst exponent 0.65: gain 2^-0.65. The largest octave
+// is damped (regimes and systems own that scale); 1200-300 km stay full.
 const CS_GAIN: f32 = 0.64;
-// Standard deviation of one simplex octave.
-const CS_SIMPLEX_SIGMA: f32 = 0.26;
+// Standard deviation of one `snoise` octave (measured over 400k samples).
+const CS_SIMPLEX_SIGMA: f32 = 0.373;
 // Mean and standard deviation of the cs_blobs fields below on a sphere slice
 // of unit cells (measured offline, ragged = 0).
-const CS_MCS_STATS: vec2<f32> = vec2<f32>(0.16, 0.286);
-const CS_FLOWER_STATS: vec2<f32> = vec2<f32>(0.128, 0.243);
+const CS_MCS_STATS: vec2<f32> = vec2<f32>(0.162, 0.289);
+const CS_FLOWER_STATS: vec2<f32> = vec2<f32>(0.131, 0.247);
 // Meridional compression of the noise domain by the zonal jets.
 const CS_ZONAL_STRETCH: f32 = 3.2;
 const CS_CIRRUS_STRETCH: f32 = 6.0;
@@ -143,7 +146,7 @@ fn cs_blobs(p: vec3<f32>, seed: u32, firing: f32, radius: vec2<f32>, inner: f32,
     let cell = floor(p);
     let local = p - cell;
     let base = vec3<i32>(cell);
-    var value = 0.0;
+    var clear = 1.0;
     for (var z = -1; z <= 1; z++) {
         for (var y = -1; y <= 1; y++) {
             for (var x = -1; x <= 1; x++) {
@@ -161,11 +164,12 @@ fn cs_blobs(p: vec3<f32>, seed: u32, firing: f32, radius: vec2<f32>, inner: f32,
                 let stretched = d + axis * along * (1.0 / (1.0 + 0.8 * shape) - 1.0);
                 let r = mix(radius.x, radius.y, fract(id * 7.31 + shape));
                 let distance = length(stretched) * (1.0 + ragged);
-                value = max(value, 1.0 - smooth_step(r * inner, r, distance));
+                // Probabilistic union: overlapping blobs merge without creases.
+                clear *= smooth_step(r * inner, r, distance);
             }
         }
     }
-    return value;
+    return 1.0 - clear;
 }
 
 // Share of a noise octave with lattice spacing `size` (domain units) the
@@ -474,9 +478,10 @@ fn cs_add(
     (*m).conv += w * conv;
 }
 
+// Land fraction with a shoreline ramp of a few hundred metres of relief.
 fn cs_land(direction: vec3<f32>) -> f32 {
     let height = textureSampleLevel(height_tex, height_sampler, direction, 0.0).r;
-    return smooth_step(uniforms.ocean_level - 0.002, uniforms.ocean_level + 0.004, height);
+    return smooth_step(uniforms.ocean_level - 0.01, uniforms.ocean_level + 0.03, height);
 }
 
 // Solver depth d whose preview/bridge optical depth 36 (d - 0.05) t^0.6,
@@ -553,15 +558,18 @@ fn cs_synthesize(p: vec3<f32>, footprint: f32, solver: vec4<f32>) -> vec4<f32> {
     let hadley = cloud_synthesis.climate.x;
     let subpolar = max(cloud_synthesis.climate.y, hadley + 10.0);
     let height = textureSampleLevel(height_tex, height_sampler, p, 0.0).r;
-    // Regimes change over ~100 km at coasts, not at the shoreline texel.
-    let basis = tangent_basis(p);
-    let coast_reach = 120.0 / radius_km;
-    var land = cs_land(p) * 2.0;
-    for (var i = 0; i < 4; i++) {
-        let angle = f32(i) * 1.5707963;
-        land += cs_land(normalize(p + (basis[0] * cos(angle) + basis[1] * sin(angle)) * coast_reach));
+    // Regimes change over ~150 km at coasts, not at the shoreline texel:
+    // two rings of taps, so no single sample steps the fraction much. The
+    // ring turns with the circulation pole, continuously everywhere but there.
+    let east = normalize(cross(pole, p) + vec3<f32>(1.0e-6, 0.0, 0.0));
+    let basis = mat2x3<f32>(east, cross(p, east));
+    var land = cs_land(p);
+    for (var i = 0; i < 8; i++) {
+        let angle = f32(i) * 0.7853982;
+        let reach = select(140.0, 70.0, (i & 1) == 0) / radius_km;
+        land += cs_land(normalize(p + (basis[0] * cos(angle) + basis[1] * sin(angle)) * reach));
     }
-    land /= 6.0;
+    land /= 9.0;
     let ocean = 1.0 - land;
     let wind = textureSampleLevel(cloud_tex, height_sampler, p, 0.0);
     let continentality = clamp(wind.a, 0.0, 1.0) * land;
@@ -585,7 +593,6 @@ fn cs_synthesize(p: vec3<f32>, footprint: f32, solver: vec4<f32>) -> vec4<f32> {
     let b_polar = polar_in;
     // West-coast stratocumulus: subtropical ocean with land to the east
     // (cold upwelling under the subtropical high's equatorward flank).
-    let east = normalize(cross(pole, p) + vec3<f32>(1.0e-6, 0.0, 0.0));
     var east_land = 0.0;
     for (var i = 0; i < 3; i++) {
         let distance = min((450.0 + 650.0 * f32(i)) / radius_km, 0.5);
