@@ -19,6 +19,9 @@ fn main() -> eframe::Result {
                 height: icon_height,
             }),
         renderer: eframe::Renderer::Wgpu,
+        // Persistence only stores app settings (export folder); keep window
+        // geometry behaving as before.
+        persist_window: false,
         ..Default::default()
     };
 
