@@ -142,7 +142,10 @@ fn cs_worley(p: vec3<f32>, seed: u32) -> vec3<f32> {
 // Union of random elliptical blobs, one per firing cell (probability
 // `firing`), radius `radius.x`-`radius.y` cells, soft inner core `inner`.
 // Every neighbour cell contributes, so a blob reaching past its own Voronoi
-// cell is never cut along the boundary. `ragged` perturbs the edges.
+// cell is never cut along the boundary. `ragged` perturbs the edges. Blobs
+// two cells away are never evaluated, so each one fades out before one cell
+// from its centre; otherwise elongated or ragged-swollen blobs were cut
+// along the lattice planes (straight edges with teeth on the map).
 fn cs_blobs(p: vec3<f32>, seed: u32, firing: f32, radius: vec2<f32>, inner: f32, ragged: f32) -> f32 {
     let cell = floor(p);
     let local = p - cell;
@@ -165,8 +168,9 @@ fn cs_blobs(p: vec3<f32>, seed: u32, firing: f32, radius: vec2<f32>, inner: f32,
                 let stretched = d + axis * along * (1.0 / (1.0 + 0.8 * shape) - 1.0);
                 let r = mix(radius.x, radius.y, fract(id * 7.31 + shape));
                 let distance = length(stretched) * (1.0 + ragged);
+                let reach = 1.0 - smooth_step(0.8, 1.0, length(d));
                 // Probabilistic union: overlapping blobs merge without creases.
-                clear *= smooth_step(r * inner, r, distance);
+                clear *= 1.0 - reach * (1.0 - smooth_step(r * inner, r, distance));
             }
         }
     }
@@ -674,14 +678,14 @@ fn cs_synthesize(p: vec3<f32>, footprint: f32, solver: vec4<f32>) -> vec4<f32> {
     let cumulus = vec4<f32>(0.0, 0.0, 0.0, 1.0);
     // Ocean.
     cs_add(&regime, ocean * w_itcz * (0.6 + 0.4 * hot), 0.42, 45.0, 0.85, 0.3, vec4<f32>(0.0, 0.0, 0.0, 0.2), 1.0);
-    cs_add(&regime, ocean * (b_trop + b_sub) * (1.0 - w_itcz) * (1.0 - w_deck), 0.2, 1.8, 0.0, 0.35, cumulus, 0.0);
+    cs_add(&regime, ocean * (b_trop + b_sub) * (1.0 - w_itcz) * (1.0 - w_deck), 0.14, 3.0, 0.0, 0.15, cumulus, 0.0);
     cs_add(&regime, ocean * w_deck * 1.6, 0.84, 11.0, 0.0, 0.06, closed, 0.0);
     cs_add(&regime, ocean * b_storm, 0.4, 6.5, 0.2, 0.18, vec4<f32>(0.65, 0.0, 0.35, 0.0), 0.0);
     cs_add(&regime, ocean * b_polar, 0.58, 6.0, 0.1, 0.2, vec4<f32>(0.8, 0.0, 0.2, 0.0), 0.0);
     // Land.
     let wet_tropics = land * w_tropics * (1.0 - 0.7 * continentality * b_sub);
     cs_add(&regime, wet_tropics, 0.48, 30.0, 0.75, 0.3, vec4<f32>(0.0, 0.0, 0.0, 0.5), 0.5);
-    cs_add(&regime, land * (b_trop + b_sub) * (1.0 - w_tropics), mix(0.16, 0.02, continentality), 4.0, 0.0, 0.35,
+    cs_add(&regime, land * (b_trop + b_sub) * (1.0 - w_tropics), mix(0.16, 0.02, continentality), 4.0, 0.0, 0.2,
         cumulus, 0.0);
     cs_add(&regime, land * b_storm, mix(0.38, 0.22, continentality) + 0.08 * local_summer, 7.0, 0.2, 0.18,
         vec4<f32>(0.5 - 0.2 * local_summer, 0.0, 0.0, 0.5 + 0.2 * local_summer), 0.0);
@@ -847,12 +851,14 @@ fn cs_synthesize(p: vec3<f32>, footprint: f32, solver: vec4<f32>) -> vec4<f32> {
     let wm = morph / w_sum;
     let wc = conv / w_sum;
     // Macro recipes, each unit variance: stratiform is synoptic-dominated,
-    // cumulus mesoscale, the cellular regimes add their cells.
-    let c_lo = wm.x * 0.97 + wm.y * 0.5 + wm.z * 0.45 + wm.w * 0.55 + wc * 0.28;
-    let c_mid = wm.x * 0.25 + wm.y * 0.2 + wm.z * 0.2 + wm.w * 0.3 + wc * 0.15;
+    // cumulus clusters follow the synoptic and mesoscale bands (the flowers
+    // only texture them: alone, their peaked field reads as a star field),
+    // the cellular regimes add their cells.
+    let c_lo = wm.x * 0.97 + wm.y * 0.5 + wm.z * 0.45 + wm.w * 0.6 + wc * 0.28;
+    let c_mid = wm.x * 0.25 + wm.y * 0.2 + wm.z * 0.2 + wm.w * 0.55 + wc * 0.15;
     let c_cl = wm.y * 0.84;
     let c_op = wm.z * 0.87;
-    let c_fl = wm.w * 0.78;
+    let c_fl = wm.w * 0.45;
     let c_cv = wc * 0.95;
     let variance = c_lo * c_lo + c_mid * c_mid + c_cl * c_cl + c_op * c_op + c_fl * c_fl + c_cv * c_cv;
     let norm = inverseSqrt(max(variance, 1.0e-6));
@@ -861,13 +867,14 @@ fn cs_synthesize(p: vec3<f32>, footprint: f32, solver: vec4<f32>) -> vec4<f32> {
     let unresolved = (c_lo * c_lo * octaves.lo_unresolved + c_mid * c_mid * octaves.mid_unresolved
         + c_cl * c_cl * closed_unres + c_op * c_op * open_unres + c_fl * c_fl * flowers_unres
         + c_cv * c_cv * clusters_unres) * norm * norm;
-    // Fill of a deck, cell or cluster: near solid for stratiform, about half
-    // for cumulus clusters.
-    // Decks are solid at this scale (their texture is brightness, not holes).
-    let fill = max(wm.x * 1.0 + wm.y * 0.97 + wm.z * 0.8 + wm.w * 0.5 + wc * 0.9, cover);
+    // Fill of a deck, cell or cluster: decks are solid at this scale (their
+    // texture is brightness, not holes); cumulus sits in compact clusters
+    // with clear sky between, as satellite composites show it, rather than a
+    // half-filled gray veil spread over the whole regime.
+    let fill = max(wm.x * 1.0 + wm.y * 0.97 + wm.z * 0.8 + wm.w * 0.8 + wc * 0.9, cover);
     let macro_cover = clamp(cover / max(fill, 1.0e-3), 0.0, 1.0);
     // Cumulus cluster margins are fuzzy even where a system sets the cover.
-    let edge = soft + 0.25 * wm.w;
+    let edge = soft + 0.1 * wm.w;
     let threshold = cs_probit(1.0 - macro_cover) * sqrt(1.0 + edge * edge);
     let spread = sqrt(unresolved + edge * edge);
     let clustered = max(cs_logistic((shape - threshold) / spread) - 0.003, 0.0) / 0.997;
@@ -883,12 +890,15 @@ fn cs_synthesize(p: vec3<f32>, footprint: f32, solver: vec4<f32>) -> vec4<f32> {
         let holes = cs_logistic((octaves.hi - fill_threshold) / sqrt(octaves.hi_unresolved + fill_soft * fill_soft));
         filled = mix(fill, holes, fine_resolved);
     }
-    let mask = clustered * filled;
+    // Broken cumulus margins thin out to nothing rather than a gray veil.
+    let mask = clustered * filled * mix(1.0, smooth_step(0.04, 0.25, clustered), wm.w);
     // Optical depth grows with distance above the threshold, so margins are
     // thin and cores thick (roughly lognormal, as observed) instead of flat
     // gray patches; resolved mesoscale and fine structure varies brightness,
     // most in broken cumulus and open cells.
-    let interior = exp(clamp(1.1 * (shape - threshold) - 0.5, -2.5, 1.2));
+    // Sub-pixel structure keeps its mean: E[exp(1.1 x)] over the unresolved
+    // variance adds 1.1^2 / 2 of it.
+    let interior = exp(clamp(1.1 * (shape - threshold) - 0.5 + 0.605 * unresolved, -2.5, 1.2));
     let texture = 0.12 + 0.35 * (wm.w + 0.5 * wm.z);
     let tau_in = tau * interior * exp(texture * (
         0.4 * octaves.mid * (1.0 - octaves.mid_unresolved) + 0.6 * octaves.hi * (1.0 - octaves.hi_unresolved)));
