@@ -43,8 +43,9 @@ CLOUD_GROUP = "PlanetGen Billow Clouds"
 CLOUD_MATERIAL = "PlanetGen Billow Clouds"
 
 CLOUD_DEFAULTS = {
-    # Contrast on the solver's optical depth: below Low is clear, above High is full.
-    "Density Low": 0.02,
+    # Contrast on the solver's optical depth: below Low is clear, above High is a
+    # full-thickness column that billows no longer erode.
+    "Density Low": 0.05,
     "Density High": 0.35,
     # Base billow cell frequency in the 0-1 shell domain (250 ~ 50 km cells on an
     # Earth-size planet).
@@ -59,8 +60,20 @@ CLOUD_DEFAULTS = {
     "Zonal Stretch": 2.5,
     # Displacement of the detail domain along the solver wind.
     "Wind Streak": 0.04,
-    # Opacity per unit density: opacity = 1 - exp(-Opacity * density).
-    "Opacity": 6.0,
+    # Physical optical depth per unit of solver depth above Low: a 0.35 column
+    # becomes tau ~11, a typical stratocumulus deck (same as the app preview).
+    "Depth Gain": 36.0,
+    # Thin-column contrast: depth scales by thickness^Contrast, so the haze between
+    # the solver's ripples stays faint while their cores turn bright.
+    "Contrast": 0.6,
+    # Two-stream reflectance: opacity = a tau / (1 + a tau). Brightness follows
+    # thickness instead of clipping to flat white, so the solver's internal
+    # structure stays visible. a = (1 - g) / 2 = 0.075 for droplets (g = 0.85), as
+    # in the app preview; a flat shell lacks the preview's multiple scattering, so
+    # the default is brighter to match it.
+    "Diffusion": 0.3,
+    # Bump from the cloud's own thickness: sunlit and shaded sides on every puff.
+    "Relief": 2.0,
     "Longitude Offset": 0.0,
 }
 # Inverted Worley F1 octaves: (frequency multiplier, weight).
@@ -293,11 +306,16 @@ def build_cloud_group(sampler):
         billow  = remap(sum(inverted Worley F1 octaves) + wisps, BILLOW_RANGE)
         bn      = 1 - exp(-3 m)                          thickness, 0-1
         lo      = Erosion * variety * (1 - billow)       variety in 0.5-1.5
-        cloud   = m * clamp((bn - lo) / (1 - lo)) / bn
-        opacity = 1 - exp(-Opacity * cloud)
+        kept    = clamp((bn - lo) / (1 - lo)) / bn
+        cloud   = m * kept                              Density output
+        tau     = Depth Gain * max(density - Low, 0) * kept * m^Contrast
+        opacity = Diffusion tau / (1 + Diffusion tau)    two-stream reflectance
 
     Thin areas and edges lose density where billows are low, thick cores keep
     theirs, so the solver's shapes survive and gain puffy, multi-scale edges.
+    The app preview uses the same mapping: opacity keeps rising with thickness
+    instead of saturating, so ripples inside decks stay visible, and a bump
+    from the opacity shades the sunward and lee sides of each puff.
     """
     group = _new_group(CLOUD_GROUP)
     tree = group
@@ -398,15 +416,31 @@ def build_cloud_group(sampler):
     cloud = _math(tree, "MULTIPLY", m, ratio, (750, 700))
     links.new(cloud, go.inputs["Density"])
 
-    opacity = _math(tree, "MULTIPLY", cloud, inp["Opacity"], (900, 500))
-    opacity = _math(tree, "MULTIPLY", opacity, -1.0, (1050, 500))
-    opacity = _math(tree, "EXPONENT", opacity, None, (1200, 500))
-    opacity = _math(tree, "SUBTRACT", 1.0, opacity, (1350, 500))
+    # Physical optical depth with the thin-column contrast curve, then two-stream
+    # reflectance as opacity.
+    excess = _math(tree, "SUBTRACT", drivers.outputs["Density"], inp["Density Low"], (600, 500))
+    excess = _math(tree, "MAXIMUM", excess, 0.0, (750, 500))
+    contrast = _math(tree, "POWER", _math(tree, "MAXIMUM", m, 1.0e-4, (600, 350)), inp["Contrast"], (750, 350))
+    tau = _math(tree, "MULTIPLY", excess, ratio, (900, 500))
+    tau = _math(tree, "MULTIPLY", tau, contrast, (1050, 500))
+    tau = _math(tree, "MULTIPLY", tau, inp["Depth Gain"], (1200, 500))
+    scattered = _math(tree, "MULTIPLY", tau, inp["Diffusion"], (1350, 500))
+    opacity = _math(tree, "DIVIDE", scattered, _math(tree, "ADD", scattered, 1.0, (1350, 350)), (1500, 450))
+
+    bump = tree.nodes.new("ShaderNodeBump")
+    bump.location = (900, 0)
+    bump.inputs["Distance"].default_value = 0.002
+    links.new(inp["Relief"], bump.inputs["Strength"])
+    # Height is the visible cloud itself, so the solver's ripples and cells get
+    # sunlit and shaded sides. Billow octaves are left out: unfiltered, they are
+    # only a few pixels wide at most distances and shade as sandpaper grain.
+    links.new(opacity, bump.inputs["Height"])
 
     bsdf = tree.nodes.new("ShaderNodeBsdfPrincipled")
     bsdf.location = (1100, 0)
     bsdf.inputs["Base Color"].default_value = (1.0, 1.0, 1.0, 1.0)
     bsdf.inputs["Roughness"].default_value = 1.0
+    links.new(bump.outputs["Normal"], bsdf.inputs["Normal"])
     transparent = tree.nodes.new("ShaderNodeBsdfTransparent")
     transparent.location = (1100, 250)
     shader = tree.nodes.new("ShaderNodeMixShader")
