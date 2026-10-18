@@ -266,8 +266,9 @@ fn cs_extratropical_frame(local: vec2<f32>, system: CloudSystem) -> vec2<f32> {
 }
 
 // A system's circulation at a local point, before the taper: x the wind-up
-// of its own cloud (radians, cyclonic in the local frame), y the broad
-// circulation that bends the surrounding field.
+// of its own cloud (radians, cyclonic in the local frame; the noise takes
+// 0.45 of it in cs_advect, the template all of it), y the broad circulation
+// that bends the surrounding field.
 fn cs_circulation(local: vec2<f32>, system: CloudSystem) -> vec2<f32> {
     let intensity = system.shape.y;
     if (system.frame.w > 1.5) {
@@ -282,7 +283,7 @@ fn cs_circulation(local: vec2<f32>, system: CloudSystem) -> vec2<f32> {
     let r2 = dot(q, q);
     let stage = system.shape.x;
     return vec2<f32>(
-        (0.45 + 2.7 * stage) * (0.6 + 0.4 * intensity) * exp(-r2 / (0.85 * 0.85)),
+        (0.3 + 1.6 * stage) * (0.6 + 0.4 * intensity) * exp(-r2 / (1.0 * 1.0)),
         0.6 * intensity * exp(-r2 / (1.5 * 1.5)),
     );
 }
@@ -291,8 +292,9 @@ fn cs_circulation(local: vec2<f32>, system: CloudSystem) -> vec2<f32> {
 // An open frontal wave is wound up by the cyclone's own circulation: the
 // twirl grows with life-cycle stage, so young waves keep a straight cold
 // front and broad warm-front shield, mature lows curl the shield into a
-// comma head with a dry slot, and occluded lows become a spiral trailing a
-// long cold front.
+// broad comma head with a dry slot, and occluded lows wrap it about once
+// around the centre, trailing a long cold front. Real lows are not wound
+// tighter than that: more wind-up reads as a whirlpool of thin arms.
 fn cs_extratropical(local: vec2<f32>, system: CloudSystem) -> CsTemplate {
     let stage = system.shape.x;
     let intensity = system.shape.y;
@@ -322,7 +324,7 @@ fn cs_extratropical(local: vec2<f32>, system: CloudSystem) -> CsTemplate {
     let band = smooth_step(-0.05, 0.02, ahead) * (1.0 - smooth_step(band_width * 0.55, band_width, ahead)) * along;
     // Warm front east of the low; its cloud shield lies poleward of it.
     let poleward = w.y - (0.12 * w.x - 0.03);
-    let shield = smooth_step(-0.10, 0.06, poleward) * (1.0 - smooth_step(0.7, 1.3, poleward))
+    let shield = smooth_step(-0.10, 0.06, poleward) * (1.0 - smooth_step(0.9, 1.6, poleward))
         * smooth_step(-1.05, -0.45, w.x) * (1.0 - smooth_step(1.25, 2.2, w.x));
     // Warm sector: ahead of the cold front, equatorward of the warm front.
     // Both sectors abut the band, so the system's weight has no seam there.
@@ -449,7 +451,7 @@ fn cs_advect(p: vec3<f32>) -> CsSynoptic {
             // Cyclonic in the local frame is counter-clockwise seen from above
             // in the north and clockwise in the south.
             let rate = cs_circulation(local.xy, system) * local.z;
-            next = cs_rotate(next, system.center.xyz, -(0.55 * rate.x + rate.y) * system.shape.z * dt);
+            next = cs_rotate(next, system.center.xyz, -(0.45 * rate.x + rate.y) * system.shape.z * dt);
         }
         q = normalize(next);
         if (step == 0) {
