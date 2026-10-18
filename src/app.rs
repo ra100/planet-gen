@@ -122,6 +122,8 @@ pub struct PlanetGenApp {
     export_done_ok: bool,
     export_destination: String,
     export_layers: String,
+    /// User-chosen export root; `None` exports to `./output`.
+    export_dir: Option<std::path::PathBuf>,
     gpu_error: Option<String>,
     /// Set by the device's uncaptured-error handler on fatal GPU errors
     /// (out-of-memory / device lost). The device is then unusable; the update
@@ -316,6 +318,11 @@ impl PlanetGenApp {
             export_done_ok: false,
             export_destination: String::new(),
             export_layers: String::new(),
+            export_dir: cc
+                .storage
+                .and_then(|storage| storage.get_string(EXPORT_DIR_KEY))
+                .map(std::path::PathBuf::from)
+                .filter(|dir| dir.is_dir()),
             gpu_error: None,
             gpu_failed,
             gpu_device_lost: false,
@@ -730,6 +737,24 @@ impl PlanetGenApp {
         -0.5 + 1.7 * self.derived.ocean_fraction * (1.0 - self.water_loss)
     }
 
+    /// Folder the export writes `<planet_name>/` into.
+    fn export_root(&self) -> std::path::PathBuf {
+        self.export_dir
+            .clone()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default().join("output"))
+    }
+
+    fn pick_export_dir(&mut self) {
+        let mut dialog = rfd::FileDialog::new().set_title("Export folder");
+        let start = self.export_root();
+        if start.is_dir() {
+            dialog = dialog.set_directory(start);
+        }
+        if let Some(dir) = dialog.pick_folder() {
+            self.export_dir = Some(dir);
+        }
+    }
+
     fn start_export(&mut self) {
         // Capture authored weather inputs at click time. Presentation-only controls are
         // deliberately absent from WeatherSnapshot, so later visibility/opacity edits
@@ -742,7 +767,7 @@ impl PlanetGenApp {
                 }),
             self.ocean_level(),
         );
-        let output_dir = std::env::current_dir().unwrap_or_default().join("output");
+        let output_dir = self.export_root();
         self.export_destination = output_dir.join(&self.planet_name).display().to_string();
         self.export_layers = self
             .export_layer_flags()
@@ -1144,6 +1169,9 @@ const EXPORT_LAYERS: &[(&str, &str)] = &[
     ("Water mask", "water_mask.png"),
     ("Normals", "normal.exr"),
 ];
+
+/// eframe storage key for the remembered export folder.
+const EXPORT_DIR_KEY: &str = "export_dir";
 
 const TABS: [&str; 5] = ["PLANET", "TERRAIN", "CLIMATE", "LOOK", "RENDER"];
 
@@ -2482,6 +2510,34 @@ impl PlanetGenApp {
                                 .desired_width(f32::INFINITY),
                         );
 
+                        widgets::section_header(ui, "folder");
+                        ui.horizontal(|ui| {
+                            let is_exporting = self.export_handle.is_some();
+                            if ui
+                                .add_enabled(!is_exporting, egui::Button::new("Choose…"))
+                                .on_hover_text("Pick the folder exports are written into")
+                                .clicked()
+                            {
+                                self.pick_export_dir();
+                            }
+                            if self.export_dir.is_some()
+                                && ui
+                                    .add_enabled(!is_exporting, egui::Button::new("Reset"))
+                                    .on_hover_text("Export to ./output again")
+                                    .clicked()
+                            {
+                                self.export_dir = None;
+                            }
+                        });
+                        let root = self.export_root();
+                        ui.label(
+                            RichText::new(root.join(&self.planet_name).display().to_string())
+                                .monospace()
+                                .size(10.5)
+                                .color(theme::TEXT_FAINT),
+                        )
+                        .on_hover_text(root.display().to_string());
+
                         widgets::section_header(ui, "resolution");
                         let res_opts: Vec<(u32, &'static str)> = [
                             (2048u32, "2K"),
@@ -2694,6 +2750,18 @@ impl PlanetGenApp {
 }
 
 impl eframe::App for PlanetGenApp {
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        let dir = self
+            .export_dir
+            .as_ref()
+            .map(|dir| dir.display().to_string());
+        storage.set_string(EXPORT_DIR_KEY, dir.unwrap_or_default());
+    }
+
+    fn persist_egui_memory(&self) -> bool {
+        false
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Expire transient save/load feedback.
         if let Some((_, _, until)) = &self.file_msg
