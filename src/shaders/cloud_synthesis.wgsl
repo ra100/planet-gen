@@ -664,13 +664,25 @@ fn cs_synthesize(p: vec3<f32>, footprint: f32, solver: vec4<f32>) -> vec4<f32> {
     let b_storm = storm_in * (1.0 - polar_in);
     let b_polar = polar_in;
     // West-coast stratocumulus: subtropical ocean with land to the east
-    // (cold upwelling under the subtropical high's equatorward flank).
+    // (cold upwelling under the subtropical high's equatorward flank). The
+    // deck thins out over ~2000 km as the trades carry it off the cold water,
+    // so land to the east is a weighted mean over a fan of taps 250-2000 km
+    // out, widening with distance, with a soft shoreline per tap. The max of a
+    // few point probes drew the coastline offshore, once per probe.
+    let north = basis[1];
     var east_land = 0.0;
-    for (var i = 0; i < 3; i++) {
-        let distance = min((450.0 + 650.0 * f32(i)) / radius_km, 0.5);
-        let probe = normalize(p * cos(distance) + east * sin(distance));
-        east_land = max(east_land, cs_land(probe) * (1.0 - 0.25 * f32(i)));
+    var east_total = 0.0;
+    for (var i = 0; i < 6; i++) {
+        let along = min((250.0 + 350.0 * f32(i)) / radius_km, 0.5);
+        let weight = 1.0 - 0.12 * f32(i);
+        for (var j = -1; j <= 1; j++) {
+            let probe = normalize(p * cos(along) + east * sin(along) + north * (0.45 * along * f32(j)));
+            let probe_height = textureSampleLevel(height_tex, height_sampler, probe, 0.0).r;
+            east_land += weight * smooth_step(uniforms.ocean_level - 0.1, uniforms.ocean_level + 0.1, probe_height);
+            east_total += weight;
+        }
     }
+    east_land = smooth_step(0.1, 0.55, east_land / east_total);
     let deck_zone = smooth_step(0.3 * hadley, 0.55 * hadley, alat)
         * (1.0 - smooth_step(1.1 * hadley, 1.45 * hadley, alat));
     let w_deck = ocean * deck_zone * east_land;
