@@ -404,6 +404,7 @@ fn run_u2_8k() {
         night_lights: 0.0,
         albedo_ao: None,
         cloud_thin_lift: 0.0,
+        cloud_synthesis: 0.0,
     };
     let (progress, _progress_rx) = std::sync::mpsc::channel();
     let started = Instant::now();

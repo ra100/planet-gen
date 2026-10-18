@@ -20,6 +20,7 @@ src/
   app.rs          — Main application, UI, parameter sliders
   preview.rs      — Preview renderer, uniforms, persistent-GPU field bindings
   weather.rs      — Revisioned front/back cloud mass and geometry cubemaps
+  cloud_synthesis.rs — Weather-system catalogue (cyclones, ridges, tropical cyclones) for cloud synthesis
   export.rs       — Tiled EXR export, including six-channel cloud reconstruction output
   planet.rs       — PlanetParams, DerivedProperties, physics model
   lib.rs          — Module declarations
@@ -27,6 +28,7 @@ src/
     preview_cubemap.wgsl — Fragment shader: terrain, climate, bounded cloud volume
     weather_field.wgsl   — Cloud mass and geometry field generation
     cloud_density.wgsl   — Shared preview/export density definitions
+    cloud_synthesis.wgsl — Shared weather systems, cloud regimes and resolution-free cloud detail
     cloud_export.wgsl    — Direct optical-depth and reconstruction-channel export
 docs/
   research/       — Research documents (planetary science, GPU techniques)
@@ -51,7 +53,7 @@ User parameters → `PlanetParams` → `DerivedProperties` (physics model) → r
 - Crater stamping
 - Bounded ray-marched cloud volume, lighting, and surface shadows
 
-Export repeats the weather sequence from an immutable snapshot at bounded field resolution. `clouds.exr` contains direct optical depth plus reconstruction channels; preview visibility and opacity do not affect export.
+Cloud synthesis (`cloud_synthesis` strength, Clouds > Structure) rebuilds each column from the solver's fields plus synoptic systems and climatological regimes, with a probability coverage remap so 2K and 8K agree. Export repeats the weather sequence from an immutable snapshot at bounded field resolution. `clouds.exr` contains direct optical depth plus reconstruction channels; preview visibility and opacity do not affect export.
 
 ### Key Physical Models
 

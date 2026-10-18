@@ -50,8 +50,10 @@ CLOUD_DEFAULTS = {
     # Base billow cell frequency in the 0-1 shell domain (250 ~ 50 km cells on an
     # Earth-size planet).
     "Scale": 250.0,
-    # How far billows eat into the cloud; varies 0.5-1.5x by region.
-    "Erosion": 0.35,
+    # How far billows eat into the cloud; varies 0.5-1.5x by region. The export
+    # already carries margins, cells and gaps (Clouds > Structure), so billows
+    # only add close-range detail; raise it for solver-only exports.
+    "Erosion": 0.15,
     # Low-frequency noise scale that varies the erosion between regions.
     "Variety Scale": 6.0,
     # Fine Perlin FBM added to the billows (wisps).

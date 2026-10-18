@@ -59,6 +59,8 @@ const CLOUD_RAY_SAMPLES: u32 = 8u;
 @group(0) @binding(3) var cloud_tex: texture_cube<f32>;
 @group(0) @binding(4) var weather_mass_tex: texture_cube<f32>;
 @group(0) @binding(5) var weather_geometry_tex: texture_cube<f32>;
+// Synoptic systems and strength for cloud_synthesis.wgsl (zeroed: solver field).
+@group(0) @binding(7) var<uniform> cloud_synthesis: CloudSynthesisData;
 
 // Plate motion for the Plates debug view (view 6). Mirrors plates.wgsl, the
 // terrain shader, so the overlay lines up with the generated terrain: same
@@ -716,7 +718,8 @@ fn cloud_detail_multipliers(noise: CloudDetailNoise, mass: vec4<f32>) -> vec3<f3
             (liquid_depth - CLOUD_CONTRAST_LOW) / (CLOUD_CONTRAST_HIGH - CLOUD_CONTRAST_LOW), 0.0, 1.0,
         );
         let solid = 1.0 - exp(-3.0 * thickness);
-        let erosion = CLOUD_EROSION * noise.variety * (1.0 - noise.billow);
+        // Synthesized cloud already has its own margins, cells and gaps.
+        let erosion = CLOUD_EROSION * noise.variety * (1.0 - noise.billow) * (1.0 - cs_strength());
         let kept = clamp((solid - erosion) / (1.0 - erosion), 0.0, 1.0) / max(solid, 1.0e-3);
         let physical_depth = CLOUD_DEPTH_GAIN * max(liquid_depth - CLOUD_CONTRAST_LOW, 0.0) * kept
             * pow(max(thickness, 1.0e-4), CLOUD_DEPTH_POWER);
@@ -735,7 +738,9 @@ fn cloud_detail_surface_shadow(
 ) -> f32 {
     let solver_shadow = cloud_surface_shadow(world_direction, sun_dir, radius_km, angular_pixel_footprint);
     let amount = cloud_detail_amount();
-    if (amount <= 0.0) { return solver_shadow; }
+    // Synthesized clouds cast their own shadows even without detail.
+    let shadow_mix = max(amount, cs_strength());
+    if (shadow_mix <= 0.0) { return solver_shadow; }
     let direction = normalize(world_direction);
     let local_mass = sample_weather_mass(direction);
     let weight = local_mass.r + local_mass.g + local_mass.b;
@@ -749,15 +754,20 @@ fn cloud_detail_surface_shadow(
     // The column that casts this shadow, as in cloud_surface_shadow.
     let center = normalize(direction + sun_dir * cloud_surface_shadow_offset(height_km, radius_km));
     let noise = cloud_detail_noise(center, angular_pixel_footprint);
-    let lookup = normalize(center + noise.warp * amount);
-    let mass = sample_weather_mass(lookup);
+    var lookup = normalize(center + noise.warp * amount);
+    var mass = sample_weather_mass(lookup);
+    if (cs_strength() > 0.0) {
+        // The synthesized column casting the shadow; it needs no lattice warp.
+        lookup = center;
+        mass = cloud_synthesis_mass(center, angular_pixel_footprint);
+    }
     let detail = cloud_detail_multipliers(noise, mass);
     let depth = (mass.r * LOW_OPTICAL_WEIGHT * 0.90 * detail.x + mass.g * 1.65 * detail.y
         + mass.b * 0.28 * 0.32 * detail.z) * CLOUD_LIGHT_EXTINCTION;
     let shadow_scale = clamp(uniforms.cloud_coverage, 0.0, 1.0) * clamp(uniforms.cloud_opacity, 0.0, 1.0);
     // Slant path through the layer toward the sun.
     let slant = 1.0 / max(dot(direction, sun_dir), 0.15);
-    return mix(solver_shadow, exp(-depth * shadow_scale * slant), amount);
+    return mix(solver_shadow, exp(-depth * shadow_scale * slant), shadow_mix);
 }
 
 fn ray_march_clouds(
@@ -776,6 +786,9 @@ fn ray_march_clouds(
     var in_scatter = vec3<f32>(0.0);
     let detail_amount = cloud_detail_amount();
     var detail_noise = CloudDetailNoise(vec3<f32>(0.0), 1.0, 0.0, vec3<f32>(0.0));
+    // Synthesized column mass, evaluated once per ray like the detail noise.
+    let synthesis = cs_strength() > 0.0;
+    var synthesized_mass = vec4<f32>(0.0);
 
     for (var i = 0u; i < CLOUD_RAY_SAMPLES; i++) {
         let segment_start = vec3<f32>(ndc, z_start - f32(i) * step_len);
@@ -788,10 +801,17 @@ fn ray_march_clouds(
         var lookup = world;
         if (detail_amount > 0.0) {
             if (i == 0u) { detail_noise = cloud_detail_noise(world, angular_pixel_footprint); }
-            lookup = normalize(world + detail_noise.warp * detail_amount);
+            if (!synthesis) { lookup = normalize(world + detail_noise.warp * detail_amount); }
         }
-        var sample = weather_cloud_layers_land_segment(
-            lookup, altitude_km, segment_start, segment_end, radius_km, angular_pixel_footprint,
+        var mass: vec4<f32>;
+        if (synthesis) {
+            if (i == 0u) { synthesized_mass = cloud_synthesis_mass(world, angular_pixel_footprint); }
+            mass = synthesized_mass;
+        } else {
+            mass = sample_weather_mass(normalize(normalize(lookup)));
+        }
+        var sample = weather_cloud_layers_land_segment_mass(
+            lookup, altitude_km, segment_start, segment_end, radius_km, angular_pixel_footprint, mass,
         );
         if (detail_amount > 0.0) {
             let detail = cloud_detail_multipliers(detail_noise, sample.mass);
@@ -1775,11 +1795,13 @@ fn shade_planet(in: VertexOutput) -> vec4<f32> {
                 debug_color = vec3<f32>(0.3, 0.3, 0.3);
             }
             case 20u: {
-                let column = cloud_column_sample(rotated, angular_pixel_footprint);
+                let column = cloud_column_sample_mass(rotated, angular_pixel_footprint,
+                    cloud_synthesis_mass(rotated, angular_pixel_footprint), cs_strength() <= 0.0);
                 debug_color = vec3<f32>(1.0 - exp(-column.y));
             }
             case 21u: {
-                let column = cloud_column_sample(rotated, angular_pixel_footprint);
+                let column = cloud_column_sample_mass(rotated, angular_pixel_footprint,
+                    cloud_synthesis_mass(rotated, angular_pixel_footprint), cs_strength() <= 0.0);
                 let altitude = select(0.0, column.base_km + 0.5 * column.thickness_km, column.y > 0.0);
                 debug_color = vec3<f32>(clamp(altitude / 20.0, 0.0, 1.0));
             }
