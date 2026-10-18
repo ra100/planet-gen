@@ -1672,16 +1672,22 @@ mod tests {
             ..uniforms()
         };
         let (reference, candidate) =
-            uniform_deck_renders(&gpu, &renderer, [0.03, 0.0, 0.0, 0.03], &settings, size);
+            uniform_deck_renders(&gpu, &renderer, [0.04, 0.0, 0.0, 0.04], &settings, size);
         let center = deck_center(size).collect::<Vec<_>>();
-        let (mut clear, mut cloud) = (0usize, 0usize);
+        let mut depths = Vec::with_capacity(center.len());
         for &i in &center {
-            let before = optical_depth(reference[i]);
-            let after = optical_depth(candidate[i]);
-            assert!(before > 0.005, "solver veil must cover the deck");
-            clear += usize::from(after < 0.25 * before);
-            cloud += usize::from(after > 0.3 * before);
+            assert!(
+                optical_depth(reference[i]) > 0.005,
+                "solver veil must cover the deck"
+            );
+            depths.push(optical_depth(candidate[i]));
         }
+        let mut sorted = depths.clone();
+        sorted.sort_by(f32::total_cmp);
+        let peak = sorted[sorted.len() * 95 / 100];
+        assert!(peak > 0.0, "thin veil vanished entirely");
+        let clear = depths.iter().filter(|&&d| d < 0.25 * peak).count();
+        let cloud = depths.iter().filter(|&&d| d > 0.5 * peak).count();
         // A thin column is a field of broken cloud, not a uniform haze: some
         // sky clears while much of the veil survives as cloud.
         let clear = clear as f32 / center.len() as f32;

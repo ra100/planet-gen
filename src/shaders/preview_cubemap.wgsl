@@ -533,12 +533,13 @@ fn ray_march_atmosphere(ndc: vec2<f32>, z_start: f32, z_end: f32, sun_dir: vec3<
 const CLOUD_DETAIL_CELL_TEXELS: f32 = 2.0;
 // Column optical depth below which liquid stays clear, and the depth above
 // which billows no longer erode it (the bridge's 0-1 thickness window).
-const CLOUD_CONTRAST_LOW: f32 = 0.02;
+const CLOUD_CONTRAST_LOW: f32 = 0.05;
 const CLOUD_CONTRAST_HIGH: f32 = 0.35;
 // Physical optical depth per unit of solver depth above the clear level: a
-// 0.35 solver column becomes tau ~4, a moderate stratocumulus deck. Higher
-// gains turned the solver's fine ripples into dense white blocks.
-const CLOUD_DEPTH_GAIN: f32 = 12.0;
+// 0.35 solver column becomes tau ~11, a typical stratocumulus deck, while
+// CLOUD_DEPTH_POWER keeps thin ripples translucent. A flat gain this high
+// merged the solver's fine ripples into dense white blocks.
+const CLOUD_DEPTH_GAIN: f32 = 36.0;
 // Two-stream diffusion with asymmetry g = 0.85: a non-absorbing layer of
 // optical depth tau reflects R = a tau / (1 + a tau), a = (1 - g) / 2, and
 // diffusely transmits 1 - R. The compositor's Beer-Lambert segment then needs
@@ -556,7 +557,13 @@ const CLOUD_BILLOW_RANGE: vec2<f32> = vec2<f32>(0.31, 0.65);
 const CLOUD_ICE_SHEET: vec2<f32> = vec2<f32>(0.004, 0.04);
 const CLOUD_ICE_GAIN: f32 = 1.6;
 // Skylight on cloud tops relative to the direct beam's irradiance scale.
-const CLOUD_SKYLIGHT: f32 = 0.16;
+const CLOUD_SKYLIGHT: f32 = 0.24;
+// Thin-column contrast: physical depth scales by thickness^power, so the
+// haze between solver ripples stays faint while their cores turn bright.
+const CLOUD_DEPTH_POWER: f32 = 0.6;
+// Brightening and darkening of sunward and lee puff slopes at oblique sun.
+const CLOUD_RELIEF: f32 = 0.6;
+const CLOUD_RELIEF_SCALE: f32 = 1.2;
 
 fn cloud_detail_amount() -> f32 {
     return clamp(uniforms.cloud_detail, 0.0, 1.0);
@@ -574,11 +581,17 @@ fn cloud_pcg3d(input: vec3<u32>) -> vec3<u32> {
     return v;
 }
 
-fn cloud_worley_f1(p: vec3<f32>, seed: u32) -> f32 {
+// F1 distance (x) and the slope of the inverted billow 1 - F1 (yzw). The
+// slope blends the unit vectors toward nearby feature points by a soft
+// minimum, so dome shading stays continuous across cell borders instead of
+// faceting like hammered metal.
+fn cloud_worley_f1(p: vec3<f32>, seed: u32) -> vec4<f32> {
     let cell = floor(p);
     let local = p - cell;
     let base = vec3<i32>(cell);
     var best = 9.0;
+    var toward = vec3<f32>(0.0);
+    var weight_sum = 0.0;
     for (var z = -1; z <= 1; z++) {
         for (var y = -1; y <= 1; y++) {
             for (var x = -1; x <= 1; x++) {
@@ -586,11 +599,16 @@ fn cloud_worley_f1(p: vec3<f32>, seed: u32) -> f32 {
                 let h = cloud_pcg3d(bitcast<vec3<u32>>(base + offset) ^ vec3<u32>(seed, seed * 3u, seed * 7u));
                 let jitter = vec3<f32>(h & vec3<u32>(0xffffu)) / 65535.0;
                 let d = vec3<f32>(offset) + jitter - local;
-                best = min(best, dot(d, d));
+                let distance_sq = dot(d, d);
+                best = min(best, distance_sq);
+                let distance = sqrt(distance_sq);
+                let weight = exp(-8.0 * distance);
+                toward += weight * d / max(distance, 1.0e-5);
+                weight_sum += weight;
             }
         }
     }
-    return sqrt(best);
+    return vec4<f32>(sqrt(best), toward / max(weight_sum, 1.0e-20));
 }
 
 // Share of an octave the pixel resolves. Unresolved octaves fall back to
@@ -599,9 +617,11 @@ fn cloud_octave_resolution(footprint_cells: f32) -> f32 {
     return 1.0 - smooth_step(0.25, 0.75, footprint_cells);
 }
 
-// Billows: inverted Worley F1 octaves plus faint zero-mean wisps, 0-1.
-fn cloud_billow(p: vec3<f32>, footprint_cells: f32) -> f32 {
+// Billows: inverted Worley F1 octaves plus faint zero-mean wisps, 0-1 (x),
+// and the gradient of the summed domes in domain units (yzw).
+fn cloud_billow(p: vec3<f32>, footprint_cells: f32) -> vec4<f32> {
     var total = 0.0;
+    var gradient = vec3<f32>(0.0);
     var frequency = 1.0;
     let weights = array<f32, 5>(0.5, 0.24, 0.13, 0.07, 0.04);
     for (var k = 0u; k < 5u; k++) {
@@ -609,7 +629,10 @@ fn cloud_billow(p: vec3<f32>, footprint_cells: f32) -> f32 {
         var value = CLOUD_BILLOW_MEAN;
         if (resolved > 0.0) {
             let q = p * frequency + vec3<f32>(f32(k) * 17.31, f32(k) * 7.13, f32(k) * 3.37);
-            value = mix(CLOUD_BILLOW_MEAN, 1.0 - cloud_worley_f1(q, 0x9e3779b9u + k * 131u), resolved);
+            let worley = cloud_worley_f1(q, 0x9e3779b9u + k * 131u);
+            value = mix(CLOUD_BILLOW_MEAN, 1.0 - worley.x, resolved);
+            // Unscaled by frequency: large domes shade, fine octaves stay flat.
+            gradient += weights[k] * resolved * worley.yzw;
         }
         total += weights[k] * value;
         frequency *= 2.0;
@@ -621,7 +644,8 @@ fn cloud_billow(p: vec3<f32>, footprint_cells: f32) -> f32 {
         let q = p * 12.0 + vec3<f32>(11.0);
         total += 0.04 * wisp_resolved * (0.65 * snoise(q) + 0.35 * snoise(q * 2.03));
     }
-    return clamp((total - CLOUD_BILLOW_RANGE.x) / (CLOUD_BILLOW_RANGE.y - CLOUD_BILLOW_RANGE.x), 0.0, 1.0);
+    let range = CLOUD_BILLOW_RANGE.y - CLOUD_BILLOW_RANGE.x;
+    return vec4<f32>(clamp((total - CLOUD_BILLOW_RANGE.x) / range, 0.0, 1.0), gradient / range);
 }
 
 // Compress the domain along `axis` so features elongate along it.
@@ -643,6 +667,9 @@ struct CloudDetailNoise {
     billow: f32,
     // Regional scale on how far billows eat in.
     variety: f32,
+    // Tangent-plane slope of the billow domes per weather texel, which
+    // shades sunward and lee sides of each puff.
+    relief: vec3<f32>,
 }
 
 fn cloud_detail_noise(direction: vec3<f32>, angular_pixel_footprint: f32) -> CloudDetailNoise {
@@ -654,19 +681,26 @@ fn cloud_detail_noise(direction: vec3<f32>, angular_pixel_footprint: f32) -> Clo
 
     let cell_angle = texel * CLOUD_DETAIL_CELL_TEXELS;
     var domain = direction / cell_angle;
+    var stretch_axis = vec3<f32>(0.0);
+    var stretch = 1.0;
     if (uniforms.cloud_advection > 0.5) {
         let wind = textureSampleLevel(cloud_tex, height_sampler, direction, 0.0).xyz;
         let tangent = wind - direction * dot(wind, direction);
         let speed = length(tangent);
         // Faster flow draws billows out into streets along the wind.
         if (speed > 1.0e-4) {
-            domain = cloud_stretch(domain, tangent / speed, 1.0 + 1.6 * smooth_step(0.1, 0.8, speed));
+            stretch_axis = tangent / speed;
+            stretch = 1.0 + 1.6 * smooth_step(0.1, 0.8, speed);
+            domain = cloud_stretch(domain, stretch_axis, stretch);
         }
     }
     let billow = cloud_billow(domain, angular_pixel_footprint / cell_angle);
+    // Chain rule through the stretch, then per texel instead of per cell.
+    var slope = cloud_stretch(billow.yzw, stretch_axis, stretch) / CLOUD_DETAIL_CELL_TEXELS;
+    slope -= direction * dot(slope, direction);
     let q = direction * 2.5 + vec3<f32>(73.0);
     let variety = clamp(1.0 + 1.1 * (0.65 * snoise(q) + 0.35 * snoise(q * 2.03)), 0.4, 1.6);
-    return CloudDetailNoise(warp, billow, variety);
+    return CloudDetailNoise(warp, billow.x, variety, slope);
 }
 
 // Per-family optical depth multipliers (low, deep, high) for one column.
@@ -680,7 +714,8 @@ fn cloud_detail_multipliers(noise: CloudDetailNoise, mass: vec4<f32>) -> vec3<f3
         let solid = 1.0 - exp(-3.0 * thickness);
         let erosion = CLOUD_EROSION * noise.variety * (1.0 - noise.billow);
         let kept = clamp((solid - erosion) / (1.0 - erosion), 0.0, 1.0) / max(solid, 1.0e-3);
-        let physical_depth = CLOUD_DEPTH_GAIN * max(liquid_depth - CLOUD_CONTRAST_LOW, 0.0) * kept;
+        let physical_depth = CLOUD_DEPTH_GAIN * max(liquid_depth - CLOUD_CONTRAST_LOW, 0.0) * kept
+            * pow(max(thickness, 1.0e-4), CLOUD_DEPTH_POWER);
         let render_depth = log(1.0 + CLOUD_DIFFUSION * physical_depth);
         multipliers = vec3<f32>(vec2<f32>(render_depth / liquid_depth), 1.0);
     }
@@ -736,7 +771,7 @@ fn ray_march_clouds(
     var transmittance = vec3<f32>(1.0);
     var in_scatter = vec3<f32>(0.0);
     let detail_amount = cloud_detail_amount();
-    var detail_noise = CloudDetailNoise(vec3<f32>(0.0), 1.0, 0.0);
+    var detail_noise = CloudDetailNoise(vec3<f32>(0.0), 1.0, 0.0, vec3<f32>(0.0));
 
     for (var i = 0u; i < CLOUD_RAY_SAMPLES; i++) {
         let segment_start = vec3<f32>(ndc, z_start - f32(i) * step_len);
@@ -815,8 +850,15 @@ fn ray_march_clouds(
         // noise-based lighting term or sun-independent illumination at night.
         let multiple_scatter = 0.38 * sqrt(light_transmittance)
             + 0.30 * (1.0 - light_transmittance);
-        let direct_energy = sun_facing * (light_transmittance * (0.8 + 0.2 * min(phase, 2.5))
+        var direct_energy = sun_facing * (light_transmittance * (0.8 + 0.2 * min(phase, 2.5))
             + multiple_scatter) * (SUN_IRRADIANCE / 1.36);
+        if (detail_amount > 0.0) {
+            // Puff domes facing the sun catch more light, lee sides less. The
+            // unnormalized sun tangent fades the effect out under a high sun.
+            let sun_tangent = sun_world - world * dot(sun_world, world);
+            let slope = clamp(dot(detail_noise.relief, sun_tangent) * CLOUD_RELIEF_SCALE, -1.0, 1.0);
+            direct_energy *= 1.0 + CLOUD_RELIEF * detail_amount * slope;
+        }
         // Skylight: cloud tops also see the blue sky dome, which lifts shaded
         // sides and offsets the reddened direct beam (detail only).
         let sky_light = vec3<f32>(0.42, 0.58, 1.0) * star * sun_facing * CLOUD_SKYLIGHT
