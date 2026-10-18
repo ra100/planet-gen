@@ -262,6 +262,16 @@ fn cs_local(q: vec3<f32>, system: CloudSystem) -> vec3<f32> {
     return vec3<f32>(dot(tangent, east) / radius, dot(tangent, north) * system.shape.z / radius, taper);
 }
 
+// System kinds (cloud_synthesis.rs): 0 extratropical low, 1 tropical
+// cyclone, 2 ridge, 3 polar low, which is drawn as a small occluded low.
+fn cs_is_tropical(system: CloudSystem) -> bool {
+    return abs(system.frame.w - 1.0) < 0.5;
+}
+
+fn cs_is_anticyclone(system: CloudSystem) -> bool {
+    return abs(system.frame.w - 2.0) < 0.5;
+}
+
 // Extratropical cyclone frame: tilted with its fronts, east-west aspect.
 fn cs_extratropical_frame(local: vec2<f32>, system: CloudSystem) -> vec2<f32> {
     let ct = cos(system.extra.w);
@@ -275,11 +285,11 @@ fn cs_extratropical_frame(local: vec2<f32>, system: CloudSystem) -> vec2<f32> {
 // that bends the surrounding field.
 fn cs_circulation(local: vec2<f32>, system: CloudSystem) -> vec2<f32> {
     let intensity = system.shape.y;
-    if (system.frame.w > 1.5) {
+    if (cs_is_anticyclone(system)) {
         let r2 = dot(local, local * vec2<f32>(1.0 / (system.extra.z * system.extra.z), 1.0));
         return vec2<f32>(0.0, -0.9 * intensity * exp(-r2 / (1.1 * 1.1)));
     }
-    if (system.frame.w > 0.5) {
+    if (cs_is_tropical(system)) {
         let r2 = dot(local, local);
         return vec2<f32>(3.2 * intensity * exp(-r2 / (0.5 * 0.5)), 0.8 * intensity * exp(-r2 / (1.2 * 1.2)));
     }
@@ -476,9 +486,9 @@ fn cs_synoptic(p: vec3<f32>) -> CsSynoptic {
         let local = cs_local(p, system);
         if (local.z <= 0.0) { continue; }
         var tpl: CsTemplate;
-        if (system.frame.w > 1.5) {
+        if (cs_is_anticyclone(system)) {
             tpl = cs_anticyclone(local.xy, system);
-        } else if (system.frame.w > 0.5) {
+        } else if (cs_is_tropical(system)) {
             tpl = cs_tropical(local.xy, system);
         } else {
             tpl = cs_extratropical(local.xy, system);

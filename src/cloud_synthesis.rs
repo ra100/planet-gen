@@ -30,6 +30,9 @@ pub const SYSTEM_EXTRATROPICAL: f32 = 0.0;
 pub const SYSTEM_TROPICAL: f32 = 1.0;
 /// Ridge between storm-track lows: subsidence clearing and anticyclonic flow.
 pub const SYSTEM_ANTICYCLONE: f32 = 2.0;
+/// Polar low or decaying occluded low poleward of the subpolar low: a small,
+/// wound-up comma cloud (drawn with the extratropical template).
+pub const SYSTEM_POLAR_LOW: f32 = 3.0;
 
 const EARTH_ROTATION_RAD_S: f32 = 7.292_115e-5;
 /// Most unstable Eady wavelength on Earth at 45 degrees latitude, km.
@@ -193,7 +196,8 @@ fn east_at(center: [f32; 3], tilt: f32) -> [f32; 3] {
 /// waves form on the equatorward side of the track and occlude poleward.
 /// Tropical cyclones need warm water (a base temperature that puts the deep
 /// tropics above about 26 C) and form at 10-25 degrees, mostly in the summer
-/// hemisphere.
+/// hemisphere. Polar lows and decaying lows fill the caps poleward of the
+/// subpolar low.
 pub fn weather_systems(
     snapshot: &WeatherSnapshot,
     strength: f32,
@@ -420,6 +424,56 @@ pub fn weather_systems(
         }
     }
 
+    // Polar lows and decaying occluded lows poleward of the subpolar low:
+    // small comma clouds wound about once, with a short trailing front, mostly
+    // over open water where cold air streams over warmer sea. They are the
+    // circulation that organizes polar cloud; without them the caps have none.
+    let polar_edge = (subpolar.max(hadley + 10.0) + 3.0).min(84.0);
+    for hemisphere in [1.0_f32, -1.0] {
+        let mut rng = Rng::new(snapshot.seed, if hemisphere > 0.0 { 31 } else { 32 });
+        let wanted = rng.range(2.0, 4.6) as usize;
+        let mut placed = 0;
+        let mut attempts = 0;
+        while placed < wanted && attempts < 12 && systems.len() < MAX_CLOUD_SYSTEMS {
+            attempts += 1;
+            // Uniform in area over the cap, short of the pole itself.
+            let sin_edge = polar_edge.to_radians().sin();
+            let latitude = (sin_edge + (1.0 - sin_edge) * rng.unit())
+                .asin()
+                .to_degrees()
+                .min(86.0);
+            let longitude = rng.unit() * std::f32::consts::TAU;
+            let center =
+                circulation_direction((latitude * hemisphere).to_radians(), longitude, tilt);
+            if !is_ocean(center) && rng.unit() > 0.3 {
+                continue;
+            }
+            let east = east_at(center, tilt);
+            systems.push(CloudSystemGpu {
+                center: [
+                    center[0],
+                    center[1],
+                    center[2],
+                    wavelength_km * rng.range(0.15, 0.3) / radius_km,
+                ],
+                frame: [east[0], east[1], east[2], SYSTEM_POLAR_LOW],
+                shape: [
+                    rng.range(0.7, 1.0),
+                    rng.range(0.5, 0.9) * vigor,
+                    hemisphere,
+                    rng.unit(),
+                ],
+                extra: [
+                    rng.range(0.7, 1.3),
+                    rng.range(0.1, 0.3),
+                    rng.range(1.0, 1.2),
+                    rng.range(-0.3, 0.3),
+                ],
+            });
+            placed += 1;
+        }
+    }
+
     data.control[1] = systems.len() as f32;
     for (slot, system) in data.systems.iter_mut().zip(systems) {
         *slot = system;
@@ -517,6 +571,31 @@ mod tests {
         let (fast_count, fast_radius) = count(&fast);
         assert!(fast_count > earth_count);
         assert!(fast_radius < earth_radius * 0.6);
+    }
+
+    #[test]
+    fn polar_lows_circulate_in_both_caps() {
+        for seed in [1042, 7, 73, 137] {
+            let snapshot = WeatherSnapshot { seed, ..earth() };
+            let data = weather_systems(&snapshot, 1.0, |_| true);
+            for hemisphere in [1.0, -1.0] {
+                let polar: Vec<_> = data.systems[..data.system_count()]
+                    .iter()
+                    .filter(|s| s.frame[3] == SYSTEM_POLAR_LOW && s.shape[2] == hemisphere)
+                    .collect();
+                assert!((2..=4).contains(&polar.len()), "polar lows {}", polar.len());
+                for system in polar {
+                    let latitude = latitude_deg(system.center, snapshot.axial_tilt_rad);
+                    assert_eq!(latitude.signum(), hemisphere);
+                    assert!(
+                        (62.9..=86.1).contains(&latitude.abs()),
+                        "latitude {latitude}"
+                    );
+                    let radius_km = system.center[3] * snapshot.radius_km;
+                    assert!((400.0..=1300.0).contains(&radius_km), "radius {radius_km}");
+                }
+            }
+        }
     }
 
     #[test]
