@@ -105,6 +105,18 @@ unchanged.
 
 ![Blender bridge, before and after](../images/cloud-detail-review/blender-42.jpg)
 
+## U8: Thin cloud lift
+
+An advanced artistic control (Clouds > Advanced > Thin lift, 0-1, default 0,
+saved as `cloud_thin_lift`). `sample_weather_mass` in `cloud_density.wgsl`
+multiplies each column's low, deep and high condensate by
+`1 + 2 * lift * exp(-(low + deep + high) / 0.05)`: faint cloud gains up to 3x,
+decks stay within 1%, empty columns stay empty, and 0 is exact. Every mass read
+in the preview and the cloud export goes through it, so `cloud_density.exr`
+matches the preview; `cloud_drivers.exr` keeps the solver's raw masses. The
+value travels in the new uniform slot after `surface_seed` (padded to 16 bytes)
+and in `ExportConfig::cloud_thin_lift`.
+
 ## Captures
 
 Seed 42 at 768 px from `realism_capture`: left `cloud_detail` = 0 (the

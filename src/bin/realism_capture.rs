@@ -276,6 +276,7 @@ fn main() {
     u.show_cities = 1.0;
     u.cloud_opacity = setting("cloud_opacity", 1.0);
     u.cloud_detail = setting("cloud_detail", 1.0);
+    u.cloud_thin_lift = setting("cloud_thin_lift", 0.0);
     u.cloud_advection = 1.0;
     u.rotation_rate = 1.0;
     u.atm_pressure = derived.surface_pressure_bar;

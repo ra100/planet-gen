@@ -159,6 +159,8 @@ pub struct ExportConfig {
     /// Bake the broad AO into `albedo.png` at this strength (0–1); `None`
     /// leaves albedo unshaded.
     pub albedo_ao: Option<f32>,
+    /// Thin cloud lift (0-1) applied to the exported cloud density, as in the preview.
+    pub cloud_thin_lift: f32,
 }
 
 pub const CLOUD_EXR_CHANNELS: [&str; 6] = [
@@ -1906,7 +1908,7 @@ fn wait_for_gpu_completion(gpu: &GpuContext, cancel: &AtomicBool) -> Result<(), 
     }
 }
 
-fn cloud_export_uniforms(snapshot: WeatherSnapshot) -> PreviewUniforms {
+fn cloud_export_uniforms(snapshot: WeatherSnapshot, cloud_thin_lift: f32) -> PreviewUniforms {
     PreviewUniforms {
         rotation: [
             [1.0, 0.0, 0.0, 0.0],
@@ -1952,6 +1954,8 @@ fn cloud_export_uniforms(snapshot: WeatherSnapshot) -> PreviewUniforms {
         planet_radius_km: snapshot.radius_km,
         show_cloud_shadows: 0.0,
         surface_seed: 0,
+        cloud_thin_lift,
+        _pad6: [0.0; 3],
     }
 }
 
@@ -2026,6 +2030,7 @@ fn stage_cloud_faces(
     dynamics: &crate::terrain_compute::DynamicsTextures,
     weather: &WeatherTextures,
     snapshot: WeatherSnapshot,
+    cloud_thin_lift: f32,
     coordinator: &TileCoordinator,
     cancel: &AtomicBool,
 ) -> Result<ExportStage, String> {
@@ -2039,7 +2044,7 @@ fn stage_cloud_faces(
     )?;
     let (_height_texture, height_view) = create_cloud_export_height_texture(gpu, terrain)?;
     let pipeline = CloudExportPipeline::new(gpu);
-    let uniforms = cloud_export_uniforms(snapshot);
+    let uniforms = cloud_export_uniforms(snapshot, cloud_thin_lift);
     for face in 0..6 {
         for tile_y in 0..coordinator.tiles_per_axis {
             for tile_x in 0..coordinator.tiles_per_axis {
@@ -3245,7 +3250,8 @@ fn export_cloud_drivers(
     let (width, height) = cloud_driver_dimensions(weather.resolution);
     let (_height_texture, height_view) = create_cloud_export_height_texture(gpu, terrain)?;
     let pipeline = CloudExportPipeline::drivers(gpu);
-    let uniforms = cloud_export_uniforms(snapshot);
+    // Drivers are the solver's own fields: no thin cloud lift.
+    let uniforms = cloud_export_uniforms(snapshot, 0.0);
     let mut writers = selected
         .iter()
         .map(|&index| {
@@ -4218,6 +4224,7 @@ pub fn run_export_with_timings_and_checkpoints(
             &dynamics,
             &weather,
             snapshot,
+            config.cloud_thin_lift,
             &coordinator,
             cancel,
         )?;
@@ -4428,6 +4435,7 @@ mod tests {
             weather: source,
             night_lights: 0.0,
             albedo_ao: None,
+            cloud_thin_lift: 0.0,
         };
         let mut changed_after_queue = source;
         changed_after_queue.coverage = 0.0;
@@ -4484,7 +4492,7 @@ mod tests {
             rotation_rate_rad_s: std::f32::consts::TAU / 43_200.0,
             ..WeatherSnapshot::default()
         };
-        let uniforms = cloud_export_uniforms(snapshot);
+        let uniforms = cloud_export_uniforms(snapshot, 0.0);
         assert_eq!(uniforms.cloud_advection, 0.0);
         assert_eq!(uniforms.rotation_rate, 2.0);
     }
@@ -4967,6 +4975,7 @@ mod tests {
             &dynamics,
             &weather,
             snapshot,
+            0.0,
             &coordinator,
             &AtomicBool::new(false),
         )
@@ -5208,7 +5217,7 @@ mod tests {
         assert!(include_str!("shaders/weather_spinup.wgsl").contains("params.storm_count"));
         assert!(include_str!("shaders/weather_spinup.wgsl").contains("params.storm_size"));
 
-        let exported_uniforms = cloud_export_uniforms(snapshot);
+        let exported_uniforms = cloud_export_uniforms(snapshot, 0.0);
         assert_eq!(exported_uniforms.show_clouds, 1.0);
         assert_eq!(exported_uniforms.cloud_opacity, 1.0);
         // Sub-texel detail is a preview presentation; export keeps the solver field.
@@ -6805,6 +6814,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             },
             night_lights: 0.5,
             albedo_ao: None,
+            cloud_thin_lift: 0.0,
         };
 
         let (tx, rx) = std::sync::mpsc::channel();
@@ -6895,6 +6905,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             weather: WeatherSnapshot::default(),
             night_lights: 0.5,
             albedo_ao: None,
+            cloud_thin_lift: 0.0,
         };
 
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -6939,6 +6950,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             weather: WeatherSnapshot::default(),
             night_lights: 0.5,
             albedo_ao: None,
+            cloud_thin_lift: 0.0,
         };
         assert_eq!(config.tile_size, TILE_SIZE);
 
