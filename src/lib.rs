@@ -1,4 +1,5 @@
 pub mod app;
+pub mod cloud_synthesis;
 pub mod cube_sphere;
 pub mod export;
 pub mod export_staging;

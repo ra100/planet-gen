@@ -29,6 +29,8 @@ fn smooth_step(edge0: f32, edge1: f32, value: f32) -> f32 {
 @group(0) @binding(4) var weather_mass_tex: texture_cube<f32>;
 @group(0) @binding(5) var weather_geometry_tex: texture_cube<f32>;
 @group(0) @binding(6) var<uniform> params: CloudExportParams;
+// Synoptic systems and strength for cloud_synthesis.wgsl.
+@group(0) @binding(8) var<uniform> cloud_synthesis: CloudSynthesisData;
 
 struct WindTangent { direction: vec3<f32>, magnitude: f32, }
 

@@ -57,7 +57,7 @@ rebuilds the node groups, so every material using them picks up the change.
 |-------|--------|
 | Density Low / High | Contrast on the solver's optical depth: below Low is clear, above High a full column that billows no longer erode |
 | Scale | Base billow cell frequency (250 ~ 50 km cells on an Earth-size planet); six octaves down to 1/32 |
-| Erosion | How far billows eat into thin areas and edges; cores are kept |
+| Erosion | How far billows eat into thin areas and edges; cores are kept. Default 0.15: exports with Clouds > Structure already carry margins, cells and gaps; use ~0.35 for solver-only exports (Structure 0) |
 | Variety Scale | Planet-scale noise that varies Erosion 0.5-1.5x, so some systems are puffier |
 | Wisps | Fine FBM added to the billows |
 | Zonal Stretch | Compresses the detail along the pole axis; elongates billows east-west |

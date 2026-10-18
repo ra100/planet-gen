@@ -11,6 +11,7 @@ use half::f16;
 use thiserror::Error;
 use wgpu::util::DeviceExt;
 
+use crate::cloud_synthesis::{CloudSynthesisGpu, weather_systems};
 use crate::export_staging::{
     EquirectStage, ExportStage, StageMetadata, StagedCubemapSampler, StagedEquirectRowGenerator,
 };
@@ -161,6 +162,9 @@ pub struct ExportConfig {
     pub albedo_ao: Option<f32>,
     /// Thin cloud lift (0-1) applied to the exported cloud density, as in the preview.
     pub cloud_thin_lift: f32,
+    /// Cloud synthesis strength (0-1): 0 exports the weather solver's field,
+    /// 1 the synthesized weather systems and cloud regimes, as in the preview.
+    pub cloud_synthesis: f32,
 }
 
 pub const CLOUD_EXR_CHANNELS: [&str; 6] = [
@@ -898,6 +902,8 @@ struct CloudExportParams {
     _pad1: u32,
 }
 
+const CLOUD_SYNTHESIS_WGSL: &str = include_str!("shaders/cloud_synthesis.wgsl");
+
 struct CloudExportPipeline {
     pipeline: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
@@ -911,6 +917,7 @@ impl CloudExportPipeline {
             include_str!("shaders/cloud_export_columns.wgsl"),
             "main",
             "cloud export",
+            CLOUD_SYNTHESIS_WGSL,
         )
     }
 
@@ -921,6 +928,7 @@ impl CloudExportPipeline {
             include_str!("shaders/cloud_drivers.wgsl"),
             "drivers",
             "cloud drivers",
+            CLOUD_SYNTHESIS_WGSL,
         )
     }
 
@@ -929,6 +937,7 @@ impl CloudExportPipeline {
         stage_source: &str,
         entry_point: &str,
         label: &str,
+        synthesis_source: &str,
     ) -> Self {
         let layout = gpu
             .device
@@ -952,6 +961,7 @@ impl CloudExportPipeline {
                         },
                         count: None,
                     },
+                    uniform_binding(8),
                 ],
             });
         // Shared sampling uses explicit LOD 0 in both stages: these cubemaps
@@ -963,13 +973,14 @@ impl CloudExportPipeline {
                 label: Some(label),
                 source: wgpu::ShaderSource::Wgsl(
                     format!(
-                        "{}\n{}\n{}\n{}\n{}\n{}\n{}",
+                        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
                         include_str!("shaders/cube_sphere.wgsl"),
                         include_str!("shaders/noise.wgsl"),
                         include_str!("shaders/climate.wgsl"),
                         cloud_density,
                         include_str!("shaders/cloud_wind_fallback.wgsl"),
                         include_str!("shaders/cloud_export.wgsl"),
+                        synthesis_source,
                         stage_source,
                     )
                     .into(),
@@ -1013,6 +1024,7 @@ impl CloudExportPipeline {
         height: &wgpu::TextureView,
         dynamics: &crate::terrain_compute::DynamicsTextures,
         weather: &WeatherTextures,
+        synthesis: &CloudSynthesisGpu,
         params: CloudExportParams,
         cancel: &AtomicBool,
     ) -> Result<Vec<f32>, String> {
@@ -1022,6 +1034,7 @@ impl CloudExportPipeline {
             height,
             dynamics,
             weather,
+            synthesis,
             params,
             CLOUD_EXR_CHANNELS.len(),
             cancel,
@@ -1037,6 +1050,7 @@ impl CloudExportPipeline {
         height: &wgpu::TextureView,
         dynamics: &crate::terrain_compute::DynamicsTextures,
         weather: &WeatherTextures,
+        synthesis: &CloudSynthesisGpu,
         params: CloudExportParams,
         components: usize,
         cancel: &AtomicBool,
@@ -1070,6 +1084,13 @@ impl CloudExportPipeline {
                 contents: bytemuck::bytes_of(&params),
                 usage: wgpu::BufferUsages::UNIFORM,
             });
+        let synthesis_buffer = gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("cloud export synthesis"),
+                contents: bytemuck::bytes_of(synthesis),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
         let output = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("cloud export output"),
             size: bytes,
@@ -1094,6 +1115,7 @@ impl CloudExportPipeline {
                 texture_entry(5, &weather.geometry),
                 buffer_entry(6, &params_buffer),
                 buffer_entry(7, &output),
+                buffer_entry(8, &synthesis_buffer),
             ],
         });
         let mut encoder = gpu
@@ -2031,6 +2053,7 @@ fn stage_cloud_faces(
     weather: &WeatherTextures,
     snapshot: WeatherSnapshot,
     cloud_thin_lift: f32,
+    synthesis: &CloudSynthesisGpu,
     coordinator: &TileCoordinator,
     cancel: &AtomicBool,
 ) -> Result<ExportStage, String> {
@@ -2058,6 +2081,7 @@ fn stage_cloud_faces(
                     &height_view,
                     dynamics,
                     weather,
+                    synthesis,
                     CloudExportParams {
                         face,
                         tile_offset_x: region.origin_x + region.crop_x,
@@ -3280,6 +3304,8 @@ fn export_cloud_drivers(
             &height_view,
             dynamics,
             weather,
+            // Drivers are the solver's own fields: no synthesis.
+            &CloudSynthesisGpu::disabled(),
             CloudExportParams {
                 face: 0,
                 tile_offset_x: 0,
@@ -3309,6 +3335,72 @@ fn export_cloud_drivers(
         writer.finish()?;
     }
     Ok(())
+}
+
+/// Evaluates the exported cloud column (`CLOUD_EXR_CHANNELS` per pixel) on a
+/// `width` x `width / 2` equirectangular grid, for inspection tools. Same
+/// shader and weather inputs as `cloud_density.exr`, without cube staging.
+/// `synthesis_source` replaces the built-in `cloud_synthesis.wgsl` so tools
+/// can iterate on it without a rebuild.
+#[allow(clippy::too_many_arguments)]
+pub fn render_cloud_columns_equirect(
+    gpu: &GpuContext,
+    terrain: &TectonicTerrain,
+    dynamics: &crate::terrain_compute::DynamicsTextures,
+    weather: &WeatherTextures,
+    snapshot: WeatherSnapshot,
+    cloud_thin_lift: f32,
+    synthesis: &CloudSynthesisGpu,
+    synthesis_source: Option<&str>,
+    width: u32,
+    rows: Option<(u32, u32)>,
+) -> Result<Vec<f32>, String> {
+    let height = width / 2;
+    let (_height_texture, height_view) = create_cloud_export_height_texture(gpu, terrain)?;
+    let pipeline = CloudExportPipeline::with_entry_point(
+        gpu,
+        include_str!("shaders/cloud_export_columns.wgsl"),
+        "equirect",
+        "cloud equirect columns",
+        synthesis_source.unwrap_or(CLOUD_SYNTHESIS_WGSL),
+    );
+    let (first_row, row_count) = rows.unwrap_or((0, height));
+    let end_row = (first_row + row_count).min(height);
+    let uniforms = cloud_export_uniforms(snapshot, cloud_thin_lift);
+    let row_bytes = u64::from(width) * (CLOUD_EXR_CHANNELS.len() * 4) as u64;
+    let band_rows = u32::try_from((CLOUD_DRIVER_BAND_BYTES / row_bytes).max(1))
+        .unwrap_or(height)
+        .min(height);
+    let cancel = AtomicBool::new(false);
+    let mut values = Vec::with_capacity(
+        (width * end_row.saturating_sub(first_row)) as usize * CLOUD_EXR_CHANNELS.len(),
+    );
+    let mut band_start = first_row;
+    while band_start < end_row {
+        let band_height = band_rows.min(end_row - band_start);
+        values.extend(pipeline.dispatch(
+            gpu,
+            &uniforms,
+            &height_view,
+            dynamics,
+            weather,
+            synthesis,
+            CloudExportParams {
+                face: 0,
+                tile_offset_x: 0,
+                tile_offset_y: band_start,
+                tile_width: width,
+                tile_height: band_height,
+                full_resolution: height,
+                _pad0: 0,
+                _pad1: 0,
+            },
+            CLOUD_EXR_CHANNELS.len(),
+            &cancel,
+        )?);
+        band_start += band_height;
+    }
+    Ok(values)
 }
 
 fn quantize_unit(value: f32, max: u32) -> Result<u32, String> {
@@ -3533,7 +3625,7 @@ pub(crate) fn face_uv_to_direction(face: usize, u: f32, v: f32) -> [f32; 3] {
     }
 }
 
-fn sample_cubemap_height(terrain: &TectonicTerrain, direction: [f32; 3]) -> f32 {
+pub(crate) fn sample_cubemap_height(terrain: &TectonicTerrain, direction: [f32; 3]) -> f32 {
     let (face, u, v) = direction_to_face_uv(direction[0], direction[1], direction[2]);
     let resolution = terrain.resolution as usize;
     let x = u * (resolution - 1) as f32;
@@ -4217,6 +4309,9 @@ pub fn run_export_with_timings_and_checkpoints(
         wait_for_gpu_completion(gpu, cancel)?;
         timings.export_weather_wall_ms = weather_started.elapsed().as_secs_f64() * 1000.0;
         let cloud_tiles_started = Instant::now();
+        let synthesis = weather_systems(&snapshot, config.cloud_synthesis, |direction| {
+            sample_cubemap_height(&weather_terrain, direction) < snapshot.ocean_level
+        });
         let stage = stage_cloud_faces(
             gpu,
             &planet_dir,
@@ -4225,6 +4320,7 @@ pub fn run_export_with_timings_and_checkpoints(
             &weather,
             snapshot,
             config.cloud_thin_lift,
+            &synthesis,
             &coordinator,
             cancel,
         )?;
@@ -4436,6 +4532,7 @@ mod tests {
             night_lights: 0.0,
             albedo_ao: None,
             cloud_thin_lift: 0.0,
+            cloud_synthesis: 0.0,
         };
         let mut changed_after_queue = source;
         changed_after_queue.coverage = 0.0;
@@ -4936,6 +5033,16 @@ mod tests {
         terrain: &TectonicTerrain,
         tile_size: u32,
     ) -> [Vec<f32>; 6] {
+        u5_validation_cloud_faces_with(gpu, snapshot, terrain, tile_size, 0.0)
+    }
+
+    fn u5_validation_cloud_faces_with(
+        gpu: &GpuContext,
+        snapshot: WeatherSnapshot,
+        terrain: &TectonicTerrain,
+        tile_size: u32,
+        synthesis_strength: f32,
+    ) -> [Vec<f32>; 6] {
         let wind = WindFieldPipeline::new(gpu).expect("U5 wind pipeline unavailable");
         let dynamics =
             wind.create_textures(gpu, snapshot.resolution, terrain, snapshot.ocean_level);
@@ -4976,6 +5083,9 @@ mod tests {
             &weather,
             snapshot,
             0.0,
+            &weather_systems(&snapshot, synthesis_strength, |direction| {
+                sample_cubemap_height(terrain, direction) < snapshot.ocean_level
+            }),
             &coordinator,
             &AtomicBool::new(false),
         )
@@ -5139,6 +5249,104 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn synthesized_cloud_export_is_deterministic_tile_independent_and_seam_safe() {
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let snapshot = WeatherSnapshot {
+            resolution: 48,
+            ..u5_validation_snapshot()
+        };
+        let terrain = directional_terrain(snapshot.resolution);
+        let faces = |tile_size, strength| {
+            u5_validation_cloud_faces_with(&gpu, snapshot, &terrain, tile_size, strength)
+        };
+        let direct = faces(snapshot.resolution, 1.0);
+        let tiled = faces(16, 1.0);
+        let repeat = faces(snapshot.resolution, 1.0);
+        let solver = faces(snapshot.resolution, 0.0);
+        for ((direct, tiled), repeat) in direct.iter().zip(&tiled).zip(&repeat) {
+            for ((direct, tiled), repeat) in direct.iter().zip(tiled).zip(repeat) {
+                assert!((direct - tiled).abs() <= 1.0e-6, "tiling changed a column");
+                assert!((direct - repeat).abs() <= 1.0e-6, "same-adapter drift");
+            }
+        }
+        // Synthesized columns are functions of direction: shared cube edges and
+        // corners agree like the solver field's.
+        let seam = u5_max_shared_boundary_delta(&direct, snapshot.resolution);
+        assert!(seam <= 0.02, "synthesized seam/corner delta={seam}");
+        // Synthesis restructures the field: it is not the solver's.
+        let (y_mae, _, correlation, _) = u5_y_metrics(&solver, &direct);
+        assert!(
+            y_mae > 0.01,
+            "synthesis left the solver field unchanged ({y_mae})"
+        );
+        println!(
+            "synthesis vs solver: Y_MAE={y_mae:.4} correlation={correlation:.3} seam={seam:.6}"
+        );
+    }
+
+    #[test]
+    fn synthesized_cloud_amount_does_not_depend_on_export_resolution() {
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let snapshot = WeatherSnapshot {
+            resolution: 48,
+            ..u5_validation_snapshot()
+        };
+        let terrain = directional_terrain(snapshot.resolution);
+        let wind = WindFieldPipeline::new(&gpu).expect("wind pipeline");
+        let dynamics =
+            wind.create_textures(&gpu, snapshot.resolution, &terrain, snapshot.ocean_level);
+        wind.generate_gpu(
+            &gpu,
+            &terrain,
+            &dynamics,
+            snapshot.seed,
+            snapshot.ocean_level,
+            snapshot.axial_tilt_rad,
+            snapshot.season,
+            earth_relative_rotation_rate(snapshot.rotation_rate_rad_s),
+            snapshot.base_temp_c,
+            snapshot.surface_pressure_bar,
+            snapshot.wind_scale,
+        );
+        let weather_pipeline = WeatherFieldPipeline::new(&gpu).expect("weather pipeline");
+        let weather = weather_pipeline.create_textures(&gpu, snapshot.resolution);
+        weather_pipeline.generate(&gpu, snapshot, &terrain, &dynamics, &weather);
+        let synthesis = weather_systems(&snapshot, 1.0, |direction| {
+            sample_cubemap_height(&terrain, direction) < snapshot.ocean_level
+        });
+        // Area-weighted mean physical optical depth (the bridge's curve).
+        let mean_tau = |width: u32| {
+            let columns = render_cloud_columns_equirect(
+                &gpu, &terrain, &dynamics, &weather, snapshot, 0.0, &synthesis, None, width, None,
+            )
+            .expect("render columns");
+            let height = width / 2;
+            let (mut sum, mut area) = (0.0f64, 0.0f64);
+            for (index, column) in columns.chunks_exact(CLOUD_EXR_CHANNELS.len()).enumerate() {
+                let y = index as u32 / width;
+                let latitude = std::f64::consts::PI * (0.5 - (y as f64 + 0.5) / height as f64);
+                let depth = column[0];
+                let t = ((depth - 0.05) / 0.3).clamp(0.0, 1.0);
+                let tau = 36.0 * (depth - 0.05).max(0.0) * t.powf(0.6);
+                sum += f64::from(tau) * latitude.cos();
+                area += latitude.cos();
+            }
+            sum / area
+        };
+        let coarse = mean_tau(64);
+        let fine = mean_tau(512);
+        // Unresolved structure turns into soft edges, not lost or added cloud.
+        assert!(
+            coarse > 0.5,
+            "synthesized clouds expected (mean tau {coarse})"
+        );
+        assert!(
+            (coarse / fine - 1.0).abs() < 0.12,
+            "mean optical depth 64px {coarse:.3} vs 512px {fine:.3}"
+        );
     }
 
     #[test]
@@ -6815,6 +7023,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             night_lights: 0.5,
             albedo_ao: None,
             cloud_thin_lift: 0.0,
+            cloud_synthesis: 0.0,
         };
 
         let (tx, rx) = std::sync::mpsc::channel();
@@ -6906,6 +7115,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             night_lights: 0.5,
             albedo_ao: None,
             cloud_thin_lift: 0.0,
+            cloud_synthesis: 0.0,
         };
 
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -6951,6 +7161,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             night_lights: 0.5,
             albedo_ao: None,
             cloud_thin_lift: 0.0,
+            cloud_synthesis: 0.0,
         };
         assert_eq!(config.tile_size, TILE_SIZE);
 

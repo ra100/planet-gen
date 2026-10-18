@@ -2,6 +2,7 @@ use eframe::egui;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::cloud_synthesis::{CloudSynthesisGpu, weather_systems};
 use crate::export::{self, ExportConfig, ExportHandle, ExportLayers, ExportProgress};
 use crate::gpu::GpuContext;
 use crate::planet::{DerivedProperties, PlanetParams};
@@ -26,6 +27,8 @@ pub struct PlanetGenApp {
     weather_pipeline: WeatherFieldPipeline,
     weather: Option<WeatherLifecycle>,
     weather_terrain: Option<crate::terrain_compute::TectonicTerrain>,
+    /// Snapshot and strength of the cloud synthesis last uploaded to the preview.
+    cloud_synthesis_key: Option<(WeatherSnapshot, f32)>,
     texture_id: egui::TextureId,
     render_state: eframe::egui_wgpu::RenderState,
     params: PlanetParams,
@@ -72,6 +75,7 @@ pub struct PlanetGenApp {
     cloud_opacity: f32,
     cloud_detail: f32,
     cloud_thin_lift: f32,
+    cloud_synthesis: f32,
     wind_scale: f32,
     lava_glow: f32,    // tectonic emission intensity (0.0-1.0)
     ring_inner: f32,   // ring inner radius (planet radii)
@@ -237,6 +241,7 @@ impl PlanetGenApp {
             weather_terrain: None,
             texture_id,
             render_state: render_state.clone(),
+            cloud_synthesis_key: None,
             params,
             derived,
             rot: IDENTITY3,
@@ -274,6 +279,7 @@ impl PlanetGenApp {
             cloud_opacity: 1.0,
             cloud_detail: 1.0,
             cloud_thin_lift: 0.0,
+            cloud_synthesis: 1.0,
             wind_scale: 1.0,
             lava_glow: 0.0,
             ring_inner: 0.0,
@@ -612,7 +618,39 @@ impl PlanetGenApp {
         }
     }
 
+    /// Rebuilds the preview's weather systems when the displayed weather or the
+    /// synthesis strength changes; export builds the same catalogue from its
+    /// snapshot.
+    fn sync_cloud_synthesis(&mut self) {
+        let snapshot = self
+            .weather
+            .as_ref()
+            .and_then(WeatherLifecycle::front_snapshot);
+        let key = snapshot.map(|snapshot| (snapshot, self.cloud_synthesis));
+        if key == self.cloud_synthesis_key {
+            return;
+        }
+        let data = match snapshot {
+            Some(snapshot) => {
+                let terrain = self
+                    .weather_terrain
+                    .as_ref()
+                    .or(self.erosion_terrain.as_ref());
+                weather_systems(&snapshot, self.cloud_synthesis, |direction| {
+                    terrain.is_none_or(|terrain| {
+                        export::sample_cubemap_height(terrain, direction) < snapshot.ocean_level
+                    })
+                })
+            }
+            None => CloudSynthesisGpu::disabled(),
+        };
+        self.preview_renderer
+            .upload_cloud_synthesis(&self.gpu, &data);
+        self.cloud_synthesis_key = key;
+    }
+
     fn render_preview(&mut self) {
+        self.sync_cloud_synthesis();
         if let Some(ref cubemap_view) = self.cached_cubemap_view {
             let uniforms = self.build_uniforms();
             let size = self.viewport_render_size;
@@ -807,6 +845,7 @@ impl PlanetGenApp {
             albedo_ao: (self.export_albedo && self.export_bake_ao)
                 .then_some(self.export_bake_ao_strength),
             cloud_thin_lift: self.cloud_thin_lift,
+            cloud_synthesis: self.cloud_synthesis,
         };
 
         let terrain_params = self.terrain_params();
@@ -1220,6 +1259,7 @@ impl PlanetGenApp {
         self.cloud_opacity = 1.0;
         self.cloud_detail = 1.0;
         self.cloud_thin_lift = 0.0;
+        self.cloud_synthesis = 1.0;
         self.wind_scale = 1.0;
         self.lava_glow = 0.0;
         self.ring_inner = 0.0;
@@ -1353,6 +1393,7 @@ impl PlanetGenApp {
             cloud_opacity: self.cloud_opacity,
             cloud_detail: self.cloud_detail,
             cloud_thin_lift: self.cloud_thin_lift,
+            cloud_synthesis: self.cloud_synthesis,
             wind_scale: self.wind_scale,
             lava_glow: self.lava_glow,
             ring_inner: self.ring_inner,
@@ -1420,6 +1461,7 @@ impl PlanetGenApp {
         self.cloud_opacity = file.cloud_opacity;
         self.cloud_detail = file.cloud_detail;
         self.cloud_thin_lift = file.cloud_thin_lift.clamp(0.0, 1.0);
+        self.cloud_synthesis = file.cloud_synthesis.clamp(0.0, 1.0);
         self.wind_scale = file.wind_scale;
         self.lava_glow = file.lava_glow;
         self.ring_inner = file.ring_inner;
@@ -2083,6 +2125,19 @@ impl PlanetGenApp {
             Param::new(
                 "Detail",
                 "Sub-texel cloud structure: 0 = raw weather field, 1 = billowed margins, broken thin cloud and bright thick cores",
+                1.0,
+            )
+            .with(2, ""),
+        ) {
+            self.needs_render = true;
+        }
+        if widgets::slider_row(
+            ui,
+            &mut self.cloud_synthesis,
+            0.0..=1.0,
+            Param::new(
+                "Structure",
+                "Weather systems and cloud regimes: 0 = raw weather field, 1 = cyclones with fronts, ITCZ clusters, stratocumulus decks, cumulus fields and cirrus. Applies to the preview and exported clouds",
                 1.0,
             )
             .with(2, ""),
@@ -3223,6 +3278,7 @@ mod tests {
             night_lights: 0.0,
             albedo_ao: None,
             cloud_thin_lift: 0.0,
+            cloud_synthesis: 0.0,
         }
     }
 

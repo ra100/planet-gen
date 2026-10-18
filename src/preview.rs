@@ -1,3 +1,4 @@
+use crate::cloud_synthesis::CloudSynthesisGpu;
 use crate::gpu::GpuContext;
 use crate::plates::PlateGpu;
 use crate::terrain_compute::TectonicTerrain;
@@ -101,6 +102,7 @@ pub struct PreviewRenderer {
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     plate_buffer: wgpu::Buffer,
+    synthesis_buffer: wgpu::Buffer,
     target: wgpu::Texture,
     target_view: wgpu::TextureView,
     pub size: u32,
@@ -132,12 +134,13 @@ impl PreviewRenderer {
             &format!("const CLOUD_RAY_SAMPLES: u32 = {samples}u;"),
         );
         let shader_source = format!(
-            "{}\n{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}",
             include_str!("shaders/noise.wgsl"),
             include_str!("shaders/climate.wgsl"),
             include_str!("shaders/surface_material.wgsl"),
             cloud_density,
             include_str!("shaders/cloud_wind_fallback.wgsl"),
+            include_str!("shaders/cloud_synthesis.wgsl"),
             preview_shader,
         );
 
@@ -224,6 +227,17 @@ impl PreviewRenderer {
                             },
                             count: None,
                         },
+                        // Cloud synthesis systems and strength
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 7,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
                     ],
                 });
 
@@ -284,6 +298,18 @@ impl PreviewRenderer {
 
         let (target, target_view) = Self::create_target(gpu, DEFAULT_PREVIEW_SIZE);
         let plate_buffer = Self::create_plate_buffer(gpu, &[], 0, 0.0);
+        let synthesis_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("preview cloud synthesis"),
+            size: std::mem::size_of::<CloudSynthesisGpu>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        // Zeroed: synthesis off until the app uploads systems.
+        gpu.queue.write_buffer(
+            &synthesis_buffer,
+            0,
+            bytemuck::bytes_of(&CloudSynthesisGpu::disabled()),
+        );
 
         Self {
             pipeline,
@@ -291,6 +317,7 @@ impl PreviewRenderer {
             bind_group_layout,
             sampler,
             plate_buffer,
+            synthesis_buffer,
             target,
             target_view,
             size: DEFAULT_PREVIEW_SIZE,
@@ -342,6 +369,13 @@ impl PreviewRenderer {
         warp_strength: f32,
     ) {
         self.plate_buffer = Self::create_plate_buffer(gpu, plates, seed, warp_strength);
+    }
+
+    /// Weather systems and strength for cloud synthesis; see `cloud_synthesis`.
+    /// A new renderer starts disabled and renders the solver field.
+    pub fn upload_cloud_synthesis(&self, gpu: &GpuContext, synthesis: &CloudSynthesisGpu) {
+        gpu.queue
+            .write_buffer(&self.synthesis_buffer, 0, bytemuck::bytes_of(synthesis));
     }
 
     pub fn target_view(&self) -> &wgpu::TextureView {
@@ -505,6 +539,10 @@ impl PreviewRenderer {
                 wgpu::BindGroupEntry {
                     binding: 6,
                     resource: self.plate_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: self.synthesis_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -1823,6 +1861,99 @@ mod tests {
     }
 
     #[test]
+    fn cloud_synthesis_restructures_the_preview_and_strength_zero_is_exact() {
+        use crate::cloud_synthesis::weather_systems;
+        use crate::weather::WeatherSnapshot;
+        let gpu = GpuContext::new().unwrap();
+        let renderer = PreviewRenderer::new(&gpu);
+        let resolution = 32;
+        let size = 128usize;
+        // An ocean planet with a thin uniform low deck from the solver.
+        let terrain = TectonicTerrain {
+            faces: std::array::from_fn(|_| vec![-0.5; (resolution * resolution) as usize]),
+            resolution,
+        };
+        let terrain_view = renderer.upload_terrain(&gpu, &terrain);
+        let mass = std::array::from_fn(|_| {
+            (0..resolution * resolution)
+                .flat_map(|_| [0.06, 0.0, 0.01, 0.06])
+                .collect()
+        });
+        let geometry = std::array::from_fn(|_| {
+            (0..resolution * resolution)
+                .flat_map(|_| [0.6, 1.6, 4.0, 11.0])
+                .collect()
+        });
+        let mass_view = renderer.upload_cubemap_rgba16(&gpu, &mass, resolution);
+        let geometry_view = renderer.upload_cubemap_rgba16(&gpu, &geometry, resolution);
+        let settings = PreviewUniforms {
+            view_mode: 9,
+            show_clouds: 1.0,
+            cloud_coverage: 0.5,
+            cloud_detail: 1.0,
+            ..uniforms()
+        };
+        let render = || {
+            renderer.render(
+                &gpu,
+                &settings,
+                &terrain_view,
+                None,
+                Some((&mass_view, &geometry_view)),
+                size as u32,
+            )
+        };
+        let snapshot = WeatherSnapshot {
+            seed: settings.cloud_seed,
+            coverage: settings.cloud_coverage,
+            moisture: 1.0,
+            axial_tilt_rad: settings.axial_tilt_rad,
+            base_temp_c: settings.base_temp_c,
+            ocean_level: settings.ocean_level,
+            ..WeatherSnapshot::default()
+        };
+        let solver = render();
+        renderer.upload_cloud_synthesis(&gpu, &weather_systems(&snapshot, 0.0, |_| true));
+        assert_eq!(
+            render(),
+            solver,
+            "strength 0 must render the solver field exactly"
+        );
+
+        renderer.upload_cloud_synthesis(&gpu, &weather_systems(&snapshot, 1.0, |_| true));
+        let synthesized = render();
+        assert_ne!(synthesized, solver);
+        // The solver's uniform veil becomes clear sky and dense cloud.
+        let densities: Vec<u8> = synthesized
+            .chunks_exact(4)
+            .enumerate()
+            .filter(|(index, _)| sphere_mask(size, *index))
+            .map(|(_, pixel)| pixel[0])
+            .collect();
+        let share = |test: fn(u8) -> bool| {
+            densities.iter().filter(|&&d| test(d)).count() as f32 / densities.len() as f32
+        };
+        let clear = share(|d| d < 10);
+        let dense = share(|d| d > 200);
+        assert!(clear > 0.1, "clear share {clear}");
+        assert!(dense > 0.05, "dense share {dense}");
+
+        // No moisture, no synthesized cloud.
+        let dry = WeatherSnapshot {
+            moisture: 0.0,
+            ..snapshot
+        };
+        renderer.upload_cloud_synthesis(&gpu, &weather_systems(&dry, 1.0, |_| true));
+        assert!(
+            render()
+                .chunks_exact(4)
+                .enumerate()
+                .all(|(index, pixel)| !sphere_mask(size, index) || pixel[0..3] == [0, 0, 0]),
+            "a dry planet must stay clear"
+        );
+    }
+
+    #[test]
     fn cloud_height_filter_does_not_turn_tiny_cirrus_into_altitude_spikes() {
         let gpu = GpuContext::new().unwrap();
         let renderer = PreviewRenderer::new(&gpu);
@@ -2106,12 +2237,13 @@ mod tests {
 
     fn layer_profile_oracle(gpu: &GpuContext) -> Vec<f32> {
         let shader_source = format!(
-            "{}\n{}\n{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
             include_str!("shaders/noise.wgsl"),
             include_str!("shaders/climate.wgsl"),
             include_str!("shaders/surface_material.wgsl"),
             include_str!("shaders/cloud_density.wgsl"),
             include_str!("shaders/cloud_wind_fallback.wgsl"),
+            include_str!("shaders/cloud_synthesis.wgsl"),
             include_str!("shaders/preview_cubemap.wgsl"),
             r#"
 @group(1) @binding(0) var<storage, read_write> output: array<f32, 80>;
@@ -2248,12 +2380,13 @@ fn layer_profile_oracle() {
         resolution: u32,
     ) -> Vec<f32> {
         let shader_source = format!(
-            "{}\n{}\n{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
             include_str!("shaders/noise.wgsl"),
             include_str!("shaders/climate.wgsl"),
             include_str!("shaders/surface_material.wgsl"),
             include_str!("shaders/cloud_density.wgsl"),
             include_str!("shaders/cloud_wind_fallback.wgsl"),
+            include_str!("shaders/cloud_synthesis.wgsl"),
             include_str!("shaders/preview_cubemap.wgsl"),
             r#"
 @fragment fn cloud_sun_path_oracle(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
@@ -2451,12 +2584,13 @@ fn layer_profile_oracle() {
     #[test]
     fn u4_cloud_phase_is_normalized_bounded_and_forward_weighted() {
         let shader_source = format!(
-            "{}\n{}\n{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
             include_str!("shaders/noise.wgsl"),
             include_str!("shaders/climate.wgsl"),
             include_str!("shaders/surface_material.wgsl"),
             include_str!("shaders/cloud_density.wgsl"),
             include_str!("shaders/cloud_wind_fallback.wgsl"),
+            include_str!("shaders/cloud_synthesis.wgsl"),
             include_str!("shaders/preview_cubemap.wgsl"),
             r#"@group(1) @binding(0) var<storage, read_write> output: array<f32, 80>;
 @compute @workgroup_size(1) fn u4_phase_oracle() {
@@ -3412,12 +3546,13 @@ fn layer_profile_oracle() {
             }
         }
         let source = format!(
-            "{}\n{}\n{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
             include_str!("shaders/noise.wgsl"),
             include_str!("shaders/climate.wgsl"),
             include_str!("shaders/surface_material.wgsl"),
             include_str!("shaders/cloud_density.wgsl"),
             include_str!("shaders/cloud_wind_fallback.wgsl"),
+            include_str!("shaders/cloud_synthesis.wgsl"),
             include_str!("shaders/preview_cubemap.wgsl"),
             r#"
 @group(1) @binding(0) var<storage, read> directions: array<vec4<f32>>;

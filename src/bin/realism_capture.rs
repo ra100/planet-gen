@@ -1,5 +1,6 @@
 use bytemuck::Zeroable;
 use planet_gen::{
+    cloud_synthesis::weather_systems,
     gpu::GpuContext,
     planet::{DerivedProperties, PlanetParams},
     plates::{PlateGenParams, generate_plates},
@@ -241,6 +242,38 @@ fn main() {
         snapshot.wind_scale,
     );
     weather_pipeline.generate(&gpu, snapshot, &terrain, &dynamics, &weather);
+    // Weather systems for cloud synthesis (Clouds > Structure), as the app uploads them.
+    let terrain_height = |direction: [f32; 3]| {
+        let [x, y, z] = direction;
+        let (ax, ay, az) = (x.abs(), y.abs(), z.abs());
+        let (face, s, t) = if ax >= ay && ax >= az {
+            if x > 0.0 {
+                (0, -z / ax, -y / ax)
+            } else {
+                (1, z / ax, -y / ax)
+            }
+        } else if ay >= az {
+            if y > 0.0 {
+                (2, x / ay, z / ay)
+            } else {
+                (3, x / ay, -z / ay)
+            }
+        } else if z > 0.0 {
+            (4, x / az, -y / az)
+        } else {
+            (5, -x / az, -y / az)
+        };
+        let res = terrain.resolution as usize;
+        let column = (((s + 1.0) * 0.5) * (res - 1) as f32).round() as usize;
+        let row = (((t + 1.0) * 0.5) * (res - 1) as f32).round() as usize;
+        terrain.faces[face][row.min(res - 1) * res + column.min(res - 1)]
+    };
+    renderer.upload_cloud_synthesis(
+        &gpu,
+        &weather_systems(&snapshot, setting("cloud_synthesis", 1.0), |direction| {
+            terrain_height(direction) < ocean_level
+        }),
+    );
     let mut u = PreviewUniforms::zeroed();
     u.rotation = [
         [1.0, 0.0, 0.0, 0.0],

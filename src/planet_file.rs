@@ -71,6 +71,9 @@ pub struct PlanetFile {
     pub cloud_detail: f32,
     /// Advanced: lifts thin cloud (0 = solver field); files without it load as 0.
     pub cloud_thin_lift: f32,
+    /// Weather systems and cloud regimes over the solver field (0 = solver
+    /// field only); files without it load as 1.
+    pub cloud_synthesis: f32,
     pub wind_scale: f32,
     pub storm_count: u32,
     pub storm_size: f32,
@@ -141,6 +144,7 @@ impl Default for PlanetFile {
             cloud_opacity: 1.0,
             cloud_detail: 1.0,
             cloud_thin_lift: 0.0,
+            cloud_synthesis: 1.0,
             wind_scale: 1.0,
             lava_glow: 0.0,
             ring_inner: 0.0,
@@ -221,6 +225,7 @@ pub fn checked_load(json: &str) -> Result<PlanetFile, String> {
     finite("cloud_opacity", file.cloud_opacity)?;
     finite("cloud_detail", file.cloud_detail)?;
     finite("cloud_thin_lift", file.cloud_thin_lift)?;
+    finite("cloud_synthesis", file.cloud_synthesis)?;
     finite("wind_scale", file.wind_scale)?;
     finite("storm_size", file.storm_size)?;
     finite("lava_glow", file.lava_glow)?;

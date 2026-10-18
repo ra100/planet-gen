@@ -153,6 +153,7 @@ fn main() {
                 .ok()
                 .and_then(|value| value.parse().ok()),
             cloud_thin_lift: 0.0,
+            cloud_synthesis: 0.0,
         };
         let terrain_params = TerrainGenerationParams {
             seed,
