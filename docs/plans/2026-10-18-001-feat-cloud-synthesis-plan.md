@@ -1,7 +1,7 @@
 ---
 title: "feat: Cloud synthesis (weather systems, regimes, resolution-free detail)"
 type: feat
-status: active
+status: completed
 date: 2026-10-18
 origin: "docs/brainstorms/2026-10-18-cloud-synthesis-requirements.md"
 ---
@@ -35,6 +35,10 @@ weather snapshot, so preview and export build identical systems:
 - Tropical cyclones (0-3) form at 10-24 degrees, mostly in the summer
   hemisphere, only when the tropics exceed ~24 C and only over open water
   (centre and four points 300 km out), so preview and export agree near coasts.
+- Polar lows (kind 3, 2-4 per hemisphere) fill the caps poleward of the
+  subpolar low: uniform in area up to 86 degrees, mostly over open water,
+  radius 0.15-0.3 of the Eady wavelength, occluded, short trailing front.
+  Added after tropical cyclones, only while slots remain.
 
 48 systems fit the uniform block (`CloudSynthesisGpu`, 32 + 48 x 64 bytes).
 
@@ -51,12 +55,26 @@ In local coordinates (x east, y poleward, one system radius = 1):
 - Tropical cyclone: eye, central dense overcast, two log-spiral rainbands
   (`theta + k ln r`), cirrus outflow.
 - Ridge: subsidence lowers cover toward a thin stratocumulus sheet.
+- Polar low: the extratropical template at an occluded stage.
 
-Each system also bends the noise domain around it (backward rotation about its
-centre). Synoptic structure takes the full wind-up, mesoscale a fraction, fine
-detail almost none: small eddies live too briefly to be wound into coherent
-spirals. A broad swirl, tapered to zero inside the system's reach, gives the
-S-shaped streaks between lows and ridges.
+The extratropical twirl is `(0.3 + 1.6 stage)(0.6 + 0.4 intensity)
+exp(-r^2)`: at most about one wrap, so lows do not read as whirlpools. The
+warm-front shield reaches 0.9-1.6 radii poleward (a broad comma head).
+
+## U2b: Flow-advected noise (`cs_advect`)
+
+The noise domain is carried backward through a steady flow in six steps
+(advected texture, Neyret 2003). Each step rotates the point about every
+system centre by that system's rate at the current point (`cs_circulation`:
+0.45 of its wind-up plus a broad swirl, tapered to zero at its reach), which
+is exact for an isolated vortex, plus the storm-track jet and polar
+easterlies about the circulation pole, seen from the lows that travel with
+the jet core (`CS_JET_ANGLE` 0.6 rad, 12 degree width; `CS_EASTERLY_ANGLE`
+0.2). The jet's flanks shear the field into streaks and tilted bands, the
+saddles between lows and ridges into filaments, and cyclone cores keep their
+own clean wind-up. Fine detail takes half the first step, mesoscale the
+first step, synoptic structure all six. With the shear in place the zonal
+stretch dropped from 3.2 to 2.2.
 
 ## U3: Regimes
 
@@ -65,14 +83,14 @@ coast-blurred land fraction, continentality and temperature:
 
 | Regime | Where | Cover | Optical depth |
 |---|---|---|---|
-| ITCZ convective clusters | seasonal thermal trough, 3.5 deg sigma, ocean | 0.42 | 45 |
-| Trade cumulus | tropical and subtropical ocean | 0.22 | 3.5 |
-| Stratocumulus decks (closed cells) | subtropical ocean with land 450-1750 km to the east | 0.84 | 11 |
-| Storm-track stratiform / open cells | 1.0-1.3 Hadley to the subpolar low, ocean | 0.46 | 11 |
-| Polar stratus | poleward of the subpolar low | 0.68 / 0.35-0.5 land | 10 / 7 |
+| ITCZ convective clusters | seasonal thermal trough, 2.8 deg sigma, ocean | 0.42 | 45 |
+| Trade cumulus | tropical and subtropical ocean | 0.14 | 3 |
+| Stratocumulus decks (closed cells) | subtropical ocean with land to the east (weighted fan of taps 250-2000 km out) | 0.84 | 11 |
+| Storm-track stratiform / open cells | 0.95-1.3 Hadley to the subpolar low, ocean | 0.4 | 6.5 |
+| Polar stratus | poleward of the subpolar low | 0.58 / 0.3-0.45 land | 6 / 5 |
 | Wet tropics | land near the ITCZ | 0.48 | 30 |
 | Dry subtropical land | land outside the tropics' rain belt | 0.16 -> 0.02 inland | 4 |
-| Mid-latitude land | storm-track land, more cumulus in summer | 0.3-0.45 | 11 |
+| Mid-latitude land | storm-track land, more cumulus in summer | 0.22-0.38 (+0.08 summer) | 7 |
 
 The solver modulates cover by its regional condensate (450 km, x0.72-1.15),
 its convective storms become clusters, its ice raises cirrus cover. Systems
@@ -81,14 +99,18 @@ override cover, depth and morphology where their features are.
 ## U4: Morphology and the two-level remap
 
 - Noise: three fBm bands, synoptic (2400-300 km), mesoscale (150-37 km) and
-  fine (19-2.3 km), gain 0.64 (cloud boundary dimension 1.35, Lovejoy 1982),
-  the two largest octaves damped. The domain is compressed along the
-  circulation pole (zonal elongation that vanishes at the poles) and warped
-  with strain ~0.25.
+  fine (19-2.3 km), gain 0.64 (cloud boundary dimension 1.35, Lovejoy 1982).
+  The synoptic band falls off from 1200 km (amplitudes 0.7, 0.8, 0.55,
+  0.38), so thresholding leaves large clear and cloudy areas for the flow to
+  draw into bands. The domain is advected (U2b), compressed along the
+  circulation pole (zonal elongation 2.2 that vanishes at the poles) and
+  warped with strain ~0.25.
 - Cells (Worley, normalized by measured slice statistics): closed cells 30 km
   (bright polygons, wobbling darker borders), open cells 40 km (cloud walls
   around clear centres), convective clusters 450 km with 45 % firing plus
-  85 km cells.
+  85 km cells. Blobs are a smooth probabilistic union over the 3x3x3
+  neighbourhood, each fading out within one cell; `ragged` swells blobs with
+  the fine noise they sit in (the opposite sign drew rings).
 - Cloud fraction = macro fraction x fill. The macro field (synoptic and
   mesoscale bands plus cells) is thresholded at the quantile of
   `cover / fill`; the fine band at the quantile of `fill` (decks ~0.94,
@@ -96,6 +118,9 @@ override cover, depth and morphology where their features are.
 - Probability remap: unresolved octaves (smaller than the pixel) become edge
   softness, `mask = Phi((shape - t) / sqrt(unresolved + soft^2))`, so the
   expected cloud fraction does not depend on resolution.
+- In-cloud optical depth is lognormal in the excess over the threshold, thin
+  margins and thick cores, plus the unresolved variance's lognormal mean
+  (`0.605 unresolved`), so 1K and 4K maps keep the same mean optical depth.
 - Cirrus: separate layer, stretched six-fold along the jets, thin (ice mass
   0.1-0.3).
 - Masses: physical optical depth is mapped back through the preview/bridge
@@ -124,79 +149,54 @@ override cover, depth and morphology where their features are.
 
 - Catalogue unit tests: lows per hemisphere, latitude band, radius, faster
   rotation gives more and smaller lows, tropical cyclones need warm open
-  water, deterministic, off when disabled.
+  water, polar lows in both caps, deterministic, off when disabled.
 - `synthesized_cloud_export_is_deterministic_tile_independent_and_seam_safe`.
 - Existing suites with synthesis 0 (exact solver path).
 - Captures and statistics (`cloud_capture`, seed 42, 2K): see Results.
 
-## Results so far (seed 42, 2K, `cloud_capture` + `scripts/cloud_eval/analyze.py`)
+## Results (seed 42, 2K, `cloud_capture` + `scripts/cloud_eval/analyze.py`)
 
-| | Baseline (solver) | v23 (commit dbaa872) | v25 (current) |
+| | Baseline (solver) | v25 (handoff, 9c6613b) | Final |
 |---|---|---|---|
-| Cloud fraction R > 0.1 | 0.165 | 0.44 | 0.40 |
-| Bright fraction R > 0.4 | 0.036 | 0.14 | 0.126 |
-| Zonal spectrum slope | -2.22 | -1.78 | -1.85 |
-| Variance share < 16 px | 0.046 | 0.093 | 0.078 |
-| Area with R < 0.01 (really clear) | | | 0.23 (reference alpha map: 0.79) |
+| Cloud fraction R > 0.1 | 0.165 | 0.40 | 0.42 |
+| Bright fraction R > 0.4 | 0.036 | 0.126 | 0.226 |
+| Clear R < 0.01 | | 0.23 | 0.39 |
+| Veil 0.01 < R < 0.1 | | 0.37 | 0.19 |
+| Zonal spectrum slope | -2.22 | -1.85 | -1.86 |
+| Variance share < 16 px | 0.046 | 0.078 | 0.079 |
 
-v25 = v23 + measured simplex sigma (0.373, was assumed 0.26: low-cover
-regimes were inflated, decks deflated), smooth probabilistic union in
-`cs_blobs` (re-measured stats), 9-tap coast-blurred land fraction on a
-circulation-pole ring (no seam at |y| > 0.9).
+Seeds 137 and 7 (final): cloud fraction 0.45 / 0.42, clear 0.37 / 0.38,
+veil 0.19 / 0.20. The reference alpha map has 0.79 of its area below 0.1
+alpha, but it is a sparse fair-weather composite; it served as a
+qualitative guide (big clear areas, flow-aligned streaks), not a target.
 
-Reached: Earth-like zonal profile (ITCZ, subtropical minimum, storm tracks
-0.7-0.78), coherent cyclones (comma head, dry slot, trailing front) at 8K,
-ITCZ clusters, resolution-independent cover. Seeds 137 and 7 coherent.
+## Defects resolved after the handoff
 
-## Handoff: open defects (v25 vs the NASA-derived reference)
+1. Camouflage between systems: flow-advected noise (U2b) and a synoptic band
+   that falls off from 1200 km.
+2. Gray veil: trade cumulus 0.14 cover, tau 3, tighter edges; cumulus
+   clusters 80 % filled and following the large bands; broken cumulus
+   margins fade below 4-25 % cover; thickness grows with the shape excess.
+   Clear 0.23 -> 0.39, veil 0.37 -> 0.19.
+3. Whirlpool cyclones: about one wrap at most, wider core and comma head.
+4. Soap-bubble cumulus and ITCZ pearls: the ragged sign followed the noise
+   the wrong way (rings); clusters now follow the synoptic and mesoscale
+   bands with wider radii, flowers are drawn out along the trades.
+5. Offshore coastline copy: a weighted fan of soft taps replaces the max of
+   three point probes for the decks' land to the east.
+6. Polar caps: polar lows bring circulation to the caps, whose cloud was
+   isotropic noise under a solid-body rotation. No artifact sits at the
+   circulation poles in the current maps; the horizontal streaks near the
+   top and bottom rows of the equirect captures are the projection's
+   stretching at the geographic poles.
 
-1. **Gray veil instead of black clear sky.** 37 % of the sphere has
-   0.01 < R < 0.1 (reference 14 %). Not cirrus (removing it changes < 3 %).
-   Sources: trade-cumulus regime (cover 0.2, tau 1.8, fill 0.5 rendered as
-   uniform gray at 2K) and wide logistic tails (`edge = soft + 0.25 wm.w`,
-   soft 0.35 for cumulus). Satellite composites show sub-pixel cumulus as
-   black or sparse speckle, so bias toward that look: lower trade cumulus
-   tau/cover, smaller `soft`, maybe a cutoff `mask *= smooth_step(0.05, 0.2, mask)`
-   for cumulus regimes only.
-2. **"Camo" between systems.** Storm-track background (cover 0.4) thresholds
-   isotropic fBm into black blotches on gray; the reference has big clear
-   areas and flow-aligned streaks. Recommended fix (the main next step):
-   **kinematic flow advection of the noise domain** (Neyret 2003 advected
-   textures / Perlin-Neyret flow noise). Replace the one-shot per-system
-   rotations in `cs_synoptic` with K = 6 backward steps; each step composes a
-   rotation about every system centre by its angular rate
-   `omega_i(d) = (0.55 twirl_i(d) + swirl_i(d)) * taper_i / K` re-evaluated at
-   the current point (exact for one vortex, so isolated systems look as now),
-   plus a differential zonal jet rotation about the circulation pole
-   (`exp(-((|lat| - track)/12 deg)^2)`). Take the fine point after step 1,
-   meso after step 2, synoptic after step 6 (replaces the 0.1/0.15/0.55
-   fractions). Saddles between lows and ridges then stretch cloud into the
-   filaments and tilted SW-NE bands the reference shows; reduce
-   `CS_ZONAL_STRETCH` once the jet shear exists.
-3. **Whirlpool cyclones.** Too tight, thin multi-arm spirals: lower twirl
-   amplitude `(0.45 + 2.7 stage)` toward ~`(0.3 + 1.6 stage)`, widen the comma
-   head, keep one wrap at most for occluded lows.
-4. **Soap-bubble cumulus.** Flowers (110 km) and small Cb blobs (85 km) are
-   round and uniform in size: elongate along the flow (use the advected
-   point), widen the radius range, raise `ragged`, dim their tau.
-5. **Offshore copy of the coastline.** `east_land` for the stratocumulus
-   decks takes the max of 3 point probes (450/1100/1750 km east), so the deck
-   edge is the coastline translated. Blur each probe (small ring like the
-   land fraction) or use a smooth weight over 6+ probes.
-6. Polar caps: smooth gray with dark streak artifacts at the circulation
-   pole in the equirect map; check the zonal stretch near the pole.
+Known remainder: at 2K the subtropical trade cumulus reads as fine
+salt-and-pepper grain (sub-pixel cumulus); it disappears at 8K.
 
-## Handoff: status and how to continue locally
+## Tooling
 
-- Committed and pushed on `claude/dazzling-johnson-ha0i6a`. Everything
-  builds with `cargo build --release --all-targets` (the `validation`
-  feature's `sweep` binary was already broken before this work).
-- **Not yet run:** `cargo test --release --lib` (new tests:
-  `synthesized_cloud_export_is_deterministic_tile_independent_and_seam_safe`,
-  `synthesized_cloud_amount_does_not_depend_on_export_resolution`,
-  `cloud_synthesis_restructures_the_preview_and_strength_zero_is_exact`, and
-  the 5 `cloud_synthesis` catalogue tests, which did pass), integration
-  tests, `cargo fmt`, `cargo clippy --all-targets`.
+- The `validation` feature's `sweep` binary was already broken before this
+  work.
 - Iteration loop (no weather regeneration per change):
   ```
   mkdir out && cargo run --release --bin cloud_capture -- out 42 2048 --watch out/job.json > out/log.txt &
@@ -206,10 +206,12 @@ ITCZ clusters, resolution-independent cover. Seeds 137 and 7 coherent.
   echo '{"quit":true}' > out/job.json
   ```
   A copy of the shader with a debug change can be passed as SHADER to A/B a
-  hypothesis (that is how cirrus was ruled out for defect 1).
+  hypothesis (that is how cirrus was ruled out for the gray veil, and how a
+  debug return of `w_deck` showed the coastline copies). The catalogue is
+  built when the server starts, so changes to `cloud_synthesis.rs` need a
+  rebuild and restart; the startup render (`clouds-SEED.png`) uses the
+  current shader.
 - Reference: three.js `examples/textures/planets/earth_clouds_1024.png`
   (alpha channel; NASA-derived; slope -1.37, gx/gy 0.83). The Solar System
   Scope URL is blocked from the cloud container; compare against it locally.
 - Lit globe check: `realism_capture` (uploads the synthesis block).
-- After the fixes: run tests/fmt/clippy, stamp Plans.md Phase 15 rows
-  `cc:完了 [hash]`, set this plan `status: completed`.
