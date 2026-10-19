@@ -2783,9 +2783,11 @@ mod tests {
         sum
     }
 
-    // TEMP: Metal seam diagnostic, removed before merge.
     #[test]
-    fn zz_seam_diagnostic() {
+    fn spinup_cube_corner_copies_stay_bit_identical() {
+        // Each cube corner is stored once on each of its three faces. Inexact
+        // WGSL division (Metal) used to leave the copies a few ULP apart, and
+        // they then diverged through tie-sensitive stencil choices.
         let gpu = GpuContext::new().expect("GPU init failed");
         let terrain = terrain(16);
         let wind = WindFieldPipeline::new(&gpu).expect("dynamics unavailable");
@@ -2798,24 +2800,37 @@ mod tests {
         overcast.coverage = 1.0;
         let weather = pipeline.create_textures(&gpu, 16);
         let trace = pipeline.validation_tracer_trace_for_sweep(
-            &gpu, overcast, &terrain, &dynamics, &weather, 0, false,
+            &gpu, overcast, &terrain, &dynamics, &weather, 0, true,
         );
-        let mass = read_texture(&gpu, &weather._mass_texture, 16);
         let r = trace.spin_resolution as usize;
-        let mut out = format!("adapter {:?} spin {r}\n", gpu.adapter_info.backend);
+        let last = r - 1;
+        let texel = |(face, x, y): (usize, usize, usize)| (face * r + y) * r + x;
         for corners in [
-            [(0, 0, 0), (2, 15, 15), (4, 15, 0)],
-            [(0, 15, 0), (2, 15, 0), (5, 0, 0)],
-            [(0, 0, 15), (3, 15, 0), (4, 15, 15)],
-            [(0, 15, 15), (3, 15, 15), (5, 0, 15)],
+            [(0, 0, 0), (2, last, last), (4, last, 0)],
+            [(0, last, 0), (2, last, 0), (5, 0, 0)],
+            [(0, 0, last), (3, last, 0), (4, last, last)],
+            [(0, last, last), (3, last, last), (5, 0, last)],
+            [(1, last, 0), (2, 0, last), (4, 0, 0)],
+            [(1, 0, 0), (2, 0, 0), (5, last, 0)],
+            [(1, last, last), (3, 0, 0), (4, 0, last)],
+            [(1, 0, last), (3, 0, last), (5, last, last)],
         ] {
-            for (face, x, y) in corners {
-                let m = &mass[((face * 16 + y) * 16 + x) * 4..][..4];
-                let st = &trace.state[((face * r + y) * r + x) * 4..][..4];
-                out += &format!("({face},{x},{y}) mass {m:?} state {st:?}\n");
+            let reference = texel(corners[0]);
+            for &corner in &corners[1..] {
+                let copy = texel(corner);
+                assert_eq!(
+                    trace.state[reference * 4..][..4],
+                    trace.state[copy * 4..][..4],
+                    "spin-up state corner {corners:?} copies diverged"
+                );
+                if let Some(provenance) = &trace.provenance {
+                    assert_eq!(
+                        provenance[reference], provenance[copy],
+                        "provenance corner {corners:?} copies diverged"
+                    );
+                }
             }
         }
-        panic!("{out}");
     }
 
     #[test]

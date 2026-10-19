@@ -66,9 +66,6 @@ const STORM_RECHARGE_HARD_CAP: f32 = 0.24;
 const EDDY_DIFFUSIVITY_M2_S: f32 = 10000.0;
 const EDDY_DIFFUSION_MAX_BLEND: f32 = 0.24;
 
-// Far below one texel of angular separation at any supported resolution.
-const FACE_TIE_TOLERANCE: f32 = 0.00001;
-
 fn smooth_step(edge0: f32, edge1: f32, value: f32) -> f32 {
     let t = clamp((value - edge0) / (edge1 - edge0), 0.0, 1.0);
     return t * t * (3.0 - 2.0 * t);
@@ -76,17 +73,10 @@ fn smooth_step(edge0: f32, edge1: f32, value: f32) -> f32 {
 
 fn sphere_to_face_uv(dir: vec3<f32>) -> vec3<f32> {
     let a = abs(dir);
-    // Edge and corner texels are duplicated across faces and land on exact
-    // |x| == |y| == |z| ties. WGSL allows inexact division, so Metal can round
-    // those directions a few ULP off the tie and pick a different face than
-    // IEEE backends; the duplicates then read inconsistent cells and transport
-    // stops conserving mass at the seam. A relative tolerance keeps ties on
-    // the fixed x > y > z priority everywhere.
-    let tie = max(max(a.x, a.y), a.z) * FACE_TIE_TOLERANCE;
-    if (a.x + tie >= a.y && a.x + tie >= a.z) {
+    if (a.x >= a.y && a.x >= a.z) {
         return select(vec3<f32>(1.0, dir.z / a.x * 0.5 + 0.5, -dir.y / a.x * 0.5 + 0.5), vec3<f32>(0.0, -dir.z / a.x * 0.5 + 0.5, -dir.y / a.x * 0.5 + 0.5), dir.x > 0.0);
     }
-    if (a.y + tie >= a.z) {
+    if (a.y >= a.x && a.y >= a.z) {
         return select(vec3<f32>(3.0, dir.x / a.y * 0.5 + 0.5, -dir.z / a.y * 0.5 + 0.5), vec3<f32>(2.0, dir.x / a.y * 0.5 + 0.5, dir.z / a.y * 0.5 + 0.5), dir.y > 0.0);
     }
     return select(vec3<f32>(5.0, -dir.x / a.z * 0.5 + 0.5, -dir.y / a.z * 0.5 + 0.5), vec3<f32>(4.0, dir.x / a.z * 0.5 + 0.5, -dir.y / a.z * 0.5 + 0.5), dir.z > 0.0);
@@ -378,9 +368,32 @@ fn source_budgets(
     );
 }
 
+// Edge and corner texels are stored once per face that shares them, and every
+// copy must evolve identically. WGSL allows inexact division (Metal), so
+// building each copy from its own face's uv left them a few ULP apart; the
+// tie-sensitive face, flux-orientation and stencil choices then diverged and
+// the copies drifted (one cube corner reached 2x its column mass). Seam
+// coordinates are therefore exact +-1, interior coordinates are odd in the
+// index so reversed edges negate exactly, and the length sums squares in
+// magnitude order, so all copies get a bit-identical direction.
 fn direction(id: vec3<u32>, resolution: u32) -> vec3<f32> {
-    let uv = vec2<f32>(id.xy) / f32(resolution - 1u);
-    return cube_to_sphere(id.z, uv);
+    let last = i32(resolution - 1u);
+    let k = vec2<i32>(id.xy) * 2 - vec2<i32>(last);
+    let st = select(vec2<f32>(k) / f32(last), sign(vec2<f32>(k)), abs(k) >= vec2<i32>(last));
+    var p: vec3<f32>;
+    switch (id.z) {
+        case 0u: { p = vec3<f32>(1.0, -st.y, -st.x); }
+        case 1u: { p = vec3<f32>(-1.0, -st.y, st.x); }
+        case 2u: { p = vec3<f32>(st.x, 1.0, st.y); }
+        case 3u: { p = vec3<f32>(st.x, -1.0, -st.y); }
+        case 4u: { p = vec3<f32>(st.x, -st.y, 1.0); }
+        default: { p = vec3<f32>(-st.x, -st.y, -1.0); }
+    }
+    let q = p * p;
+    let low = min(min(q.x, q.y), q.z);
+    let high = max(max(q.x, q.y), q.z);
+    let middle = max(min(q.x, q.y), min(max(q.x, q.y), q.z));
+    return p * inverseSqrt((low + middle) + high);
 }
 
 struct TerrainTransect {
