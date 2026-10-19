@@ -259,7 +259,8 @@ pub fn callout(ui: &mut egui::Ui, glyph: &str, text: &str, color: Color32) {
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(glyph).strong().color(color));
-                ui.label(RichText::new(text).small().color(theme::TEXT_DIM));
+                // Wrap so a long notice cannot widen the inspector panel.
+                ui.add(egui::Label::new(RichText::new(text).small().color(theme::TEXT_DIM)).wrap());
             });
         });
 }
