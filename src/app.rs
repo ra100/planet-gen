@@ -2167,7 +2167,7 @@ impl PlanetGenApp {
             0.0..=4.0,
             Param::new(
                 "Wind strength",
-                "0 = calm, 1 = physical baseline, 2 = strong transport, 4 = extreme. Regenerates weather transport.",
+                "0 = calm, 1 = physical baseline, 2 = strong transport, 4 = extreme. Regenerates weather transport; with Structure on, also sets jet-stream streaking and how far cumulus are drawn into streets along the wind.",
                 1.0,
             )
             .with(2, ""),

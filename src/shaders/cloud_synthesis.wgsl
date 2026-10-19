@@ -22,8 +22,9 @@
 //     fractal edges with the area-perimeter dimension of real clouds),
 //     sheared zonally, domain-warped and advected through a steady flow of
 //     the systems' circulation and the storm-track jets (cs_advect), blended
-//     with Worley closed and open cells, cumulus "flowers" and convective
-//     systems.
+//     with open-cell rings, cumulus "flowers" and convective systems; closed
+//     cells shade decks with soft lanes. Rotation sets the zonal banding and
+//     jet width, wind strength the jets' shear and the cumulus streets.
 //
 // Coverage is a two-level probability remap: the macro field is thresholded
 // at the quantile of cover / fill (where decks, cells and clusters are), the
@@ -55,6 +56,9 @@ const CS_SIMPLEX_SIGMA: f32 = 0.373;
 // of unit cells (measured offline, ragged = 0).
 const CS_MCS_STATS: vec2<f32> = vec2<f32>(0.117, 0.226);
 const CS_FLOWER_STATS: vec2<f32> = vec2<f32>(0.149, 0.260);
+// The same for the open-cell rings (cs_synthesize), with the fine-band fray
+// and ring clumps as unit Gaussians.
+const CS_OPEN_STATS: vec2<f32> = vec2<f32>(0.345, 0.319);
 // Meridional compression of the noise domain by the zonal jets.
 const CS_ZONAL_STRETCH: f32 = 2.2;
 const CS_CIRRUS_STRETCH: f32 = 6.0;
@@ -74,6 +78,25 @@ struct CloudSynthesisData {
 
 fn cs_strength() -> f32 {
     return clamp(cloud_synthesis.control.x, 0.0, 1.0);
+}
+
+// Wind strength (Clouds > Wind strength; 0 with wind transport off): scales
+// the jets' shear and the cumulus streets.
+fn cs_wind() -> f32 {
+    return clamp(cloud_synthesis.control.w, 0.0, 4.0);
+}
+
+// Zonal banding relative to Earth. The jets' meridional scale (the Rhines
+// scale, sqrt(U / beta) with beta ~ Omega / R) shrinks as rotation speeds up:
+// fast rotators draw cloud into narrow zonal bands, slow ones into broad,
+// rounder patterns.
+fn cs_banding() -> f32 {
+    return clamp(sqrt(max(cloud_synthesis.climate.w, 0.0)), 0.5, 2.0);
+}
+
+// A domain stretch scaled by the rotation's banding (1 stays isotropic).
+fn cs_band_stretch(earth: f32) -> f32 {
+    return 1.0 + (earth - 1.0) * cs_banding();
 }
 
 // Logistic approximation of the standard normal CDF and its exact inverse.
@@ -193,6 +216,28 @@ fn cs_cells_resolved(footprint: f32, size: f32) -> f32 {
     return 1.0 - smooth_step(0.06, 0.2, footprint / size);
 }
 
+// Bends a cell lattice (domain in cell units) so walls curve and wander
+// instead of running straight between feature points; `footprint` is the
+// pixel in cell units, and the finer octave fades once it is unresolved.
+fn cs_cell_warp(q: vec3<f32>, seed: u32, footprint: f32) -> vec3<f32> {
+    let a = q * 0.6;
+    var warp = vec3<f32>(
+        snoise(a + noise_seed_offset(seed, 90u)),
+        snoise(a + noise_seed_offset(seed, 91u)),
+        snoise(a + noise_seed_offset(seed, 92u)),
+    ) * (0.3 / CS_SIMPLEX_SIGMA * 0.5);
+    let fine = cs_resolved(footprint, 0.45);
+    if (fine > 0.0) {
+        let b = q * 2.2;
+        warp += vec3<f32>(
+            snoise(b + noise_seed_offset(seed, 93u)),
+            snoise(b + noise_seed_offset(seed, 94u)),
+            snoise(b + noise_seed_offset(seed, 95u)),
+        ) * (fine * 0.12 / CS_SIMPLEX_SIGMA * 0.5);
+    }
+    return q + warp;
+}
+
 // Compresses the domain along the circulation pole so features elongate
 // east-west, most at mid latitudes and not at all at the poles. The added
 // offset w(y) has slope (1 - y^2)(0.3 + 2 y^2), y = sin(latitude), which
@@ -203,6 +248,13 @@ fn cs_zonal_stretch(q: vec3<f32>, pole: vec3<f32>, stretch: f32) -> vec3<f32> {
     let y2 = y * y;
     let w = y * (0.3 + y2 * (0.56666667 - 0.4 * y2));
     return q + pole * ((stretch - 1.0) * w);
+}
+
+// Compresses the domain along a tangent `axis`, drawing features out along
+// it by `stretch`. Near the column, dot(q, axis) is the local distance along
+// the axis, so a slowly turning axis bends the pattern without tearing it.
+fn cs_street(q: vec3<f32>, axis: vec3<f32>, stretch: f32) -> vec3<f32> {
+    return q + axis * dot(q, axis) * (1.0 / stretch - 1.0);
 }
 
 // Pixel footprint in a stretched domain: the compression peaks at
@@ -449,14 +501,17 @@ fn cs_advect(p: vec3<f32>) -> CsSynoptic {
     let track = cloud_synthesis.climate.z;
     let subpolar = max(cloud_synthesis.climate.y, cloud_synthesis.climate.x + 10.0);
     let dt = 1.0 / f32(CS_FLOW_STEPS);
+    // Narrower jets on fast rotators; their shear grows with the wind.
+    let jet_width = CS_JET_WIDTH_DEG / cs_banding();
+    let wind = cs_wind();
     var q = p;
     var meso = p;
     var fine = p;
     for (var step = 0; step < CS_FLOW_STEPS; step++) {
         let alat = abs(asin(clamp(dot(q, pole), -1.0, 1.0)) * 57.29578);
-        let jet_offset = (alat - track) / CS_JET_WIDTH_DEG;
-        let lag = CS_JET_ANGLE * (1.0 - exp(-jet_offset * jet_offset))
-            + CS_EASTERLY_ANGLE * smooth_step(subpolar - 4.0, subpolar + 8.0, alat);
+        let jet_offset = (alat - track) / jet_width;
+        let lag = wind * (CS_JET_ANGLE * (1.0 - exp(-jet_offset * jet_offset))
+            + CS_EASTERLY_ANGLE * smooth_step(subpolar - 4.0, subpolar + 8.0, alat));
         var next = cs_rotate(q, pole, lag * dt);
         for (var i = 0u; i < count; i++) {
             let system = cloud_synthesis.systems[i];
@@ -655,6 +710,16 @@ fn cs_synthesize(p: vec3<f32>, footprint: f32, solver: vec4<f32>) -> vec4<f32> {
     let ocean = 1.0 - land;
     let wind = textureSampleLevel(cloud_tex, height_sampler, p, 0.0);
     let continentality = clamp(wind.a, 0.0, 1.0) * land;
+    // Cumulus streets and cells are drawn out along the low-level wind, more
+    // as it blows harder (roll convection).
+    let flow = wind.xyz - p * dot(wind.xyz, p);
+    let flow_speed = length(flow);
+    var street_axis = vec3<f32>(0.0);
+    var street = 1.0;
+    if (flow_speed > 1.0e-4) {
+        street_axis = flow / flow_speed;
+        street = 1.0 + 1.2 * smooth_step(0.1, 0.8, flow_speed) * min(cs_wind(), 2.5);
+    }
     let temperature = climate_temperature(p, height, uniforms.ocean_level, uniforms.base_temp_c,
         uniforms.axial_tilt_rad, uniforms.season);
     let season_sign = clamp((uniforms.season - 0.5) * 2.0, -1.0, 1.0);
@@ -767,9 +832,9 @@ fn cs_synthesize(p: vec3<f32>, footprint: f32, solver: vec4<f32>) -> vec4<f32> {
 
     // ---- Noise domains ----
     // Footprints in each stretched domain.
-    let fp = cs_stretch_footprint(footprint, CS_ZONAL_STRETCH);
-    let fp_cells = cs_stretch_footprint(footprint, 1.3);
-    let base = cs_zonal_stretch(synoptic.point, pole, CS_ZONAL_STRETCH);
+    let fp = cs_stretch_footprint(footprint, cs_band_stretch(CS_ZONAL_STRETCH));
+    let fp_cells = cs_stretch_footprint(footprint, cs_band_stretch(1.3));
+    let base = cs_zonal_stretch(synoptic.point, pole, cs_band_stretch(CS_ZONAL_STRETCH));
     let warp_size = 1600.0 / radius_km;
     let warp_a = cs_resolved(fp, warp_size) * (160.0 / radius_km);
     let warp_1 = vec3<f32>(
@@ -789,26 +854,35 @@ fn cs_synthesize(p: vec3<f32>, footprint: f32, solver: vec4<f32>) -> vec4<f32> {
         ) * warp_b;
     }
     let q_lo = base + warp_1 + warp_2;
-    let q_mid = cs_zonal_stretch(synoptic.point_meso, pole, 1.8) + warp_1 * 0.7 + warp_2;
-    let q_hi = cs_zonal_stretch(synoptic.point_fine, pole, 1.25) + warp_1 * 0.4 + warp_2 * 0.6;
-    let q_cells = cs_zonal_stretch(synoptic.point_fine, pole, 1.3) + warp_1 * 0.5 + warp_2 * 0.8;
-    let octaves = cs_fbm(q_lo, q_mid, q_hi, vec3<f32>(fp, cs_stretch_footprint(footprint, 1.8),
-        cs_stretch_footprint(footprint, 1.25)), radius_km, seed, 40u);
+    let q_mid = cs_zonal_stretch(synoptic.point_meso, pole, cs_band_stretch(1.8)) + warp_1 * 0.7 + warp_2;
+    let q_hi = cs_zonal_stretch(synoptic.point_fine, pole, cs_band_stretch(1.25)) + warp_1 * 0.4 + warp_2 * 0.6;
+    // Open cells only lean into the wind (drawn out like the streets, they
+    // smear into strokes); closed cells are drawn as they are.
+    let q_cells_still = cs_zonal_stretch(synoptic.point_fine, pole, cs_band_stretch(1.3)) + warp_1 * 0.5
+        + warp_2 * 0.8;
+    let q_cells = cs_street(q_cells_still, street_axis, sqrt(street));
+    let octaves = cs_fbm(q_lo, q_mid, q_hi, vec3<f32>(fp, cs_stretch_footprint(footprint, cs_band_stretch(1.8)),
+        cs_stretch_footprint(footprint, cs_band_stretch(1.25))), radius_km, seed, 40u);
 
     // Cellular morphologies, each zero-mean and unit variance when resolved.
-    var closed_cells = 0.0;
-    var closed_unres = 1.0;
+    // Real cells are not Voronoi polygons: their walls bend and wander, their
+    // tops are lumpy domes, and the lanes between closed cells are thinner
+    // cloud more often than clear sea. The lattice is warped by noise on the
+    // cell scale, and the walls frayed by the fine band.
+    // Closed cells shade the deck rather than cut it (thresholded, their walls
+    // turned a deck into hard polygon floes): bright, slightly domed cells
+    // with narrow lanes of thinner cloud between.
+    var closed_lanes = 1.0;
     if (morph.y > 0.02) {
         let size = 30.0 / radius_km;
         let resolved = cs_cells_resolved(fp_cells, size);
         if (resolved > 0.0) {
-            let cells = cs_worley(q_cells / size, seed ^ 0x51u);
-            // Bright polygon cells with narrow, wobbling darker borders.
-            // Mean and deviation measured for unit-jitter cells on a slice.
-            let edge = cells.y - cells.x + 0.05 * octaves.hi * (1.0 - octaves.hi_unresolved);
-            let interior = smooth_step(0.0, 0.22, edge);
-            closed_cells = resolved * (interior - 0.65) / 0.385;
-            closed_unres = 1.0 - resolved * resolved;
+            let qc = cs_cell_warp(q_cells_still / size, seed ^ 0x51u, fp_cells / size);
+            let cells = cs_worley(qc, seed ^ 0x51u);
+            let fray = 0.05 * octaves.hi * (1.0 - octaves.hi_unresolved);
+            let lane = smooth_step(0.0, 0.32, cells.y - cells.x + fray);
+            let dome = 0.8 + 0.2 * (1.0 - min(cells.x, 1.0));
+            closed_lanes = mix(1.0, (0.4 + 0.6 * lane) * dome, resolved);
         }
     }
     var open_cells = 0.0;
@@ -817,11 +891,19 @@ fn cs_synthesize(p: vec3<f32>, footprint: f32, solver: vec4<f32>) -> vec4<f32> {
         let size = 40.0 / radius_km;
         let resolved = cs_cells_resolved(fp_cells, size);
         if (resolved > 0.0) {
-            let cells = cs_worley(q_cells / size + vec3<f32>(17.0), seed ^ 0x6fu);
-            // Cloud on the cell walls around clear centres.
-            let edge = cells.y - cells.x + 0.05 * octaves.hi * (1.0 - octaves.hi_unresolved);
-            let walls = 1.0 - smooth_step(0.03, 0.28, edge);
-            open_cells = resolved * (walls - 0.47) / 0.41;
+            let qo = q_cells / size + vec3<f32>(17.0);
+            let cells = cs_worley(qo, seed ^ 0x6fu);
+            // Cloud rings around rounded clear centres of varying size (by
+            // distance to the cell's own point, not to the Voronoi wall: wall
+            // lines warped by noise turned into squiggles). The rings are
+            // strings of cumulus clumps rather than continuous walls.
+            let fray = 0.06 * octaves.hi * (1.0 - octaves.hi_unresolved);
+            let clump_resolved = cs_resolved(fp_cells, size * 0.3);
+            let clump = mix(0.5, smooth_step(-0.6, 0.6,
+                snoise(qo * 3.3 + noise_seed_offset(seed, 97u)) / CS_SIMPLEX_SIGMA), clump_resolved);
+            let hollow = 0.25 + 0.2 * cells.z;
+            let walls = smooth_step(hollow, hollow + 0.4, cells.x + fray) * (0.55 + 0.45 * clump);
+            open_cells = resolved * (walls - CS_OPEN_STATS.x) / CS_OPEN_STATS.y;
             open_unres = 1.0 - resolved * resolved;
         }
     }
@@ -831,7 +913,7 @@ fn cs_synthesize(p: vec3<f32>, footprint: f32, solver: vec4<f32>) -> vec4<f32> {
         let size = 320.0 / radius_km;
         let resolved = cs_cells_resolved(fp, size * 3.0);
         if (resolved > 0.0) {
-            let q_cluster = cs_zonal_stretch(synoptic.point_meso, pole, 1.4) + warp_1 * 0.6 + warp_2;
+            let q_cluster = cs_zonal_stretch(synoptic.point_meso, pole, cs_band_stretch(1.4)) + warp_1 * 0.6 + warp_2;
             // Mesoscale convective systems: about half the cells host one,
             // 130-510 km across, elongated, with ragged anvil edges; they
             // swell where the synoptic band is moist, so they gather in
@@ -859,10 +941,11 @@ fn cs_synthesize(p: vec3<f32>, footprint: f32, solver: vec4<f32>) -> vec4<f32> {
     var flowers_unres = 1.0;
     if (morph.w > 0.02) {
         let size = 110.0 / radius_km;
-        let resolved = cs_cells_resolved(cs_stretch_footprint(footprint, 1.8), size * 2.0);
+        let resolved = cs_cells_resolved(cs_stretch_footprint(footprint, cs_band_stretch(1.8)), size * 2.0);
         if (resolved > 0.0) {
             // Drawn out along the trades into short streets.
-            let q_flowers = cs_zonal_stretch(synoptic.point_meso, pole, 1.8) + warp_1 * 0.5 + warp_2 * 0.8;
+            let q_flowers = cs_street(cs_zonal_stretch(synoptic.point_meso, pole, cs_band_stretch(1.8)) + warp_1 * 0.5
+                + warp_2 * 0.8, street_axis, street);
             let ragged = 0.3 * octaves.hi * (1.0 - octaves.hi_unresolved);
             let blob = cs_blobs(q_flowers / size + vec3<f32>(41.0), seed ^ 0x3bu, 0.6,
                 vec2<f32>(0.25, 0.75), 0.2, ragged);
@@ -884,25 +967,25 @@ fn cs_synthesize(p: vec3<f32>, footprint: f32, solver: vec4<f32>) -> vec4<f32> {
     // Macro recipes, each unit variance: stratiform is synoptic-dominated,
     // cumulus clusters follow the synoptic and mesoscale bands (the flowers
     // only texture them: alone, their peaked field reads as a star field),
-    // the cellular regimes add their cells.
+    // open cells add their rings (closed cells only shade, see closed_lanes).
     let c_lo = wm.x * 0.97 + wm.y * 0.5 + wm.z * 0.45 + wm.w * 0.6 + wc * 0.5;
     let c_mid = wm.x * 0.25 + wm.y * 0.2 + wm.z * 0.2 + wm.w * 0.55 + wc * 0.45;
-    let c_cl = wm.y * 0.84;
     let c_op = wm.z * 0.87;
     let c_fl = wm.w * 0.45;
     let c_cv = wc * 0.8;
-    let variance = c_lo * c_lo + c_mid * c_mid + c_cl * c_cl + c_op * c_op + c_fl * c_fl + c_cv * c_cv;
+    let variance = c_lo * c_lo + c_mid * c_mid + c_op * c_op + c_fl * c_fl + c_cv * c_cv;
     let norm = inverseSqrt(max(variance, 1.0e-6));
-    let shape = (c_lo * octaves.lo + c_mid * octaves.mid + c_cl * closed_cells + c_op * open_cells
+    let shape = (c_lo * octaves.lo + c_mid * octaves.mid + c_op * open_cells
         + c_fl * flowers + c_cv * clusters) * norm;
     let unresolved = (c_lo * c_lo * octaves.lo_unresolved + c_mid * c_mid * octaves.mid_unresolved
-        + c_cl * c_cl * closed_unres + c_op * c_op * open_unres + c_fl * c_fl * flowers_unres
+        + c_op * c_op * open_unres + c_fl * c_fl * flowers_unres
         + c_cv * c_cv * clusters_unres) * norm * norm;
     // Fill of a deck, cell or cluster: decks are solid at this scale (their
     // texture is brightness, not holes); cumulus sits in compact clusters
     // with clear sky between, as satellite composites show it, rather than a
     // half-filled gray veil spread over the whole regime.
-    let fill = max(wm.x * 1.0 + wm.y * 0.97 + wm.z * 0.8 + wm.w * 0.8 + wc * 0.9, cover);
+    // Cells get their gaps from the cell pattern, not from pinholes.
+    let fill = max(wm.x + wm.y + wm.z + wm.w * 0.8 + wc * 0.9, cover);
     let macro_cover = clamp(cover / max(fill, 1.0e-3), 0.0, 1.0);
     // Cumulus cluster margins are fuzzy even where a system sets the cover.
     let edge = soft + 0.1 * wm.w;
@@ -915,11 +998,17 @@ fn cs_synthesize(p: vec3<f32>, footprint: f32, solver: vec4<f32>) -> vec4<f32> {
     // brightness, varying with how many clouds each pixel catches.
     let fill_soft = 0.3;
     var filled = fill;
+    // Thickness ramp at the edges of individual clouds once they resolve.
+    var fill_margin = 1.0;
     let fine_resolved = smooth_step(0.4, 0.8, 1.0 - octaves.hi_unresolved);
-    if (fill < 0.995 && fine_resolved > 0.0) {
+    if (fill < 0.95 && fine_resolved > 0.0) {
         let fill_threshold = cs_probit(1.0 - fill) * sqrt(1.0 + fill_soft * fill_soft);
         let holes = cs_logistic((octaves.hi - fill_threshold) / sqrt(octaves.hi_unresolved + fill_soft * fill_soft));
-        filled = mix(fill, holes, fine_resolved);
+        // A nearly full deck stays whole: a few percent of holes thresholded
+        // from the fine band read as pinhole stipple, not as broken cloud.
+        let breakup = fine_resolved * (1.0 - smooth_step(0.8, 0.95, fill));
+        filled = mix(fill, holes, breakup);
+        fill_margin = mix(1.0, smooth_step(-0.2, 0.9, octaves.hi - fill_threshold), breakup);
     }
     // Broken cumulus margins thin out to nothing rather than a gray veil.
     let mask = clustered * filled * mix(1.0, smooth_step(0.04, 0.25, clustered), wm.w);
@@ -930,10 +1019,15 @@ fn cs_synthesize(p: vec3<f32>, footprint: f32, solver: vec4<f32>) -> vec4<f32> {
     // Sub-pixel structure keeps its mean: E[exp(1.1 x)] over the unresolved
     // variance adds 1.1^2 / 2 of it.
     let interior = exp(clamp(1.1 * (shape - threshold) - 0.5 + 0.605 * unresolved, -2.5, 1.2));
+    // Up close (once the fine band resolves), cloud edges thin out over a few
+    // kilometres instead of ending at a hard rim. Coarser pixels already see
+    // the logistic's softness, and keep their optical depth.
+    let margin = mix(1.0, smooth_step(-0.15, 0.6, shape - threshold), fine_resolved) * fill_margin;
     let texture = 0.12 + 0.35 * (wm.w + 0.5 * wm.z);
     let tau_in = tau * interior * exp(texture * (
         0.4 * octaves.mid * (1.0 - octaves.mid_unresolved) + 0.6 * octaves.hi * (1.0 - octaves.hi_unresolved)));
-    let tau_liquid = mask * tau_in * (1.0 - 0.45 * frozen);
+    let lanes = mix(1.0, closed_lanes, wm.y);
+    let tau_liquid = mask * tau_in * margin * lanes * (1.0 - 0.45 * frozen);
 
     // ---- Cirrus ----
     var cirrus_cover = 0.03 + 0.12 * b_storm + 0.12 * w_itcz * ocean + 0.05 * wet_tropics
@@ -942,19 +1036,38 @@ fn cs_synthesize(p: vec3<f32>, footprint: f32, solver: vec4<f32>) -> vec4<f32> {
     cirrus_cover = clamp(cirrus_cover * min(moisture * 1.6, 1.0), 0.0, 0.9);
     var high = 0.0;
     if (cirrus_cover > 0.01) {
-        let qc = cs_zonal_stretch(synoptic.point, pole, CS_CIRRUS_STRETCH) + warp_1 * 1.4;
-        let qc_fine = cs_zonal_stretch(synoptic.point_meso, pole, CS_CIRRUS_STRETCH) + warp_1;
-        let fp_cirrus = cs_stretch_footprint(footprint, CS_CIRRUS_STRETCH);
+        let qc = cs_zonal_stretch(synoptic.point, pole, cs_band_stretch(CS_CIRRUS_STRETCH)) + warp_1 * 1.4;
+        let qc_fine = cs_zonal_stretch(synoptic.point_meso, pole, cs_band_stretch(CS_CIRRUS_STRETCH)) + warp_1;
+        let fp_cirrus = cs_stretch_footprint(footprint, cs_band_stretch(CS_CIRRUS_STRETCH));
         let fibres = cs_fbm(qc, qc_fine, qc_fine, vec3<f32>(fp_cirrus), radius_km, seed, 60u);
         let ci_shape = 0.7 * fibres.lo + 0.6 * fibres.mid + 0.4 * fibres.hi;
         let ci_unres = 0.49 * fibres.lo_unresolved + 0.36 * fibres.mid_unresolved + 0.16 * fibres.hi_unresolved;
-        let ci_soft = 0.35;
+        // Veils fade out at their margins instead of ending in streaky smears.
+        let ci_soft = 0.6;
         let ci_threshold = cs_probit(1.0 - cirrus_cover) * sqrt(1.0 + ci_soft * ci_soft);
         let ci_mask = max(cs_logistic((ci_shape - ci_threshold) / sqrt(ci_unres + ci_soft * ci_soft)) - 0.003, 0.0)
             / 0.997;
-        let streak = 0.6 + 0.4 * (1.0 - abs(fibres.hi) * (1.0 - fibres.hi_unresolved) * 0.6);
+        // Fibres: thin ridges of noise drawn out along the flow, so a resolved
+        // veil reads as filaments (cirrus fibratus) with clear lanes between,
+        // not as smeared fBm.
+        var fibres_bright = 1.0;
+        let fibre_size = 55.0 / radius_km;
+        let fibre_resolved = cs_resolved(fp_cirrus, fibre_size);
+        if (fibre_resolved > 0.0) {
+            let qf = qc_fine / fibre_size;
+            let r1 = 1.0 - abs(snoise(qf + noise_seed_offset(seed, 70u)) / CS_SIMPLEX_SIGMA) * 0.5;
+            var r2 = 0.75;
+            let fine_fibre = cs_resolved(fp_cirrus, fibre_size * 0.4);
+            if (fine_fibre > 0.0) {
+                let r = 1.0 - abs(snoise(qf * 2.5 + noise_seed_offset(seed, 71u)) / CS_SIMPLEX_SIGMA) * 0.5;
+                r2 = mix(0.75, r, fine_fibre);
+            }
+            let ridges = pow(clamp(0.6 * r1 + 0.4 * r2, 0.0, 1.0), 4.0);
+            // The ridge field averages 0.22: the veil keeps its mean mass.
+            fibres_bright = mix(1.0, 0.25 + 3.4 * ridges, fibre_resolved);
+        }
         // Ice mass 0.1-0.3: optical depth ~0.5-2, thin veils over the low cloud.
-        high = ci_mask * (0.08 + 0.22 * smooth_step(0.0, 1.5, ci_shape - ci_threshold)) * streak;
+        high = ci_mask * (0.08 + 0.22 * smooth_step(0.0, 1.5, ci_shape - ci_threshold)) * max(fibres_bright, 0.0);
     }
 
     let depth = cs_solver_depth(tau_liquid);
