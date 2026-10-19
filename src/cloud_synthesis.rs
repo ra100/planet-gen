@@ -60,7 +60,7 @@ pub struct CloudSystemGpu {
 #[derive(Copy, Clone, Debug, PartialEq, Pod, Zeroable)]
 pub struct CloudSynthesisGpu {
     /// Strength (0 = solver field only), system count, climate moisture (0-1),
-    /// reserved.
+    /// wind strength (0-4; 0 with wind transport off).
     pub control: [f32; 4],
     /// Hadley edge, subpolar low and storm-track latitudes (degrees), and the
     /// relative rotation rate.
@@ -213,7 +213,12 @@ pub fn weather_systems(
     let hadley = hadley_edge_deg(rotation, snapshot.base_temp_c);
     let subpolar = subpolar_low_deg(rotation);
     let track = storm_track_deg(rotation, snapshot.base_temp_c);
-    data.control = [strength, 0.0, snapshot.moisture.clamp(0.0, 1.0), 0.0];
+    data.control = [
+        strength,
+        0.0,
+        snapshot.moisture.clamp(0.0, 1.0),
+        snapshot.wind_scale.clamp(0.0, 4.0),
+    ];
     data.climate = [hadley, subpolar, track, rotation];
     if strength <= 0.0 || snapshot.coverage <= 0.0 || snapshot.moisture <= 0.0 {
         return data;
@@ -658,5 +663,37 @@ mod tests {
             other_seed.systems,
             weather_systems(&snapshot, 1.0, |_| true).systems
         );
+    }
+
+    #[test]
+    fn wind_strength_and_rotation_reach_the_shader() {
+        let snapshot = earth();
+        let calm = weather_systems(
+            &WeatherSnapshot {
+                wind_scale: 0.0,
+                ..snapshot
+            },
+            1.0,
+            |_| true,
+        );
+        let windy = weather_systems(
+            &WeatherSnapshot {
+                wind_scale: 3.0,
+                ..snapshot
+            },
+            1.0,
+            |_| true,
+        );
+        assert_eq!(calm.control[3], 0.0);
+        assert_eq!(windy.control[3], 3.0);
+        let fast = weather_systems(
+            &WeatherSnapshot {
+                rotation_rate_rad_s: snapshot.rotation_rate_rad_s * 3.0,
+                ..snapshot
+            },
+            1.0,
+            |_| true,
+        );
+        assert!((fast.climate[3] / windy.climate[3] - 3.0).abs() < 1.0e-3);
     }
 }

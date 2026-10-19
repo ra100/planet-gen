@@ -127,7 +127,17 @@ impl PreviewRenderer {
         Self::new_with_cloud_config(gpu, samples)
     }
 
+    /// A renderer built with another `cloud_synthesis.wgsl`, for iterating on
+    /// the synthesis shader without a rebuild (`cloud_closeup --watch`).
+    pub fn new_with_synthesis_source(gpu: &GpuContext, synthesis_source: &str) -> Self {
+        Self::new_with_sources(gpu, 8, synthesis_source)
+    }
+
     fn new_with_cloud_config(gpu: &GpuContext, samples: u32) -> Self {
+        Self::new_with_sources(gpu, samples, include_str!("shaders/cloud_synthesis.wgsl"))
+    }
+
+    fn new_with_sources(gpu: &GpuContext, samples: u32, synthesis_source: &str) -> Self {
         let cloud_density = include_str!("shaders/cloud_density.wgsl");
         let preview_shader = include_str!("shaders/preview_cubemap.wgsl").replace(
             "const CLOUD_RAY_SAMPLES: u32 = 8u;",
@@ -140,7 +150,7 @@ impl PreviewRenderer {
             include_str!("shaders/surface_material.wgsl"),
             cloud_density,
             include_str!("shaders/cloud_wind_fallback.wgsl"),
-            include_str!("shaders/cloud_synthesis.wgsl"),
+            synthesis_source,
             preview_shader,
         );
 

@@ -215,3 +215,9 @@ salt-and-pepper grain (sub-pixel cumulus); it disappears at 8K.
   (alpha channel; NASA-derived; slope -1.37, gx/gy 0.83). The Solar System
   Scope URL is blocked from the cloud container; compare against it locally.
 - Lit globe check: `realism_capture` (uploads the synthesis block).
+- Close-ups as the app shows them zoomed in (~1 km per pixel at zoom 20):
+  `cloud_closeup OUT 42 512 --views "44,157,20;-44,-74,20" --watch OUT/job.json`,
+  then write `{"tag":"v2","shader":"/abs/path/cloud_synthesis.wgsl"}` to the
+  job file. `--rotation-hours H` and `--wind-scale W` regenerate the planet
+  with another day length or wind. Seed 42 at 44,157 is a closed-cell deck,
+  -44,-74 storm-track open cells, 37,-113 cirrus over broken cumulus.
