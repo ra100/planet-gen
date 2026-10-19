@@ -102,6 +102,8 @@ pub struct PlanetGenApp {
     // Progressive erosion state
     erosion_terrain: Option<crate::terrain_compute::TectonicTerrain>,
     erosion_remaining: u32,
+    /// Input events held back after a pointer release; see `ui::input`.
+    deferred_input: Vec<egui::Event>,
     erosion_ocean_level: f32,
     measured_ocean_coverage: Option<f32>,
     // Export state
@@ -304,6 +306,7 @@ impl PlanetGenApp {
             cached_cubemap_view: None,
             erosion_terrain: None,
             erosion_remaining: 0,
+            deferred_input: Vec::new(),
             erosion_ocean_level: 0.0,
             measured_ocean_coverage: None,
             planet_name: format!("planet_{}", PlanetParams::default().seed),
@@ -2830,6 +2833,17 @@ impl PlanetGenApp {
 }
 
 impl eframe::App for PlanetGenApp {
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        // A slow frame batches the release with later cursor moves; end the
+        // batch at the release so sliders don't jump to the final cursor.
+        if !self.deferred_input.is_empty() {
+            let new_events = std::mem::take(&mut raw_input.events);
+            raw_input.events = std::mem::take(&mut self.deferred_input);
+            raw_input.events.extend(new_events);
+        }
+        crate::ui::input::split_at_pointer_release(&mut raw_input.events, &mut self.deferred_input);
+    }
+
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         let dir = self
             .export_dir
@@ -2848,6 +2862,9 @@ impl eframe::App for PlanetGenApp {
             && *until <= std::time::Instant::now()
         {
             self.file_msg = None;
+        }
+        if !self.deferred_input.is_empty() {
+            ctx.request_repaint();
         }
         self.handle_keyboard_shortcuts(ctx);
 
