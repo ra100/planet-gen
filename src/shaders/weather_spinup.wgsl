@@ -66,6 +66,9 @@ const STORM_RECHARGE_HARD_CAP: f32 = 0.24;
 const EDDY_DIFFUSIVITY_M2_S: f32 = 10000.0;
 const EDDY_DIFFUSION_MAX_BLEND: f32 = 0.24;
 
+// Far below one texel of angular separation at any supported resolution.
+const FACE_TIE_TOLERANCE: f32 = 0.00001;
+
 fn smooth_step(edge0: f32, edge1: f32, value: f32) -> f32 {
     let t = clamp((value - edge0) / (edge1 - edge0), 0.0, 1.0);
     return t * t * (3.0 - 2.0 * t);
@@ -73,10 +76,17 @@ fn smooth_step(edge0: f32, edge1: f32, value: f32) -> f32 {
 
 fn sphere_to_face_uv(dir: vec3<f32>) -> vec3<f32> {
     let a = abs(dir);
-    if (a.x >= a.y && a.x >= a.z) {
+    // Edge and corner texels are duplicated across faces and land on exact
+    // |x| == |y| == |z| ties. WGSL allows inexact division, so Metal can round
+    // those directions a few ULP off the tie and pick a different face than
+    // IEEE backends; the duplicates then read inconsistent cells and transport
+    // stops conserving mass at the seam. A relative tolerance keeps ties on
+    // the fixed x > y > z priority everywhere.
+    let tie = max(max(a.x, a.y), a.z) * FACE_TIE_TOLERANCE;
+    if (a.x + tie >= a.y && a.x + tie >= a.z) {
         return select(vec3<f32>(1.0, dir.z / a.x * 0.5 + 0.5, -dir.y / a.x * 0.5 + 0.5), vec3<f32>(0.0, -dir.z / a.x * 0.5 + 0.5, -dir.y / a.x * 0.5 + 0.5), dir.x > 0.0);
     }
-    if (a.y >= a.x && a.y >= a.z) {
+    if (a.y + tie >= a.z) {
         return select(vec3<f32>(3.0, dir.x / a.y * 0.5 + 0.5, -dir.z / a.y * 0.5 + 0.5), vec3<f32>(2.0, dir.x / a.y * 0.5 + 0.5, dir.z / a.y * 0.5 + 0.5), dir.y > 0.0);
     }
     return select(vec3<f32>(5.0, -dir.x / a.z * 0.5 + 0.5, -dir.y / a.z * 0.5 + 0.5), vec3<f32>(4.0, dir.x / a.z * 0.5 + 0.5, -dir.y / a.z * 0.5 + 0.5), dir.z > 0.0);
