@@ -22,6 +22,7 @@
 //!    `EXPORT_LAYERS` in `app.rs` — those tables drive header chips, HUD
 //!    badges, summaries, and texture-slot selection from a single source.
 
+pub mod input;
 pub mod theme;
 pub mod widgets;
 
