@@ -2783,6 +2783,41 @@ mod tests {
         sum
     }
 
+    // TEMP: Metal seam diagnostic, removed before merge.
+    #[test]
+    fn zz_seam_diagnostic() {
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let terrain = terrain(16);
+        let wind = WindFieldPipeline::new(&gpu).expect("dynamics unavailable");
+        let dynamics = wind.create_textures(&gpu, 16, &terrain, 0.0);
+        wind.generate_gpu(
+            &gpu, &terrain, &dynamics, 42, 0.0, 0.4, 0.5, 1.0, 15.0, 1.0, 1.0,
+        );
+        let pipeline = WeatherFieldPipeline::new(&gpu).expect("weather unavailable");
+        let mut overcast = snapshot(16);
+        overcast.coverage = 1.0;
+        let weather = pipeline.create_textures(&gpu, 16);
+        let trace = pipeline.validation_tracer_trace_for_sweep(
+            &gpu, overcast, &terrain, &dynamics, &weather, 0, false,
+        );
+        let mass = read_texture(&gpu, &weather._mass_texture, 16);
+        let r = trace.spin_resolution as usize;
+        let mut out = format!("adapter {:?} spin {r}\n", gpu.adapter_info.backend);
+        for corners in [
+            [(0, 0, 0), (2, 15, 15), (4, 15, 0)],
+            [(0, 15, 0), (2, 15, 0), (5, 0, 0)],
+            [(0, 0, 15), (3, 15, 0), (4, 15, 15)],
+            [(0, 15, 15), (3, 15, 15), (5, 0, 15)],
+        ] {
+            for (face, x, y) in corners {
+                let m = &mass[((face * 16 + y) * 16 + x) * 4..][..4];
+                let st = &trace.state[((face * r + y) * r + x) * 4..][..4];
+                out += &format!("({face},{x},{y}) mass {m:?} state {st:?}\n");
+            }
+        }
+        panic!("{out}");
+    }
+
     #[test]
     fn weather_is_deterministic_finite_and_channel_ordered() {
         let gpu = GpuContext::new().expect("GPU init failed");
