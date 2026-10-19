@@ -37,7 +37,9 @@
 // Output is the column's low, deep and high mass in solver units: physical
 // optical depth is mapped back through the preview/bridge curve
 // (tau = 36 (d - 0.05) t^0.6), so every existing consumer of the masses and
-// of `cloud_density.exr` renders the synthesized cloud unchanged.
+// of `cloud_density.exr` renders the synthesized cloud unchanged. Its layer
+// heights come out in the solver's geometry layout, so `cloud_height.exr`
+// and the preview's cloud volume follow the synthesized clouds too.
 
 const CS_MAX_SYSTEMS: u32 = 48u;
 const CS_OCTAVES: i32 = 11;
@@ -681,13 +683,20 @@ fn cs_fbm(
     return CsOctaves(sum.x * scale.x, sum.y * scale.y, sum.z * scale.z, share.x, share.y, share.z);
 }
 
-// Synthesized column mass (low, deep, high, occupancy) in solver units.
-fn cs_synthesize(p: vec3<f32>, footprint: f32, solver: vec4<f32>) -> vec4<f32> {
+// A synthesized column: mass (low, deep, high, occupancy) in solver units and
+// geometry in the solver's layout (cloud base, low top, deep top, cirrus top,
+// km), so every consumer of the weather cubemaps reads it unchanged.
+struct CsCloud {
+    mass: vec4<f32>,
+    geometry: vec4<f32>,
+}
+
+fn cs_synthesize(p: vec3<f32>, footprint: f32, solver: vec4<f32>, solver_geometry: vec4<f32>) -> CsCloud {
     let radius_km = max(uniforms.planet_radius_km, 100.0);
     let pole = cs_pole();
     let seed = uniforms.cloud_seed;
     let moisture = clamp(cloud_synthesis.control.z, 0.0, 1.0);
-    if (moisture <= 0.0) { return vec4<f32>(0.0); }
+    if (moisture <= 0.0) { return CsCloud(vec4<f32>(0.0), solver_geometry); }
 
     // ---- Climate at this column ----
     let lat = asin(clamp(dot(p, pole), -1.0, 1.0)) * 57.29578;
@@ -1074,15 +1083,50 @@ fn cs_synthesize(p: vec3<f32>, footprint: f32, solver: vec4<f32>) -> vec4<f32> {
     let deep = clamp(deep_share, 0.0, 1.0);
     let low_mass = (1.0 - deep) * depth / (LOW_OPTICAL_WEIGHT * 0.9 * CLOUD_LIGHT_EXTINCTION);
     let deep_mass = deep * depth / (1.65 * CLOUD_LIGHT_EXTINCTION);
-    return vec4<f32>(low_mass, deep_mass, high, max(mask, min(high * 2.0, 1.0)));
+    let mass = vec4<f32>(low_mass, deep_mass, high, max(mask, min(high * 2.0, 1.0)));
+
+    // ---- Heights ----
+    // The solver's column sets the planet's scale: the condensation level from
+    // the boundary layer and the tropopause from temperature and rotation.
+    // The regime and the cloud's own structure place each family within it:
+    // decks under a low inversion, cumulus tops rising with their cores,
+    // frontal shields climbing toward the tropopause with their thickness,
+    // convective clusters reaching it. Km below are Earth's (12 km tropopause).
+    let tropopause = clamp(solver_geometry.a, 6.0, 20.0);
+    let scale = tropopause / 12.0;
+    // 0 at a cloud's margin, 1 in its core; resolved fine structure adds the
+    // lumpy tops of individual cells and towers.
+    let core = clamp((shape - threshold) / 1.5, 0.0, 1.0);
+    let relief = octaves.hi * (1.0 - octaves.hi_unresolved) * fine_resolved;
+    let cloud_base = max(mix(solver_geometry.r, min(solver_geometry.r, 0.5), wm.y), 0.2);
+    let low_depth = (wm.x * 1.6 + wm.y * (0.45 + 0.35 * (closed_lanes - 0.4)) + wm.z * (1.0 + 0.8 * core)
+        + wm.w * (0.6 + 1.9 * core) + wc * 2.0) * sqrt(scale);
+    let low_top = cloud_base + max(low_depth * (1.0 + 0.12 * relief), 0.3);
+    // Deep cloud: congestus above the boundary layer by default; frontal and
+    // tropical shields at 45-80 % of the tropopause with their thickness;
+    // convective clusters 65-100 % with their cores, overshooting in towers.
+    let shield = mix(0.45, 0.8, smooth_step(0.4, 2.8, synoptic.tpl.thick)) * tropopause;
+    let towers = (0.65 + 0.35 * core + 0.04 * relief) * tropopause;
+    var deep_top = low_top + 2.0 * scale;
+    deep_top = mix(deep_top, towers, max(wc, storm_hint) * (1.0 - env));
+    deep_top = mix(deep_top, shield, env);
+    deep_top = clamp(deep_top, low_top + 0.5, tropopause * 1.05);
+    // Cirrus tops at the tropopause; outflow from towers spreads just below.
+    let cirrus_top = max(tropopause, deep_top);
+    return CsCloud(mass, vec4<f32>(cloud_base, low_top, deep_top, cirrus_top));
 }
 
-// Column mass for rendering and export: the solver's, blended toward the
-// synthesized cloud by the synthesis strength. Strength 0 is exact.
-fn cloud_synthesis_mass(direction: vec3<f32>, footprint: f32) -> vec4<f32> {
+// Column mass and geometry for rendering and export: the solver's, blended
+// toward the synthesized cloud by the synthesis strength. Strength 0 is exact.
+fn cloud_synthesis_cloud(direction: vec3<f32>, footprint: f32) -> CsCloud {
     let solver = sample_weather_mass(direction);
+    let solver_geometry = sample_weather_cube(weather_geometry_tex, direction);
     let strength = cs_strength();
-    if (strength <= 0.0) { return solver; }
-    let synthesized = cs_synthesize(normalize(direction), max(footprint, 1.0e-6), solver);
-    return mix(solver, synthesized, strength);
+    if (strength <= 0.0) { return CsCloud(solver, solver_geometry); }
+    let synthesized = cs_synthesize(normalize(direction), max(footprint, 1.0e-6), solver, solver_geometry);
+    return CsCloud(mix(solver, synthesized.mass, strength), mix(solver_geometry, synthesized.geometry, strength));
+}
+
+fn cloud_synthesis_mass(direction: vec3<f32>, footprint: f32) -> vec4<f32> {
+    return cloud_synthesis_cloud(direction, footprint).mass;
 }

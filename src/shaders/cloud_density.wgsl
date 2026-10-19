@@ -71,15 +71,22 @@ fn cloud_column_sample(direction: vec3<f32>, footprint: f32) -> CloudColumn {
     return cloud_column_sample_mass(direction, footprint, sample_weather_mass(direction), true);
 }
 
-// The same column for a given column mass (low, deep, high, occupancy), such
-// as the synthesized one; layer heights still come from the solver's geometry.
-// `filter_geometry` weights base and thickness by the solver's neighbouring
-// mass (the solver field); otherwise by this column's own family mix.
+// The same column for a given column mass (low, deep, high, occupancy) and
+// layer geometry (base, low top, deep top, cirrus top), such as the
+// synthesized ones. `filter_geometry` weights base and thickness by the
+// solver's neighbouring mass (the solver field); otherwise by this column's
+// own family mix and geometry.
 fn cloud_column_sample_mass(
     direction: vec3<f32>, footprint: f32, mass: vec4<f32>, filter_geometry: bool,
 ) -> CloudColumn {
+    return cloud_column_sample_cloud(direction, footprint, mass,
+        sample_weather_cube(weather_geometry_tex, direction), filter_geometry);
+}
+
+fn cloud_column_sample_cloud(
+    direction: vec3<f32>, footprint: f32, mass: vec4<f32>, geometry: vec4<f32>, filter_geometry: bool,
+) -> CloudColumn {
     if (max(max(mass.r, mass.g), mass.b) <= 0.0) { return CloudColumn(0.0, 0.0, 0.0, 0.0, 0.0, 0.0); }
-    let geometry = sample_weather_cube(weather_geometry_tex, direction);
     let radius_km = max(uniforms.planet_radius_km, 1.0);
     let step_km = max(geometry.a, 0.0) / 8.0;
     var optical_depth = 0.0;
@@ -90,8 +97,8 @@ fn cloud_column_sample_mass(
         let altitude_km = (f32(sample_index) + 0.5) * step_km;
         let segment_start = direction * (1.0 + f32(sample_index) * step_km / radius_km);
         let segment_end = direction * (1.0 + (f32(sample_index) + 1.0) * step_km / radius_km);
-        let sample = weather_cloud_layers_land_segment_mass(
-            direction, altitude_km, segment_start, segment_end, radius_km, footprint, mass,
+        let sample = weather_cloud_layers_land_segment_cloud(
+            direction, altitude_km, segment_start, segment_end, radius_km, footprint, mass, geometry,
         );
         let packed = cloud_layer_geometry(sample.geometry, sample.layers);
         optical_depth += packed.x * step_km * CLOUD_LIGHT_EXTINCTION;
@@ -283,8 +290,15 @@ fn weather_cloud_sample(dir: vec3<f32>, altitude_km: f32, angular_pixel_footprin
 fn weather_cloud_sample_mass(
     dir: vec3<f32>, altitude_km: f32, angular_pixel_footprint: f32, mass: vec4<f32>,
 ) -> WeatherCloudSample {
+    return weather_cloud_sample_cloud(dir, altitude_km, angular_pixel_footprint, mass,
+        sample_weather_cube(weather_geometry_tex, normalize(dir)));
+}
+
+// A sample of a given column mass and layer geometry (see cloud_column_sample_cloud).
+fn weather_cloud_sample_cloud(
+    dir: vec3<f32>, altitude_km: f32, angular_pixel_footprint: f32, mass: vec4<f32>, geometry: vec4<f32>,
+) -> WeatherCloudSample {
     let direction = normalize(dir);
-    let geometry = sample_weather_cube(weather_geometry_tex, direction);
     let height = textureSampleLevel(height_tex, height_sampler, direction, 0.0).r;
     var sample = WeatherCloudSample(CloudLayers(0.0, 0.0, 0.0), mass, geometry, height, 1.0, 1.0, 0.28);
     if (max(max(mass.r, mass.g), mass.b) <= 0.0) { return sample; }
@@ -325,9 +339,23 @@ fn weather_cloud_layers_land_segment_mass(
     angular_pixel_footprint: f32,
     mass: vec4<f32>,
 ) -> WeatherCloudSample {
+    return weather_cloud_layers_land_segment_cloud(dir, altitude_km, segment_start, segment_end, radius_km,
+        angular_pixel_footprint, mass, sample_weather_cube(weather_geometry_tex, normalize(dir)));
+}
+
+fn weather_cloud_layers_land_segment_cloud(
+    dir: vec3<f32>,
+    altitude_km: f32,
+    segment_start: vec3<f32>,
+    segment_end: vec3<f32>,
+    radius_km: f32,
+    angular_pixel_footprint: f32,
+    mass: vec4<f32>,
+    geometry: vec4<f32>,
+) -> WeatherCloudSample {
     // Integrate thin profiles on every surface, not only above a land mask.
     // Formation mass and geometry alone own cloud shape. Both renderers use this.
-    var sample = weather_cloud_sample_mass(normalize(dir), altitude_km, angular_pixel_footprint, mass);
+    var sample = weather_cloud_sample_cloud(normalize(dir), altitude_km, angular_pixel_footprint, mass, geometry);
     let g = sample.geometry;
     let detached_base = mix(g.r, mix(g.r, g.g, 0.16), smooth_step(0.7, 1.8, g.g - g.r));
     let deep_base = mix(g.r, g.g, 0.28);

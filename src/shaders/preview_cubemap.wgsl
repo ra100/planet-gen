@@ -788,7 +788,7 @@ fn ray_march_clouds(
     var detail_noise = CloudDetailNoise(vec3<f32>(0.0), 1.0, 0.0, vec3<f32>(0.0));
     // Synthesized column mass, evaluated once per ray like the detail noise.
     let synthesis = cs_strength() > 0.0;
-    var synthesized_mass = vec4<f32>(0.0);
+    var synthesized = CsCloud(vec4<f32>(0.0), vec4<f32>(0.0));
 
     for (var i = 0u; i < CLOUD_RAY_SAMPLES; i++) {
         let segment_start = vec3<f32>(ndc, z_start - f32(i) * step_len);
@@ -803,16 +803,20 @@ fn ray_march_clouds(
             if (i == 0u) { detail_noise = cloud_detail_noise(world, angular_pixel_footprint); }
             if (!synthesis) { lookup = normalize(world + detail_noise.warp * detail_amount); }
         }
-        var mass: vec4<f32>;
+        var sample: WeatherCloudSample;
         if (synthesis) {
-            if (i == 0u) { synthesized_mass = cloud_synthesis_mass(world, angular_pixel_footprint); }
-            mass = synthesized_mass;
+            // Synthesized clouds carry their own heights: decks, towers, shields.
+            if (i == 0u) { synthesized = cloud_synthesis_cloud(world, angular_pixel_footprint); }
+            sample = weather_cloud_layers_land_segment_cloud(
+                lookup, altitude_km, segment_start, segment_end, radius_km, angular_pixel_footprint,
+                synthesized.mass, synthesized.geometry,
+            );
         } else {
-            mass = sample_weather_mass(normalize(normalize(lookup)));
+            sample = weather_cloud_layers_land_segment_mass(
+                lookup, altitude_km, segment_start, segment_end, radius_km, angular_pixel_footprint,
+                sample_weather_mass(normalize(normalize(lookup))),
+            );
         }
-        var sample = weather_cloud_layers_land_segment_mass(
-            lookup, altitude_km, segment_start, segment_end, radius_km, angular_pixel_footprint, mass,
-        );
         if (detail_amount > 0.0) {
             let detail = cloud_detail_multipliers(detail_noise, sample.mass);
             sample.layers.low *= detail.x;
@@ -1795,13 +1799,15 @@ fn shade_planet(in: VertexOutput) -> vec4<f32> {
                 debug_color = vec3<f32>(0.3, 0.3, 0.3);
             }
             case 20u: {
-                let column = cloud_column_sample_mass(rotated, angular_pixel_footprint,
-                    cloud_synthesis_mass(rotated, angular_pixel_footprint), cs_strength() <= 0.0);
+                let cloud = cloud_synthesis_cloud(rotated, angular_pixel_footprint);
+                let column = cloud_column_sample_cloud(rotated, angular_pixel_footprint,
+                    cloud.mass, cloud.geometry, cs_strength() <= 0.0);
                 debug_color = vec3<f32>(1.0 - exp(-column.y));
             }
             case 21u: {
-                let column = cloud_column_sample_mass(rotated, angular_pixel_footprint,
-                    cloud_synthesis_mass(rotated, angular_pixel_footprint), cs_strength() <= 0.0);
+                let cloud = cloud_synthesis_cloud(rotated, angular_pixel_footprint);
+                let column = cloud_column_sample_cloud(rotated, angular_pixel_footprint,
+                    cloud.mass, cloud.geometry, cs_strength() <= 0.0);
                 let altitude = select(0.0, column.base_km + 0.5 * column.thickness_km, column.y > 0.0);
                 debug_color = vec3<f32>(clamp(altitude / 20.0, 0.0, 1.0));
             }
