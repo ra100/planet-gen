@@ -3814,7 +3814,7 @@ pub fn run_export_with_timings_and_checkpoints(
         .map_err(|e| format!("Failed to create output dir: {e}"))?;
 
     let effective_ocean = derived.ocean_fraction * (1.0 - water_loss);
-    let ocean_level = -0.5 + 1.7 * effective_ocean; // match app.rs formula
+    let ocean_level = crate::scene::sea_level(derived, water_loss);
 
     // Compute total steps for progress based on selected layers
     let layers = &config.layers;
