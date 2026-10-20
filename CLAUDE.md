@@ -30,6 +30,7 @@ src/
     cloud_density.wgsl   — Shared preview/export density definitions
     cloud_synthesis.wgsl — Shared weather systems, cloud regimes and resolution-free cloud detail
     cloud_export.wgsl    — Direct optical-depth and reconstruction-channel export
+    rocky.wgsl           — Stagnant-lid crust (craters, basins, maria, volcanoes, dichotomy), regolith albedo, frost, photometry
 docs/
   research/       — Research documents (planetary science, GPU techniques)
   brainstorms/    — Requirements documents
@@ -62,11 +63,14 @@ Cloud synthesis (`cloud_synthesis` strength, Clouds > Structure) rebuilds each c
 - Atmosphere strength from escape velocity + greenhouse feedback
 - MMSN isolation mass for plausibility warnings
 - Bimodal elevation (continental +0.3, oceanic -0.4)
+- Cosmic shoreline atmospheric escape; no liquid water below the triple point (6.1 mbar)
+- Stagnant-lid worlds: Pike crater morphometry, Neukum chronology, basins, maria, shields (`rocky.wgsl`)
 
 ### User Parameters
 
 **Physics:** star distance (AU), mass (M_Earth), metallicity, axial tilt, rotation period, seed
 **Visual overrides:** continental scale, water loss
+**Surface history (AUTO = physics):** pressure, plate activity, crater age, maria, volcanoes, dust; dichotomy slider
 
 ## Workflow
 

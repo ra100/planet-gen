@@ -415,3 +415,19 @@ Requirements: [docs/brainstorms/2026-10-18-cloud-synthesis-requirements.md](docs
 | 15.9 | Tropical cyclone look and Storms controls ([plan](docs/plans/2026-10-20-001-feat-tropical-cyclone-look-plan.md)): Storm count / size drive the synthesized cyclones, new Storms > Intensity walks the Dvorak sequence (curved band, CDO, ragged then clear eye); tropical templates override fronts instead of being averaged; eye wall falls off onto broken low cloud; noise wound into each storm before the jet flow | Seed 42 before/after at zoom 5/14/40, intensity and size sweeps; `storm_controls_set_count_size_and_intensity`, `cool_tropics_get_fewer_of_the_requested_storms` | 15.8 | cc:完了 [1d508f2] |
 
 Results, the defects fixed after the handoff and the iteration tooling are in `docs/plans/2026-10-18-001-feat-cloud-synthesis-plan.md`.
+
+---
+
+## Phase 16: Rocky Worlds
+
+MOON, MERCURY and MARS rendered as one Earth desert (plate continents, camouflage blotches, blue lakes and limb, no craters, disk albedo ~0.28 and red/blue ~1.3 for all three) with atmospheres they cannot keep. A stagnant-lid crust is now built as a stratigraphic history (crust, dichotomy, basins, volcanic resurfacing, dated cratering, degradation), the atmosphere follows escape physics and the look follows the units. Earth renders and terrain stay identical.
+
+Requirements: [docs/brainstorms/2026-10-20-rocky-worlds-requirements.md](docs/brainstorms/2026-10-20-rocky-worlds-requirements.md), plan: [docs/plans/2026-10-20-002-feat-rocky-worlds-plan.md](docs/plans/2026-10-20-002-feat-rocky-worlds-plan.md)
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 16.1 | `scene.rs` shared settings-to-pipeline path, `presets.rs`, `planet_capture` tool (globe, full phase, terminator, close-up, export albedo, stats) | Before captures of every preset from main | - | cc:完了 [a27ef7d] |
+| 16.2 | Physics: cosmic shoreline retention (Zahnle & Catling 2017), triple-point water to polar ice, stagnant lid, crater age, erosion, maria vs shields by mass, dust, airless; `SurfaceOverrides` | Mars 0.006 bar and no liquid water, Moon and Mercury airless; `earth_is_unchanged_by_the_rocky_surface_model`, shoreline and history tests | 16.1 | cc:完了 [4e73d19] |
+| 16.3 | Terrain `rocky.wgsl`: Pike morphometry with 1/g transition, Neukum chronology with saturation, per-crater age ranks buried by provinces, multi-ring basin catalogue (younger excavate older, lowlands bury), flooded basins and Procellarum plains, dichotomy, volcanic rise with shields and rift; plate relief fades with the lid | `stagnant_lid_terrain_records_impacts_tiles_match_and_earth_is_unchanged`; Mars relief -10.2 / +19.3 km (MOLA -8.2 / +21.2), Moon p01 -7.7 km | 16.2 | cc:完了 [c0bc5b2] |
+| 16.4 | Look: lunar palette with maria, fresh craters and rays, Mercury LRM and bright plains, Mars dust over basalt, frost caps with spiral troughs, lunar-Lambert and opposition surge, black airless shadows, relief cast shadows with phase-aware hiding, delta-M Mars dust haze, no clouds in thin air; export albedo and roughness parity | Moon albedo 0.14, red/blue 1.24; Mars red/blue 3.29; Mercury 0.13; rocky case in `tile_local_gpu_maps_match_monolithic_output`; Earth captures identical | 16.3 | cc:完了 [8ccd281] |
+| 16.5 | Controls: TERRAIN > surface history (Plate activity, Crater age, Maria, Volcanoes with AUTO, Dichotomy), CLIMATE > Pressure (log) and Dust, inspector pressure and crater age, GEOLOGY view, planet-file fields, MARS preset dichotomy | `surface_overrides_roundtrip`; before/after images in project files `rocky-worlds/` | 16.2 | cc:完了 [c0bc5b2] |
