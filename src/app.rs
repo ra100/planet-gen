@@ -9,8 +9,10 @@ use crate::export::{self, ExportConfig, ExportHandle, ExportLayers, ExportProgre
 use crate::gpu::GpuContext;
 use crate::planet::{DerivedProperties, PlanetParams};
 use crate::planet_file::{self, PlanetFile};
-use crate::plates::{PlateGenParams, generate_plates};
+use crate::plates::generate_plates;
+use crate::presets;
 use crate::preview::{PreviewRenderer, PreviewUniforms};
+use crate::scene;
 use crate::terrain_compute::{
     DynamicsTextures, ErosionClimate, ErosionPipeline, TerrainComputePipeline,
     TerrainGenerationParams, WindFieldPipeline, earth_relative_rotation_rate,
@@ -157,51 +159,6 @@ pub struct PlanetGenApp {
     /// Canvas rect captured during the current frame's CentralPanel layout;
     /// HUD chips anchor inside it, not inside the whole window.
     hud_rect: egui::Rect,
-}
-
-#[allow(clippy::too_many_arguments)]
-fn derive_terrain_params(
-    params: &PlanetParams,
-    derived: &DerivedProperties,
-    continental_scale: f32,
-    mountain_scale: f32,
-    boundary_width: f32,
-    warp_strength: f32,
-    detail_scale: f32,
-    age_override: Option<f32>,
-    num_plates_override: u32,
-    num_continents: u32,
-    continent_size_variety: f32,
-    geologic_time_myr: f32,
-) -> TerrainGenerationParams {
-    let dist_factor = (params.star_distance_au.ln() / 3.0_f32.ln()).clamp(0.0, 1.0);
-    let beta = (1.47 + 0.91 * dist_factor + 0.3 * params.metallicity).clamp(1.2, 3.0);
-    let gain = 2.0_f32.powf(-(beta - 1.0) / 2.0);
-    let amplitude = 0.6 + 0.6 * params.mass_earth.powf(0.3).min(2.0);
-    let frequency = (1.0 + 0.5 * params.mass_earth.powf(0.2)) * continental_scale;
-    let octaves = (8.0 + 4.0 * (params.axial_tilt_deg / 90.0) * derived.tectonics_factor) as u32;
-    let lacunarity = 1.9 + 0.2 * (24.0 / params.rotation_period_h).clamp(0.5, 2.0);
-
-    TerrainGenerationParams {
-        seed: params.seed,
-        amplitude,
-        frequency,
-        octaves,
-        gain,
-        lacunarity,
-        mountain_scale,
-        boundary_width,
-        warp_strength,
-        detail_scale,
-        surface_gravity: derived.surface_gravity,
-        tectonics_factor: derived.tectonics_factor,
-        surface_age: age_override.unwrap_or(derived.surface_age),
-        continental_scale,
-        num_plates_override,
-        num_continents,
-        continent_size_variety,
-        geologic_time_myr,
-    }
 }
 
 impl PlanetGenApp {
@@ -356,94 +313,15 @@ impl PlanetGenApp {
     }
 
     fn build_uniforms(&self) -> PreviewUniforms {
-        let ocean_level = self.ocean_level();
-
         let weather_snapshot = self
             .weather
             .as_ref()
             .and_then(WeatherLifecycle::front_snapshot);
-
-        PreviewUniforms {
-            rotation: [
-                [self.rot[0][0], self.rot[0][1], self.rot[0][2], 0.0],
-                [self.rot[1][0], self.rot[1][1], self.rot[1][2], 0.0],
-                [self.rot[2][0], self.rot[2][1], self.rot[2][2], 0.0],
-                [0.0, 0.0, 0.0, 1.0],
-            ],
-            light_dir: [
-                self.light_azimuth.cos() * self.light_elevation.cos(),
-                self.light_elevation.sin(),
-                self.light_azimuth.sin() * self.light_elevation.cos(),
-            ],
-            ocean_level,
-            base_temp_c: self.derived.base_temperature_c,
-            // Climate moisture: physics ocean_fraction scaled by user's moisture slider.
-            // water_loss controls sea level only; climate_moisture controls atmosphere wetness.
-            ocean_fraction: self.derived.ocean_fraction * self.climate_moisture,
-            axial_tilt_rad: self.params.axial_tilt_deg.to_radians(),
-            view_mode: self.view_mode,
-            season: self.season,
-            atmosphere_density: if self.show_atmosphere {
-                self.derived.surface_pressure_bar
-            } else {
-                0.0
-            },
-            atmosphere_height: self.derived.atmosphere_shell_height(),
-            height_scale: self.height_scale,
-            zoom: self.zoom,
-            pan_x: self.pan[0],
-            pan_y: self.pan[1],
-            cloud_coverage: weather_snapshot
-                .map(|snapshot| snapshot.coverage)
-                .unwrap_or(self.cloud_coverage),
-            cloud_seed: weather_snapshot
-                .map(|snapshot| snapshot.seed)
-                .unwrap_or(self.cloud_seed),
-            night_lights: self.night_lights,
-            star_color_temp: self.star_color_temp,
-            city_light_hue: self.city_light_hue,
-            show_ao: if self.show_ao { 1.0 } else { 0.0 },
-            show_water: if self.show_water { 1.0 } else { 0.0 },
-            show_ice: if self.show_ice { 1.0 } else { 0.0 },
-            show_biomes: if self.show_biomes { 1.0 } else { 0.0 },
-            show_clouds: if self.show_clouds { 1.0 } else { 0.0 },
-            show_atmosphere_layer: if self.show_atmosphere { 1.0 } else { 0.0 },
-            show_cities: if self.show_cities { 1.0 } else { 0.0 },
-            cloud_opacity: self.cloud_opacity,
-            cloud_advection: if self.show_wind_effects { 1.0 } else { 0.0 },
-            rotation_rate: self.derived.rotation_rate_rad_s / (std::f32::consts::TAU / 86400.0),
-            atm_pressure: self.derived.surface_pressure_bar,
-            cloud_detail: self.cloud_detail,
-            cloud_thin_lift: self.cloud_thin_lift,
-            _pad6: [0.0; 3],
-            lava_glow: self.lava_glow,
-            ring_inner: self.ring_inner,
-            ring_outer: self.ring_outer,
-            ring_tilt: self.ring_tilt.to_radians(),
-            ring_opacity: self.ring_opacity,
-            planet_radius_km: weather_snapshot
-                .map(|snapshot| snapshot.radius_km)
-                .unwrap_or(self.derived.radius_km),
-            show_cloud_shadows: if self.show_cloud_shadows { 1.0 } else { 0.0 },
-            surface_seed: self.params.seed,
-        }
+        scene::preview_uniforms(&self.collect_settings(), &self.derived, weather_snapshot)
     }
 
     fn terrain_params(&self) -> TerrainGenerationParams {
-        derive_terrain_params(
-            &self.params,
-            &self.derived,
-            self.continental_scale,
-            self.mountain_scale,
-            self.boundary_width,
-            self.warp_strength,
-            self.detail_scale,
-            self.age_override,
-            self.num_plates_override,
-            self.num_continents,
-            self.continent_size_variety,
-            self.geologic_time_myr,
-        )
+        scene::terrain_params(&self.collect_settings(), &self.derived)
     }
 
     fn regenerate_terrain(&mut self) {
@@ -454,16 +332,10 @@ impl PlanetGenApp {
         use std::time::Instant;
         let t0 = Instant::now();
 
-        let plates = generate_plates(&PlateGenParams {
-            seed: self.params.seed,
-            mass_earth: self.params.mass_earth,
-            ocean_fraction: self.derived.ocean_fraction * (1.0 - self.water_loss),
-            tectonics_factor: self.derived.tectonics_factor,
-            continental_scale: self.continental_scale,
-            num_plates_override: self.num_plates_override,
-            num_continents: self.num_continents,
-            continent_size_variety: self.continent_size_variety,
-        });
+        let plates = generate_plates(&scene::plate_params(
+            &self.collect_settings(),
+            &self.derived,
+        ));
         let plates = crate::tectonic_history::plate_records(
             &plates,
             self.params.seed,
@@ -491,8 +363,7 @@ impl PlanetGenApp {
             terrain_params.continental_scale,
         );
 
-        let effective_ocean = self.derived.ocean_fraction * (1.0 - self.water_loss);
-        let ocean_level = -0.5 + 1.7 * effective_ocean;
+        let ocean_level = self.ocean_level();
 
         self.preview_renderer.upload_plates(
             &self.gpu,
@@ -522,13 +393,8 @@ impl PlanetGenApp {
 
         // Schedule progressive erosion (skipped when erosion layer is disabled)
         if self.show_erosion {
-            let adaptive_iters = match self.preview_resolution {
-                r if r <= 256 => (self.erosion_iterations as f32 * 0.2) as u32,
-                r if r <= 512 => (self.erosion_iterations as f32 * 0.4) as u32,
-                r if r <= 768 => (self.erosion_iterations as f32 * 0.6) as u32,
-                _ => self.erosion_iterations,
-            }
-            .max(1);
+            let adaptive_iters =
+                scene::preview_erosion_iterations(self.preview_resolution, self.erosion_iterations);
             self.erosion_terrain = Some(terrain);
             self.erosion_remaining = adaptive_iters;
             self.erosion_ocean_level = ocean_level;
@@ -719,29 +585,12 @@ impl PlanetGenApp {
     }
 
     fn weather_snapshot(&self, resolution: u32, ocean_level: f32) -> WeatherSnapshot {
-        WeatherSnapshot {
-            face: 0,
+        scene::weather_snapshot(
+            &self.collect_settings(),
+            &self.derived,
             resolution,
-            seed: self.cloud_seed,
-            surface_seed: self.params.seed,
-            ocean_fraction: self.derived.ocean_fraction * self.climate_moisture,
-            storm_count: self.storm_count,
-            coverage: self.cloud_coverage,
-            moisture: self.climate_moisture,
-            surface_pressure_bar: self.derived.surface_pressure_bar,
-            base_temp_c: self.derived.base_temperature_c,
             ocean_level,
-            axial_tilt_rad: self.params.axial_tilt_deg.to_radians(),
-            season: self.season,
-            storm_size: self.storm_size,
-            radius_km: self.derived.radius_km,
-            rotation_rate_rad_s: self.derived.rotation_rate_rad_s,
-            wind_scale: if self.show_wind_effects {
-                self.wind_scale
-            } else {
-                0.0
-            },
-        }
+        )
     }
 
     fn invalidate_weather(&mut self) {
@@ -796,7 +645,7 @@ impl PlanetGenApp {
     }
 
     fn ocean_level(&self) -> f32 {
-        -0.5 + 1.7 * self.derived.ocean_fraction * (1.0 - self.water_loss)
+        scene::sea_level(&self.derived, self.water_loss)
     }
 
     /// Folder the export writes `<planet_name>/` into.
@@ -1240,10 +1089,6 @@ const EXPORT_DIR_KEY: &str = "export_dir";
 
 const TABS: [&str; 5] = ["PLANET", "TERRAIN", "CLIMATE", "LOOK", "RENDER"];
 
-const PRESETS: [&str; 7] = [
-    "EARTH", "MARS", "OCEAN", "SNOWBALL", "HOTHOUSE", "VOLCANIC", "RINGED",
-];
-
 impl PlanetGenApp {
     fn export_layer_flags(&self) -> [bool; EXPORT_LAYERS.len()] {
         [
@@ -1258,116 +1103,10 @@ impl PlanetGenApp {
         ]
     }
 
-    /// Reset visual overrides to factory defaults before applying a preset.
-    fn preset_base(&mut self) {
-        self.params = PlanetParams::default();
-        self.continental_scale = 1.0;
-        self.water_loss = 0.5;
-        self.climate_moisture = 1.0;
-        self.season = 0.5;
-        self.erosion_iterations = 25;
-        self.height_scale = 3.0;
-        self.mountain_scale = 1.0;
-        self.boundary_width = 0.10;
-        self.warp_strength = 1.0;
-        self.detail_scale = 1.0;
-        self.age_override = None;
-        self.num_plates_override = 0;
-        self.num_continents = 4;
-        self.continent_size_variety = 0.35;
-        self.geologic_time_myr = 0.0;
-        self.cloud_coverage = 0.5;
-        self.cloud_opacity = 1.0;
-        self.cloud_detail = 1.0;
-        self.cloud_thin_lift = 0.0;
-        self.cloud_synthesis = 1.0;
-        self.wind_scale = 1.0;
-        self.lava_glow = 0.0;
-        self.ring_inner = 0.0;
-        self.ring_outer = 0.0;
-        self.ring_tilt = 15.0;
-        self.ring_opacity = 0.7;
-        self.storm_count = 2;
-        self.storm_size = 1.0;
-        self.storm_intensity = DEFAULT_STORM_INTENSITY;
-        self.night_lights = 0.0;
-        self.star_color_temp = 0.5;
-        self.city_light_hue = 0.0;
-    }
-
-    fn apply_preset(&mut self, idx: usize) {
-        self.preset_base();
-        match idx {
-            1 => {
-                // Mars analog: small, cold, dry, dust-rough.
-                self.params.star_distance_au = 1.52;
-                self.params.mass_earth = 0.107;
-                self.params.axial_tilt_deg = 25.2;
-                self.params.rotation_period_h = 24.6;
-                self.water_loss = 0.85;
-                self.climate_moisture = 0.15;
-                self.cloud_coverage = 0.15;
-                self.erosion_iterations = 5;
-                self.detail_scale = 1.3;
-                self.mountain_scale = 1.2;
-                self.height_scale = 4.0;
-            }
-            2 => {
-                // Ocean world: no water loss, heavy cloud, few landmasses.
-                self.water_loss = 0.0;
-                self.cloud_coverage = 0.65;
-                self.num_continents = 2;
-                self.continent_size_variety = 0.25;
-                self.erosion_iterations = 30;
-            }
-            3 => {
-                // Snowball: far, tilted-cold axis, thin moisture.
-                self.params.star_distance_au = 2.7;
-                self.params.mass_earth = 0.9;
-                self.params.axial_tilt_deg = 8.0;
-                self.water_loss = 0.25;
-                self.climate_moisture = 0.35;
-                self.cloud_coverage = 0.45;
-                self.erosion_iterations = 10;
-                self.season = 0.15;
-            }
-            4 => {
-                // Hothouse: close-in, heavy atmosphere, overcast.
-                self.params.star_distance_au = 0.72;
-                self.params.mass_earth = 1.6;
-                self.climate_moisture = 0.95;
-                self.cloud_coverage = 0.85;
-                self.water_loss = 0.35;
-                self.erosion_iterations = 40;
-                self.season = 0.85;
-            }
-            5 => {
-                // Volcanic: tectonically violent, lava emission, sparse water.
-                self.params.mass_earth = 1.3;
-                self.lava_glow = 0.85;
-                self.mountain_scale = 2.2;
-                self.num_plates_override = 26;
-                self.detail_scale = 1.6;
-                self.water_loss = 0.65;
-                self.cloud_coverage = 0.3;
-                self.erosion_iterations = 8;
-            }
-            6 => {
-                // Ringed world: massive planet with prominent ring system.
-                self.params.star_distance_au = 1.05;
-                self.params.mass_earth = 1.6;
-                self.ring_inner = 1.35;
-                self.ring_outer = 2.35;
-                self.ring_tilt = 18.0;
-                self.ring_opacity = 0.75;
-                self.cloud_coverage = 0.6;
-            }
-            _ => {} // 0 = Earth analog: factory defaults.
-        }
-        self.cloud_seed = self.params.seed.wrapping_add(1000);
-        self.planet_name = format!("planet_{}", self.params.seed);
-        self.update_derived();
-        self.needs_terrain = true;
+    fn apply_preset(&mut self, name: &str) {
+        let mut file = self.collect_settings();
+        presets::apply(&mut file, name);
+        self.apply_settings(&file);
     }
 
     // ---- Save / load ------------------------------------------------------
@@ -1954,10 +1693,13 @@ impl PlanetGenApp {
         });
 
         widgets::section_header(ui, "presets");
-        let preset_opts: Vec<(usize, &'static str)> =
-            PRESETS.iter().enumerate().map(|(i, p)| (i, *p)).collect();
+        let preset_opts: Vec<(usize, &'static str)> = presets::PRESETS
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (i, *p))
+            .collect();
         if let Some(idx) = widgets::chip_bar(ui, &preset_opts, usize::MAX) {
-            self.apply_preset(idx);
+            self.apply_preset(presets::PRESETS[idx]);
         }
         ui.add_space(2.0);
         widgets::dim(
@@ -3324,6 +3066,7 @@ fn rand_seed() -> u32 {
 mod tests {
     use super::*;
     use crate::export::{ExportConfig, ExportLayers, run_export};
+    use crate::scene::derive_terrain_params;
 
     #[test]
     fn atomic_write_replaces_file_and_leaves_no_temp() {
