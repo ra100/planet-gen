@@ -91,6 +91,47 @@ pub fn slider_row(
     response.changed()
 }
 
+/// Slider over a physics-derived value: shows the model's `auto` value while
+/// unset, dragging overrides it, and the AUTO box or a double-click hands
+/// control back to the model. Returns changed.
+pub fn override_row(
+    ui: &mut egui::Ui,
+    value: &mut Option<f32>,
+    auto: f32,
+    range: std::ops::RangeInclusive<f32>,
+    p: Param,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        let mut is_auto = value.is_none();
+        if ui
+            .checkbox(
+                &mut is_auto,
+                RichText::new("AUTO").small().color(theme::TEXT_DIM),
+            )
+            .on_hover_text("Use the physics model's value")
+            .changed()
+        {
+            *value = if is_auto { None } else { Some(auto) };
+            changed = true;
+        }
+        let mut shown = value.unwrap_or(auto).clamp(*range.start(), *range.end());
+        let slider = egui::Slider::new(&mut shown, range)
+            .logarithmic(p.log)
+            .text(param_label(p.label, value.is_some()))
+            .custom_formatter(move |v, _| format!("{:.*}{}", p.digits, v, p.suffix));
+        let response = ui.add(slider).on_hover_text(p.tip);
+        if response.double_clicked() && value.is_some() {
+            *value = None;
+            changed = true;
+        } else if response.changed() {
+            *value = Some(shown);
+            changed = true;
+        }
+    });
+    changed
+}
+
 /// Integer slider variant. Returns changed.
 pub fn int_row(
     ui: &mut egui::Ui,

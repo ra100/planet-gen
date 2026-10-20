@@ -64,6 +64,22 @@ pub struct PlanetFile {
     pub continent_size_variety: f32,
     /// Simulated plate history in Myr; files without it load as 0.
     pub geologic_time_myr: f32,
+    // Atmosphere and surface history overrides (None = physics model);
+    // files without them load as the physics model.
+    /// Surface pressure in bar.
+    pub pressure_override: Option<f32>,
+    /// Plate activity (0 = stagnant lid, 1 = vigorous plates).
+    pub tectonics_override: Option<f32>,
+    /// Surface age recorded by impact craters, in Gyr.
+    pub crater_age_override: Option<f32>,
+    /// Volcanic plains flooding impact basins (0-1).
+    pub mare_override: Option<f32>,
+    /// Shield volcanoes and volcanic rises (0-1).
+    pub volcanism_override: Option<f32>,
+    /// Hemispheric crustal dichotomy (0 = none).
+    pub dichotomy: f32,
+    /// Oxidized surface dust (0-1).
+    pub dust_override: Option<f32>,
     // Clouds / weather
     pub cloud_coverage: f32,
     pub cloud_seed: u32,
@@ -141,6 +157,13 @@ impl Default for PlanetFile {
             num_continents: 4,
             continent_size_variety: 0.35,
             geologic_time_myr: 0.0,
+            pressure_override: None,
+            tectonics_override: None,
+            crater_age_override: None,
+            mare_override: None,
+            volcanism_override: None,
+            dichotomy: 0.0,
+            dust_override: None,
             cloud_coverage: 0.5,
             cloud_seed: params.seed.wrapping_add(1000),
             cloud_opacity: 1.0,
@@ -224,6 +247,19 @@ pub fn checked_load(json: &str) -> Result<PlanetFile, String> {
     }
     finite("continent_size_variety", file.continent_size_variety)?;
     finite("geologic_time_myr", file.geologic_time_myr)?;
+    for (name, value) in [
+        ("pressure_override", file.pressure_override),
+        ("tectonics_override", file.tectonics_override),
+        ("crater_age_override", file.crater_age_override),
+        ("mare_override", file.mare_override),
+        ("volcanism_override", file.volcanism_override),
+        ("dust_override", file.dust_override),
+    ] {
+        if let Some(value) = value {
+            finite(name, value)?;
+        }
+    }
+    finite("dichotomy", file.dichotomy)?;
     finite("cloud_coverage", file.cloud_coverage)?;
     finite("cloud_opacity", file.cloud_opacity)?;
     finite("cloud_detail", file.cloud_detail)?;
@@ -454,6 +490,28 @@ mod tests {
         assert_eq!(file.zoom, 1.0);
         assert_eq!(file.pan, [0.0, 0.0]);
         assert_eq!(file.geologic_time_myr, 0.0);
+        // Files from before the rocky-surface model keep the physics model.
+        assert_eq!(file.pressure_override, None);
+        assert_eq!(file.crater_age_override, None);
+        assert_eq!(file.dichotomy, 0.0);
+    }
+
+    #[test]
+    fn surface_overrides_roundtrip() {
+        let file = PlanetFile {
+            pressure_override: Some(0.006),
+            tectonics_override: Some(0.1),
+            crater_age_override: Some(3.9),
+            mare_override: Some(0.4),
+            volcanism_override: Some(1.0),
+            dichotomy: 0.8,
+            dust_override: Some(0.0),
+            ..Default::default()
+        };
+        let json = serde_json::to_string_pretty(&file).unwrap();
+        assert_eq!(checked_load(&json).unwrap(), file);
+        let bad = json.replace("\"dichotomy\": 0.8", "\"dichotomy\": 1e999");
+        assert!(checked_load(&bad).is_err());
     }
 
     #[test]

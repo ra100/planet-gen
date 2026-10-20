@@ -184,6 +184,7 @@ fn main() {
                 show_cloud_shadows: 1.0,
                 surface_seed: 42,
                 cloud_thin_lift: 0.0,
+                rocky: Default::default(),
                 _pad6: [0.0; 3],
             };
 

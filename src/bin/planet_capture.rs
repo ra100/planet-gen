@@ -3,13 +3,13 @@
 //! reference comparisons.
 //!
 //! cargo run --release --bin planet_capture -- OUT_DIR [--preset NAME]... [--file PLANET.json]...
-//!     [--size 768] [--res 768] [--seed N]
+//!     [--size 768] [--res 768] [--seed N] [--set FIELD=JSON]... [--terrain-only]
 //!
 //! Writes per planet: `NAME-globe.png` (the file's own light), `NAME-full.png`
 //! (zero phase, four longitudes), `NAME-terminator.png` (low sun),
 //! `NAME-closeup.png` (zoom 4 at low sun), `NAME-albedo.png` (unlit surface
-//! albedo), `NAME-height.png`, and `NAME-stats.json` (hypsometry in km and
-//! the disk-mean linear albedo).
+//! albedo), `NAME-height.png`, `NAME-heightmap.png` (equirectangular terrain)
+//! and `NAME-stats.json` (hypsometry in km and the disk-mean linear albedo).
 
 use planet_gen::{
     cloud_synthesis::weather_systems_with_storms,
@@ -49,6 +49,35 @@ fn cube_height(terrain: &TectonicTerrain, [x, y, z]: [f32; 3]) -> f32 {
     let column = (((s + 1.0) * 0.5) * (res - 1) as f32).round() as usize;
     let row = (((t + 1.0) * 0.5) * (res - 1) as f32).round() as usize;
     terrain.faces[face][row.min(res - 1) * res + column.min(res - 1)]
+}
+
+/// Equirectangular height map (2:1, latitude up), stretched between `low`
+/// and `high` terrain units.
+fn save_height_map(path: &str, terrain: &TectonicTerrain, low: f32, high: f32) {
+    let (width, height) = (1024usize, 512usize);
+    let mut pixels = vec![0u8; width * height];
+    for row in 0..height {
+        let latitude =
+            std::f32::consts::FRAC_PI_2 - (row as f32 + 0.5) / height as f32 * std::f32::consts::PI;
+        for column in 0..width {
+            let longitude = (column as f32 + 0.5) / width as f32 * std::f32::consts::TAU;
+            let direction = [
+                latitude.cos() * longitude.cos(),
+                latitude.sin(),
+                latitude.cos() * longitude.sin(),
+            ];
+            let value = (cube_height(terrain, direction) - low) / (high - low).max(1e-6);
+            pixels[row * width + column] = (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+        }
+    }
+    image::save_buffer(
+        path,
+        &pixels,
+        width as u32,
+        height as u32,
+        image::ColorType::L8,
+    )
+    .unwrap();
 }
 
 fn rotation_y(longitude_deg: f32) -> [[f32; 3]; 3] {
@@ -109,7 +138,15 @@ fn percentile(sorted: &[f32], p: f64) -> f32 {
     sorted[((sorted.len() - 1) as f64 * p).round() as usize]
 }
 
-fn capture(gpu: &GpuContext, out: &str, name: &str, file: &PlanetFile, size: u32, res: u32) {
+fn capture(
+    gpu: &GpuContext,
+    out: &str,
+    name: &str,
+    file: &PlanetFile,
+    size: u32,
+    res: u32,
+    terrain_only: bool,
+) {
     let derived = scene::derived(file);
     let ocean_level = scene::sea_level(&derived, file.water_loss);
     let plates = generate_plates(&scene::plate_params(file, &derived));
@@ -118,25 +155,7 @@ fn capture(gpu: &GpuContext, out: &str, name: &str, file: &PlanetFile, size: u32
     let tp = scene::terrain_params(file, &derived);
     let compute = TerrainComputePipeline::new(gpu);
     let started = std::time::Instant::now();
-    let mut terrain = compute.generate(
-        gpu,
-        &plates,
-        res,
-        tp.seed,
-        tp.amplitude,
-        tp.frequency,
-        tp.octaves,
-        tp.gain,
-        tp.lacunarity,
-        tp.mountain_scale,
-        tp.boundary_width,
-        tp.warp_strength,
-        tp.detail_scale,
-        tp.surface_gravity,
-        tp.tectonics_factor,
-        tp.surface_age,
-        tp.continental_scale,
-    );
+    let mut terrain = compute.generate_params(gpu, &plates, res, &tp);
     println!("{name}: terrain {:.1}s", started.elapsed().as_secs_f32());
     if file.show_erosion {
         let iterations = scene::preview_erosion_iterations(res, file.erosion_iterations);
@@ -155,6 +174,26 @@ fn capture(gpu: &GpuContext, out: &str, name: &str, file: &PlanetFile, size: u32
                 },
             )
             .expect("erosion");
+    }
+    if terrain_only {
+        let mut heights: Vec<f32> = terrain.faces.iter().flatten().map(|h| h * 5.0).collect();
+        heights.sort_by(f32::total_cmp);
+        save_height_map(
+            &format!("{out}/{name}-heightmap.png"),
+            &terrain,
+            percentile(&heights, 0.002) / 5.0,
+            percentile(&heights, 0.998) / 5.0,
+        );
+        println!(
+            "{name}: height km p01 {:.2} p10 {:.2} p50 {:.2} p90 {:.2} p99 {:.2} max {:.2}",
+            percentile(&heights, 0.01),
+            percentile(&heights, 0.10),
+            percentile(&heights, 0.50),
+            percentile(&heights, 0.90),
+            percentile(&heights, 0.99),
+            heights[heights.len() - 1],
+        );
+        return;
     }
 
     let mut renderer = PreviewRenderer::new(gpu);
@@ -257,6 +296,14 @@ fn capture(gpu: &GpuContext, out: &str, name: &str, file: &PlanetFile, size: u32
         front,
     ));
     save(&path("albedo"), size, &albedo);
+    let geology = render(&with_view(
+        &PreviewUniforms {
+            view_mode: 22,
+            ..base
+        },
+        front,
+    ));
+    save(&path("geology"), size, &geology);
     save(
         &path("height"),
         size,
@@ -289,8 +336,33 @@ fn capture(gpu: &GpuContext, out: &str, name: &str, file: &PlanetFile, size: u32
         }
     }
     let mean = sum.map(|v| v / count.max(1.0));
+    // Geology view: maria are the blue-dominant unit, fresh craters white.
+    let (mut mare, mut fresh, mut disk_px) = (0.0f64, 0.0f64, 0.0f64);
+    for y in 0..size as usize {
+        for x in 0..size as usize {
+            let (dx, dy) = (x as f64 + 0.5 - half, y as f64 + 0.5 - half);
+            if dx * dx + dy * dy > (disk * 0.8).powi(2) {
+                continue;
+            }
+            let i = (y * size as usize + x) * 4;
+            let [r, g, b] = [geology[i], geology[i + 1], geology[i + 2]].map(|c| c as f64);
+            disk_px += 1.0;
+            if b > r + 8.0 && b > g {
+                mare += 1.0;
+            }
+            if r > 200.0 && g > 200.0 && b > 200.0 {
+                fresh += 1.0;
+            }
+        }
+    }
     let mut heights: Vec<f32> = terrain.faces.iter().flatten().map(|h| h * 5.0).collect();
     heights.sort_by(f32::total_cmp);
+    save_height_map(
+        &format!("{out}/{name}-heightmap.png"),
+        &terrain,
+        percentile(&heights, 0.002) / 5.0,
+        percentile(&heights, 0.998) / 5.0,
+    );
     let stats = serde_json::json!({
         "name": name,
         "pressure_bar": derived.surface_pressure_bar,
@@ -310,6 +382,8 @@ fn capture(gpu: &GpuContext, out: &str, name: &str, file: &PlanetFile, size: u32
         },
         "albedo_linear_rgb": mean,
         "albedo_red_over_blue": mean[0] / mean[2].max(1e-6),
+        "mare_disk_fraction": mare / disk_px.max(1.0),
+        "fresh_disk_fraction": fresh / disk_px.max(1.0),
     });
     std::fs::write(
         format!("{out}/{name}-stats.json"),
@@ -324,7 +398,10 @@ fn main() {
     let out = args
         .get(1)
         .filter(|arg| !arg.starts_with("--"))
-        .expect("planet_capture OUT_DIR [--preset NAME]... [--file PLANET.json]... [--size 768] [--res 768] [--seed N]")
+        .expect(
+            "planet_capture OUT_DIR [--preset NAME]... [--file PLANET.json]... [--size 768] \
+             [--res 768] [--seed N] [--set FIELD=JSON]... [--terrain-only]",
+        )
         .clone();
     let value = |flag: &str| {
         args.windows(2)
@@ -336,6 +413,19 @@ fn main() {
         v.parse().unwrap()
     });
     let seed: Option<u32> = value("--seed").map(|v| v.parse().unwrap());
+    let terrain_only = args.iter().any(|arg| arg == "--terrain-only");
+    // Planet-file fields set on every planet, e.g. `--set crater_age_override=1.0`.
+    let overrides: Vec<(String, serde_json::Value)> = args
+        .windows(2)
+        .filter(|pair| pair[0] == "--set")
+        .map(|pair| {
+            let (field, value) = pair[1].split_once('=').expect("--set FIELD=JSON");
+            (
+                field.to_owned(),
+                serde_json::from_str(value).expect("--set value must be JSON"),
+            )
+        })
+        .collect();
     assert!(
         (64..=1536).contains(&size) && size.is_multiple_of(64),
         "size must be 64..1536 and divisible by 64"
@@ -377,6 +467,17 @@ fn main() {
             file.seed = seed;
             file.cloud_seed = seed.wrapping_add(1000);
         }
-        capture(&gpu, &out, &name, &file, size, res);
+        if !overrides.is_empty() {
+            let mut json = serde_json::to_value(&file).unwrap();
+            for (field, value) in &overrides {
+                assert!(
+                    json.get(field).is_some(),
+                    "unknown planet file field {field}"
+                );
+                json[field] = value.clone();
+            }
+            file = serde_json::from_value(json).expect("invalid --set value");
+        }
+        capture(&gpu, &out, &name, &file, size, res, terrain_only);
     }
 }

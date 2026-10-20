@@ -175,6 +175,7 @@ fn main() {
             num_continents: 4,
             continent_size_variety: 0.35,
             geologic_time_myr: 0.0,
+            rocky: Default::default(),
         };
         let (tx, _rx) = std::sync::mpsc::channel();
         run_export(

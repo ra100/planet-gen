@@ -46,6 +46,19 @@ struct Uniforms {
     show_cloud_shadows: f32,
     surface_seed: u32,
     cloud_thin_lift: f32,  // raises thin cloud optical depth, 0 = solver field
+    // Rocky-world surface (rocky.wgsl); all zero renders the climate surface.
+    rocky_gravity: f32,
+    rocky_crater_age: f32, // Gyr
+    rocky_erosion: f32,
+    rocky_mare: f32,
+    rocky_volcanism: f32,
+    rocky_dichotomy: f32,
+    rocky_lid: f32,
+    rocky_airless: f32,
+    rocky_dust: f32,
+    rocky_water_ice: f32,
+    rocky_insolation: f32, // relative to Earth
+    rocky_regolith: f32,   // bare regolith instead of climate biomes
     _pad6: f32,
     _pad7: f32,
     _pad8: f32,
@@ -459,9 +472,29 @@ fn atmosphere_extinction(pos: vec3<f32>) -> vec3<f32> {
     let scale_h = atmosphere_scale_height();
     let molecular = exp(-altitude / scale_h);
     let aerosol = exp(-altitude / (scale_h * 0.15));
-    return (vec3<f32>(0.005802, 0.013558, 0.033100) * molecular
+    var extinction = (vec3<f32>(0.005802, 0.013558, 0.033100) * molecular
         + vec3<f32>(0.004440) * aerosol)
         * max(uniforms.atmosphere_density, 0.0) * max(uniforms.planet_radius_km, 1.0);
+    if (uniforms.rocky_dust > 0.0) {
+        extinction += dust_extinction(altitude) * (vec3<f32>(1.0) - DUST_ALBEDO * DUST_FORWARD);
+    }
+    return extinction;
+}
+
+// Suspended dust (Mars): vertical optical depth ~0.4 in a typical season,
+// mixed through the gas scale height; grains scatter red and absorb blue
+// (single-scattering albedo after Wolff et al. 2009) with a forward-peaked
+// phase function, g ~0.65. Delta-M scaling (f = g²) folds the forward peak
+// into the direct beam, so the ground stays lit through the haze as on
+// Mars. Per planet-radius path length.
+const DUST_OPTICAL_DEPTH: f32 = 0.4;
+const DUST_ALBEDO: vec3<f32> = vec3<f32>(0.97, 0.90, 0.68);
+const DUST_FORWARD: f32 = 0.4225;
+const DUST_ASYMMETRY: f32 = 0.395;
+
+fn dust_extinction(altitude: f32) -> f32 {
+    let scale_h = atmosphere_scale_height();
+    return uniforms.rocky_dust * DUST_OPTICAL_DEPTH / scale_h * exp(-altitude / scale_h);
 }
 
 fn atmosphere_sun_transmittance(pos: vec3<f32>, sun: vec3<f32>) -> vec3<f32> {
@@ -499,8 +532,13 @@ fn atmosphere_segment(pos: vec3<f32>, distance: f32, sun: vec3<f32>) -> ScatterR
     let beta_m = vec3<f32>(0.003996) * factor * exp(-altitude / (scale_h * 0.15));
     let extinction = atmosphere_extinction(pos);
     let cos_theta = -sun.z;
-    let source = (beta_r * (0.0596831 * (1.0 + cos_theta * cos_theta))
-        + beta_m * henyey_greenstein(cos_theta, 0.76))
+    var scattering = beta_r * (0.0596831 * (1.0 + cos_theta * cos_theta))
+        + beta_m * henyey_greenstein(cos_theta, 0.76);
+    if (uniforms.rocky_dust > 0.0) {
+        scattering += DUST_ALBEDO * (1.0 - DUST_FORWARD) * dust_extinction(altitude)
+            * henyey_greenstein(cos_theta, DUST_ASYMMETRY);
+    }
+    let source = scattering
         * atmosphere_sun_transmittance(pos, sun) * star_color(uniforms.star_color_temp) * SUN_IRRADIANCE;
     result.transmittance = exp(-extinction * abs(distance));
     result.in_scatter = source / max(extinction, vec3<f32>(1.0e-8)) * (vec3<f32>(1.0) - result.transmittance);
@@ -1393,6 +1431,91 @@ fn starfield(ndc: vec2<f32>, sun_dir: vec3<f32>, sun_color: vec3<f32>) -> vec3<f
 }
 
 // ---- Main fragment shader ----
+// ---- Rocky worlds (rocky.wgsl) ----
+// The terrain pass's parameters, so surface units line up with the relief
+// in the height cubemap.
+fn rocky_params() -> RockyParams {
+    var prm: RockyParams;
+    prm.seed = uniforms.surface_seed;
+    prm.radius_km = max(uniforms.planet_radius_km, 100.0);
+    prm.gravity = uniforms.rocky_gravity;
+    prm.crater_age = uniforms.rocky_crater_age;
+    prm.erosion = uniforms.rocky_erosion;
+    prm.mare = uniforms.rocky_mare;
+    prm.volcanism = uniforms.rocky_volcanism;
+    prm.dichotomy = uniforms.rocky_dichotomy;
+    prm.lid = uniforms.rocky_lid;
+    prm.min_crater_km = 4.0 * 1.5707963 * prm.radius_km / f32(textureDimensions(height_tex).x);
+    prm.airless = uniforms.rocky_airless;
+    prm.dust = uniforms.rocky_dust;
+    return prm;
+}
+
+fn rocky_surface_albedo(p: vec3<f32>, height: f32, relief: vec2<f32>) -> vec3<f32> {
+    let prm = rocky_params();
+    let units = rk_material(p, prm);
+    let gradient = relief.x * 5.0 / prm.radius_km;
+    return rk_albedo(p, prm, units, gradient, relief.y, height * 5.0, uniforms.rocky_insolation);
+}
+
+fn rocky_frost(p: vec3<f32>) -> f32 {
+    let pole_temp = uniforms.base_temp_c + 15.0 - 50.0;
+    return rk_frost(p, rocky_params(), climate_latitude(p, uniforms.axial_tilt_rad),
+        uniforms.axial_tilt_rad, uniforms.season, pole_temp, uniforms.rocky_water_ice);
+}
+
+// Horizon visibility toward a direction: march over the height field (with
+// the normal map's height exaggeration and the sphere's curvature) and keep
+// the steepest occluder, softened by the solar disk (~0.5°).
+fn rocky_horizon(p: vec3<f32>, direction: vec3<f32>, height: f32) -> f32 {
+    let sin_e = dot(direction, p);
+    if (sin_e > 0.5 || sin_e < -0.1) {
+        return 1.0;
+    }
+    let scale = clamp(uniforms.height_scale, 0.0, 5.0) * 5.0 / max(uniforms.planet_radius_km, 1.0);
+    let tangent = direction - p * sin_e;
+    let toward = tangent / max(length(tangent), 1.0e-6);
+    let tan_e = sin_e / max(sqrt(max(1.0 - sin_e * sin_e, 0.0)), 1.0e-4);
+    let texel = 2.0 / f32(textureDimensions(height_tex).x);
+    let z0 = height * scale;
+    var lit = 1.0;
+    var distance = texel;
+    for (var i = 0u; i < 14u; i++) {
+        let q = normalize(p + toward * distance);
+        let z = sample_surface_height(q) * scale;
+        let ray = z0 + distance * tan_e - 0.5 * distance * distance;
+        let penumbra = max(distance * 0.0087, 1.0e-6);
+        lit = min(lit, clamp((ray - z) / penumbra * 0.5 + 0.5, 0.0, 1.0));
+        distance *= 1.45;
+    }
+    return lit;
+}
+
+// Cast shadows of the relief at low sun, the signature of airless
+// terminators. A shadow the viewer cannot see (it lies behind its caster,
+// exactly so at zero phase) is not darkened, because the pixel shows the
+// lit caster instead; this keeps the full-phase limb evenly bright.
+fn rocky_terrain_shadow(p: vec3<f32>, sun_world: vec3<f32>, view_world: vec3<f32>, height: f32) -> f32 {
+    let lit = rocky_horizon(p, sun_world, height);
+    if (lit >= 1.0) {
+        return 1.0;
+    }
+    return 1.0 - (1.0 - lit) * rocky_horizon(p, view_world, height);
+}
+
+// Geologic units: highlands tan, lowland plains green, volcanic provinces
+// red, maria blue, fresh craters white, rays yellow; shaded by elevation.
+fn rocky_geology(p: vec3<f32>, height: f32) -> vec3<f32> {
+    let units = rk_material(p, rocky_params());
+    var color = vec3<f32>(0.62, 0.55, 0.42);
+    color = mix(color, vec3<f32>(0.34, 0.58, 0.32), units.provinces.plains);
+    color = mix(color, vec3<f32>(0.80, 0.28, 0.16), units.provinces.volcanic);
+    color = mix(color, vec3<f32>(0.16, 0.24, 0.50), units.provinces.mare);
+    color = mix(color, vec3<f32>(0.96), units.fresh);
+    color = mix(color, vec3<f32>(1.0, 0.85, 0.30), units.ray * 0.8);
+    return color * (0.7 + 0.3 * clamp(height * 0.5 + 0.5, 0.0, 1.0));
+}
+
 fn shade_planet(in: VertexOutput) -> vec4<f32> {
     let pan = vec2<f32>(uniforms.pan_x, uniforms.pan_y);
     let ndc = ((in.uv - 0.5) * 2.0 / 0.85 - pan) / uniforms.zoom;
@@ -1507,7 +1630,13 @@ fn shade_planet(in: VertexOutput) -> vec4<f32> {
 
     let pure_elevation = uniforms.show_biomes < 0.5 && uniforms.show_water < 0.5;
     var surface_color: vec3<f32>;
-    let ice_surface = preview_ice(rotated, height);
+    var ice_surface = preview_ice(rotated, height);
+    if (uniforms.rocky_regolith > 0.0) {
+        // Dry worlds: polar frost instead of the hydrological ice sheets.
+        let frost = rocky_frost(rotated);
+        ice_surface.coverage = mix(ice_surface.coverage, frost, uniforms.rocky_regolith);
+        ice_surface.snow = mix(ice_surface.snow, 1.0, uniforms.rocky_regolith);
+    }
     let polar_ice = select(0.0, ice_surface.coverage, uniforms.show_ice > 0.5);
     var terrain_land_height = 0.0;
     var terrain_slope_value = 0.0;
@@ -1533,9 +1662,17 @@ fn shade_planet(in: VertexOutput) -> vec4<f32> {
         let relief = surface_relief(rotated, height);
         terrain_slope_value = relief.x;
         if (uniforms.show_biomes > 0.5) {
-            surface_color = surface_land_albedo(rotated, uniforms.surface_seed, mean_temp,
-                mean_moisture_local, seasonal_temp_local, terrain_land_height,
-                relief.x, relief.y, uniforms.ocean_fraction);
+            if (uniforms.rocky_regolith < 1.0) {
+                surface_color = surface_land_albedo(rotated, uniforms.surface_seed, mean_temp,
+                    mean_moisture_local, seasonal_temp_local, terrain_land_height,
+                    relief.x, relief.y, uniforms.ocean_fraction);
+            }
+            // Without liquid water there is no soil or life: bare regolith.
+            if (uniforms.rocky_regolith > 0.0) {
+                let regolith = rocky_surface_albedo(rotated, height, relief);
+                surface_color = select(mix(surface_color, regolith, uniforms.rocky_regolith),
+                    regolith, uniforms.rocky_regolith >= 1.0);
+            }
         } else {
             surface_color = height_color(height, uniforms.ocean_level);
         }
@@ -1550,6 +1687,9 @@ fn shade_planet(in: VertexOutput) -> vec4<f32> {
             ),
             uniforms.show_ice > 0.5,
         );
+        if (uniforms.rocky_regolith > 0.0) {
+            mountain_snow *= 1.0 - uniforms.rocky_regolith;
+        }
         if (mountain_snow > 0.0) {
             let fresh_snow = vec3<f32>(0.90, 0.93, 0.96) + vec3<f32>(0.012) * color_var;
             let glacier_blue = vec3<f32>(0.78, 0.86, 0.93);
@@ -1561,8 +1701,13 @@ fn shade_planet(in: VertexOutput) -> vec4<f32> {
 
     // One blue-white albedo for the shared ocean/land polar cap boundary.
     if (!pure_elevation && polar_ice > 0.0) {
-        let polar_ice_albedo = mix(vec3<f32>(0.56, 0.72, 0.82), vec3<f32>(0.90, 0.93, 0.96),
+        var polar_ice_albedo = mix(vec3<f32>(0.56, 0.72, 0.82), vec3<f32>(0.90, 0.93, 0.96),
             ice_surface.snow) + vec3<f32>(color_var * 0.012);
+        if (uniforms.rocky_regolith > 0.0) {
+            // Dusty frost (Mars residual caps ~0.5-0.7 albedo).
+            let frost_albedo = vec3<f32>(0.74, 0.71, 0.67) * (1.0 + 0.05 * color_var);
+            polar_ice_albedo = mix(polar_ice_albedo, frost_albedo, uniforms.rocky_regolith);
+        }
         surface_color = mix(surface_color, polar_ice_albedo, polar_ice);
     }
 
@@ -1804,6 +1949,7 @@ fn shade_planet(in: VertexOutput) -> vec4<f32> {
                     cloud.mass, cloud.geometry, cs_strength() <= 0.0);
                 debug_color = vec3<f32>(1.0 - exp(-column.y));
             }
+            case 22u: { debug_color = rocky_geology(rotated, height); }
             case 21u: {
                 let cloud = cloud_synthesis_cloud(rotated, angular_pixel_footprint);
                 let column = cloud_column_sample_cloud(rotated, angular_pixel_footprint,
@@ -1851,8 +1997,12 @@ fn shade_planet(in: VertexOutput) -> vec4<f32> {
         ),
         !pure_elevation,
     );
-    let roughness = mix(substrate_roughness, ice_surface.roughness,
+    var roughness = mix(substrate_roughness, ice_surface.roughness,
         select(polar_ice, 0.0, pure_elevation));
+    if (uniforms.rocky_regolith > 0.0 && !pure_elevation) {
+        // Fluffy regolith scatters diffusely; no glossy highlight.
+        roughness = mix(roughness, 0.95, uniforms.rocky_regolith * (1.0 - polar_ice));
+    }
     // Air/water normal-incidence reflectance for n=1.333 is 0.0204.
     let f0 = mix(select(0.04, 0.0204, is_ocean), 0.018, select(polar_ice, 0.0, pure_elevation));
 
@@ -1867,10 +2017,31 @@ fn shade_planet(in: VertexOutput) -> vec4<f32> {
 
     // Ambient (subtle, directional — slightly brighter on the lit hemisphere)
     let ao = select(1.0, compute_ao(rotated), !is_ocean && uniforms.show_ao > 0.5);
-    let ambient = surface_color * (0.002 + 0.04 * max(dot(normal, light), 0.0)) * ao;
+    var ambient = surface_color * (0.002 + 0.04 * max(dot(normal, light), 0.0)) * ao;
+
+    var direct = (diffuse + specular) * n_dot_l;
+    if (uniforms.rocky_airless > 0.0) {
+        // Airless regolith: lunar-Lambert photometry and no skylight, so
+        // shadows stay black.
+        // Toward the limb relief normals tilt past the view direction; fade
+        // them to the sphere so back-facing facets do not speckle the
+        // evenly bright full-phase limb.
+        let limb_normal = normalize(mix(shading_normal, normal, 1.0 - smooth_step(0.0, 0.3, normal.z)));
+        let mu0 = max(dot(limb_normal, light), 0.0) * smooth_step(0.0, 0.002, dot(normal, light));
+        let mu = max(dot(limb_normal, view_dir), 0.001);
+        let phase = degrees(acos(clamp(dot(light, view_dir), -1.0, 1.0)));
+        let photometric = mix(n_dot_l, rk_lunar_lambert(mu0, mu, phase), uniforms.rocky_airless);
+        direct = diffuse * photometric + specular * n_dot_l;
+        ambient *= 1.0 - 0.95 * uniforms.rocky_airless;
+    }
+    if (uniforms.rocky_regolith > 0.0 && !pure_elevation) {
+        let sun_world = normalize((uniforms.rotation * vec4<f32>(light, 0.0)).xyz);
+        let view_world = normalize((uniforms.rotation * vec4<f32>(view_dir, 0.0)).xyz);
+        direct *= rocky_terrain_shadow(rotated, sun_world, view_world, height);
+    }
 
     // Combine — tint direct light by star color
-    var lit_color = ambient + (diffuse + specular) * n_dot_l * s_color * SUN_IRRADIANCE
+    var lit_color = ambient + direct * s_color * SUN_IRRADIANCE
         * atmosphere_sun_transmittance(normal * 1.000001, light);
 
     // Cloud shadow on surface (independent from visible cloud self-shading)

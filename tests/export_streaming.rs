@@ -60,6 +60,7 @@ fn terrain_params(seed: u32) -> TerrainGenerationParams {
         num_continents: 0,
         continent_size_variety: 0.0,
         geologic_time_myr: 0.0,
+        rocky: Default::default(),
     }
 }
 

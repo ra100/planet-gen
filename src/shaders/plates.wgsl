@@ -31,6 +31,19 @@ struct GenParams {
     tectonics_factor: f32, // [0,1]: boundary force strength
     surface_age: f32,      // [0,1]: 0=young/sharp, 1=old/smooth
     continental_scale: f32, // noise frequency for continent size
+    // Stagnant-lid surface history (rocky.wgsl); all zero keeps plate terrain.
+    crater_age: f32,        // Gyr recorded by craters
+    crater_erosion: f32,
+    mare_flooding: f32,
+    shield_volcanism: f32,
+    dichotomy: f32,
+    stagnant_lid: f32,      // 1 = no plates
+    radius_km: f32,
+    airless: f32,
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
+    _pad3: f32,
 }
 
 @group(0) @binding(0) var<storage, read> plates: array<Plate>;
@@ -348,6 +361,41 @@ fn detail_noise(pos: vec3<f32>) -> f32 {
     return value;
 }
 
+fn rocky_active() -> bool {
+    return params.stagnant_lid > 0.0 || params.crater_age > 0.0 || params.dichotomy > 0.0
+        || params.shield_volcanism > 0.0;
+}
+
+fn rocky_params() -> RockyParams {
+    var prm: RockyParams;
+    prm.seed = params.seed;
+    prm.radius_km = max(params.radius_km, 100.0);
+    prm.gravity = params.surface_gravity;
+    prm.crater_age = params.crater_age;
+    prm.erosion = params.crater_erosion;
+    prm.mare = params.mare_flooding;
+    prm.volcanism = params.shield_volcanism;
+    prm.dichotomy = params.dichotomy;
+    prm.lid = params.stagnant_lid;
+    // Four texels across the smallest crater at the full face resolution, so
+    // export tiles and the preview resolve the same population.
+    prm.min_crater_km = 4.0 * 1.5707963 * prm.radius_km / f32(params.full_resolution);
+    prm.airless = params.airless;
+    prm.dust = 0.0;
+    return prm;
+}
+
+// Terrain units are 5 km. Plate relief gives way to the lid's own crust;
+// impacts land on whatever surface there is.
+fn rocky_relief(pos: vec3<f32>, plate_height: f32) -> f32 {
+    let prm = rocky_params();
+    let lid = clamp(params.stagnant_lid, 0.0, 1.0);
+    let structure = rk_structure(pos, prm);
+    var height = mix(plate_height, structure.height / 5.0, lid);
+    height += rk_impacts(pos, prm, structure).height / 5.0;
+    return height;
+}
+
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let res = params.resolution;
@@ -504,6 +552,13 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         height = pow(t, 1.3) * h_cap;
     } else {
         height *= 1.2;
+    }
+
+    // === Stagnant-lid surface history ===
+    // Without plates the crust keeps its impact record, volcanic provinces
+    // and any hemispheric dichotomy; plate relief fades out with the lid.
+    if (rocky_active()) {
+        height = rocky_relief(raw_pos, height);
     }
 
     let idx = id.y * res + id.x;

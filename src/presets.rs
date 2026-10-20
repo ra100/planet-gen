@@ -34,6 +34,13 @@ fn preset_base(file: &mut PlanetFile) {
     file.num_continents = 4;
     file.continent_size_variety = 0.35;
     file.geologic_time_myr = 0.0;
+    file.pressure_override = None;
+    file.tectonics_override = None;
+    file.crater_age_override = None;
+    file.mare_override = None;
+    file.volcanism_override = None;
+    file.dichotomy = 0.0;
+    file.dust_override = None;
     file.cloud_coverage = 0.5;
     file.cloud_opacity = 1.0;
     file.cloud_detail = 1.0;
@@ -70,6 +77,8 @@ pub fn apply(file: &mut PlanetFile, name: &str) {
             file.detail_scale = 1.3;
             file.mountain_scale = 1.2;
             file.height_scale = 4.0;
+            // Northern lowlands 5 km below the southern highlands.
+            file.dichotomy = 1.0;
         }
         "MOON" => {
             // Earth's Moon: airless, tidally locked (27.3 d), 1.5° obliquity.

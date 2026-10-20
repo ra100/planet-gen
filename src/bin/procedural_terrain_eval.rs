@@ -1243,6 +1243,7 @@ fn preview_uniforms(params: &PlanetParams, derived: &DerivedProperties) -> Previ
         show_cloud_shadows: 0.,
         surface_seed: params.seed,
         cloud_thin_lift: 0.0,
+        rocky: Default::default(),
         _pad6: [0.0; 3],
     }
 }
