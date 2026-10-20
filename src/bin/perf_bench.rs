@@ -247,6 +247,7 @@ fn terrain_params(params: &PlanetParams, derived: &DerivedProperties) -> Terrain
         num_continents: 0,
         continent_size_variety: 0.0,
         geologic_time_myr: 0.0,
+        rocky: Default::default(),
     }
 }
 

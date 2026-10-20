@@ -20,7 +20,7 @@ use crate::openexr_writer::AtomicScanlineExrWriter;
 use crate::planet::{DerivedProperties, PlanetParams};
 use crate::plates::{PlateGenParams, generate_plates};
 use crate::png_writer::{AtomicScanlinePngWriter, PngRowFormat};
-use crate::preview::PreviewUniforms;
+use crate::preview::{PreviewUniforms, RockyUniforms};
 use crate::tectonic_history::{plate_count, plate_records};
 use crate::terrain_ao::{BroadAoField, albedo_bake_factor};
 use crate::terrain_compute::{
@@ -858,6 +858,9 @@ pub struct RoughnessMapParams {
     pub local_height: u32,
     pub axial_tilt_rad: f32,
     pub season: f32,
+    /// Bare regolith share (worlds without liquid water): rough, matte.
+    pub regolith: f32,
+    pub _pad: [f32; 3],
 }
 
 #[repr(C)]
@@ -875,6 +878,10 @@ pub struct AlbedoMapParams {
     pub tile_offset_y: u32,
     pub full_resolution: u32,
     pub local_height: u32,
+    /// Rocky-world surface (rocky.wgsl), as in the preview.
+    pub rocky: RockyUniforms,
+    pub radius_km: f32,
+    pub _pad: [f32; 3],
 }
 
 #[repr(C)]
@@ -1982,6 +1989,7 @@ fn cloud_export_uniforms(snapshot: WeatherSnapshot, cloud_thin_lift: f32) -> Pre
         show_cloud_shadows: 0.0,
         surface_seed: 0,
         cloud_thin_lift,
+        rocky: Default::default(),
         _pad6: [0.0; 3],
     }
 }
@@ -3814,6 +3822,7 @@ pub fn run_export_with_timings_and_checkpoints(
         .map_err(|e| format!("Failed to create output dir: {e}"))?;
 
     let effective_ocean = derived.ocean_fraction * (1.0 - water_loss);
+    let rocky = RockyUniforms::from_derived(derived, params.star_distance_au);
     let ocean_level = crate::scene::sea_level(derived, water_loss);
 
     // Compute total steps for progress based on selected layers
@@ -4001,11 +4010,12 @@ pub fn run_export_with_timings_and_checkpoints(
         Some(MapPipeline::new(
             gpu,
             &format!(
-                "{}\n{}\n{}\n{}\n{}",
+                "{}\n{}\n{}\n{}\n{}\n{}",
                 include_str!("shaders/cube_sphere.wgsl"),
                 include_str!("shaders/noise.wgsl"),
                 include_str!("shaders/climate.wgsl"),
                 include_str!("shaders/surface_material.wgsl"),
+                include_str!("shaders/rocky.wgsl"),
                 include_str!("shaders/albedo_map.wgsl"),
             ),
             "albedo map",
@@ -4148,6 +4158,8 @@ pub fn run_export_with_timings_and_checkpoints(
                 local_height: region.height,
                 axial_tilt_rad: params.axial_tilt_deg.to_radians(),
                 season: config.weather.season,
+                regolith: rocky.regolith,
+                _pad: [0.0; 3],
             },
             4,
             &mut progress,
@@ -4207,6 +4219,9 @@ pub fn run_export_with_timings_and_checkpoints(
                 tile_offset_y: region.origin_y,
                 full_resolution: full_res,
                 local_height: region.height,
+                rocky,
+                radius_km: derived.radius_km,
+                _pad: [0.0; 3],
             },
             16,
             &mut progress,
@@ -5631,6 +5646,7 @@ mod tests {
             num_continents: 0,
             continent_size_variety: 0.0,
             geologic_time_myr: 0.0,
+            rocky: Default::default(),
         }
     }
 
@@ -6801,11 +6817,12 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         );
         let shader = |map: &str| {
             format!(
-                "{}\n{}\n{}\n{}\n{}",
+                "{}\n{}\n{}\n{}\n{}\n{}",
                 include_str!("shaders/cube_sphere.wgsl"),
                 include_str!("shaders/noise.wgsl"),
                 include_str!("shaders/climate.wgsl"),
                 include_str!("shaders/surface_material.wgsl"),
+                include_str!("shaders/rocky.wgsl"),
                 map,
             )
         };
@@ -6873,6 +6890,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
                 local_height: region.height,
                 axial_tilt_rad: 0.2,
                 season: 0.5,
+                regolith: 0.0,
+                _pad: [0.0; 3],
             },
         );
         assert_map_parity(
@@ -6893,6 +6912,43 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
                 tile_offset_y: region.origin_y,
                 full_resolution: resolution,
                 local_height: region.height,
+                rocky: RockyUniforms::default(),
+                radius_km: 0.0,
+                _pad: [0.0; 3],
+            },
+        );
+        // Rocky material is a function of position: tiles match the whole face.
+        let moon = RockyUniforms {
+            gravity: 1.62,
+            crater_age_gyr: 4.4,
+            mare_flooding: 0.3,
+            stagnant_lid: 1.0,
+            airless: 1.0,
+            insolation: 1.0,
+            regolith: 1.0,
+            ..Default::default()
+        };
+        assert_map_parity(
+            &gpu,
+            "rocky albedo",
+            shader(include_str!("shaders/albedo_map.wgsl")),
+            16,
+            |region| AlbedoMapParams {
+                face: 2,
+                resolution: region.width,
+                seed: 7,
+                base_temp_c: -18.0,
+                ocean_level: -4.0,
+                ocean_fraction: 0.0,
+                axial_tilt_rad: 0.03,
+                season: 0.5,
+                tile_offset_x: region.origin_x,
+                tile_offset_y: region.origin_y,
+                full_resolution: resolution,
+                local_height: region.height,
+                rocky: moon,
+                radius_km: 1737.0,
+                _pad: [0.0; 3],
             },
         );
         assert_map_parity(

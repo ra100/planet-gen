@@ -2,11 +2,11 @@
 //! both go through these functions, so a capture renders a planet file the
 //! way the app does.
 
-use crate::planet::{DerivedProperties, PlanetParams};
+use crate::planet::{DerivedProperties, PlanetParams, SurfaceOverrides};
 use crate::planet_file::PlanetFile;
 use crate::plates::PlateGenParams;
-use crate::preview::PreviewUniforms;
-use crate::terrain_compute::TerrainGenerationParams;
+use crate::preview::{PreviewUniforms, RockyUniforms};
+use crate::terrain_compute::{RockyTerrainParams, TerrainGenerationParams};
 use crate::weather::WeatherSnapshot;
 
 pub fn planet_params(file: &PlanetFile) -> PlanetParams {
@@ -20,13 +20,34 @@ pub fn planet_params(file: &PlanetFile) -> PlanetParams {
     }
 }
 
-pub fn derived(file: &PlanetFile) -> DerivedProperties {
-    DerivedProperties::from_params(&planet_params(file))
+pub fn surface_overrides(file: &PlanetFile) -> SurfaceOverrides {
+    SurfaceOverrides {
+        pressure_bar: file.pressure_override,
+        tectonics: file.tectonics_override,
+        crater_age_gyr: file.crater_age_override,
+        mare_flooding: file.mare_override,
+        shield_volcanism: file.volcanism_override,
+        dichotomy: file.dichotomy,
+        dust: file.dust_override,
+    }
 }
 
+pub fn derived(file: &PlanetFile) -> DerivedProperties {
+    DerivedProperties::from_params_with(&planet_params(file), &surface_overrides(file))
+}
+
+/// Sea level of a world that cannot hold liquid water: far below any relief.
+const DRY_SEA_LEVEL: f32 = -4.0;
+
 /// Sea level in terrain units (1 unit = 5 km) for a water-loss setting.
+/// Below water's triple point the basins stay dry whatever the inventory.
 pub fn sea_level(derived: &DerivedProperties, water_loss: f32) -> f32 {
-    -0.5 + 1.7 * derived.ocean_fraction * (1.0 - water_loss)
+    let base = if derived.liquid_water >= 1.0 {
+        -0.5
+    } else {
+        DRY_SEA_LEVEL + (-0.5 - DRY_SEA_LEVEL) * derived.liquid_water
+    };
+    base + 1.7 * derived.ocean_fraction * (1.0 - water_loss)
 }
 
 /// Erosion iterations the preview runs at a terrain resolution; low
@@ -113,7 +134,16 @@ pub fn derive_terrain_params(
         num_continents,
         continent_size_variety,
         geologic_time_myr,
+        rocky: RockyTerrainParams::from_derived(derived),
     }
+}
+
+/// Cloud coverage the atmosphere can carry: below ~0.3 bar the air holds
+/// too little vapour for decks (as the weather field's moisture supply), so
+/// thin-air worlds like Mars stay clear apart from their dust.
+pub fn cloud_coverage(file: &PlanetFile, derived: &DerivedProperties) -> f32 {
+    let t = ((derived.surface_pressure_bar - 0.05) / 0.25).clamp(0.0, 1.0);
+    file.cloud_coverage * (t * t * (3.0 - 2.0 * t))
 }
 
 /// Weather inputs for the current settings; `ocean_level` is the sea level
@@ -131,7 +161,7 @@ pub fn weather_snapshot(
         surface_seed: file.seed,
         ocean_fraction: derived.ocean_fraction * file.climate_moisture,
         storm_count: file.storm_count,
-        coverage: file.cloud_coverage,
+        coverage: cloud_coverage(file, derived),
         moisture: file.climate_moisture,
         surface_pressure_bar: derived.surface_pressure_bar,
         base_temp_c: derived.base_temperature_c,
@@ -193,7 +223,7 @@ pub fn preview_uniforms(
         pan_y: file.pan[1],
         cloud_coverage: weather
             .map(|snapshot| snapshot.coverage)
-            .unwrap_or(file.cloud_coverage),
+            .unwrap_or(cloud_coverage(file, derived)),
         cloud_seed: weather
             .map(|snapshot| snapshot.seed)
             .unwrap_or(file.cloud_seed),
@@ -213,6 +243,7 @@ pub fn preview_uniforms(
         atm_pressure: derived.surface_pressure_bar,
         cloud_detail: file.cloud_detail,
         cloud_thin_lift: file.cloud_thin_lift,
+        rocky: RockyUniforms::from_derived(derived, file.star_distance_au),
         _pad6: [0.0; 3],
         lava_glow: file.lava_glow,
         ring_inner: file.ring_inner,

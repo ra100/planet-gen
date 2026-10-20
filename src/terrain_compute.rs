@@ -32,6 +32,46 @@ pub struct TerrainGenParams {
     pub tectonics_factor: f32, // [0,1]: 0=stagnant lid, 1=vigorous tectonics
     pub surface_age: f32,    // [0,1]: 0=young/sharp, 1=old/smooth
     pub continental_scale: f32, // noise frequency multiplier for continent size (1.0 = default)
+    // Stagnant-lid surface history (rocky.wgsl); all zero leaves plate terrain untouched.
+    pub crater_age_gyr: f32,
+    pub crater_erosion: f32,
+    pub mare_flooding: f32,
+    pub shield_volcanism: f32,
+    pub dichotomy: f32,
+    pub stagnant_lid: f32,
+    pub radius_km: f32,
+    pub airless: f32,
+    pub _pad: [f32; 4],
+}
+
+/// Surface history of a stagnant-lid world: impact craters and basins,
+/// volcanic plains and shields, and a crustal dichotomy (rocky.wgsl). The
+/// default (all zero) generates plate terrain only.
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub struct RockyTerrainParams {
+    pub crater_age_gyr: f32,
+    pub crater_erosion: f32,
+    pub mare_flooding: f32,
+    pub shield_volcanism: f32,
+    pub dichotomy: f32,
+    pub stagnant_lid: f32,
+    pub radius_km: f32,
+    pub airless: f32,
+}
+
+impl RockyTerrainParams {
+    pub fn from_derived(derived: &crate::planet::DerivedProperties) -> Self {
+        Self {
+            crater_age_gyr: derived.crater_age_gyr,
+            crater_erosion: derived.crater_erosion,
+            mare_flooding: derived.mare_flooding,
+            shield_volcanism: derived.shield_volcanism,
+            dichotomy: derived.dichotomy,
+            stagnant_lid: derived.stagnant_lid,
+            radius_km: derived.radius_km,
+            airless: derived.airless,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -55,6 +95,7 @@ pub struct TerrainGenerationParams {
     pub continent_size_variety: f32,
     /// Simulated plate motion history in Myr (0 = present-day plates only).
     pub geologic_time_myr: f32,
+    pub rocky: RockyTerrainParams,
 }
 
 impl TerrainGenParams {
@@ -88,6 +129,15 @@ impl TerrainGenParams {
             tectonics_factor: terrain.tectonics_factor,
             surface_age: terrain.surface_age,
             continental_scale: terrain.continental_scale,
+            crater_age_gyr: terrain.rocky.crater_age_gyr,
+            crater_erosion: terrain.rocky.crater_erosion,
+            mare_flooding: terrain.rocky.mare_flooding,
+            shield_volcanism: terrain.rocky.shield_volcanism,
+            dichotomy: terrain.rocky.dichotomy,
+            stagnant_lid: terrain.rocky.stagnant_lid,
+            radius_km: terrain.rocky.radius_km,
+            airless: terrain.rocky.airless,
+            _pad: [0.0; 4],
         }
     }
 }
@@ -140,10 +190,11 @@ pub struct TerrainComputePipeline {
 impl TerrainComputePipeline {
     pub fn new(gpu: &GpuContext) -> Self {
         let shader_source = format!(
-            "{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}",
             include_str!("shaders/cube_sphere.wgsl"),
             include_str!("shaders/noise.wgsl"),
             include_str!("shaders/terrain_profiles.wgsl"),
+            include_str!("shaders/rocky.wgsl"),
             include_str!("shaders/plates.wgsl"),
         );
 
@@ -357,6 +408,43 @@ impl TerrainComputePipeline {
         surface_age: f32,
         continental_scale: f32,
     ) -> TectonicTerrain {
+        self.generate_params(
+            gpu,
+            plates,
+            resolution,
+            &TerrainGenerationParams {
+                seed,
+                amplitude,
+                frequency,
+                octaves,
+                gain,
+                lacunarity,
+                mountain_scale,
+                boundary_width,
+                warp_strength,
+                detail_scale,
+                surface_gravity,
+                tectonics_factor,
+                surface_age,
+                continental_scale,
+                num_plates_override: 0,
+                num_continents: 0,
+                continent_size_variety: 0.0,
+                geologic_time_myr: 0.0,
+                rocky: RockyTerrainParams::default(),
+            },
+        )
+    }
+
+    /// Generate all 6 cube faces at `resolution` from the derived terrain
+    /// parameters, including any stagnant-lid surface history.
+    pub fn generate_params(
+        &self,
+        gpu: &GpuContext,
+        plates: &[PlateGpu],
+        resolution: u32,
+        terrain: &TerrainGenerationParams,
+    ) -> TectonicTerrain {
         let total_pixels = (resolution * resolution) as usize;
         let buffer_size = (total_pixels * std::mem::size_of::<f32>()) as u64;
 
@@ -386,28 +474,15 @@ impl TerrainComputePipeline {
         let mut faces: [Vec<f32>; 6] = Default::default();
 
         for face_idx in 0..6u32 {
-            let params = TerrainGenParams {
-                face: face_idx,
+            let params = TerrainGenParams::for_tile(
+                terrain,
+                face_idx,
                 resolution,
-                num_plates: crate::tectonic_history::plate_count(plates) as u32,
-                seed,
-                amplitude,
-                frequency,
-                octaves,
-                gain,
-                lacunarity,
-                tile_offset_x: 0,
-                tile_offset_y: 0,
-                full_resolution: resolution,
-                mountain_scale,
-                boundary_width,
-                warp_strength,
-                detail_scale,
-                surface_gravity,
-                tectonics_factor,
-                surface_age,
-                continental_scale,
-            };
+                crate::tectonic_history::plate_count(plates) as u32,
+                0,
+                0,
+                resolution,
+            );
 
             let params_buffer = gpu
                 .device
@@ -883,6 +958,15 @@ impl MultiPassTerrainPipeline {
                 tectonics_factor,
                 surface_age,
                 continental_scale,
+                crater_age_gyr: 0.0,
+                crater_erosion: 0.0,
+                mare_flooding: 0.0,
+                shield_volcanism: 0.0,
+                dichotomy: 0.0,
+                stagnant_lid: 0.0,
+                radius_km: 0.0,
+                airless: 0.0,
+                _pad: [0.0; 4],
             };
             let terrain_params_buf =
                 gpu.device
@@ -2774,6 +2858,71 @@ mod tests {
             "Should have peaks > 0.2, max is {}",
             max_height
         );
+    }
+
+    #[test]
+    fn stagnant_lid_terrain_records_impacts_tiles_match_and_earth_is_unchanged() {
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let pipeline = TerrainComputePipeline::new(&gpu);
+        let setup = |name: &str| {
+            let file = crate::presets::preset_file(name);
+            let derived = crate::scene::derived(&file);
+            let plates = generate_plates(&crate::scene::plate_params(&file, &derived));
+            (crate::scene::terrain_params(&file, &derived), plates)
+        };
+
+        // Earth's derived rocky terms are all zero: plate terrain only.
+        let (earth, plates) = setup("EARTH");
+        let with_rocky = pipeline.generate_params(&gpu, &plates, 48, &earth);
+        let plain = pipeline.generate_params(
+            &gpu,
+            &plates,
+            48,
+            &TerrainGenerationParams {
+                rocky: RockyTerrainParams::default(),
+                ..earth
+            },
+        );
+        assert_eq!(
+            bytemuck::cast_slice::<f32, u8>(&with_rocky.faces.concat()),
+            bytemuck::cast_slice::<f32, u8>(&plain.faces.concat()),
+        );
+
+        let (moon, plates) = setup("MOON");
+        assert_eq!(moon.rocky.stagnant_lid, 1.0);
+        let resolution = 64;
+        let whole = pipeline.generate_params(&gpu, &plates, resolution, &moon);
+        let heights: Vec<f32> = whole.faces.concat();
+        assert!(heights.iter().all(|h| h.is_finite()));
+        let (low, high) = heights
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(a, b), h| (a.min(*h), b.max(*h)));
+        // Basins several km deep below rims a few km high (units are 5 km).
+        assert!(low < -0.8 && high > 0.4, "relief {low}..{high}");
+
+        let buffer = pipeline.create_plates_buffer(&gpu, &plates);
+        let half = resolution / 2;
+        let count = crate::tectonic_history::plate_count(&plates) as u32;
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        for face in [0, 2, 5] {
+            for (ox, oy) in [(0, 0), (half, 0), (0, half), (half, half)] {
+                let tile = pipeline
+                    .dispatch_tile(
+                        &gpu,
+                        &buffer,
+                        &TerrainGenParams::for_tile(&moon, face, half, count, ox, oy, resolution),
+                        &cancel,
+                    )
+                    .unwrap();
+                for y in 0..half {
+                    for x in 0..half {
+                        let expected =
+                            whole.faces[face as usize][((oy + y) * resolution + ox + x) as usize];
+                        assert_eq!(tile[(y * half + x) as usize], expected);
+                    }
+                }
+            }
+        }
     }
 
     #[test]

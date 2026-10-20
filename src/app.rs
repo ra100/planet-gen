@@ -7,7 +7,7 @@ use crate::cloud_synthesis::{
 };
 use crate::export::{self, ExportConfig, ExportHandle, ExportLayers, ExportProgress};
 use crate::gpu::GpuContext;
-use crate::planet::{DerivedProperties, PlanetParams};
+use crate::planet::{DerivedProperties, PlanetParams, SurfaceOverrides};
 use crate::planet_file::{self, PlanetFile};
 use crate::plates::generate_plates;
 use crate::presets;
@@ -74,6 +74,7 @@ pub struct PlanetGenApp {
     num_continents: u32,       // target number of distinct landmasses (1-10)
     continent_size_variety: f32, // 0 = equal sizes, 1 = heavily skewed
     geologic_time_myr: f32,    // simulated plate history (0 = present-day plates only)
+    surface: SurfaceOverrides, // atmosphere and surface history (None = physics model)
     cloud_coverage: f32,
     cloud_seed: u32,
     cloud_opacity: f32,
@@ -242,6 +243,7 @@ impl PlanetGenApp {
             num_continents: 4,
             continent_size_variety: 0.35,
             geologic_time_myr: 0.0,
+            surface: SurfaceOverrides::default(),
             cloud_coverage: 0.5,
             cloud_seed: default_cloud_seed,
             cloud_opacity: 1.0,
@@ -343,24 +345,11 @@ impl PlanetGenApp {
         );
 
         let terrain_params = self.terrain_params();
-        let terrain = self.terrain_compute.generate(
+        let terrain = self.terrain_compute.generate_params(
             &self.gpu,
             &plates,
             self.preview_resolution,
-            terrain_params.seed,
-            terrain_params.amplitude,
-            terrain_params.frequency,
-            terrain_params.octaves,
-            terrain_params.gain,
-            terrain_params.lacunarity,
-            terrain_params.mountain_scale,
-            terrain_params.boundary_width,
-            terrain_params.warp_strength,
-            terrain_params.detail_scale,
-            terrain_params.surface_gravity,
-            terrain_params.tectonics_factor,
-            terrain_params.surface_age,
-            terrain_params.continental_scale,
+            &terrain_params,
         );
 
         let ocean_level = self.ocean_level();
@@ -641,7 +630,7 @@ impl PlanetGenApp {
     }
 
     fn update_derived(&mut self) {
-        self.derived = DerivedProperties::from_params(&self.params);
+        self.derived = DerivedProperties::from_params_with(&self.params, &self.surface);
     }
 
     fn ocean_level(&self) -> f32 {
@@ -1005,6 +994,11 @@ const VIEW_MODES: &[ViewMode] = &[
         group: ViewGroup::Debug,
     },
     ViewMode {
+        id: 22,
+        label: "GEOLOGY",
+        group: ViewGroup::Debug,
+    },
+    ViewMode {
         id: 2,
         label: "TEMP",
         group: ViewGroup::Debug,
@@ -1055,6 +1049,17 @@ const VIEW_MODES: &[ViewMode] = &[
         group: ViewGroup::Debug,
     },
 ];
+
+/// Surface pressure for the inspector, from Venus-like bars to a vacuum.
+fn format_pressure(bar: f32) -> String {
+    if bar >= 0.1 {
+        format!("{bar:.2} bar")
+    } else if bar >= 1.0e-4 {
+        format!("{:.1} mbar", bar * 1000.0)
+    } else {
+        "vacuum".to_owned()
+    }
+}
 
 fn view_mode_info(id: u32) -> &'static ViewMode {
     VIEW_MODES
@@ -1149,6 +1154,13 @@ impl PlanetGenApp {
             num_continents: self.num_continents,
             continent_size_variety: self.continent_size_variety,
             geologic_time_myr: self.geologic_time_myr,
+            pressure_override: self.surface.pressure_bar,
+            tectonics_override: self.surface.tectonics,
+            crater_age_override: self.surface.crater_age_gyr,
+            mare_override: self.surface.mare_flooding,
+            volcanism_override: self.surface.shield_volcanism,
+            dichotomy: self.surface.dichotomy,
+            dust_override: self.surface.dust,
             cloud_coverage: self.cloud_coverage,
             cloud_seed: self.cloud_seed,
             cloud_opacity: self.cloud_opacity,
@@ -1218,6 +1230,7 @@ impl PlanetGenApp {
         self.geologic_time_myr = file
             .geologic_time_myr
             .clamp(0.0, crate::tectonic_history::MAX_GEOLOGIC_TIME_MYR);
+        self.surface = scene::surface_overrides(file);
         self.cloud_coverage = file.cloud_coverage;
         self.cloud_seed = file.cloud_seed;
         self.cloud_opacity = file.cloud_opacity;
@@ -1902,6 +1915,73 @@ impl PlanetGenApp {
             }
         });
 
+        widgets::section_header(ui, "surface history");
+        let auto = DerivedProperties::from_params(&self.params);
+        let mut history = false;
+        history |= widgets::override_row(
+            ui,
+            &mut self.surface.tectonics,
+            auto.tectonics_factor,
+            0.0..=1.0,
+            Param::new(
+                "Plate activity",
+                "0 = stagnant lid: one-plate crust that keeps its craters, maria and volcanoes (Moon, Mars, Mercury). 1 = vigorous plate tectonics (Earth). AUTO derives it from mass",
+                auto.tectonics_factor,
+            )
+            .with(2, ""),
+        );
+        history |= widgets::override_row(
+            ui,
+            &mut self.surface.crater_age_gyr,
+            self.derived.crater_age_gyr,
+            0.0..=crate::planet::MAX_CRATER_AGE_GYR,
+            Param::new(
+                "Crater age",
+                "Age of the surface as recorded by impact craters. 4.4 Gyr = saturated highlands (Moon), 3.5 = Martian plains, 0 = no craters. AUTO follows the lid and mass",
+                self.derived.crater_age_gyr,
+            )
+            .with(1, " Gyr"),
+        );
+        history |= widgets::override_row(
+            ui,
+            &mut self.surface.mare_flooding,
+            self.derived.mare_flooding,
+            0.0..=1.0,
+            Param::new(
+                "Maria",
+                "Dark volcanic plains flooding impact basins, concentrated on one hemisphere like the lunar nearside",
+                self.derived.mare_flooding,
+            )
+            .with(2, ""),
+        );
+        history |= widgets::override_row(
+            ui,
+            &mut self.surface.shield_volcanism,
+            self.derived.shield_volcanism,
+            0.0..=1.0,
+            Param::new(
+                "Volcanoes",
+                "Volcanic rise with giant shield volcanoes and a rift canyon (Tharsis, Olympus Mons, Valles Marineris)",
+                self.derived.shield_volcanism,
+            )
+            .with(2, ""),
+        );
+        history |= widgets::slider_row(
+            ui,
+            &mut self.surface.dichotomy,
+            0.0..=1.0,
+            Param::new(
+                "Dichotomy",
+                "Hemispheric crustal dichotomy: smooth northern lowlands kilometres below cratered southern highlands (Mars = 1)",
+                0.0,
+            )
+            .with(2, ""),
+        );
+        if history {
+            self.update_derived();
+            self.needs_terrain = true;
+        }
+
         widgets::section_header(ui, "physics");
         widgets::instrument_row(
             ui,
@@ -1925,6 +2005,38 @@ impl PlanetGenApp {
 
     fn tab_climate(&mut self, ui: &mut egui::Ui) {
         widgets::section_header(ui, "atmosphere");
+        let auto = DerivedProperties::from_params(&self.params);
+        let mut air = false;
+        air |= widgets::override_row(
+            ui,
+            &mut self.surface.pressure_bar,
+            auto.surface_pressure_bar,
+            0.00001..=crate::planet::MAX_PRESSURE_BAR,
+            Param::new(
+                "Pressure",
+                "Surface pressure. AUTO keeps what escape velocity and stellar flux allow (cosmic shoreline): Earth 1 bar, Mars 0.006, Moon none. Below 6 mbar water cannot stay liquid",
+                auto.surface_pressure_bar,
+            )
+            .with(4, " bar")
+            .log_scale(),
+        );
+        air |= widgets::override_row(
+            ui,
+            &mut self.surface.dust,
+            self.derived.dust,
+            0.0..=1.0,
+            Param::new(
+                "Dust",
+                "Oxidized dust on the surface and in the air: bright ochre deposits and a butterscotch haze (Mars). AUTO lifts it in thin, dry air",
+                self.derived.dust,
+            )
+            .with(2, ""),
+        );
+        if air {
+            self.update_derived();
+            self.needs_terrain = true;
+            self.invalidate_weather();
+        }
         if widgets::slider_row(
             ui,
             &mut self.climate_moisture,
@@ -2413,9 +2525,21 @@ impl PlanetGenApp {
                         );
                         widgets::instrument_row(
                             ui,
+                            "PRESSURE",
+                            format_pressure(self.derived.surface_pressure_bar),
+                        );
+                        widgets::instrument_row(
+                            ui,
                             "GRAVITY",
                             format!("{:.2} m/s²", self.derived.surface_gravity),
                         );
+                        if self.derived.crater_age_gyr > 0.0 {
+                            widgets::instrument_row(
+                                ui,
+                                "CRATER AGE",
+                                format!("{:.1} Gyr", self.derived.crater_age_gyr),
+                            );
+                        }
                         widgets::instrument_row(
                             ui,
                             "BASE TEMP",

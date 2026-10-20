@@ -54,7 +54,49 @@ pub struct PreviewUniforms {
     pub show_cloud_shadows: f32,
     pub surface_seed: u32,
     pub cloud_thin_lift: f32, // raises thin cloud optical depth (0 = solver field)
+    pub rocky: RockyUniforms,
     pub _pad6: [f32; 3],
+}
+
+/// Rocky-world surface terms (rocky.wgsl) for the preview and texture
+/// export; all zero renders the climate surface only. Flattened into the
+/// WGSL uniform struct as `rocky_*` fields.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable)]
+pub struct RockyUniforms {
+    pub gravity: f32,
+    pub crater_age_gyr: f32,
+    pub crater_erosion: f32,
+    pub mare_flooding: f32,
+    pub shield_volcanism: f32,
+    pub dichotomy: f32,
+    pub stagnant_lid: f32,
+    pub airless: f32,
+    pub dust: f32,
+    pub water_ice: f32,
+    /// Stellar flux relative to Earth's.
+    pub insolation: f32,
+    /// Bare regolith instead of climate biomes: worlds without liquid water.
+    pub regolith: f32,
+}
+
+impl RockyUniforms {
+    pub fn from_derived(derived: &crate::planet::DerivedProperties, star_distance_au: f32) -> Self {
+        Self {
+            gravity: derived.surface_gravity,
+            crater_age_gyr: derived.crater_age_gyr,
+            crater_erosion: derived.crater_erosion,
+            mare_flooding: derived.mare_flooding,
+            shield_volcanism: derived.shield_volcanism,
+            dichotomy: derived.dichotomy,
+            stagnant_lid: derived.stagnant_lid,
+            airless: derived.airless,
+            dust: derived.dust,
+            water_ice: derived.water_ice,
+            insolation: 1.0 / (star_distance_au * star_distance_au).max(1.0e-4),
+            regolith: 1.0 - derived.liquid_water,
+        }
+    }
 }
 
 /// Header of the Plates-view storage buffer; `PlateGpu` records follow it.
@@ -144,10 +186,11 @@ impl PreviewRenderer {
             &format!("const CLOUD_RAY_SAMPLES: u32 = {samples}u;"),
         );
         let shader_source = format!(
-            "{}\n{}\n{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
             include_str!("shaders/noise.wgsl"),
             include_str!("shaders/climate.wgsl"),
             include_str!("shaders/surface_material.wgsl"),
+            include_str!("shaders/rocky.wgsl"),
             cloud_density,
             include_str!("shaders/cloud_wind_fallback.wgsl"),
             synthesis_source,
@@ -901,6 +944,7 @@ mod tests {
             show_cloud_shadows: 1.0,
             surface_seed: 42,
             cloud_thin_lift: 0.0,
+            rocky: RockyUniforms::default(),
             _pad6: [0.0; 3],
         }
     }
@@ -2247,10 +2291,11 @@ mod tests {
 
     fn layer_profile_oracle(gpu: &GpuContext) -> Vec<f32> {
         let shader_source = format!(
-            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
             include_str!("shaders/noise.wgsl"),
             include_str!("shaders/climate.wgsl"),
             include_str!("shaders/surface_material.wgsl"),
+            include_str!("shaders/rocky.wgsl"),
             include_str!("shaders/cloud_density.wgsl"),
             include_str!("shaders/cloud_wind_fallback.wgsl"),
             include_str!("shaders/cloud_synthesis.wgsl"),
@@ -2390,10 +2435,11 @@ fn layer_profile_oracle() {
         resolution: u32,
     ) -> Vec<f32> {
         let shader_source = format!(
-            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
             include_str!("shaders/noise.wgsl"),
             include_str!("shaders/climate.wgsl"),
             include_str!("shaders/surface_material.wgsl"),
+            include_str!("shaders/rocky.wgsl"),
             include_str!("shaders/cloud_density.wgsl"),
             include_str!("shaders/cloud_wind_fallback.wgsl"),
             include_str!("shaders/cloud_synthesis.wgsl"),
@@ -2594,10 +2640,11 @@ fn layer_profile_oracle() {
     #[test]
     fn u4_cloud_phase_is_normalized_bounded_and_forward_weighted() {
         let shader_source = format!(
-            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
             include_str!("shaders/noise.wgsl"),
             include_str!("shaders/climate.wgsl"),
             include_str!("shaders/surface_material.wgsl"),
+            include_str!("shaders/rocky.wgsl"),
             include_str!("shaders/cloud_density.wgsl"),
             include_str!("shaders/cloud_wind_fallback.wgsl"),
             include_str!("shaders/cloud_synthesis.wgsl"),
@@ -3556,10 +3603,11 @@ fn layer_profile_oracle() {
             }
         }
         let source = format!(
-            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
             include_str!("shaders/noise.wgsl"),
             include_str!("shaders/climate.wgsl"),
             include_str!("shaders/surface_material.wgsl"),
+            include_str!("shaders/rocky.wgsl"),
             include_str!("shaders/cloud_density.wgsl"),
             include_str!("shaders/cloud_wind_fallback.wgsl"),
             include_str!("shaders/cloud_synthesis.wgsl"),

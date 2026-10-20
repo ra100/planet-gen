@@ -15,6 +15,10 @@ struct RoughnessParams {
     local_height: u32,
     axial_tilt_rad: f32,
     season: f32,
+    regolith: f32, // bare regolith share: rough and matte
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
 }
 
 @group(0) @binding(0) var<storage, read> heightmap: array<f32>;
@@ -92,6 +96,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         // Add noise variation
         let noise_var = snoise(sphere_pos * 10.0 + seed_offset) * 0.1;
         r = clamp(r + noise_var, 0.05, 1.0);
+        if (params.regolith > 0.0) {
+            r = mix(r, 0.95, params.regolith);
+        }
     }
 
     // Write to tile-local index
