@@ -77,6 +77,8 @@ pub struct PlanetFile {
     pub wind_scale: f32,
     pub storm_count: u32,
     pub storm_size: f32,
+    /// Tropical cyclone intensity (0-1); files without it load as the default.
+    pub storm_intensity: f32,
     // Surface extras
     pub lava_glow: f32,
     pub ring_inner: f32,
@@ -153,6 +155,7 @@ impl Default for PlanetFile {
             ring_opacity: 0.7,
             storm_count: 2,
             storm_size: 1.0,
+            storm_intensity: crate::cloud_synthesis::DEFAULT_STORM_INTENSITY,
             night_lights: 0.0,
             star_color_temp: 0.5,
             city_light_hue: 0.0,
@@ -228,6 +231,7 @@ pub fn checked_load(json: &str) -> Result<PlanetFile, String> {
     finite("cloud_synthesis", file.cloud_synthesis)?;
     finite("wind_scale", file.wind_scale)?;
     finite("storm_size", file.storm_size)?;
+    finite("storm_intensity", file.storm_intensity)?;
     finite("lava_glow", file.lava_glow)?;
     finite("ring_inner", file.ring_inner)?;
     finite("ring_outer", file.ring_outer)?;

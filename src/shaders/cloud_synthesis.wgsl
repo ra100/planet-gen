@@ -287,10 +287,19 @@ struct CsTemplate {
     // How strongly the system's own structure (shield, fronts, sectors, dry
     // slot) sets the cloud here; elsewhere the background regime holds.
     feature: f32,
+    // Extra edge softness over the systems' default (standard deviations).
+    soft: f32,
+    // Tropical cyclone weight: there the storm draws its own synoptic
+    // structure and the noise turns with the vortex, not the zonal jets.
+    vortex: f32,
+    // Eye: the column's cloud is replaced by broken low cloud from the fine
+    // band, so an eye is clear wherever it is, not only where the noise
+    // happens to be low.
+    clear: f32,
 }
 
 fn cs_empty_template() -> CsTemplate {
-    return CsTemplate(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    return CsTemplate(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
 }
 
 // Angular reach of a system, radians: everything it does fades to zero
@@ -445,29 +454,120 @@ fn cs_anticyclone(local: vec2<f32>, system: CloudSystem) -> CsTemplate {
     return tpl;
 }
 
-// Tropical cyclone: eye, central dense overcast and spiral rainbands that wind
-// inward cyclonically (theta + k ln r = const), with a cirrus outflow shield.
+// Distance from a logarithmic spiral arm, in radians of the spiral
+// coordinate s = theta + k ln r (constant along an arm that winds inward
+// cyclonically), as a band profile of half-width `width`.
+fn cs_spiral_arm(s: f32, offset: f32, width: f32) -> f32 {
+    let d = s - offset;
+    let wrapped = d - 6.2831853 * round(d / 6.2831853);
+    return exp(-(wrapped * wrapped) / (width * width));
+}
+
+// Tropical cyclone in local coordinates (x east, y poleward, radius 1;
+// cyclonic is counter-clockwise in both hemispheres). Intensity walks the
+// Dvorak sequence of satellite patterns: weak storms are a curved band
+// wrapped part-way round a centre that shear leaves exposed; stronger ones
+// grow a central dense overcast (CDO) that the band spirals into; hurricanes
+// open an eye in it, ragged and cloud-filled at first, then clear and round
+// with a thick eyewall and a moat inside the rainbands. Rainbands are
+// logarithmic spirals crossing circles at 10-25 degrees (k = cot of the
+// angle), one principal band and shorter secondary and inner bands rather
+// than a symmetric pinwheel. The eye floor keeps broken low stratocumulus,
+// and the eyewall's cloud top climbs from it to the tropopause (the stadium),
+// so the renderer shades and shadows its inner wall.
 fn cs_tropical(local: vec2<f32>, system: CloudSystem) -> CsTemplate {
-    let stage = system.shape.x;
     let intensity = system.shape.y;
+    let variant = system.shape.x;
+    let phase = system.shape.w * 6.2831853;
+    let eye_radius = max(system.extra.x, 0.005);
+    let k = system.extra.y;
+    // Strong storms only form and hold where shear is weak.
+    let shear = system.extra.w * (1.0 - 0.85 * smooth_step(0.45, 0.85, intensity));
+    let shear_dir = vec2<f32>(cos(system.extra.z), sin(system.extra.z));
+    let organized = smooth_step(0.2, 0.65, intensity);
+    let has_eye = smooth_step(0.5, 0.68, intensity);
+    let eye_open = smooth_step(0.62, 0.85, intensity);
     let r = length(local);
     let theta = atan2(local.y, local.x);
-    let tightness = system.extra.y;
-    let spiral = theta + tightness * log(max(r, 0.02));
-    let arm = 0.5 + 0.5 * cos(2.0 * spiral + system.shape.w * 6.2831853);
-    let bands = smooth_step(0.4, 0.85, arm) * smooth_step(0.12, 0.3, r) * (1.0 - smooth_step(0.65, 1.15, r));
-    let overcast = 1.0 - smooth_step(0.14 + 0.1 * stage, 0.34, r);
-    let eye = (1.0 - smooth_step(0.022, 0.05, r)) * smooth_step(0.6, 0.85, intensity);
+    let s = theta + k * log(max(r, 1.0e-3));
+
+    // CDO: the convective core, carried downshear of the low-level centre.
+    // Its cover falls off over a wide margin, so the advected noise frays
+    // the edge into the wound-up filaments of the outflow rather than a rim.
+    let core = local - shear_dir * (0.25 * shear);
+    let cdo_radius = mix(0.0, 0.36, organized) * (1.0 + 0.2 * shear) * (0.9 + 0.2 * variant);
+    let overcast = (1.0 - smooth_step(0.55 * cdo_radius, 1.35 * cdo_radius + 1.0e-4, length(core)))
+        * smooth_step(0.15, 0.4, intensity);
+
+    // Rainbands: widths grow outward with the spiral (constant in s), each
+    // arm fading in where it leaves the CDO and out at its own length. Weak
+    // storms are mostly their principal band, wrapped round the centre.
+    let curved = 1.0 - organized;
+    let principal = cs_spiral_arm(s, phase, mix(0.6, 0.8, curved))
+        * smooth_step(0.4 * cdo_radius, cdo_radius + 0.05, r)
+        * (1.0 - smooth_step(mix(0.7, 0.95, variant), mix(1.05, 1.3, variant), r));
+    let secondary = 0.8 * cs_spiral_arm(s, phase + 3.1416 + 0.8 * (variant - 0.5), 0.5)
+        * smooth_step(cdo_radius * 0.8, cdo_radius + 0.1, r) * (1.0 - smooth_step(0.45, 0.85, r))
+        * smooth_step(0.15, 0.5, intensity);
+    let inner = 0.7 * cs_spiral_arm(s, phase + 1.9, 0.4)
+        * smooth_step(cdo_radius * 0.8, cdo_radius + 0.05, r) * (1.0 - smooth_step(0.3, 0.55, r)) * organized;
+    // Bands break up into convective cells toward their outer ends.
+    let bands = max(principal, max(secondary, inner)) * (1.0 - 0.35 * smooth_step(0.35, 1.1, r));
+
+    // Eye: a slightly polygonal opening (eyewall mesovortices) whose wall
+    // slopes outward with height, so its cloud thins over a wide margin;
+    // the eyewall ring around it is the thickest cloud.
+    let wobble = 1.0 + 0.05 * cos(2.0 * theta + phase) + 0.02 * cos(4.0 * theta + 3.0 * phase) * eye_open;
+    let er = eye_radius * wobble;
+    let eye = (1.0 - smooth_step(0.55 * er, 1.6 * er, r)) * has_eye;
+    let eye_floor = (1.0 - smooth_step(0.4 * er, 1.5 * er, r)) * has_eye;
+    let eyewall = exp(-((r - 2.0 * er) * (r - 2.0 * er)) / (er * er)) * has_eye;
+    // Moat: the clearer ring between the CDO and the outer rainbands.
+    let moat = smooth_step(cdo_radius, cdo_radius + 0.06, r) * (1.0 - smooth_step(cdo_radius + 0.1, cdo_radius + 0.3, r))
+        * eye_open;
+
     var tpl = cs_empty_template();
-    tpl.cover = max(max(overcast, 0.92 * bands), 0.12) * (1.0 - eye);
+    // Between the bands: broken low cloud spiralling in under the canopy.
+    let between = mix(0.24, 0.15, moat) * (1.0 - smooth_step(0.7, 1.3, r)) + 0.15 * smooth_step(0.7, 1.3, r);
+    tpl.cover = max(max(0.999 * overcast, 0.93 * bands), between);
+    // The eye fills with thinning cloud as it opens, leaving broken low
+    // stratocumulus over the sea in major hurricanes.
+    tpl.cover = mix(tpl.cover, mix(0.97, 0.35, eye_open), eye);
+    tpl.clear = eye_floor * eye_open;
     tpl.feature = 1.0;
-    tpl.thick = 0.8 + 2.4 * overcast + 1.2 * bands;
-    tpl.deep = 0.9;
-    tpl.cirrus = 0.75 * (1.0 - smooth_step(0.5, 1.5, r)) * (1.0 - eye);
-    tpl.strat = max(overcast, bands);
-    tpl.cu = 1.0 - tpl.strat;
-    tpl.env = (1.0 - smooth_step(0.95, 1.45, r)) * intensity;
+    tpl.thick = 0.4 + 2.6 * overcast + 1.5 * bands + 1.2 * eyewall * overcast;
+    // Geometric falloff down the sloped wall, so the inner eyewall shows as
+    // a gradient from the bright overcast to the dim floor, not a cut rim.
+    tpl.thick = tpl.thick * pow(mix(1.6, 0.25, eye_open) / max(tpl.thick, 0.25), eye);
+    tpl.deep = mix(0.9, 0.05, eye * eye_open);
+    // Cirrus canopy over the CDO and inner bands; the eye stays clear of it.
+    tpl.cirrus = (0.35 + 0.5 * organized) * (1.0 - smooth_step(cdo_radius + 0.15, 1.0, r)) * (1.0 - eye);
+    // Drawn as stratiform: its gaps come from the wound-up shape field, so
+    // the low cloud between bands spirals in as lines instead of the
+    // pinholed cumulus fill of the trades.
+    tpl.strat = 1.0;
+    // Bands and the CDO margin keep soft, frayed edges, not a hard rim.
+    tpl.soft = 0.1 * (1.0 - overcast);
+    tpl.vortex = 1.0;
+    // Full weight over the storm: a partial weight lets the background
+    // regime's cover leak in, and the threshold then punches holes into the
+    // overcast and fills the eye.
+    tpl.env = 1.0 - smooth_step(0.95, 1.45, r);
     return tpl;
+}
+
+// Wind-up of a tropical cyclone's noise at radius r (system radii), radians.
+fn cs_tropical_twist(r: f32, system: CloudSystem) -> f32 {
+    let intensity = system.shape.y;
+    let k = 0.3 * system.extra.y * (0.35 + 0.65 * smooth_step(0.2, 0.65, intensity));
+    // The dense overcast turns nearly as one body: shear inside it only
+    // drew the core into rings.
+    // ln(1 + 1 / r^2) / 2: ln(1 / r) inside the storm, fading smoothly
+    // as 1 / r^2 beyond it (a clamped logarithm drew a ring where it
+    // stopped).
+    let rc = max(r, 0.22);
+    let spiral = 0.5 * k * log(1.0 + 1.0 / (rc * rc));
+    return spiral + intensity * exp(-r * r / (1.2 * 1.2));
 }
 
 struct CsSynoptic {
@@ -506,9 +606,24 @@ fn cs_advect(p: vec3<f32>) -> CsSynoptic {
     // Narrower jets on fast rotators; their shear grows with the wind.
     let jet_width = CS_JET_WIDTH_DEG / cs_banding();
     let wind = cs_wind();
-    var q = p;
-    var meso = p;
-    var fine = p;
+    // Tropical cyclones wind the noise into their vortex: a rotation about
+    // the centre that grows toward it shears features into curved arcs, the
+    // way the vortex's differential rotation draws real cloud into bands.
+    // It acts on the start point, near the storm: applied after the jets
+    // had carried the point far away, the same angle swept it thousands of
+    // kilometres and smeared the noise into rings.
+    var start = p;
+    for (var i = 0u; i < count; i++) {
+        let system = cloud_synthesis.systems[i];
+        if (!cs_is_tropical(system)) { continue; }
+        let local = cs_local(p, system);
+        if (local.z <= 0.0) { continue; }
+        let angle = cs_tropical_twist(length(local.xy), system) * local.z * system.shape.z;
+        start = cs_rotate(start, system.center.xyz, -angle);
+    }
+    var q = start;
+    var meso = start;
+    var fine = start;
     for (var step = 0; step < CS_FLOW_STEPS; step++) {
         let alat = abs(asin(clamp(dot(q, pole), -1.0, 1.0)) * 57.29578);
         let jet_offset = (alat - track) / jet_width;
@@ -517,6 +632,7 @@ fn cs_advect(p: vec3<f32>) -> CsSynoptic {
         var next = cs_rotate(q, pole, lag * dt);
         for (var i = 0u; i < count; i++) {
             let system = cloud_synthesis.systems[i];
+            if (cs_is_tropical(system)) { continue; }
             let local = cs_local(q, system);
             if (local.z <= 0.0) { continue; }
             // Cyclonic in the local frame is counter-clockwise seen from above
@@ -526,17 +642,39 @@ fn cs_advect(p: vec3<f32>) -> CsSynoptic {
         }
         q = normalize(next);
         if (step == 0) {
-            fine = normalize(p + q);
+            fine = normalize(start + q);
             meso = q;
         }
     }
     return CsSynoptic(cs_empty_template(), q, meso, fine);
 }
 
+// Blends a template over `base` with weight `w` (0-1).
+fn cs_overlay(base: CsTemplate, top: CsTemplate, w: f32) -> CsTemplate {
+    var out = base;
+    out.cover = mix(base.cover, top.cover, w);
+    out.thick = mix(base.thick, top.thick, w);
+    out.deep = mix(base.deep, top.deep, w);
+    out.strat = mix(base.strat, top.strat, w);
+    out.closed = mix(base.closed, top.closed, w);
+    out.open = mix(base.open, top.open, w);
+    out.cu = mix(base.cu, top.cu, w);
+    out.cirrus = max(base.cirrus * (1.0 - w), top.cirrus);
+    out.soft = mix(base.soft, top.soft, w);
+    out.vortex = top.vortex * w;
+    out.clear = top.clear * w;
+    out.env = 1.0 - (1.0 - base.env) * (1.0 - w);
+    return out;
+}
+
 fn cs_synoptic(p: vec3<f32>) -> CsSynoptic {
     var acc = cs_empty_template();
     var weight = 0.0;
     var clear = 1.0;
+    // Tropical cyclones are kept apart from each other (cloud_synthesis.rs)
+    // and override every other system where they are: averaged in, a cold
+    // front's trailing tail crossing a storm cut its overcast in half.
+    var tropical = cs_empty_template();
     let count = min(u32(cloud_synthesis.control.y), CS_MAX_SYSTEMS);
     for (var i = 0u; i < count; i++) {
         let system = cloud_synthesis.systems[i];
@@ -547,6 +685,9 @@ fn cs_synoptic(p: vec3<f32>) -> CsSynoptic {
             tpl = cs_anticyclone(local.xy, system);
         } else if (cs_is_tropical(system)) {
             tpl = cs_tropical(local.xy, system);
+            tpl.env *= local.z;
+            if (tpl.env > tropical.env) { tropical = tpl; }
+            continue;
         } else {
             tpl = cs_extratropical(local.xy, system);
         }
@@ -576,6 +717,10 @@ fn cs_synoptic(p: vec3<f32>) -> CsSynoptic {
         acc.cu *= inv;
     }
     acc.env = 1.0 - clear;
+    if (tropical.env > 0.0) {
+        tropical.cirrus *= tropical.env;
+        acc = cs_overlay(acc, tropical, clamp(tropical.env * tropical.feature, 0.0, 1.0));
+    }
     var result = cs_advect(p);
     result.tpl = acc;
     return result;
@@ -830,7 +975,7 @@ fn cs_synthesize(p: vec3<f32>, footprint: f32, solver: vec4<f32>, solver_geometr
     cover = mix(cover, system_cover, env);
     tau = mix(tau, 14.0 * synoptic.tpl.thick, env);
     deep_share = mix(deep_share, synoptic.tpl.deep, env);
-    soft = mix(soft, 0.1, env);
+    soft = mix(soft, 0.1 + synoptic.tpl.soft, env);
     morph = mix(morph, system_morph, env);
     conv *= 1.0 - env;
 
@@ -977,8 +1122,12 @@ fn cs_synthesize(p: vec3<f32>, footprint: f32, solver: vec4<f32>, solver_geometr
     // cumulus clusters follow the synoptic and mesoscale bands (the flowers
     // only texture them: alone, their peaked field reads as a star field),
     // open cells add their rings (closed cells only shade, see closed_lanes).
-    let c_lo = wm.x * 0.97 + wm.y * 0.5 + wm.z * 0.45 + wm.w * 0.6 + wc * 0.5;
-    let c_mid = wm.x * 0.25 + wm.y * 0.2 + wm.z * 0.2 + wm.w * 0.55 + wc * 0.45;
+    // Tropical cyclones draw their own bands: the synoptic band, as large as
+    // the storm, would erase whole arms, so their shape is mostly mesoscale.
+    let meso = 0.3 * clamp(synoptic.tpl.vortex, 0.0, 1.0);
+    let c_lo_base = wm.x * 0.97 + wm.y * 0.5 + wm.z * 0.45 + wm.w * 0.6 + wc * 0.5;
+    let c_lo = c_lo_base * (1.0 - 0.8 * meso);
+    let c_mid = wm.x * 0.25 + wm.y * 0.2 + wm.z * 0.2 + wm.w * 0.55 + wc * 0.45 + 0.8 * meso * c_lo_base;
     let c_op = wm.z * 0.87;
     let c_fl = wm.w * 0.45;
     let c_cv = wc * 0.8;
@@ -1020,7 +1169,7 @@ fn cs_synthesize(p: vec3<f32>, footprint: f32, solver: vec4<f32>, solver_geometr
         fill_margin = mix(1.0, smooth_step(-0.2, 0.9, octaves.hi - fill_threshold), breakup);
     }
     // Broken cumulus margins thin out to nothing rather than a gray veil.
-    let mask = clustered * filled * mix(1.0, smooth_step(0.04, 0.25, clustered), wm.w);
+    var mask = clustered * filled * mix(1.0, smooth_step(0.04, 0.25, clustered), wm.w);
     // Optical depth grows with distance above the threshold, so margins are
     // thin and cores thick (roughly lognormal, as observed) instead of flat
     // gray patches; resolved mesoscale and fine structure varies brightness,
@@ -1036,7 +1185,18 @@ fn cs_synthesize(p: vec3<f32>, footprint: f32, solver: vec4<f32>, solver_geometr
     let tau_in = tau * interior * exp(texture * (
         0.4 * octaves.mid * (1.0 - octaves.mid_unresolved) + 0.6 * octaves.hi * (1.0 - octaves.hi_unresolved)));
     let lanes = mix(1.0, closed_lanes, wm.y);
-    let tau_liquid = mask * tau_in * margin * lanes * (1.0 - 0.45 * frozen);
+    var tau_liquid = mask * tau_in * margin * lanes * (1.0 - 0.45 * frozen);
+    // A clear eye: the eyewall's optical depth falls geometrically down its
+    // sloped inner wall (a linear blend stays opaque until the last step and
+    // cuts a hard rim), onto broken low stratocumulus over a third of the
+    // floor from the fine band alone, gray where that band is unresolved.
+    let eye = synoptic.tpl.clear * env;
+    if (eye > 0.0) {
+        let floor_threshold = cs_probit(0.65) * sqrt(1.0 + 0.3 * 0.3);
+        let floor = cs_logistic((octaves.hi - floor_threshold) / sqrt(octaves.hi_unresolved + 0.3 * 0.3));
+        tau_liquid = tau_liquid * pow(0.01, eye) + eye * floor * 4.0;
+        mask = mix(mask, floor, eye);
+    }
 
     // ---- Cirrus ----
     var cirrus_cover = 0.03 + 0.12 * b_storm + 0.12 * w_itcz * ocean + 0.05 * wet_tropics
