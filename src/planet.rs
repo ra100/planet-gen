@@ -85,6 +85,26 @@ impl PlanetParams {
     }
 }
 
+/// User overrides for the rocky-surface model. `None` derives the value
+/// from physics; `dichotomy` has no physical derivation and defaults to 0.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct SurfaceOverrides {
+    /// Surface pressure in bar.
+    pub pressure_bar: Option<f32>,
+    /// Tectonics factor [0, 1] (0 = stagnant lid, 1 = vigorous plates).
+    pub tectonics: Option<f32>,
+    /// Model age of the surface recorded by impact craters, in Gyr.
+    pub crater_age_gyr: Option<f32>,
+    /// Volcanic plains flooding the lowest basins [0, 1] (lunar maria).
+    pub mare_flooding: Option<f32>,
+    /// Shield volcanoes and volcanic rises [0, 1] (Tharsis).
+    pub shield_volcanism: Option<f32>,
+    /// Hemispheric crustal dichotomy [0, 1] (Mars' northern lowlands).
+    pub dichotomy: f32,
+    /// Wind-blown oxidized dust on the surface and in the air [0, 1].
+    pub dust: Option<f32>,
+}
+
 /// Derived planet type from distance and mass.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PlanetType {
@@ -138,6 +158,33 @@ pub struct DerivedProperties {
     pub frost_line_au: f32,
     /// MMSN isolation mass at this distance
     pub isolation_mass: f32,
+    /// Escape velocity in km/s (rocky composition, R ∝ M^0.27).
+    pub escape_velocity_kms: f32,
+    /// log10 of insolation over the cosmic-shoreline insolation for this
+    /// escape velocity (Zahnle & Catling 2017): below about -0.5 an
+    /// atmosphere is retained in full, Mars sits near 0, the Moon near +1.8.
+    pub shoreline: f32,
+    /// Liquid surface water possible [0, 1]: needs pressure above water's
+    /// triple point (6.1 mbar). `ocean_fraction` already includes it.
+    pub liquid_water: f32,
+    /// Water inventory held as ice because it cannot stay liquid (polar caps).
+    pub water_ice: f32,
+    /// 1 = stagnant lid (no plates), 0 = active plate tectonics.
+    pub stagnant_lid: f32,
+    /// Model age of the surface as recorded by impact craters, in Gyr.
+    pub crater_age_gyr: f32,
+    /// Crater degradation by an atmosphere and water [0, 1].
+    pub crater_erosion: f32,
+    /// Volcanic plains flooding basins [0, 1].
+    pub mare_flooding: f32,
+    /// Shield volcanoes and volcanic rises [0, 1].
+    pub shield_volcanism: f32,
+    /// Hemispheric crustal dichotomy [0, 1].
+    pub dichotomy: f32,
+    /// Oxidized dust on the surface and in the air [0, 1].
+    pub dust: f32,
+    /// Airless surface [0, 1]: space-weathered regolith and its photometry.
+    pub airless: f32,
 }
 
 impl DerivedProperties {
@@ -156,31 +203,101 @@ impl DerivedProperties {
 
     /// Derive planet properties from user parameters using planetary science rules.
     pub fn from_params(params: &PlanetParams) -> Self {
+        Self::from_params_with(params, &SurfaceOverrides::default())
+    }
+
+    /// As `from_params`, with the rocky-surface overrides applied.
+    pub fn from_params_with(params: &PlanetParams, overrides: &SurfaceOverrides) -> Self {
+        let mass = params.mass_earth;
+        let distance = params.star_distance_au;
         let frost_line_au = compute_frost_line(params.metallicity);
-        let planet_type = classify_planet(params.star_distance_au, frost_line_au);
-        let surface_gravity = compute_surface_gravity(params.mass_earth);
-        let radius_km = 6371.0 * params.mass_earth.powf(0.27);
+        let planet_type = classify_planet(distance, frost_line_au);
+        let surface_gravity = compute_surface_gravity(mass);
+        let radius_km = 6371.0 * mass.powf(0.27);
         let rotation_rate_rad_s = std::f32::consts::TAU / (params.rotation_period_h * 3600.0);
-        let tectonics_factor =
-            compute_tectonics_factor(params.mass_earth, params.star_distance_au, surface_gravity);
+        let tectonics_factor = overrides
+            .tectonics
+            .map(|t| t.clamp(0.0, 1.0))
+            .unwrap_or_else(|| compute_tectonics_factor(mass, distance, surface_gravity));
         let tectonic_regime = if tectonics_factor > 0.5 {
             TectonicRegime::PlateTectonics
         } else {
             TectonicRegime::StagnantLid
         };
-        let atmosphere_strength =
-            compute_atmosphere_strength(params.mass_earth, params.star_distance_au);
-        let atmosphere_type = classify_atmosphere(atmosphere_strength, planet_type);
+        let atmosphere_strength = compute_atmosphere_strength(mass, distance);
+
+        // The retention heuristic sets an inventory; escape below the cosmic
+        // shoreline strips it. The greenhouse follows the retained pressure.
+        let escape_velocity_kms = 11.186 * mass.powf(0.365);
+        let shoreline = cosmic_shoreline(escape_velocity_kms, distance);
+        let retained_pressure = compute_surface_pressure_bar(atmosphere_strength, mass, distance);
+        let surface_pressure_bar = overrides
+            .pressure_bar
+            .map(|p| p.clamp(0.0, MAX_PRESSURE_BAR))
+            .unwrap_or_else(|| retained_pressure * escape_retention(shoreline));
+        let greenhouse_scale = if retained_pressure > 0.0 {
+            (surface_pressure_bar / retained_pressure).sqrt().min(10.0)
+        } else {
+            surface_pressure_bar.sqrt().min(10.0)
+        };
+        let atmosphere_type = if surface_pressure_bar < AIRLESS_PRESSURE_BAR {
+            AtmosphereType::None
+        } else {
+            classify_atmosphere(atmosphere_strength, planet_type)
+        };
         let base_temperature_c =
-            compute_base_temperature(params.star_distance_au, atmosphere_strength);
-        let ocean_fraction = compute_ocean_fraction(
-            params.star_distance_au,
-            params.mass_earth,
-            base_temperature_c,
-            frost_line_au,
+            compute_base_temperature(distance, atmosphere_strength, greenhouse_scale);
+        let water_inventory =
+            compute_ocean_fraction(distance, mass, base_temperature_c, frost_line_au);
+        let liquid_water = smoothstep(
+            TRIPLE_POINT_PRESSURE_BAR,
+            5.0 * TRIPLE_POINT_PRESSURE_BAR,
+            surface_pressure_bar,
         );
-        let surface_age = compute_surface_age(tectonics_factor, params.mass_earth);
-        let isolation_mass = compute_isolation_mass(params.star_distance_au);
+        let ocean_fraction = water_inventory * liquid_water;
+        let water_ice = water_inventory * (1.0 - liquid_water);
+        let surface_age = compute_surface_age(tectonics_factor, mass);
+        let isolation_mass = compute_isolation_mass(distance);
+
+        // Rocky-surface history. Stagnant-lid crusts keep their impact
+        // record for billions of years; resurfacing grows with mass.
+        let stagnant_lid = 1.0 - smoothstep(0.2, 0.6, tectonics_factor);
+        let crater_age_gyr = overrides
+            .crater_age_gyr
+            .map(|age| age.clamp(0.0, MAX_CRATER_AGE_GYR))
+            .unwrap_or(
+                MAX_CRATER_AGE_GYR * stagnant_lid * (1.1 - 0.35 * mass.sqrt()).clamp(0.3, 1.0),
+            );
+        let crater_erosion = (((surface_pressure_bar / AIRLESS_PRESSURE_BAR).max(1.0)).log10()
+            / 3.0)
+            .clamp(0.0, 1.0);
+        // Larger bodies stay hot long enough to build shields from a few
+        // long-lived vents (Tharsis) instead of flooding basins (lunar maria).
+        let shield_growth = smoothstep(0.02, 0.15, mass);
+        let mare_flooding = overrides
+            .mare_flooding
+            .map(|m| m.clamp(0.0, 1.0))
+            .unwrap_or(
+                stagnant_lid * (0.12 + 0.6 * mass.sqrt()).min(0.6) * (1.0 - 0.7 * shield_growth),
+            );
+        let shield_volcanism = overrides
+            .shield_volcanism
+            .map(|v| v.clamp(0.0, 1.0))
+            .unwrap_or(stagnant_lid * shield_growth);
+        // Thin air lifts dust planet-wide without rain to wash it out.
+        let dust = overrides.dust.map(|d| d.clamp(0.0, 1.0)).unwrap_or(
+            smoothstep(
+                AIRLESS_PRESSURE_BAR,
+                4.0 * AIRLESS_PRESSURE_BAR,
+                surface_pressure_bar,
+            ) * (1.0 - smoothstep(0.05, 0.5, surface_pressure_bar)),
+        );
+        let airless = 1.0
+            - smoothstep(
+                0.1 * AIRLESS_PRESSURE_BAR,
+                AIRLESS_PRESSURE_BAR,
+                surface_pressure_bar,
+            );
 
         Self {
             planet_type,
@@ -191,18 +308,67 @@ impl DerivedProperties {
             surface_gravity,
             radius_km,
             rotation_rate_rad_s,
-            surface_pressure_bar: compute_surface_pressure_bar(
-                atmosphere_strength,
-                params.mass_earth,
-                params.star_distance_au,
-            ),
+            surface_pressure_bar,
             base_temperature_c,
             ocean_fraction,
             surface_age,
             frost_line_au,
             isolation_mass,
+            escape_velocity_kms,
+            shoreline,
+            liquid_water,
+            water_ice,
+            stagnant_lid,
+            crater_age_gyr,
+            crater_erosion,
+            mare_flooding,
+            shield_volcanism,
+            dichotomy: overrides.dichotomy.clamp(0.0, 1.0),
+            dust,
+            airless,
         }
     }
+}
+
+/// Water's triple point: below it liquid water boils or freezes away.
+pub const TRIPLE_POINT_PRESSURE_BAR: f32 = 0.0061;
+/// Below this an atmosphere neither weathers nor shields the surface.
+pub const AIRLESS_PRESSURE_BAR: f32 = 0.001;
+pub const MAX_PRESSURE_BAR: f32 = 100.0;
+/// Oldest crater record: the end of the heavy bombardment, as on lunar highlands.
+pub const MAX_CRATER_AGE_GYR: f32 = 4.4;
+
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// log10(insolation / shoreline insolation). The empirical cosmic shoreline
+/// runs as I ∝ v_esc^4 (Zahnle & Catling 2017); it is placed through Mars,
+/// whose 6 mbar atmosphere marks the edge of retention.
+fn cosmic_shoreline(escape_velocity_kms: f32, distance_au: f32) -> f32 {
+    let insolation = 1.0 / (distance_au * distance_au);
+    let shoreline_insolation = 0.43 * (escape_velocity_kms / 5.0).powi(4);
+    (insolation / shoreline_insolation).log10()
+}
+
+/// Fraction of the retained atmosphere left after escape. Exactly 1 well
+/// inside the shoreline (Earth, Venus, Titan), 6 mbar out of ~160 at Mars,
+/// and vanishing for the Moon and Mercury. A quadratic knee keeps it smooth.
+fn escape_retention(shoreline: f32) -> f32 {
+    const ONSET: f32 = -0.5;
+    const KNEE: f32 = 0.3;
+    const DEX_PER_DEX: f32 = 3.87;
+    let u = shoreline - ONSET;
+    if u <= 0.0 {
+        return 1.0;
+    }
+    let hinge = if u < KNEE {
+        u * u / (2.0 * KNEE)
+    } else {
+        u - 0.5 * KNEE
+    };
+    10.0_f32.powf(-DEX_PER_DEX * hinge)
 }
 
 /// Frost line: water ice condenses beyond this distance.
@@ -289,7 +455,11 @@ fn compute_surface_gravity(mass_earth: f32) -> f32 {
 
 /// Temperature with greenhouse feedback (carbonate-silicate cycle approximation).
 /// Colder planets accumulate more CO₂ → stronger greenhouse, extending habitable zone.
-fn compute_base_temperature(distance_au: f32, atmosphere_strength: f32) -> f32 {
+fn compute_base_temperature(
+    distance_au: f32,
+    atmosphere_strength: f32,
+    greenhouse_scale: f32,
+) -> f32 {
     // Equilibrium temperature: T_eq = 255 / sqrt(distance) K
     let t_eq_k = 255.0 / distance_au.sqrt();
 
@@ -310,7 +480,7 @@ fn compute_base_temperature(distance_au: f32, atmosphere_strength: f32) -> f32 {
     };
 
     let greenhouse_k = base_greenhouse * feedback_factor;
-    t_eq_k + greenhouse_k - 273.15
+    t_eq_k + greenhouse_k * greenhouse_scale - 273.15
 }
 
 /// Ocean fraction from water budget model.
@@ -479,11 +649,169 @@ mod tests {
             ..Default::default()
         };
         let derived = DerivedProperties::from_params(&params);
+        // Mars' water is ice: its 6 mbar sits at the triple point.
         assert!(
-            derived.ocean_fraction > 0.05,
-            "Mars-like planet should have some water/ice, got {}",
+            derived.water_ice > 0.05,
+            "Mars-like planet should keep water as ice, got {}",
+            derived.water_ice
+        );
+        assert!(
+            derived.ocean_fraction < 0.01,
+            "Mars-like planet cannot hold liquid oceans, got {}",
             derived.ocean_fraction
         );
+    }
+
+    fn body(distance: f32, mass: f32) -> DerivedProperties {
+        DerivedProperties::from_params(&PlanetParams {
+            star_distance_au: distance,
+            mass_earth: mass,
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn earth_is_unchanged_by_the_rocky_surface_model() {
+        // Values pinned from the model before escape, liquid water and
+        // surface history were added: Earth must stay bit-identical.
+        let earth = body(1.0, 1.0);
+        assert_eq!(earth.surface_pressure_bar, 1.0);
+        assert_eq!(earth.base_temperature_c, 14.850_006);
+        assert_eq!(earth.ocean_fraction, 0.636_481_46);
+        assert_eq!(earth.tectonics_factor, 0.979_122_76);
+        assert_eq!(earth.liquid_water, 1.0);
+        assert_eq!(earth.water_ice, 0.0);
+        assert_eq!(earth.stagnant_lid, 0.0);
+        assert_eq!(earth.crater_age_gyr, 0.0);
+        assert_eq!(earth.mare_flooding, 0.0);
+        assert_eq!(earth.shield_volcanism, 0.0);
+        assert_eq!(earth.dust, 0.0);
+        assert_eq!(earth.airless, 0.0);
+    }
+
+    #[test]
+    fn moon_is_airless_dry_and_old() {
+        let moon = body(1.0, 0.0123);
+        assert!(
+            moon.surface_pressure_bar < 1e-5,
+            "{}",
+            moon.surface_pressure_bar
+        );
+        assert_eq!(moon.atmosphere_type, AtmosphereType::None);
+        assert_eq!(moon.ocean_fraction, 0.0);
+        assert_eq!(moon.airless, 1.0);
+        assert_eq!(moon.dust, 0.0);
+        assert!(moon.crater_age_gyr > 4.3, "{}", moon.crater_age_gyr);
+        assert!(moon.shoreline > 1.5, "{}", moon.shoreline);
+        // Maria cover about 17% of the Moon; no large shields.
+        assert!(
+            (0.12..0.25).contains(&moon.mare_flooding),
+            "{}",
+            moon.mare_flooding
+        );
+        assert_eq!(moon.shield_volcanism, 0.0);
+    }
+
+    #[test]
+    fn mars_keeps_a_thin_dusty_atmosphere_near_the_shoreline() {
+        let mars = body(1.52, 0.107);
+        assert!(
+            (0.003..0.012).contains(&mars.surface_pressure_bar),
+            "Mars surface pressure is ~6 mbar, got {}",
+            mars.surface_pressure_bar
+        );
+        assert!(mars.shoreline.abs() < 0.1, "{}", mars.shoreline);
+        assert!(
+            (-70.0..-48.0).contains(&mars.base_temperature_c),
+            "Mars mean surface temperature is about -60 C, got {}",
+            mars.base_temperature_c
+        );
+        assert!(mars.liquid_water < 0.01);
+        assert!(mars.dust > 0.9, "{}", mars.dust);
+        assert_eq!(mars.airless, 0.0);
+        assert!(mars.shield_volcanism > 0.5, "{}", mars.shield_volcanism);
+        assert!(mars.crater_age_gyr > 4.0);
+        assert!(mars.crater_erosion > 0.1 && mars.crater_erosion < 0.5);
+    }
+
+    #[test]
+    fn mercury_is_airless_and_hot() {
+        let mercury = body(0.387, 0.055);
+        assert!(mercury.surface_pressure_bar < 1e-5);
+        assert_eq!(mercury.airless, 1.0);
+        assert_eq!(mercury.ocean_fraction, 0.0);
+        assert!(mercury.base_temperature_c > 100.0);
+    }
+
+    #[test]
+    fn pressure_override_restores_liquid_water_and_greenhouse() {
+        let params = PlanetParams {
+            star_distance_au: 1.52,
+            mass_earth: 0.107,
+            ..Default::default()
+        };
+        let dry = DerivedProperties::from_params(&params);
+        let wet = DerivedProperties::from_params_with(
+            &params,
+            &SurfaceOverrides {
+                pressure_bar: Some(1.0),
+                ..Default::default()
+            },
+        );
+        assert_eq!(wet.surface_pressure_bar, 1.0);
+        assert_eq!(wet.liquid_water, 1.0);
+        assert!(wet.ocean_fraction > 0.05);
+        assert!(wet.base_temperature_c > dry.base_temperature_c + 15.0);
+        assert_eq!(wet.dust, 0.0);
+        let airless = DerivedProperties::from_params_with(
+            &params,
+            &SurfaceOverrides {
+                pressure_bar: Some(0.0),
+                ..Default::default()
+            },
+        );
+        assert_eq!(airless.atmosphere_type, AtmosphereType::None);
+        assert_eq!(airless.airless, 1.0);
+    }
+
+    #[test]
+    fn surface_history_overrides_apply_and_clamp() {
+        let overrides = SurfaceOverrides {
+            tectonics: Some(0.0),
+            crater_age_gyr: Some(9.0),
+            mare_flooding: Some(0.4),
+            shield_volcanism: Some(-1.0),
+            dichotomy: 0.8,
+            dust: Some(0.5),
+            ..Default::default()
+        };
+        let earth = DerivedProperties::from_params_with(&PlanetParams::default(), &overrides);
+        assert_eq!(earth.tectonics_factor, 0.0);
+        assert_eq!(earth.tectonic_regime, TectonicRegime::StagnantLid);
+        assert_eq!(earth.stagnant_lid, 1.0);
+        assert_eq!(earth.crater_age_gyr, MAX_CRATER_AGE_GYR);
+        assert_eq!(earth.mare_flooding, 0.4);
+        assert_eq!(earth.shield_volcanism, 0.0);
+        assert_eq!(earth.dichotomy, 0.8);
+        assert_eq!(earth.dust, 0.5);
+        // A thick atmosphere degrades craters fully.
+        assert_eq!(earth.crater_erosion, 1.0);
+    }
+
+    #[test]
+    fn retention_falls_off_beyond_the_shoreline() {
+        let titan_like = body(9.5, 0.0225);
+        let ganymede_like = body(5.2, 0.025);
+        assert!(titan_like.shoreline < ganymede_like.shoreline);
+        assert_eq!(escape_retention(-1.0), 1.0);
+        assert!(escape_retention(0.0) < 0.1);
+        assert!(escape_retention(1.5) < 1e-5);
+        let mut last = 1.0;
+        for step in 0..40 {
+            let r = escape_retention(-0.6 + step as f32 * 0.05);
+            assert!(r <= last);
+            last = r;
+        }
     }
 
     #[test]
