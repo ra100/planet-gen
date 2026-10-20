@@ -144,10 +144,16 @@ pub struct PlanetGenApp {
     gpu_device_lost: bool,
     /// Transient save/load feedback: (ok, text, expiry). Shown in the top bar.
     file_msg: Option<(bool, String, std::time::Instant)>,
-    /// Last file written by a save or opened by a load. Its folder seeds the
-    /// next save/load dialog; Ctrl+S overwrites it without a dialog and
-    /// Ctrl+Shift+S snapshots beside it as `<name>.001.json`, `.002.json`, …
+    /// The current file: last written by a save or opened by a load. Its
+    /// folder seeds the next save/load dialog; Ctrl+S overwrites it and
+    /// Ctrl+Shift+S saves the next version beside it (`abc.001.json` →
+    /// `abc.002.json`), which then becomes the current file.
     last_file_path: Option<std::path::PathBuf>,
+    /// Settings as last saved to or loaded from `last_file_path`; the
+    /// unsaved-changes marker compares against it.
+    saved_settings: Option<PlanetFile>,
+    /// Window title last sent to the viewport, so it is only resent on change.
+    window_title: String,
     /// Canvas rect captured during the current frame's CentralPanel layout;
     /// HUD chips anchor inside it, not inside the whole window.
     hud_rect: egui::Rect,
@@ -342,6 +348,8 @@ impl PlanetGenApp {
             gpu_failed,
             gpu_device_lost: false,
             file_msg: None,
+            saved_settings: None,
+            window_title: String::new(),
             last_file_path: None,
             hud_rect: egui::Rect::NOTHING,
         })
@@ -1505,23 +1513,50 @@ impl PlanetGenApp {
 
     /// Serialize the current configuration and write it to `path`. Reports
     /// success/failure via the top-bar file message; returns true on success.
+    /// The file becomes the current file.
     fn write_planet_file(&mut self, path: &std::path::Path) -> bool {
         let file = self.collect_settings();
-        match serde_json::to_string_pretty(&file) {
-            Ok(json) => match std::fs::write(path, json) {
-                Ok(()) => {
-                    self.set_file_msg(true, format!("saved {}", path.display()));
-                    true
-                }
-                Err(e) => {
-                    self.set_file_msg(false, format!("save failed: {e}"));
-                    false
-                }
-            },
+        let result = serde_json::to_string_pretty(&file)
+            .map_err(|e| e.to_string())
+            .and_then(|json| write_atomically(path, json.as_bytes()).map_err(|e| e.to_string()));
+        match result {
+            Ok(()) => {
+                self.set_file_msg(true, format!("saved {}", path.display()));
+                self.last_file_path = Some(path.to_path_buf());
+                self.saved_settings = Some(file);
+                true
+            }
             Err(e) => {
                 self.set_file_msg(false, format!("save failed: {e}"));
                 false
             }
+        }
+    }
+
+    /// True when the settings differ from the current file (or nothing has
+    /// been saved yet). Viewport state counts: the file stores it.
+    fn has_unsaved_changes(&self) -> bool {
+        self.saved_settings.as_ref() != Some(&self.collect_settings())
+    }
+
+    /// Keep the window title on the current file: `abc.002.json • — Planet
+    /// Gen 0.2.0`, with `•` while there are unsaved changes.
+    fn sync_window_title(&mut self, ctx: &egui::Context) {
+        let app = format!("Planet Gen {}", env!("CARGO_PKG_VERSION"));
+        let title = match self.last_file_path.as_ref().and_then(|p| p.file_name()) {
+            Some(name) => {
+                let dirty = if self.has_unsaved_changes() {
+                    " •"
+                } else {
+                    ""
+                };
+                format!("{}{dirty} — {app}", name.to_string_lossy())
+            }
+            None => app,
+        };
+        if title != self.window_title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.window_title = title;
         }
     }
 
@@ -1540,9 +1575,7 @@ impl PlanetGenApp {
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 path.set_extension("json");
             }
-            if self.write_planet_file(&path) {
-                self.last_file_path = Some(path);
-            }
+            self.write_planet_file(&path);
         } // dialog cancelled — silent no-op
         ctx.request_repaint();
     }
@@ -1559,37 +1592,55 @@ impl PlanetGenApp {
         ctx.request_repaint();
     }
 
-    /// Ctrl/⌘+Shift+S: snapshot the current file as `<name>.001.json`,
-    /// `.002.json`, … beside it (lowest free number). The base file itself is
-    /// never touched. With no current file, falls back to the save dialog.
+    /// Ctrl/⌘+Shift+S: save the next version of the current file beside it
+    /// and continue on it, e.g. `abc.json` → `abc.001.json`, `abc.001.json` →
+    /// `abc.002.json`, `abc_v3.json` → `abc_v4.json` (see
+    /// `planet_file::next_version_name`). Never overwrites an existing file.
+    /// With no current file, falls back to the save dialog.
     fn incremental_save(&mut self, ctx: &egui::Context) {
-        let base = match self.last_file_path.clone() {
-            Some(p) => p,
-            None => {
-                self.save_planet_file(ctx);
-                return;
-            }
+        let Some(current) = self.last_file_path.clone() else {
+            self.save_planet_file(ctx);
+            return;
         };
-        let stem = base
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("planet");
-        let ext = base.extension().and_then(|e| e.to_str()).unwrap_or("json");
-        let dir = base
+        let dir = current
             .parent()
             .map(std::path::Path::to_path_buf)
             .unwrap_or_default();
-        for n in 1..=999u32 {
-            let candidate = dir.join(format!("{stem}.{n:03}.{ext}"));
+        let current_name = current
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "planet.json".to_owned());
+        let listing_dir = if dir.as_os_str().is_empty() {
+            std::path::Path::new(".")
+        } else {
+            dir.as_path()
+        };
+        let mut existing: Vec<String> = std::fs::read_dir(listing_dir)
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        // A version may appear between listing and writing; step past it.
+        for _ in 0..16 {
+            let Some(name) =
+                planet_file::next_version_name(&current_name, existing.iter().map(String::as_str))
+            else {
+                break;
+            };
+            let candidate = dir.join(&name);
             if !candidate.exists() {
                 self.write_planet_file(&candidate);
                 ctx.request_repaint();
                 return;
             }
+            existing.push(name);
         }
         self.set_file_msg(
             false,
-            "incremental save failed: 999 versions already exist".into(),
+            format!("incremental save failed: no free version after {current_name}"),
         );
         ctx.request_repaint();
     }
@@ -1609,6 +1660,9 @@ impl PlanetGenApp {
                     Ok(file) => {
                         self.apply_settings(&file);
                         self.last_file_path = Some(path.clone());
+                        // Compare against the app's own view of the file so
+                        // fields it normalises on load do not read as edits.
+                        self.saved_settings = Some(self.collect_settings());
                         self.set_file_msg(true, format!("loaded {}", path.display()));
                     }
                     Err(e) => self.set_file_msg(false, e),
@@ -1660,14 +1714,41 @@ impl PlanetGenApp {
                 );
 
                 ui.add_space(12.0);
+                let save_hint = match &self.last_file_path {
+                    Some(path) => format!("Overwrite {} (Ctrl+S)", path.display()),
+                    None => "Save to a new file (Ctrl+S)".to_owned(),
+                };
                 if ui
                     .small_button(RichText::new("SAVE").color(theme::TEXT_DIM))
-                    .on_hover_text(
-                        "Save… dialog (S) · Ctrl+S overwrite current · Ctrl+Shift+S snapshot",
-                    )
+                    .on_hover_text(save_hint)
+                    .clicked()
+                {
+                    self.quick_save(ctx);
+                }
+                if ui
+                    .small_button(RichText::new("SAVE AS…").color(theme::TEXT_DIM))
+                    .on_hover_text("Save to a new file, chosen in a dialog (S)")
                     .clicked()
                 {
                     self.save_planet_file(ctx);
+                }
+                let increment_hint = match self.last_file_path.as_ref().and_then(|p| {
+                    let name = p.file_name()?.to_string_lossy().into_owned();
+                    planet_file::next_version_name(&name, std::iter::empty())
+                }) {
+                    Some(next) => format!(
+                        "Save the next version, e.g. {next}, and continue on it (Ctrl+Shift+S)"
+                    ),
+                    None => "Save the next version: abc.json → abc.001.json → abc.002.json; \
+                        also bumps abc_01, abc-v2 … (Ctrl+Shift+S)"
+                        .to_owned(),
+                };
+                if ui
+                    .small_button(RichText::new("SAVE +1").color(theme::TEXT_DIM))
+                    .on_hover_text(increment_hint)
+                    .clicked()
+                {
+                    self.incremental_save(ctx);
                 }
                 if ui
                     .small_button(RichText::new("LOAD").color(theme::TEXT_DIM))
@@ -1675,6 +1756,29 @@ impl PlanetGenApp {
                     .clicked()
                 {
                     self.load_planet_file(ctx);
+                }
+                if let Some(name) = self.last_file_path.as_ref().and_then(|p| p.file_name()) {
+                    let dirty = self.has_unsaved_changes();
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new(format!(
+                            "{}{}",
+                            name.to_string_lossy(),
+                            if dirty { " •" } else { "" }
+                        ))
+                        .monospace()
+                        .size(11.0)
+                        .color(if dirty {
+                            theme::TEXT_DIM
+                        } else {
+                            theme::TEXT_FAINT
+                        }),
+                    )
+                    .on_hover_text(if dirty {
+                        "Current file — unsaved changes"
+                    } else {
+                        "Current file — saved"
+                    });
                 }
 
                 // Transient save/load feedback (auto-expires in update()).
@@ -2835,9 +2939,9 @@ impl PlanetGenApp {
                 let rows: &[(&str, &str)] = &[
                     ("N", "Randomize seed"),
                     ("R", "Reset view"),
-                    ("S", "Save… dialog (remembers folder)"),
-                    ("Ctrl/⌘ S", "Overwrite current file"),
-                    ("Ctrl/⌘ ⇧ S", "Incremental save .001, .002 …"),
+                    ("S", "Save as… dialog (remembers folder)"),
+                    ("Ctrl/⌘ S", "Save: overwrite current file"),
+                    ("Ctrl/⌘ ⇧ S", "Save next version (abc.001 → abc.002)"),
                     ("L", "Load… dialog (last folder)"),
                     ("← → ↑ ↓", "Rotate planet"),
                     ("+ / −", "Zoom in / out"),
@@ -2893,6 +2997,7 @@ impl eframe::App for PlanetGenApp {
             ctx.request_repaint();
         }
         self.handle_keyboard_shortcuts(ctx);
+        self.sync_window_title(ctx);
 
         // One-shot response to a fatal GPU error: the device is lost, so stop
         // all GPU work (cancel any running export, drop pending generation)
@@ -3192,6 +3297,21 @@ fn rot3_orthonormalize(m: &[[f32; 3]; 3]) -> [[f32; 3]; 3] {
     [r0, r1, cross(r0, r1)]
 }
 
+/// Write `bytes` to `path` via a temporary file in the same folder and a
+/// rename, so a failed or interrupted save never leaves a truncated file.
+fn write_atomically(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let tmp = path.with_file_name(format!(".{name}.tmp"));
+    let result = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
 fn rand_seed() -> u32 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -3204,6 +3324,22 @@ fn rand_seed() -> u32 {
 mod tests {
     use super::*;
     use crate::export::{ExportConfig, ExportLayers, run_export};
+
+    #[test]
+    fn atomic_write_replaces_file_and_leaves_no_temp() {
+        let dir = std::env::temp_dir().join(format!("planet-gen-save-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("abc.001.json");
+        write_atomically(&path, b"first").unwrap();
+        write_atomically(&path, b"second").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"second");
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("abc.001.json")]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     fn apply_vec(m: &[[f32; 3]; 3], v: [f32; 3]) -> [f32; 3] {
         let mut out = [0.0f32; 3];

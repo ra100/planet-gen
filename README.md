@@ -95,7 +95,9 @@ The app opens with a tabbed control rail on the left, the 3D preview in the midd
 
 **Preview:** Drag to rotate, scroll to zoom, middle-click to pan, double-click to reset. The view bar switches between the lit planet (ALL), texture maps (height, roughness, clouds, cloud density, cloud height, emission, normals, AO), and debug views (plates, temperature, moisture, biome, ocean/ice, boundaries, snow, wind, currents, continentality, pressure).
 
-**Shortcuts:** `N` new seed, `R` reset view, arrow keys rotate, `+`/`-` zoom, `S` save, `Ctrl+S` overwrite the current file, `Ctrl+Shift+S` save a numbered snapshot, `L` load, `F1` or `?` help.
+**Saving:** the top bar has SAVE (overwrite the current file), SAVE AS… (choose a new file), SAVE +1 and LOAD. The current file's name sits beside them, with `•` while there are unsaved changes; the window title shows the same. SAVE +1 writes the next version beside the current file and continues on it: `abc.json` → `abc.001.json` → `abc.002.json`. Versions already ending in a number separated by `.`, `_` or `-` keep their style and padding (`abc_01` → `abc_02`, `abc-v3` → `abc-v4`), and the number goes past the highest existing version, so saving from an older one never overwrites a newer one. Trailing numbers longer than four digits (such as a seed in `planet_3185410`) are treated as part of the name. Saves go through a temporary file, so an interrupted save never leaves a truncated file.
+
+**Shortcuts:** `N` new seed, `R` reset view, arrow keys rotate, `+`/`-` zoom, `S` save as…, `Ctrl+S` save (overwrite the current file), `Ctrl+Shift+S` save the next version, `L` load, `F1` or `?` help.
 
 **Export:** Pick a folder (Choose…), a resolution, and layers, then press EXPORT TEXTURES. The folder is remembered between sessions.
 
