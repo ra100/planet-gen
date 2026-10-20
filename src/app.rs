@@ -2500,7 +2500,7 @@ impl PlanetGenApp {
                 ),
                 21 => widgets::dim(
                     ui,
-                    "Cloud height: black = clear / 0 km, white = 20 km. Export: Y = 0–1, height_km = altitude.",
+                    "Cloud top: black = clear / 0 km, white = 20 km. Export: Y = top 0–1, height_km = midpoint, base_km, top_km.",
                 ),
                 _ => {}
             }

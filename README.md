@@ -126,10 +126,10 @@ See [blender_addon/README.md](blender_addon/README.md) for the cloud bridge's co
 Export regenerates the weather inputs at bounded resolution from an immutable snapshot, builds the same weather-system catalogue as the preview, and writes the synthesized cloud (Clouds > Structure; `cloud_drivers.exr` keeps the solver's raw fields):
 
 - `cloud_density.exr` — radial optical depth in `Y`
-- `cloud_height.exr` — normalized altitude in `Y` (0–1 represents 0–20 km) and the density-weighted layer midpoint in kilometres in `height_km`; altitudes above 20 km saturate `Y` while `height_km` keeps the full value
+- `cloud_height.exr` — cloud top in `Y` (0–1 represents 0–20 km), plus the layer midpoint, base and top in kilometres in `height_km`, `base_km` and `top_km`; tops above 20 km saturate `Y` while the km channels keep the full value. Most clouds are 2–5 km thick slabs at any altitude, so a renderer that fills its layer from the ground up to `Y` should spread the optical depth over a slab below the top (`top_km - base_km`), not over the whole column: otherwise high, thin cirrus comes out several times more opaque than low decks. A layer that always starts at the ground (Blender PCO) cannot place a base: drive its height from `cloud_density.exr` `Y` instead, so the column grows with optical depth, and keep `cloud_height.exr` for renderers that take a base and top
 - `wind_drivers.exr` — tangent wind and speed at weather resolution, used by the Blender cloud bridge
 
-Clear texels are zero in density and height. Use the density texture for cloud opacity, not height as a mask. In Blender, use Non-Color data and multiply the normalized height by 20 to recover kilometres. The CLOUD DENSITY and CLOUD HEIGHT views show exactly these maps and work regardless of cloud visibility and opacity.
+Clear texels are zero in density and height. Use the density texture for cloud opacity, not height as a mask. In Blender, use Non-Color data and multiply the normalized top by 20 to recover kilometres; Blender reads only `Y`, the km channels are for scripts. The CLOUD DENSITY and CLOUD HEIGHT views show exactly these maps and work regardless of cloud visibility and opacity.
 
 Cloud altitude blends neighbouring weather cells by optical mass, so almost-empty cirrus cells next to dense low banks do not produce altitude spikes when the map drives displacement.
 

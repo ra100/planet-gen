@@ -175,7 +175,10 @@ pub const CLOUD_EXR_CHANNELS: [&str; 6] = [
     "character",
     "cirrus",
 ];
-pub const CLOUD_HEIGHT_EXR_CHANNELS: [&str; 2] = ["Y", "height_km"];
+/// `cloud_height.exr`: `Y` cloud top / 20 km (what PCO-style layers read as the column
+/// top), `height_km` the layer midpoint, and the layer's `base_km` / `top_km`. All four
+/// are zero in clear texels.
+pub const CLOUD_HEIGHT_EXR_CHANNELS: [&str; 4] = ["Y", "height_km", "base_km", "top_km"];
 pub const CLOUD_HEIGHT_SCALE_KM: f32 = 20.0;
 
 // ============ Progress ============
@@ -3149,13 +3152,16 @@ fn export_staged_cloud_maps(
                 .zip(row.chunks_exact(CLOUD_EXR_CHANNELS.len()))
             {
                 *density = column[0];
-                let height_km = if column[0] > 0.0 {
-                    column[2] + 0.5 * column[3]
+                let (base_km, thickness_km) = if column[0] > 0.0 {
+                    (column[2], column[3])
                 } else {
-                    0.0
+                    (0.0, 0.0)
                 };
-                altitude[0] = (height_km / CLOUD_HEIGHT_SCALE_KM).clamp(0.0, 1.0);
-                altitude[1] = height_km;
+                let top_km = base_km + thickness_km;
+                altitude[0] = (top_km / CLOUD_HEIGHT_SCALE_KM).clamp(0.0, 1.0);
+                altitude[1] = base_km + 0.5 * thickness_km;
+                altitude[2] = base_km;
+                altitude[3] = top_km;
             }
             density_writer
                 .borrow_mut()
@@ -4797,19 +4803,26 @@ mod tests {
             for value in read("cloud_density.exr", "Y", 1) {
                 assert!((value - density).abs() < 1.0e-6);
             }
-            let expected_km = if density > 0.0 {
-                base + 0.5 * thickness
+            let (expected_base, expected_top) = if density > 0.0 {
+                (base, base + thickness)
             } else {
-                0.0
+                (0.0, 0.0)
             };
-            for value in read("cloud_height.exr", "Y", 2) {
+            let expected_mid = 0.5 * (expected_base + expected_top);
+            for value in read("cloud_height.exr", "Y", 4) {
                 assert!((0.0..=1.0).contains(&value));
                 assert!(
-                    (value - (expected_km / CLOUD_HEIGHT_SCALE_KM).clamp(0.0, 1.0)).abs() < 1.0e-6
+                    (value - (expected_top / CLOUD_HEIGHT_SCALE_KM).clamp(0.0, 1.0)).abs() < 1.0e-6
                 );
             }
-            for value in read("cloud_height.exr", "height_km", 2) {
-                assert!((value - expected_km).abs() < 1.0e-6);
+            for (channel, expected) in [
+                ("height_km", expected_mid),
+                ("base_km", expected_base),
+                ("top_km", expected_top),
+            ] {
+                for value in read("cloud_height.exr", channel, 4) {
+                    assert!((value - expected).abs() < 1.0e-6, "{channel}: {value}");
+                }
             }
             let total_bytes: u64 = ["clouds.exr", "cloud_density.exr", "cloud_height.exr"]
                 .iter()
@@ -6224,7 +6237,8 @@ mod tests {
         let row: Vec<_> = (0..width)
             .flat_map(|x| {
                 let height = x as f32 / (width - 1) as f32;
-                [height, height * CLOUD_HEIGHT_SCALE_KM]
+                let top_km = height * CLOUD_HEIGHT_SCALE_KM;
+                [height, top_km, top_km, top_km]
             })
             .collect();
         let mut writer =
