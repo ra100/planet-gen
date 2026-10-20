@@ -39,6 +39,10 @@ const EARTH_ROTATION_RAD_S: f32 = 7.292_115e-5;
 const EARTH_EADY_WAVELENGTH_KM: f32 = 4_000.0;
 /// Tropical cyclone cloud-shield radius on Earth, km.
 const EARTH_TROPICAL_RADIUS_KM: f32 = 520.0;
+/// Most tropical cyclones Storms > Storm count can ask for.
+pub const MAX_TROPICAL_CYCLONES: u32 = 8;
+/// Storms > Intensity default: a mix of storms with and without an eye.
+pub const DEFAULT_STORM_INTENSITY: f32 = 0.7;
 
 /// One synoptic system, laid out as four `vec4<f32>` for `cloud_synthesis.wgsl`.
 #[repr(C)]
@@ -48,10 +52,13 @@ pub struct CloudSystemGpu {
     pub center: [f32; 4],
     /// xyz unit east tangent at the centre (circulation frame), w kind.
     pub frame: [f32; 4],
-    /// Life-cycle stage (0 open wave .. 1 occluded), intensity (0-1),
-    /// hemisphere (+1 north, -1 south), variant (0-1).
+    /// Life-cycle stage (0 open wave .. 1 occluded; a second variant for
+    /// tropical cyclones), intensity (0-1), hemisphere (+1 north, -1 south),
+    /// variant (0-1).
     pub shape: [f32; 4],
-    /// Cold-front length (radii), front curvature, east-west aspect, front tilt.
+    /// Cold-front length (radii), front curvature, east-west aspect, front
+    /// tilt. Tropical cyclones: eye radius (radii), spiral tightness (cot of
+    /// the rainbands' crossing angle), shear direction (radians), shear (0-1).
     pub extra: [f32; 4],
 }
 
@@ -181,6 +188,11 @@ fn normalize(v: [f32; 3]) -> [f32; 3] {
     [v[0] / length, v[1] / length, v[2] / length]
 }
 
+fn smooth_step(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
 fn east_at(center: [f32; 3], tilt: f32) -> [f32; 3] {
     let pole = [0.0, tilt.cos(), tilt.sin()];
     normalize(cross(pole, center))
@@ -203,6 +215,25 @@ pub fn weather_systems(
     strength: f32,
     is_ocean: impl Fn([f32; 3]) -> bool,
 ) -> CloudSynthesisGpu {
+    weather_systems_with_storms(snapshot, strength, DEFAULT_STORM_INTENSITY, is_ocean)
+}
+
+/// [`weather_systems`] with the Storms > Intensity control: 0 gives weak
+/// tropical storms (a curved band around an exposed centre), ~0.5 a central
+/// dense overcast without an eye, 1 major hurricanes with a clear eye, the
+/// Dvorak sequence from curved band to eye pattern. Count and size come from
+/// the snapshot's `storm_count` and `storm_size`.
+pub fn weather_systems_with_storms(
+    snapshot: &WeatherSnapshot,
+    strength: f32,
+    storm_intensity: f32,
+    is_ocean: impl Fn([f32; 3]) -> bool,
+) -> CloudSynthesisGpu {
+    let storm_intensity = if storm_intensity.is_finite() {
+        storm_intensity.clamp(0.0, 1.0)
+    } else {
+        DEFAULT_STORM_INTENSITY
+    };
     let mut data = CloudSynthesisGpu::zeroed();
     let strength = if strength.is_finite() {
         strength.clamp(0.0, 1.0)
@@ -370,17 +401,30 @@ pub fn weather_systems(
         }
     }
 
-    // Tropical cyclones over warm ocean. The tropics run about 12 C above the
-    // base temperature, so a 14 C base keeps them near the 26 C threshold.
+    // Tropical cyclones over warm ocean (Storms > count, size, intensity).
+    // The tropics run about 12 C above the base temperature, so a 14 C base
+    // puts them near the 26 C sea-surface threshold for genesis; cooler
+    // planets get fewer of the requested storms and none below ~22 C.
     let tropical_sst = snapshot.base_temp_c + 12.0;
-    if tropical_sst > 24.0 && snapshot.moisture > 0.2 {
+    let eligible =
+        smooth_step(22.0, 26.5, tropical_sst) * smooth_step(0.15, 0.35, snapshot.moisture);
+    let wanted =
+        (snapshot.storm_count.min(MAX_TROPICAL_CYCLONES) as f32 * eligible).round() as usize;
+    if wanted > 0 {
         let mut rng = Rng::new(snapshot.seed, 21);
-        let warmth = ((tropical_sst - 24.0) / 6.0).clamp(0.0, 1.5);
-        let wanted = (rng.range(0.4, 2.6) * warmth).round() as usize;
-        let size_km = (EARTH_TROPICAL_RADIUS_KM / rotation.sqrt()).clamp(150.0, 1500.0);
+        let storm_size = if snapshot.storm_size.is_finite() {
+            snapshot.storm_size.clamp(0.3, 3.0)
+        } else {
+            1.0
+        };
+        let size_km =
+            (EARTH_TROPICAL_RADIUS_KM / rotation.sqrt() * storm_size).clamp(150.0, 2_400.0);
+        // Genesis needs the Coriolis force (beyond ~8 degrees) and stays
+        // equatorward of the Hadley edge, where the trades steer storms.
+        let poleward_limit = (0.8 * hadley).clamp(14.0, 30.0);
         let mut attempts = 0;
-        let mut placed = 0;
-        while placed < wanted && attempts < 24 && systems.len() < MAX_CLOUD_SYSTEMS {
+        let mut placed: Vec<[f32; 3]> = Vec::with_capacity(wanted);
+        while placed.len() < wanted && attempts < 64 && systems.len() < MAX_CLOUD_SYSTEMS {
             attempts += 1;
             // Mostly the summer hemisphere.
             let hemisphere = if rng.unit() < 0.5 + 0.35 * season_sign {
@@ -388,9 +432,26 @@ pub fn weather_systems(
             } else {
                 -1.0
             };
-            let latitude = rng.range(10.0, 24.0) * hemisphere;
+            let latitude = rng.range(8.0, poleward_limit) * hemisphere;
             let longitude = rng.unit() * std::f32::consts::TAU;
+            // Per-storm draws come first so a rejected site never shifts the
+            // look of the storms placed after it.
+            let radius_scale = rng.range(0.75, 1.25);
+            let intensity = (storm_intensity * rng.range(0.7, 1.2)).clamp(0.05, 1.0);
+            let variant = rng.unit();
+            let tightness = rng.range(1.9, 3.0);
+            let shear_direction = rng.unit() * std::f32::consts::TAU;
+            let shear = rng.range(0.0, 1.0);
+            let eye_draw = rng.range(0.7, 1.4);
             let center = circulation_direction(latitude.to_radians(), longitude, tilt);
+            let radius = size_km * radius_scale / radius_km;
+            // Storms keep apart: two shields never overlap.
+            if placed.iter().any(|other| {
+                let cos = center[0] * other[0] + center[1] * other[1] + center[2] * other[2];
+                cos.clamp(-1.0, 1.0).acos() < 2.2 * radius
+            }) {
+                continue;
+            }
             let east = east_at(center, tilt);
             // Open water around the eye too, so preview and export terrain of
             // different resolutions agree near coasts.
@@ -409,23 +470,22 @@ pub fn weather_systems(
             if !open_water {
                 continue;
             }
+            // Eye radius: 12-45 km on Earth, smaller in stronger storms
+            // (pinhole eyes), in units of the system radius.
+            let eye_km = (45.0 - 27.0 * intensity) * eye_draw * size_km.sqrt()
+                / EARTH_TROPICAL_RADIUS_KM.sqrt();
             systems.push(CloudSystemGpu {
-                center: [
-                    center[0],
-                    center[1],
-                    center[2],
-                    size_km * rng.range(0.75, 1.25) / radius_km,
-                ],
+                center: [center[0], center[1], center[2], radius],
                 frame: [east[0], east[1], east[2], SYSTEM_TROPICAL],
-                shape: [
-                    rng.range(0.3, 1.0),
-                    rng.range(0.6, 1.0),
-                    hemisphere,
-                    rng.unit(),
+                shape: [variant, intensity, hemisphere, rng.unit()],
+                extra: [
+                    eye_km / (size_km * radius_scale),
+                    tightness,
+                    shear_direction,
+                    shear,
                 ],
-                extra: [rng.range(1.2, 2.2), rng.range(2.0, 4.0), 1.0, 0.0],
             });
-            placed += 1;
+            placed.push(center);
         }
     }
 
@@ -608,6 +668,7 @@ mod tests {
         let earth = earth();
         let warm = WeatherSnapshot {
             base_temp_c: 22.0,
+            storm_count: 2,
             ..earth
         };
         let tropical = |s: &WeatherSnapshot, ocean: bool| {
@@ -630,6 +691,108 @@ mod tests {
             total >= 16,
             "warm oceans should average one or more ({total})"
         );
+    }
+
+    fn tropical(data: &CloudSynthesisGpu) -> Vec<CloudSystemGpu> {
+        data.systems[..data.system_count()]
+            .iter()
+            .filter(|s| s.frame[3] == SYSTEM_TROPICAL)
+            .copied()
+            .collect()
+    }
+
+    #[test]
+    fn storm_controls_set_count_size_and_intensity() {
+        let warm = WeatherSnapshot {
+            base_temp_c: 18.0,
+            ..earth()
+        };
+        for count in 0..=MAX_TROPICAL_CYCLONES {
+            let snapshot = WeatherSnapshot {
+                storm_count: count,
+                ..warm
+            };
+            let storms = tropical(&weather_systems(&snapshot, 1.0, |_| true));
+            assert_eq!(storms.len(), count as usize, "count {count}");
+            // Storms keep apart: their shields never overlap.
+            for (i, a) in storms.iter().enumerate() {
+                for b in &storms[i + 1..] {
+                    let cos = a.center[0] * b.center[0]
+                        + a.center[1] * b.center[1]
+                        + a.center[2] * b.center[2];
+                    assert!(cos.acos() >= 2.2 * a.center[3].max(b.center[3]) * 0.99);
+                }
+            }
+        }
+        let mean_radius = |size: f32| {
+            let storms = tropical(&weather_systems(
+                &WeatherSnapshot {
+                    storm_count: 4,
+                    storm_size: size,
+                    ..warm
+                },
+                1.0,
+                |_| true,
+            ));
+            storms.iter().map(|s| s.center[3]).sum::<f32>() / storms.len() as f32
+        };
+        assert!(mean_radius(2.0) > 1.8 * mean_radius(1.0));
+        assert!(mean_radius(0.5) < 0.6 * mean_radius(1.0));
+        let snapshot = WeatherSnapshot {
+            storm_count: 6,
+            ..warm
+        };
+        let intensity = |value: f32| {
+            let storms = tropical(&weather_systems_with_storms(&snapshot, 1.0, value, |_| {
+                true
+            }));
+            storms.iter().map(|s| s.shape[1]).sum::<f32>() / storms.len() as f32
+        };
+        assert!(intensity(0.2) < 0.3);
+        assert!(intensity(1.0) > 0.85);
+        // Stronger storms have smaller eyes (pinhole eyes), relative to the storm.
+        let eye = |value: f32| {
+            let storms = tropical(&weather_systems_with_storms(&snapshot, 1.0, value, |_| {
+                true
+            }));
+            storms.iter().map(|s| s.extra[0]).sum::<f32>() / storms.len() as f32
+        };
+        assert!(eye(1.0) < eye(0.6));
+    }
+
+    #[test]
+    fn cool_tropics_get_fewer_of_the_requested_storms() {
+        let count = |base_temp_c: f32| {
+            tropical(&weather_systems(
+                &WeatherSnapshot {
+                    base_temp_c,
+                    storm_count: 8,
+                    ..earth()
+                },
+                1.0,
+                |_| true,
+            ))
+            .len()
+        };
+        assert_eq!(count(16.0), 8);
+        let cool = count(12.0);
+        assert!((1..8).contains(&cool), "cool tropics {cool}");
+        assert_eq!(count(9.0), 0);
+    }
+
+    #[test]
+    fn tropical_cyclones_form_between_eight_degrees_and_the_hadley_edge() {
+        for seed in 0..12 {
+            let snapshot = WeatherSnapshot {
+                seed,
+                storm_count: 8,
+                ..earth()
+            };
+            for storm in tropical(&weather_systems(&snapshot, 1.0, |_| true)) {
+                let latitude = latitude_deg(storm.center, snapshot.axial_tilt_rad).abs();
+                assert!((7.9..=30.1).contains(&latitude), "latitude {latitude}");
+            }
+        }
     }
 
     #[test]

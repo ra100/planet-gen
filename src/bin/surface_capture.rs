@@ -154,6 +154,7 @@ fn main() {
                 .and_then(|value| value.parse().ok()),
             cloud_thin_lift: 0.0,
             cloud_synthesis: 0.0,
+            storm_intensity: planet_gen::cloud_synthesis::DEFAULT_STORM_INTENSITY,
         };
         let terrain_params = TerrainGenerationParams {
             seed,

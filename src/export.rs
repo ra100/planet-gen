@@ -11,7 +11,7 @@ use half::f16;
 use thiserror::Error;
 use wgpu::util::DeviceExt;
 
-use crate::cloud_synthesis::{CloudSynthesisGpu, weather_systems};
+use crate::cloud_synthesis::{CloudSynthesisGpu, weather_systems_with_storms};
 use crate::export_staging::{
     EquirectStage, ExportStage, StageMetadata, StagedCubemapSampler, StagedEquirectRowGenerator,
 };
@@ -165,6 +165,8 @@ pub struct ExportConfig {
     /// Cloud synthesis strength (0-1): 0 exports the weather solver's field,
     /// 1 the synthesized weather systems and cloud regimes, as in the preview.
     pub cloud_synthesis: f32,
+    /// Storms > Intensity (0-1) for the synthesized tropical cyclones.
+    pub storm_intensity: f32,
 }
 
 pub const CLOUD_EXR_CHANNELS: [&str; 6] = [
@@ -4315,9 +4317,12 @@ pub fn run_export_with_timings_and_checkpoints(
         wait_for_gpu_completion(gpu, cancel)?;
         timings.export_weather_wall_ms = weather_started.elapsed().as_secs_f64() * 1000.0;
         let cloud_tiles_started = Instant::now();
-        let synthesis = weather_systems(&snapshot, config.cloud_synthesis, |direction| {
-            sample_cubemap_height(&weather_terrain, direction) < snapshot.ocean_level
-        });
+        let synthesis = weather_systems_with_storms(
+            &snapshot,
+            config.cloud_synthesis,
+            config.storm_intensity,
+            |direction| sample_cubemap_height(&weather_terrain, direction) < snapshot.ocean_level,
+        );
         let stage = stage_cloud_faces(
             gpu,
             &planet_dir,
@@ -4539,6 +4544,7 @@ mod tests {
             albedo_ao: None,
             cloud_thin_lift: 0.0,
             cloud_synthesis: 0.0,
+            storm_intensity: crate::cloud_synthesis::DEFAULT_STORM_INTENSITY,
         };
         let mut changed_after_queue = source;
         changed_after_queue.coverage = 0.0;
@@ -5096,7 +5102,7 @@ mod tests {
             &weather,
             snapshot,
             0.0,
-            &weather_systems(&snapshot, synthesis_strength, |direction| {
+            &crate::cloud_synthesis::weather_systems(&snapshot, synthesis_strength, |direction| {
                 sample_cubemap_height(terrain, direction) < snapshot.ocean_level
             }),
             &coordinator,
@@ -5327,7 +5333,7 @@ mod tests {
         let weather_pipeline = WeatherFieldPipeline::new(&gpu).expect("weather pipeline");
         let weather = weather_pipeline.create_textures(&gpu, snapshot.resolution);
         weather_pipeline.generate(&gpu, snapshot, &terrain, &dynamics, &weather);
-        let synthesis = weather_systems(&snapshot, 1.0, |direction| {
+        let synthesis = crate::cloud_synthesis::weather_systems(&snapshot, 1.0, |direction| {
             sample_cubemap_height(&terrain, direction) < snapshot.ocean_level
         });
         // Area-weighted mean physical optical depth (the bridge's curve).
@@ -7038,6 +7044,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             albedo_ao: None,
             cloud_thin_lift: 0.0,
             cloud_synthesis: 0.0,
+            storm_intensity: crate::cloud_synthesis::DEFAULT_STORM_INTENSITY,
         };
 
         let (tx, rx) = std::sync::mpsc::channel();
@@ -7130,6 +7137,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             albedo_ao: None,
             cloud_thin_lift: 0.0,
             cloud_synthesis: 0.0,
+            storm_intensity: crate::cloud_synthesis::DEFAULT_STORM_INTENSITY,
         };
 
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -7176,6 +7184,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             albedo_ao: None,
             cloud_thin_lift: 0.0,
             cloud_synthesis: 0.0,
+            storm_intensity: crate::cloud_synthesis::DEFAULT_STORM_INTENSITY,
         };
         assert_eq!(config.tile_size, TILE_SIZE);
 

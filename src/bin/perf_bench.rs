@@ -405,6 +405,7 @@ fn run_u2_8k() {
         albedo_ao: None,
         cloud_thin_lift: 0.0,
         cloud_synthesis: 0.0,
+        storm_intensity: planet_gen::cloud_synthesis::DEFAULT_STORM_INTENSITY,
     };
     let (progress, _progress_rx) = std::sync::mpsc::channel();
     let started = Instant::now();

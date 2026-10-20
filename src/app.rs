@@ -2,7 +2,9 @@ use eframe::egui;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::cloud_synthesis::{CloudSynthesisGpu, weather_systems};
+use crate::cloud_synthesis::{
+    CloudSynthesisGpu, DEFAULT_STORM_INTENSITY, MAX_TROPICAL_CYCLONES, weather_systems_with_storms,
+};
 use crate::export::{self, ExportConfig, ExportHandle, ExportLayers, ExportProgress};
 use crate::gpu::GpuContext;
 use crate::planet::{DerivedProperties, PlanetParams};
@@ -28,7 +30,7 @@ pub struct PlanetGenApp {
     weather: Option<WeatherLifecycle>,
     weather_terrain: Option<crate::terrain_compute::TectonicTerrain>,
     /// Snapshot and strength of the cloud synthesis last uploaded to the preview.
-    cloud_synthesis_key: Option<(WeatherSnapshot, f32)>,
+    cloud_synthesis_key: Option<(WeatherSnapshot, f32, f32)>,
     texture_id: egui::TextureId,
     render_state: eframe::egui_wgpu::RenderState,
     params: PlanetParams,
@@ -84,6 +86,7 @@ pub struct PlanetGenApp {
     ring_opacity: f32, // ring opacity
     storm_count: u32,
     storm_size: f32,
+    storm_intensity: f32,
     night_lights: f32,
     star_color_temp: f32,
     city_light_hue: f32,
@@ -290,6 +293,7 @@ impl PlanetGenApp {
             ring_opacity: 0.7,
             storm_count: 2,
             storm_size: 1.0,
+            storm_intensity: DEFAULT_STORM_INTENSITY,
             night_lights: 0.0,
             star_color_temp: 0.5,
             city_light_hue: 0.0,
@@ -629,7 +633,7 @@ impl PlanetGenApp {
             .weather
             .as_ref()
             .and_then(WeatherLifecycle::front_snapshot);
-        let key = snapshot.map(|snapshot| (snapshot, self.cloud_synthesis));
+        let key = snapshot.map(|snapshot| (snapshot, self.cloud_synthesis, self.storm_intensity));
         if key == self.cloud_synthesis_key {
             return;
         }
@@ -639,11 +643,16 @@ impl PlanetGenApp {
                     .weather_terrain
                     .as_ref()
                     .or(self.erosion_terrain.as_ref());
-                weather_systems(&snapshot, self.cloud_synthesis, |direction| {
-                    terrain.is_none_or(|terrain| {
-                        export::sample_cubemap_height(terrain, direction) < snapshot.ocean_level
-                    })
-                })
+                weather_systems_with_storms(
+                    &snapshot,
+                    self.cloud_synthesis,
+                    self.storm_intensity,
+                    |direction| {
+                        terrain.is_none_or(|terrain| {
+                            export::sample_cubemap_height(terrain, direction) < snapshot.ocean_level
+                        })
+                    },
+                )
             }
             None => CloudSynthesisGpu::disabled(),
         };
@@ -849,6 +858,7 @@ impl PlanetGenApp {
                 .then_some(self.export_bake_ao_strength),
             cloud_thin_lift: self.cloud_thin_lift,
             cloud_synthesis: self.cloud_synthesis,
+            storm_intensity: self.storm_intensity,
         };
 
         let terrain_params = self.terrain_params();
@@ -1271,6 +1281,7 @@ impl PlanetGenApp {
         self.ring_opacity = 0.7;
         self.storm_count = 2;
         self.storm_size = 1.0;
+        self.storm_intensity = DEFAULT_STORM_INTENSITY;
         self.night_lights = 0.0;
         self.star_color_temp = 0.5;
         self.city_light_hue = 0.0;
@@ -1405,6 +1416,7 @@ impl PlanetGenApp {
             ring_opacity: self.ring_opacity,
             storm_count: self.storm_count,
             storm_size: self.storm_size,
+            storm_intensity: self.storm_intensity,
             night_lights: self.night_lights,
             star_color_temp: self.star_color_temp,
             city_light_hue: self.city_light_hue,
@@ -1473,6 +1485,7 @@ impl PlanetGenApp {
         self.ring_opacity = file.ring_opacity;
         self.storm_count = file.storm_count;
         self.storm_size = file.storm_size;
+        self.storm_intensity = file.storm_intensity.clamp(0.0, 1.0);
         self.night_lights = file.night_lights;
         self.star_color_temp = file.star_color_temp;
         self.city_light_hue = file.city_light_hue;
@@ -2212,30 +2225,43 @@ impl PlanetGenApp {
         if widgets::int_row(
             ui,
             &mut storms,
-            0..=8,
+            0..=MAX_TROPICAL_CYCLONES as i32,
             Param::new(
                 "Storm count",
-                "Number of localized storm regions within physically eligible weather",
+                "Tropical cyclones (hurricanes, typhoons) over warm tropical ocean. Cool planets get fewer and none once the tropics fall below ~22 C; also seeds storm regions in the weather solver",
                 2.0,
             ),
         ) {
             self.storm_count = storms as u32;
             self.invalidate_weather();
         }
-        if self.storm_count > 0
-            && widgets::slider_row(
+        if self.storm_count > 0 {
+            if widgets::slider_row(
                 ui,
                 &mut self.storm_size,
                 0.3..=3.0,
                 Param::new(
                     "Storm size",
-                    "Scale of eligible storm regions: 0.3 = compact, 3.0 = broad",
+                    "Cyclone cloud-shield size: 0.3 = compact (midget storm), 1 = typical (~500 km radius on Earth), 3 = giant typhoon",
                     1.0,
                 )
                 .with(2, ""),
-            )
-        {
-            self.invalidate_weather();
+            ) {
+                self.invalidate_weather();
+            }
+            if widgets::slider_row(
+                ui,
+                &mut self.storm_intensity,
+                0.0..=1.0,
+                Param::new(
+                    "Intensity",
+                    "Storm strength, shown with Structure on: 0 = tropical storms (curved bands round an exposed centre), 0.5 = dense overcast without an eye, 1 = major hurricanes with a clear eye. Storms vary around this value",
+                    DEFAULT_STORM_INTENSITY,
+                )
+                .with(2, ""),
+            ) {
+                self.needs_render = true;
+            }
         }
     }
 
@@ -3296,6 +3322,7 @@ mod tests {
             albedo_ao: None,
             cloud_thin_lift: 0.0,
             cloud_synthesis: 0.0,
+            storm_intensity: crate::cloud_synthesis::DEFAULT_STORM_INTENSITY,
         }
     }
 

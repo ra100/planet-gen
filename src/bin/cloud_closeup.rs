@@ -1,6 +1,6 @@
 use bytemuck::Zeroable;
 use planet_gen::{
-    cloud_synthesis::weather_systems,
+    cloud_synthesis::{SYSTEM_TROPICAL, weather_systems_with_storms},
     gpu::GpuContext,
     planet::{DerivedProperties, PlanetParams},
     plates::{PlateGenParams, generate_plates},
@@ -16,7 +16,11 @@ use planet_gen::{
 // Writes view-LAT-LON-ZOOM[-TAG].png per view. --watch re-renders whenever
 // the job file changes, reusing the generated weather. A job is JSON:
 // {"tag", "shader": path to a cloud_synthesis.wgsl, "views": "LAT,LON,ZOOM;...",
-// "synthesis": strength, "quit": true}.
+// "synthesis": strength, "storm_intensity", "storm_count", "storm_size",
+// "quit": true}. Storm settings in a job only rebuild the synthesized
+// systems; the solver keeps the weather it was started with. Tropical
+// cyclone centres are printed as "storm LAT,LON radius_km intensity" in view
+// coordinates, ready for --views.
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let arg = |name: &str| {
@@ -174,9 +178,33 @@ fn main() {
         let row = (((t + 1.0) * 0.5) * (res - 1) as f32).round() as usize;
         terrain.faces[face][row.min(res - 1) * res + column.min(res - 1)]
     };
-    let synthesis = weather_systems(&snapshot, setting("cloud_synthesis", 1.0), |direction| {
-        terrain_height(direction) < ocean_level
-    });
+    let systems = |snapshot: &WeatherSnapshot, strength: f32, storm_intensity: f32| {
+        let synthesis =
+            weather_systems_with_storms(snapshot, strength, storm_intensity, |direction| {
+                terrain_height(direction) < ocean_level
+            });
+        for system in &synthesis.systems[..synthesis.system_count()] {
+            if system.frame[3] == SYSTEM_TROPICAL {
+                let [x, y, z, radius] = system.center;
+                println!(
+                    "storm {:.2},{:.2} radius_km={:.0} intensity={:.2}",
+                    y.asin().to_degrees(),
+                    x.atan2(z).to_degrees(),
+                    radius * snapshot.radius_km,
+                    system.shape[1]
+                );
+            }
+        }
+        synthesis
+    };
+    let synthesis = systems(
+        &snapshot,
+        setting("cloud_synthesis", 1.0),
+        setting(
+            "storm_intensity",
+            planet_gen::cloud_synthesis::DEFAULT_STORM_INTENSITY,
+        ),
+    );
     let mut views = parse_views(
         &arg("--views").unwrap_or_else(|| "0,0,20;30,-60,20;-45,100,20;10,150,6".to_owned()),
     );
@@ -298,9 +326,24 @@ fn main() {
             let strength = json["synthesis"]
                 .as_f64()
                 .map_or(setting("cloud_synthesis", 1.0), |v| v as f32);
-            let synthesis = weather_systems(&snapshot, strength, |direction| {
-                terrain_height(direction) < ocean_level
-            });
+            let mut storms = snapshot;
+            if let Some(count) = json["storm_count"].as_u64() {
+                storms.storm_count = count as u32;
+            }
+            if let Some(size) = json["storm_size"].as_f64() {
+                storms.storm_size = size as f32;
+            }
+            let synthesis = systems(
+                &storms,
+                strength,
+                json["storm_intensity"].as_f64().map_or(
+                    setting(
+                        "storm_intensity",
+                        planet_gen::cloud_synthesis::DEFAULT_STORM_INTENSITY,
+                    ),
+                    |v| v as f32,
+                ),
+            );
             gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
             let mut renderer = match json["shader"].as_str() {
                 Some(path) => PreviewRenderer::new_with_synthesis_source(

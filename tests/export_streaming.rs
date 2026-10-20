@@ -176,6 +176,7 @@ fn eight_k_all_layers_with_erosion() {
         albedo_ao: None,
         cloud_thin_lift: 0.0,
         cloud_synthesis: 0.0,
+        storm_intensity: planet_gen::cloud_synthesis::DEFAULT_STORM_INTENSITY,
     };
     let (tx, rx) = channel();
     let monitor = std::thread::spawn(move || {
@@ -311,6 +312,7 @@ fn streamed_layers_release_previous_face_buffers() {
         albedo_ao: None,
         cloud_thin_lift: 0.0,
         cloud_synthesis: 0.0,
+        storm_intensity: planet_gen::cloud_synthesis::DEFAULT_STORM_INTENSITY,
     };
     let (progress, _) = channel();
     let result = run_export(
@@ -403,6 +405,7 @@ fn invalid_tile_sizes_are_export_errors() {
             albedo_ao: None,
             cloud_thin_lift: 0.0,
             cloud_synthesis: 0.0,
+            storm_intensity: planet_gen::cloud_synthesis::DEFAULT_STORM_INTENSITY,
         };
         let (progress, _) = channel();
         assert!(
