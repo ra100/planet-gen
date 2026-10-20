@@ -322,6 +322,7 @@ Plan: [docs/plans/2026-10-17-001-feat-plate-motion-history-plan.md](docs/plans/2
 | 10.2 | Cross-platform CI: GitHub Actions for Linux, macOS, Windows | CI green on all 3 | Phase 5 | cc:完了 [155a63f] |
 | 10.3 | README: install, usage guide, parameter reference, example renders | Full documentation | 10.2 | cc:完了 [155a63f] |
 | 10.4 | Blender addon packaging: zip + install instructions | Install via Preferences | Phase 7 | cc:完了 [155a63f] |
+| 10.5 | Save flow and 0.2.0: version-aware incremental save (`abc.001` → `abc.002`, `_` `-` `.` separators, optional `v`, past the highest sibling), SAVE / SAVE AS… / SAVE +1 buttons, current file and unsaved marker in top bar and title, atomic writes, CHANGELOG | `planet_file` incremental-name tests, `atomic_write_replaces_file_and_leaves_no_temp` | 10.1 | cc:完了 [b5ec028] |
 
 ---
 
