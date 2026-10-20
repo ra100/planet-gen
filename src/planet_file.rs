@@ -294,6 +294,129 @@ pub fn default_filename(planet_name: &str) -> String {
     format!("{base}.json")
 }
 
+/// Version-number separators recognised at the end of a file stem.
+const VERSION_SEPARATORS: [char; 3] = ['.', '_', '-'];
+/// Longest bare trailing number read as a version. Longer runs are almost
+/// always data (`planet_<seed>`), not a version, and get a fresh `.001`.
+const MAX_BARE_VERSION_DIGITS: usize = 4;
+/// Longest `v`-prefixed version (`_v12345`), bounded so it fits a `u32`.
+const MAX_PREFIXED_VERSION_DIGITS: usize = 9;
+
+/// A file stem split into its base and trailing version number, e.g.
+/// `abc_v03` → base `abc`, separator `_`, prefix `v`, number 3, width 2.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionedStem {
+    pub base: String,
+    pub separator: char,
+    /// `v`/`V` before the digits, or empty.
+    pub prefix: String,
+    pub number: u32,
+    /// Digit count as written; zero padding is kept on increment.
+    pub width: usize,
+}
+
+impl VersionedStem {
+    /// Parse a trailing version (`.`, `_` or `-`, an optional `v`, then
+    /// digits). `None` when the stem carries no version.
+    pub fn parse(stem: &str) -> Option<Self> {
+        let digits_start = stem.trim_end_matches(|c: char| c.is_ascii_digit()).len();
+        let digits = &stem[digits_start..];
+        if digits.is_empty() {
+            return None;
+        }
+        let head = &stem[..digits_start];
+        let (head, prefix) = match head.strip_suffix(['v', 'V']) {
+            Some(rest) if rest.ends_with(VERSION_SEPARATORS) => (rest, &head[rest.len()..]),
+            _ => (head, ""),
+        };
+        let max_digits = if prefix.is_empty() {
+            MAX_BARE_VERSION_DIGITS
+        } else {
+            MAX_PREFIXED_VERSION_DIGITS
+        };
+        if digits.len() > max_digits {
+            return None;
+        }
+        let separator = head.chars().next_back()?;
+        let base = &head[..head.len() - separator.len_utf8()];
+        if !VERSION_SEPARATORS.contains(&separator) || base.is_empty() {
+            return None;
+        }
+        Some(Self {
+            base: base.to_owned(),
+            separator,
+            prefix: prefix.to_owned(),
+            number: digits.parse().ok()?,
+            width: digits.len(),
+        })
+    }
+
+    /// The stem with `number`, padded to at least this stem's width.
+    pub fn with_number(&self, number: u32) -> String {
+        format!(
+            "{}{}{}{:0width$}",
+            self.base,
+            self.separator,
+            self.prefix,
+            number,
+            width = self.width
+        )
+    }
+
+    /// True when `stem` is a version of the same file: same base, separator
+    /// and prefix, any number of digits. Returns that version number.
+    fn sibling_number(&self, stem: &str) -> Option<u32> {
+        let rest = stem
+            .strip_prefix(self.base.as_str())?
+            .strip_prefix(self.separator)?
+            .strip_prefix(self.prefix.as_str())?;
+        if rest.is_empty()
+            || rest.len() > MAX_PREFIXED_VERSION_DIGITS
+            || !rest.bytes().all(|b| b.is_ascii_digit())
+        {
+            return None;
+        }
+        rest.parse().ok()
+    }
+}
+
+/// File name of the next incremental save after `current_name`, given the
+/// names already in its folder.
+///
+/// `abc.001.json` → `abc.002.json`, `abc_v03.json` → `abc_v04.json`,
+/// `abc-9.json` → `abc-10.json`; a stem without a version gets `.001`
+/// (`abc.json` → `abc.001.json`). The number goes one past the highest
+/// existing version of the same file, so saving from an older version never
+/// fills a gap or overwrites a newer one. `None` when the number would
+/// overflow.
+pub fn next_version_name<'a>(
+    current_name: &str,
+    existing: impl IntoIterator<Item = &'a str>,
+) -> Option<String> {
+    let (stem, ext) = match current_name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => (stem, ext),
+        _ => (current_name, "json"),
+    };
+    let version = VersionedStem::parse(stem).unwrap_or_else(|| VersionedStem {
+        base: stem.to_owned(),
+        separator: '.',
+        prefix: String::new(),
+        number: 0,
+        width: 3,
+    });
+    let suffix = format!(".{ext}");
+    let highest = existing
+        .into_iter()
+        .filter_map(|name| name.strip_suffix(suffix.as_str()))
+        .filter_map(|other| version.sibling_number(other))
+        .fold(version.number, u32::max);
+    let next = highest.checked_add(1)?;
+    if next.to_string().len() > MAX_PREFIXED_VERSION_DIGITS {
+        return None;
+    }
+    Some(format!("{}{suffix}", version.with_number(next)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -410,5 +533,56 @@ mod tests {
         assert_eq!(default_filename("kepler-442 b"), "kepler-442_b.json");
         assert_eq!(default_filename("///"), "planet.json");
         assert_eq!(default_filename("normal_name-1"), "normal_name-1.json");
+    }
+
+    fn next(name: &str, existing: &[&str]) -> String {
+        next_version_name(name, existing.iter().copied()).unwrap()
+    }
+
+    #[test]
+    fn incremental_name_bumps_existing_version() {
+        assert_eq!(next("abc.001.json", &[]), "abc.002.json");
+        assert_eq!(next("abc.json", &[]), "abc.001.json");
+        assert_eq!(next("abc_01.json", &[]), "abc_02.json");
+        assert_eq!(next("abc-7.json", &[]), "abc-8.json");
+        assert_eq!(next("abc-9.json", &[]), "abc-10.json");
+        assert_eq!(next("abc.999.json", &[]), "abc.1000.json");
+        assert_eq!(next("abc_v03.json", &[]), "abc_v04.json");
+        assert_eq!(next("abc-V12.json", &[]), "abc-V13.json");
+        assert_eq!(next("my.planet.002.json", &[]), "my.planet.003.json");
+    }
+
+    #[test]
+    fn incremental_name_skips_past_highest_sibling() {
+        let dir = ["abc.json", "abc.001.json", "abc.005.json", "abc.02.json"];
+        assert_eq!(next("abc.json", &dir), "abc.006.json");
+        assert_eq!(next("abc.002.json", &dir), "abc.006.json");
+        // Other separators, prefixes and extensions are different families.
+        let dir = [
+            "abc_009.json",
+            "abc.v010.json",
+            "abc.004.exr",
+            "abcd.008.json",
+        ];
+        assert_eq!(next("abc.001.json", &dir), "abc.002.json");
+    }
+
+    #[test]
+    fn long_numbers_and_bare_names_are_not_versions() {
+        // A seed is data, not a version.
+        assert_eq!(next("planet_3185410.json", &[]), "planet_3185410.001.json");
+        assert_eq!(next("001.json", &[]), "001.001.json");
+        assert_eq!(next("abc_.json", &[]), "abc_.001.json");
+        assert_eq!(next("abc2.json", &[]), "abc2.001.json");
+        assert_eq!(VersionedStem::parse("abc_v"), None);
+        assert_eq!(
+            VersionedStem::parse("abc_v3").map(|v| (v.base, v.prefix, v.number)),
+            Some(("abc".to_owned(), "v".to_owned(), 3))
+        );
+    }
+
+    #[test]
+    fn incremental_name_reports_overflow() {
+        assert_eq!(next_version_name("abc_v999999999.json", []), None);
     }
 }
