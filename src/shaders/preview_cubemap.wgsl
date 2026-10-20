@@ -1492,15 +1492,21 @@ fn rocky_horizon(p: vec3<f32>, direction: vec3<f32>, height: f32) -> f32 {
 }
 
 // Cast shadows of the relief at low sun, the signature of airless
-// terminators. A shadow the viewer cannot see (it lies behind its caster,
-// exactly so at zero phase) is not darkened, because the pixel shows the
-// lit caster instead; this keeps the full-phase limb evenly bright.
+// terminators. Where the viewer cannot see the point, the pixel shows the
+// occluder instead. Near zero phase that occluder is the shadow's lit
+// caster (a shadow lies behind it), so the full-phase limb stays evenly
+// bright; toward quadrature the occluder is as likely shadowed as the point.
 fn rocky_terrain_shadow(p: vec3<f32>, sun_world: vec3<f32>, view_world: vec3<f32>, height: f32) -> f32 {
     let lit = rocky_horizon(p, sun_world, height);
     if (lit >= 1.0) {
         return 1.0;
     }
-    return 1.0 - (1.0 - lit) * rocky_horizon(p, view_world, height);
+    let caster_seen = smooth_step(0.5, 1.0, dot(sun_world, view_world));
+    if (caster_seen <= 0.0) {
+        return lit;
+    }
+    let hidden = 1.0 - rocky_horizon(p, view_world, height);
+    return 1.0 - (1.0 - lit) * (1.0 - hidden * caster_seen);
 }
 
 // Geologic units: highlands tan, lowland plains green, volcanic provinces
