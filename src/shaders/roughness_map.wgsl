@@ -16,9 +16,9 @@ struct RoughnessParams {
     axial_tilt_rad: f32,
     season: f32,
     regolith: f32, // bare regolith share: rough and matte
+    airless: f32,
+    water_ice: f32,
     _pad0: f32,
-    _pad1: f32,
-    _pad2: f32,
 }
 
 @group(0) @binding(0) var<storage, read> heightmap: array<f32>;
@@ -96,14 +96,24 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         // Add noise variation
         let noise_var = snoise(sphere_pos * 10.0 + seed_offset) * 0.1;
         r = clamp(r + noise_var, 0.05, 1.0);
-        if (params.regolith > 0.0) {
-            r = mix(r, 0.95, params.regolith);
-        }
     }
 
     // Write to tile-local index
     let idx = id.y * res + id.x;
     let cap = climate_ice_surface(sphere_pos, height, params.ocean_level, params.base_temp_c,
         params.axial_tilt_rad, params.season, params.seed, params.ocean_fraction);
+    if (params.regolith > 0.0) {
+        // Dry worlds, as in the preview: polar frost instead of the
+        // hydrological ice sheets, and matte regolith around it.
+        var prm: RockyParams;
+        prm.seed = params.seed;
+        prm.airless = params.airless;
+        let frost = rk_frost(sphere_pos, prm, climate_latitude(sphere_pos, params.axial_tilt_rad),
+            params.axial_tilt_rad, params.season, params.base_temp_c - 35.0, params.water_ice);
+        let coverage = mix(cap.coverage, frost, params.regolith);
+        let frozen = mix(r, cap.roughness, coverage);
+        roughness[idx] = mix(frozen, 0.95, params.regolith * (1.0 - coverage));
+        return;
+    }
     roughness[idx] = mix(r, cap.roughness, cap.coverage);
 }
