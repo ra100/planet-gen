@@ -56,10 +56,14 @@ struct RockyTerrain {
 // positions so placement stays close to Poisson; see rk_craters.
 const RK_SATURATED_PER_CELL: f32 = 2.0;
 const RK_SLOTS: u32 = 4u;
-// Neukum density at which a surface reaches crater saturation.
-const RK_SATURATION_N1: f32 = 0.05;
+// Cumulative craters >= D per km² per D⁻² that the octaves place on a
+// saturated surface: RK_SATURATED_PER_CELL per (5 D)² cell, summed over
+// octaves (x4/3). Mapping Neukum's N(1) through this density keeps young,
+// unsaturated surfaces at the chronology's crater count.
+const RK_SATURATION_N1: f32 = RK_SATURATED_PER_CELL * 0.0533;
 // Cell size in units of the octave's smallest diameter. Influence reaches
-// 2.5 radii, half a cell, so a 3x3x3 neighbourhood finds every crater.
+// 2.75 radii (wobbled rims fade out by 2.5), at most 0.55 cell, so a 3x3x3
+// neighbourhood finds every crater.
 const RK_CELL_DIAMETERS: f32 = 5.0;
 const RK_MAX_BASINS: u32 = 40u;
 const RK_MAX_RAYED: u32 = 12u;
@@ -138,13 +142,13 @@ fn rk_area_km2(prm: RockyParams) -> f32 {
 // Smallest basin diameter: above it craters come from an explicit catalogue
 // of at most RK_MAX_BASINS, below it from hashed octaves.
 fn rk_basin_floor_km(prm: RockyParams) -> f32 {
-    let per_area = RK_SATURATED_PER_CELL * rk_fill(prm.crater_age) * 0.0533;
+    let per_area = RK_SATURATION_N1 * rk_fill(prm.crater_age);
     return max(250.0, sqrt(rk_area_km2(prm) * per_area / f32(RK_MAX_BASINS)));
 }
 
 fn rk_basin_count(prm: RockyParams) -> f32 {
     let floor_km = rk_basin_floor_km(prm);
-    let per_area = RK_SATURATED_PER_CELL * rk_fill(prm.crater_age) * 0.0533;
+    let per_area = RK_SATURATION_N1 * rk_fill(prm.crater_age);
     return min(rk_area_km2(prm) * per_area / (floor_km * floor_km), f32(RK_MAX_BASINS));
 }
 
@@ -258,7 +262,7 @@ fn rk_craters(p: vec3<f32>, prm: RockyParams, prov: RockyProvinces, fresh_only: 
                 let diameter = octave_d / sqrt(1.0 - r2.y * 0.75);
                 let radius = 0.5 * diameter / prm.radius_km;
                 let angle = rk_angle(p, center);
-                if (angle > 2.5 * radius) {
+                if (angle > 2.75 * radius) {
                     continue;
                 }
                 let resolved = rk_ramp(min_km * 0.5, min_km, diameter);
@@ -283,10 +287,12 @@ fn rk_craters(p: vec3<f32>, prm: RockyParams, prov: RockyProvinces, fresh_only: 
 
 // Large young craters whose rays reach far beyond their cell: Tycho-like
 // systems on airless worlds. x = height (km), y = fresh, z = ray.
+// Rays fade within ~1 Gyr; a surface older than ~150 Myr (N(1) ~1.25e-4)
+// has had time to collect the full set.
 fn rk_rayed_count(prm: RockyParams) -> u32 {
-    let young = rk_fill(min(prm.crater_age, 1.0)) / max(RK_SATURATION_N1, 1.0e-6);
+    let young = min(rk_neukum(min(prm.crater_age, 1.0)) / 1.25e-4, 1.0);
     let area_scale = sqrt(rk_area_km2(prm) / 3.79e7);
-    return min(u32(round(10.0 * prm.airless * area_scale * min(young * 20.0, 1.0))), RK_MAX_RAYED);
+    return min(u32(round(10.0 * prm.airless * area_scale * young)), RK_MAX_RAYED);
 }
 
 fn rk_rayed(p: vec3<f32>, prm: RockyParams) -> vec3<f32> {
@@ -308,7 +314,7 @@ fn rk_rayed(p: vec3<f32>, prm: RockyParams) -> vec3<f32> {
             continue;
         }
         let maturity = rk_rand(prm.seed, stream + 2u);
-        if (r < 2.5) {
+        if (r < 2.65) {
             let wobble = 0.05 * snoise((p - center) / radius * 1.1 + vec3<f32>(f32(i) * 7.3));
             out.x += rk_crater_shape(r * (1.0 + wobble), diameter, transition, 0.0).x;
         }
@@ -777,7 +783,9 @@ fn rk_frost(
     var residual = 1.0 - rk_ramp(residual_r - 1.5, residual_r + 1.5, colat + wobble);
     // Spiral troughs cut the residual cap (Mars' north polar layered
     // deposits): sun-facing scarps sublimate into curved dark lanes.
-    let azimuth = atan2(p.z, p.x) * select(-1.0, 1.0, latitude > 0.0);
+    // Azimuth about the same (tilted) pole the latitude is measured from.
+    let across = vec3<f32>(0.0, -sin(tilt), cos(tilt));
+    let azimuth = atan2(dot(p, across), p.x) * select(-1.0, 1.0, latitude > 0.0);
     let spiral = sin(3.0 * (azimuth + 2.2 * log(max(colat, 0.5))) + off.x);
     residual *= 1.0 - 0.6 * rk_ramp(0.55, 0.95, spiral) * rk_ramp(1.0, 3.0, colat);
     let seasonal = 1.0 - rk_ramp(seasonal_r - 3.0, seasonal_r + 3.0, colat + wobble);

@@ -1465,8 +1465,10 @@ fn rocky_frost(p: vec3<f32>) -> f32 {
 }
 
 // Horizon visibility toward a direction: march over the height field (with
-// the normal map's height exaggeration and the sphere's curvature) and keep
-// the steepest occluder, softened by the solar disk (~0.5°).
+// the normal map's height exaggeration) and keep the steepest occluder.
+// The ground curves away below a straight ray (+d²/2 in planet radii), and
+// the shadow edge is softened over the star's disk (0.53° at 1 AU, scaling
+// with distance).
 fn rocky_horizon(p: vec3<f32>, direction: vec3<f32>, height: f32) -> f32 {
     let sin_e = dot(direction, p);
     if (sin_e > 0.5 || sin_e < -0.1) {
@@ -1478,14 +1480,15 @@ fn rocky_horizon(p: vec3<f32>, direction: vec3<f32>, height: f32) -> f32 {
     let tan_e = sin_e / max(sqrt(max(1.0 - sin_e * sin_e, 0.0)), 1.0e-4);
     let texel = 2.0 / f32(textureDimensions(height_tex).x);
     let z0 = height * scale;
+    let disk = 0.0093 * sqrt(max(uniforms.rocky_insolation, 0.0));
     var lit = 1.0;
     var distance = texel;
     for (var i = 0u; i < 14u; i++) {
         let q = normalize(p + toward * distance);
         let z = sample_surface_height(q) * scale;
-        let ray = z0 + distance * tan_e - 0.5 * distance * distance;
-        let penumbra = max(distance * 0.0087, 1.0e-6);
-        lit = min(lit, clamp((ray - z) / penumbra * 0.5 + 0.5, 0.0, 1.0));
+        let ray = z0 + distance * tan_e + 0.5 * distance * distance;
+        let penumbra = max(distance * disk, 1.0e-6);
+        lit = min(lit, clamp((ray - z) / penumbra + 0.5, 0.0, 1.0));
         distance *= 1.45;
     }
     return lit;
