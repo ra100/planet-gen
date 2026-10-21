@@ -183,25 +183,34 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         let snow = material_ramp(0.34, 0.82, land_height) * material_ramp(2.0, -14.0, temp)
             * material_ramp(5.5, 1.5, relief.x) * mix(0.12, 1.0, material_ramp(15.0, 75.0, moisture));
         let snow_color = mix(vec3<f32>(0.90, 0.93, 0.96), vec3<f32>(0.78, 0.86, 0.93), land_height * snow);
+        var snow_cover = snow;
         if (params.rocky_regolith > 0.0) {
-            // Bare regolith, as in the preview.
+            // Bare regolith, as in the preview; no mountain snow without water.
             let prm = map_rocky_params();
             let units = rk_material(sphere_pos, prm);
             let regolith = rk_albedo(sphere_pos, prm, units, relief.x * 5.0 / prm.radius_km,
                 relief.y, height * 5.0, params.rocky_insolation);
             surface_color = mix(surface_color, regolith, params.rocky_regolith);
+            snow_cover *= 1.0 - params.rocky_regolith;
         }
+        surface_color = mix(surface_color, snow_color + vec3<f32>(color_var * 0.012), snow_cover);
     }
-    var ice_color = mix(vec3<f32>(0.56, 0.72, 0.82), vec3<f32>(0.90, 0.93, 0.96), cap.snow);
+    var ice_albedo = mix(vec3<f32>(0.56, 0.72, 0.82), vec3<f32>(0.90, 0.93, 0.96), cap.snow)
+        + vec3<f32>(color_var * 0.012);
     var ice_coverage = cap.coverage;
     if (params.rocky_regolith > 0.0) {
+        // Dusty polar frost, as in the preview.
         let frost = rk_frost(sphere_pos, map_rocky_params(),
             climate_latitude(sphere_pos, params.axial_tilt_rad), params.axial_tilt_rad,
             params.season, params.base_temp_c - 35.0, params.rocky_water_ice);
         ice_coverage = mix(ice_coverage, frost, params.rocky_regolith);
-        ice_color = mix(ice_color, vec3<f32>(0.74, 0.71, 0.67), params.rocky_regolith);
+        let frost_snow = mix(cap.snow, 1.0, params.rocky_regolith);
+        let ice = mix(vec3<f32>(0.56, 0.72, 0.82), vec3<f32>(0.90, 0.93, 0.96), frost_snow)
+            + vec3<f32>(color_var * 0.012);
+        let frost_albedo = vec3<f32>(0.74, 0.71, 0.67) * (1.0 + 0.05 * color_var);
+        ice_albedo = mix(ice, frost_albedo, params.rocky_regolith);
     }
-    surface_color = mix(surface_color, ice_color + vec3<f32>(color_var * 0.012), ice_coverage);
+    surface_color = mix(surface_color, ice_albedo, ice_coverage);
 
     albedo[idx] = vec4<f32>(surface_color, 1.0);
 }

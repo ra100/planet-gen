@@ -149,6 +149,8 @@ fn capture(
 ) {
     let derived = scene::derived(file);
     let ocean_level = scene::sea_level(&derived, file.water_loss);
+    // The app builds and erodes terrain with the terrain-path rounding.
+    let terrain_ocean_level = scene::terrain_sea_level(&derived, file.water_loss);
     let plates = generate_plates(&scene::plate_params(file, &derived));
     let plates =
         planet_gen::tectonic_history::plate_records(&plates, file.seed, file.geologic_time_myr);
@@ -164,7 +166,7 @@ fn capture(
                 gpu,
                 &mut terrain,
                 iterations,
-                ocean_level,
+                terrain_ocean_level,
                 ErosionClimate {
                     seed: file.seed,
                     base_temp_c: derived.base_temperature_c,
@@ -201,7 +203,7 @@ fn capture(
     renderer.upload_plates(gpu, &plates, tp.seed, tp.warp_strength);
     let terrain_view = renderer.upload_terrain(gpu, &terrain);
     let wind = WindFieldPipeline::new(gpu).unwrap();
-    let dynamics = wind.create_textures(gpu, (res / 2).max(192), &terrain, ocean_level);
+    let dynamics = wind.create_textures(gpu, (res / 2).max(192), &terrain, terrain_ocean_level);
     let weather_pipeline = WeatherFieldPipeline::new(gpu).unwrap();
     let weather = weather_pipeline.create_textures(gpu, DEFAULT_WEATHER_RESOLUTION);
     let snapshot = scene::weather_snapshot(file, &derived, DEFAULT_WEATHER_RESOLUTION, ocean_level);

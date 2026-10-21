@@ -39,15 +39,26 @@ pub fn derived(file: &PlanetFile) -> DerivedProperties {
 /// Sea level of a world that cannot hold liquid water: far below any relief.
 const DRY_SEA_LEVEL: f32 = -4.0;
 
-/// Sea level in terrain units (1 unit = 5 km) for a water-loss setting.
-/// Below water's triple point the basins stay dry whatever the inventory.
-pub fn sea_level(derived: &DerivedProperties, water_loss: f32) -> f32 {
-    let base = if derived.liquid_water >= 1.0 {
+fn sea_level_base(derived: &DerivedProperties) -> f32 {
+    if derived.liquid_water >= 1.0 {
         -0.5
     } else {
         DRY_SEA_LEVEL + (-0.5 - DRY_SEA_LEVEL) * derived.liquid_water
-    };
-    base + 1.7 * derived.ocean_fraction * (1.0 - water_loss)
+    }
+}
+
+/// Sea level in terrain units (1 unit = 5 km) for a water-loss setting, as
+/// the preview shades and the weather sees it. Below water's triple point
+/// the basins stay dry whatever the inventory.
+pub fn sea_level(derived: &DerivedProperties, water_loss: f32) -> f32 {
+    sea_level_base(derived) + 1.7 * derived.ocean_fraction * (1.0 - water_loss)
+}
+
+/// The same sea level as the terrain build, erosion and export compute it:
+/// from the effective ocean fraction, which rounds differently in f32 for
+/// some water-loss values. Kept separate so plate worlds stay bit-identical.
+pub fn terrain_sea_level(derived: &DerivedProperties, water_loss: f32) -> f32 {
+    sea_level_base(derived) + 1.7 * (derived.ocean_fraction * (1.0 - water_loss))
 }
 
 /// Erosion iterations the preview runs at a terrain resolution; low

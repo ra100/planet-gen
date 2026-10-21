@@ -352,7 +352,7 @@ impl PlanetGenApp {
             &terrain_params,
         );
 
-        let ocean_level = self.ocean_level();
+        let ocean_level = scene::terrain_sea_level(&self.derived, self.water_loss);
 
         self.preview_renderer.upload_plates(
             &self.gpu,

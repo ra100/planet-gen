@@ -860,7 +860,10 @@ pub struct RoughnessMapParams {
     pub season: f32,
     /// Bare regolith share (worlds without liquid water): rough, matte.
     pub regolith: f32,
-    pub _pad: [f32; 3],
+    /// Airless surface and frozen water inventory, for the polar frost mask.
+    pub airless: f32,
+    pub water_ice: f32,
+    pub _pad: f32,
 }
 
 #[repr(C)]
@@ -3823,7 +3826,7 @@ pub fn run_export_with_timings_and_checkpoints(
 
     let effective_ocean = derived.ocean_fraction * (1.0 - water_loss);
     let rocky = RockyUniforms::from_derived(derived, params.star_distance_au);
-    let ocean_level = crate::scene::sea_level(derived, water_loss);
+    let ocean_level = crate::scene::terrain_sea_level(derived, water_loss);
 
     // Compute total steps for progress based on selected layers
     let layers = &config.layers;
@@ -3994,10 +3997,11 @@ pub fn run_export_with_timings_and_checkpoints(
         Some(MapPipeline::new(
             gpu,
             &format!(
-                "{}\n{}\n{}\n{}",
+                "{}\n{}\n{}\n{}\n{}",
                 include_str!("shaders/cube_sphere.wgsl"),
                 include_str!("shaders/noise.wgsl"),
                 include_str!("shaders/climate.wgsl"),
+                include_str!("shaders/rocky.wgsl"),
                 include_str!("shaders/roughness_map.wgsl"),
             ),
             "roughness map",
@@ -4159,7 +4163,9 @@ pub fn run_export_with_timings_and_checkpoints(
                 axial_tilt_rad: params.axial_tilt_deg.to_radians(),
                 season: config.weather.season,
                 regolith: rocky.regolith,
-                _pad: [0.0; 3],
+                airless: rocky.airless,
+                water_ice: rocky.water_ice,
+                _pad: 0.0,
             },
             4,
             &mut progress,
@@ -6891,7 +6897,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
                 axial_tilt_rad: 0.2,
                 season: 0.5,
                 regolith: 0.0,
-                _pad: [0.0; 3],
+                airless: 0.0,
+                water_ice: 0.0,
+                _pad: 0.0,
             },
         );
         assert_map_parity(
@@ -6949,6 +6957,31 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
                 rocky: moon,
                 radius_km: 1737.0,
                 _pad: [0.0; 3],
+            },
+        );
+        // Rocky frost and matte regolith follow position as well.
+        assert_map_parity(
+            &gpu,
+            "rocky roughness",
+            shader(include_str!("shaders/roughness_map.wgsl")),
+            4,
+            |region| RoughnessMapParams {
+                face: 2,
+                resolution: region.width,
+                seed: 7,
+                base_temp_c: -60.0,
+                ocean_level: -4.0,
+                ocean_fraction: 0.0,
+                tile_offset_x: region.origin_x,
+                tile_offset_y: region.origin_y,
+                full_resolution: resolution,
+                local_height: region.height,
+                axial_tilt_rad: 0.44,
+                season: 0.25,
+                regolith: 1.0,
+                airless: 0.0,
+                water_ice: 0.1,
+                _pad: 0.0,
             },
         );
         assert_map_parity(
