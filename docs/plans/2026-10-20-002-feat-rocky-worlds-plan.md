@@ -53,7 +53,10 @@ from escape physics.
   that widens with degradation.
 - **Chronology**: Neukum's N(1 km) sets the crater density, with a
   saturation fill (Gault 1970) so 4.4 Gyr highlands look saturated rather
-  than infinitely dense. Diameters per octave follow a -2 cumulative slope.
+  than infinitely dense. The fill is normalised by the density the octaves
+  place when saturated (0.107 D^-2 per km²), so young surfaces carry the
+  chronology's own crater count. Diameters per octave follow a -2
+  cumulative slope.
   Each octave hashes 4 craters into cells of 5 diameters inside a 3x3x3
   neighbourhood, so every crater is complete, tiles are seam free and
   export at 8K matches the preview.
@@ -86,9 +89,11 @@ from escape physics.
   cap.
 - **Photometry**: lunar-Lambert (McEwen 1991) with an opposition surge
   (Hapke 1986) on airless bodies, no skylight so shadows stay black.
-- **Cast shadows** of the relief at low sun on regolith worlds, with the
-  solar penumbra. Near zero phase a shadow hidden behind its caster is not
-  darkened, so the full-phase limb stays even.
+- **Cast shadows** of the relief at low sun on regolith worlds: a horizon
+  march over the height field on the curved sphere, softened over the
+  star's disk (0.53° at 1 AU, scaled with distance). Near zero phase a
+  shadow hidden behind its caster is not darkened, so the full-phase limb
+  stays even.
 - **Mars dust haze**: tau 0.4 with Wolff et al. (2009) single-scattering
   albedo, delta-M scaled forward peak, butterscotch limb instead of
   Rayleigh blue. Thin air also suppresses clouds.
@@ -137,14 +142,34 @@ geology, an equirectangular height map) and writes stats. Before = main at
 | Mars | relief min / p01 / max | -3.2 / -2.6 / +6.3 km | -10.2 / -6.7 / +19.3 km | MOLA -8.2 / +21.2 km |
 | Mercury | disk albedo | 0.25 | 0.13 | geometric albedo 0.14 |
 | Mercury | pressure | 0.047 bar | 0 | none |
-| Earth | all captures | | identical (one pixel off by 1 of 262k in the terminator view) | |
+| Earth | all preview captures | | identical (one pixel off by 1 of 262k in the terminator view) | |
+| Earth | exported height, albedo, AO, normal, roughness, water mask, emission (water loss 0.5 and 0.35) | | byte-identical to main | |
 | Earth | derived values, terrain bytes | | unit tests pin them | |
+| Mars | export roughness under the polar frost | | 0.80 (ice) instead of 0.95 (regolith), as in the preview | |
 
 Tests: `earth_is_unchanged_by_the_rocky_surface_model` (derived values),
 `stagnant_lid_terrain_records_impacts_tiles_match_and_earth_is_unchanged`
-(terrain bytes, relief, tile parity), the export albedo parity case for a
-Moon-like surface, `surface_overrides_roundtrip` (planet file), and the
-physics tests for the shoreline, the triple point and the history fields.
+(terrain bytes, relief, tile parity), the export albedo and roughness
+parity cases for Moon- and Mars-like surfaces, `surface_overrides_roundtrip`
+(planet file), and the physics tests for the shoreline, the triple point
+and the history fields.
+
+A second review pass checked the models against the references and found
+the shadow march curving the wrong way (a convex sphere drops away below a
+straight ray, +d²/2; the first version used -d²/2, which shadowed smooth
+ground up to ~9° from the terminator), crater densities twice Neukum's on
+unsaturated surfaces, a penumbra twice the solar disk, the Mars cap spiral
+wound about the untilted axis, a small ejecta step at the crater cutoff and
+the inspector's atmosphere label ignoring a pressure override. All are
+fixed; none touches plate worlds.
+
+The export check compares every file a 128-per-face Earth export writes on
+main and on this branch (MD5). It caught two regressions an independent
+review flagged after the first push: the export albedo had lost its
+mountain snow, and one sea-level formula rounded differently in f32 when
+water loss was not 0.5, which moved the eroded terrain. Both are fixed;
+the terrain and export path keep their own rounding
+(`scene::terrain_sea_level`).
 
 ## Limits and next steps
 
