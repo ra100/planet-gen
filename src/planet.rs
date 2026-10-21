@@ -242,6 +242,8 @@ impl DerivedProperties {
         };
         let atmosphere_type = if surface_pressure_bar < AIRLESS_PRESSURE_BAR {
             AtmosphereType::None
+        } else if overrides.pressure_bar.is_some() {
+            classify_pressure(surface_pressure_bar, planet_type)
         } else {
             classify_atmosphere(atmosphere_strength, planet_type)
         };
@@ -442,6 +444,19 @@ fn classify_atmosphere(strength: f32, planet_type: PlanetType) -> AtmosphereType
     } else if strength < 0.35 {
         AtmosphereType::ThinCO2
     } else if (planet_type == PlanetType::HotRocky && strength > 0.6) || strength > 0.95 {
+        AtmosphereType::ThickCO2
+    } else {
+        AtmosphereType::Nitrogen
+    }
+}
+
+/// Atmosphere type for a user-set surface pressure (at least airless):
+/// Mars-like thin CO₂ below ~50 mbar, Venus-like thick CO₂ for crushing
+/// air, nitrogen-dominated in between.
+fn classify_pressure(pressure_bar: f32, planet_type: PlanetType) -> AtmosphereType {
+    if pressure_bar < 0.05 {
+        AtmosphereType::ThinCO2
+    } else if (planet_type == PlanetType::HotRocky && pressure_bar > 5.0) || pressure_bar > 20.0 {
         AtmosphereType::ThickCO2
     } else {
         AtmosphereType::Nitrogen
@@ -772,6 +787,21 @@ mod tests {
         );
         assert_eq!(airless.atmosphere_type, AtmosphereType::None);
         assert_eq!(airless.airless, 1.0);
+        // The type follows the pressure the user set, even on a body too
+        // small to hold air by itself.
+        assert_eq!(wet.atmosphere_type, AtmosphereType::Nitrogen);
+        let moon = PlanetParams {
+            mass_earth: 0.0123,
+            ..Default::default()
+        };
+        let aired_moon = DerivedProperties::from_params_with(
+            &moon,
+            &SurfaceOverrides {
+                pressure_bar: Some(1.0),
+                ..Default::default()
+            },
+        );
+        assert_eq!(aired_moon.atmosphere_type, AtmosphereType::Nitrogen);
     }
 
     #[test]
