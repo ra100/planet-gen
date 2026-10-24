@@ -56,8 +56,8 @@ rebuilds the node groups, so every material using them picks up the change.
 | Input | Effect |
 |-------|--------|
 | Density Low / High | Contrast on the solver's optical depth: below Low is clear, above High a full column that billows no longer erode |
-| Scale | Base billow cell frequency (250 ~ 50 km cells on an Earth-size planet); six octaves down to 1/32 |
-| Erosion | How far billows eat into thin areas and edges; cores are kept. Default 0.15: exports with Clouds > Structure already carry margins, cells and gaps; use ~0.35 for solver-only exports (Structure 0) |
+| Scale | Base billow cell frequency; six octaves down to 1/32. Drive Clouds sets it to four `cloud_density.exr` texels per cell (~1300, 10 km cells, for an 8K export; ~650 for 4K), so billows only add detail finer than the map holds |
+| Erosion | How far billows eat into thin areas and edges; cores are kept. Default 0.5: the billows sit below the map's own structure, so they break visible margins into puffs instead of laying a second pattern over it |
 | Variety Scale | Planet-scale noise that varies Erosion 0.5-1.5x, so some systems are puffier |
 | Wisps | Fine FBM added to the billows |
 | Zonal Stretch | Compresses the detail along the pole axis; elongates billows east-west |
@@ -65,8 +65,14 @@ rebuilds the node groups, so every material using them picks up the change.
 | Depth Gain | Physical optical depth per unit of solver depth above Low (36: a 0.35 column is tau ~11), as in the app preview |
 | Contrast | Depth scales by thickness^Contrast, so haze between the solver's ripples stays faint and their cores turn bright |
 | Diffusion | Two-stream reflectance `opacity = a tau / (1 + a tau)`: brightness keeps rising with thickness instead of clipping to flat white, so structure inside decks stays visible |
-| Relief | Bump from the visible cloud: sunlit and shaded sides on the solver's ripples and cells |
+| Relief | Bump from the visible cloud: sunlit and shaded sides on the solver's ripples and cells. Exaggerated for globe views and eased toward a cumulus' height (~2 km) as the camera closes in, so close-ups do not get dark-rimmed lumps |
 | Longitude Offset | Turns the maps around the pole (in turns) if the surface is rotated |
+
+Billow octaves fade to their mean as their cells shrink below a few pixels
+(judged from the camera distance, for a ~45 degree view about 1000 px wide), so
+far views get a smooth thinning instead of sub-pixel grain. The density map is
+sampled with cubic interpolation: magnified in a close-up, linear
+interpolation drew the texel grid into every cloud edge.
 
 The group also outputs the eroded `Density`. The sampler group
 (`PlanetGen Driver Sampler`) exposes density, wind and, when the opt-in maps
