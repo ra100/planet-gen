@@ -5390,6 +5390,105 @@ mod tests {
     }
 
     #[test]
+    fn staged_cloud_faces_carry_no_detail_finer_than_the_equirect_pixel() {
+        // The cube faces are resampled into a 2N x N map whose pixels span
+        // pi / N radians, up to 3x a cube texel. Detail resolved at the texel
+        // aliased into speckle there; the staged map must vary from pixel to
+        // pixel like the clouds evaluated at the map's own pixels.
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let snapshot = WeatherSnapshot {
+            resolution: 64,
+            // Small enough that the fine band resolves at the texel but not at
+            // the pixel: thresholded there, it turns into speckle.
+            radius_km: 80.0,
+            ..u5_validation_snapshot()
+        };
+        let terrain = directional_terrain(snapshot.resolution);
+        let wind = WindFieldPipeline::new(&gpu).expect("wind pipeline");
+        let dynamics =
+            wind.create_textures(&gpu, snapshot.resolution, &terrain, snapshot.ocean_level);
+        wind.generate_gpu(
+            &gpu,
+            &terrain,
+            &dynamics,
+            snapshot.seed,
+            snapshot.ocean_level,
+            snapshot.axial_tilt_rad,
+            snapshot.season,
+            earth_relative_rotation_rate(snapshot.rotation_rate_rad_s),
+            snapshot.base_temp_c,
+            snapshot.surface_pressure_bar,
+            snapshot.wind_scale,
+        );
+        let weather_pipeline = WeatherFieldPipeline::new(&gpu).expect("weather pipeline");
+        let weather = weather_pipeline.create_textures(&gpu, snapshot.resolution);
+        weather_pipeline.generate(&gpu, snapshot, &terrain, &dynamics, &weather);
+        let synthesis = crate::cloud_synthesis::weather_systems(&snapshot, 1.0, |direction| {
+            sample_cubemap_height(&terrain, direction) < snapshot.ocean_level
+        });
+        let root =
+            std::env::temp_dir().join(format!("planet-gen-cloud-footprint-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("create output directory");
+        let coordinator =
+            TileCoordinator::try_new(snapshot.resolution, snapshot.resolution).expect("tiles");
+        let stage = stage_cloud_faces(
+            &gpu,
+            &root,
+            &terrain,
+            &dynamics,
+            &weather,
+            snapshot,
+            0.0,
+            &synthesis,
+            &coordinator,
+            &AtomicBool::new(false),
+        )
+        .expect("stage cloud faces");
+        let faces: [Vec<f32>; 6] = std::array::from_fn(|face| {
+            stage
+                .read_region(face as u32, 0, 0, snapshot.resolution, snapshot.resolution)
+                .expect("read face")
+                .chunks_exact(CLOUD_EXR_CHANNELS.len())
+                .map(|column| column[0])
+                .collect()
+        });
+        drop(stage);
+        let _ = std::fs::remove_dir_all(root);
+        let (staged, width, height) = cubemap_to_equirect(&faces, snapshot.resolution, 1);
+        let direct: Vec<f32> = render_cloud_columns_equirect(
+            &gpu, &terrain, &dynamics, &weather, snapshot, 0.0, &synthesis, None, width, None,
+        )
+        .expect("render columns")
+        .chunks_exact(CLOUD_EXR_CHANNELS.len())
+        .map(|column| column[0])
+        .collect();
+        // Mean squared east-west step over the variance, away from the poles.
+        let roughness = |map: &[f32]| {
+            let (mut steps, mut sum, mut sum_sq, mut count) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+            for y in height / 6..height * 5 / 6 {
+                for x in 0..width {
+                    let value = f64::from(map[(y * width + x) as usize]);
+                    let next = f64::from(map[(y * width + (x + 1) % width) as usize]);
+                    steps += (next - value).powi(2);
+                    sum += value;
+                    sum_sq += value * value;
+                    count += 1.0;
+                }
+            }
+            let variance = sum_sq / count - (sum / count).powi(2);
+            steps / count / variance.max(1.0e-12)
+        };
+        let (staged_roughness, direct_roughness) = (roughness(&staged), roughness(&direct));
+        // Bilinear resampling smooths a band-limited map (0.93x here); texel
+        // detail aliased made it rougher than the direct map (1.13x).
+        assert!(
+            staged_roughness < direct_roughness,
+            "staged map rougher than its pixels allow: {staged_roughness:.4} vs direct {direct_roughness:.4}"
+        );
+        println!("roughness staged {staged_roughness:.4} direct {direct_roughness:.4}");
+    }
+
+    #[test]
     fn u5_cloud_snapshot_controls_change_export_while_presentation_controls_cannot() {
         let gpu = GpuContext::new().expect("GPU init failed");
         let snapshot = u5_validation_snapshot();
