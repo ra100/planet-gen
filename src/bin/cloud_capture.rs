@@ -1,21 +1,30 @@
 use planet_gen::{
-    cloud_synthesis::weather_systems,
+    cloud_synthesis::{DEFAULT_STORM_INTENSITY, weather_systems_with_storms},
     export::render_cloud_columns_equirect,
     gpu::GpuContext,
     planet::{DerivedProperties, PlanetParams},
+    planet_file,
     plates::{PlateGenParams, generate_plates},
-    terrain_compute::{TerrainComputePipeline, WindFieldPipeline, earth_relative_rotation_rate},
-    weather::{DEFAULT_WEATHER_RESOLUTION, WeatherFieldPipeline, WeatherSnapshot},
+    scene,
+    terrain_compute::{
+        DynamicsTextures, ErosionClimate, ErosionPipeline, TectonicTerrain, TerrainComputePipeline,
+        WindFieldPipeline, earth_relative_rotation_rate,
+    },
+    weather::{DEFAULT_WEATHER_RESOLUTION, WeatherFieldPipeline, WeatherSnapshot, WeatherTextures},
 };
 
 // Equirectangular maps of the exported cloud column, without a full export.
 // Usage: cloud_capture OUTPUT_DIR [SEED] [WIDTH] [--cloud-settings PLANET_JSON]
-//        [--synthesis STRENGTH] [--rows FIRST COUNT] [--watch JOB_JSON]
+//        [--file PLANET_JSON] [--synthesis STRENGTH] [--rows FIRST COUNT]
+//        [--watch JOB_JSON]
 // --synthesis defaults to the planet file's `cloud_synthesis`, else 1; --rows
 // renders a band of rows only (for 8K crops); --watch re-renders whenever the
-// job file changes, reusing the generated weather.
+// job file changes, reusing the generated weather. --file renders a saved
+// planet (terrain, weather and storms through the app's settings path);
+// otherwise the default planet of SEED takes only the cloud settings of
+// --cloud-settings.
 //
-// Writes, for the default planet of SEED:
+// Writes, for the default planet of SEED (the planet's seed with --file):
 //   clouds-SEED.png    two-stream cloud reflectance (white cloud on black),
 //                      the brightness a satellite composite would record
 //   depth-SEED.png     the exported optical depth (Y of cloud_density.exr) / 2
@@ -47,116 +56,35 @@ fn main() {
                 .expect("parse cloud settings")
         })
         .unwrap_or(serde_json::Value::Null);
-    let setting = |name: &str, fallback: f32| {
-        cloud_settings[name]
-            .as_f64()
-            .map(|value| value as f32)
-            .unwrap_or(fallback)
-    };
     std::fs::create_dir_all(&out).unwrap();
     let gpu = GpuContext::new().unwrap();
     println!("adapter={}", gpu.adapter_info.name);
 
-    let params = PlanetParams {
-        seed,
-        ..PlanetParams::default()
+    let planet = match args.windows(2).find(|pair| pair[0] == "--file") {
+        Some(pair) => file_planet(&gpu, &pair[1]),
+        None => default_planet(&gpu, seed, &cloud_settings),
     };
-    let derived = DerivedProperties::from_params(&params);
-    let ocean_level = -0.5 + 1.7 * derived.ocean_fraction * 0.5;
-    let plates = generate_plates(&PlateGenParams {
-        seed: params.seed,
-        mass_earth: params.mass_earth,
-        ocean_fraction: derived.ocean_fraction * 0.5,
-        tectonics_factor: derived.tectonics_factor,
-        continental_scale: 1.0,
-        num_plates_override: 0,
-        num_continents: 4,
-        continent_size_variety: 0.35,
-    });
-    let terrain_size = 512;
-    let terrain = TerrainComputePipeline::new(&gpu).generate(
-        &gpu,
-        &plates,
-        terrain_size,
-        params.seed,
-        1.2,
-        1.5,
-        (8.0 + 4.0 * (params.axial_tilt_deg / 90.0) * derived.tectonics_factor) as u32,
-        2.0_f32.powf(-(1.47_f32 - 1.0) / 2.0),
-        2.1,
-        1.0,
-        0.10,
-        1.0,
-        1.0,
-        derived.surface_gravity,
-        derived.tectonics_factor,
-        derived.surface_age,
-        1.0,
-    );
-    let resolution = DEFAULT_WEATHER_RESOLUTION;
-    let wind = WindFieldPipeline::new(&gpu).unwrap();
-    let dynamics = wind.create_textures(&gpu, resolution, &terrain, ocean_level);
-    let weather_pipeline = WeatherFieldPipeline::new(&gpu).unwrap();
-    let weather = weather_pipeline.create_textures(&gpu, resolution);
-    let snapshot = WeatherSnapshot {
-        resolution,
-        surface_seed: params.seed,
-        ocean_fraction: derived.ocean_fraction * setting("climate_moisture", 1.0),
-        seed: cloud_settings["cloud_seed"]
-            .as_u64()
-            .map(|seed| seed as u32)
-            .unwrap_or_else(|| params.seed.wrapping_add(1000)),
-        storm_count: cloud_settings["storm_count"]
-            .as_u64()
-            .map(|count| count as u32)
-            .unwrap_or(2),
-        coverage: setting("cloud_coverage", 0.5),
-        moisture: setting("climate_moisture", 1.0),
-        surface_pressure_bar: derived.surface_pressure_bar,
-        base_temp_c: derived.base_temperature_c,
-        ocean_level,
-        axial_tilt_rad: params.axial_tilt_deg.to_radians(),
-        season: setting("season", 0.5),
-        storm_size: setting("storm_size", 1.0),
-        radius_km: derived.radius_km,
-        rotation_rate_rad_s: derived.rotation_rate_rad_s,
-        wind_scale: setting("wind_scale", 1.0),
-        face: 0,
-    };
-    wind.generate_gpu(
-        &gpu,
-        &terrain,
-        &dynamics,
-        snapshot.seed,
-        ocean_level,
-        snapshot.axial_tilt_rad,
-        snapshot.season,
-        earth_relative_rotation_rate(snapshot.rotation_rate_rad_s),
-        snapshot.base_temp_c,
-        snapshot.surface_pressure_bar,
-        snapshot.wind_scale,
-    );
-    weather_pipeline.generate(&gpu, snapshot, &terrain, &dynamics, &weather);
 
     let strength = args
         .windows(2)
         .find(|pair| pair[0] == "--synthesis")
         .map(|pair| pair[1].parse::<f32>().expect("synthesis must be a number"))
-        .unwrap_or_else(|| setting("cloud_synthesis", 1.0));
+        .unwrap_or(planet.strength);
     let rows = args
         .windows(3)
         .find(|w| w[0] == "--rows")
         .map(|w| (w[1].parse::<u32>().unwrap(), w[2].parse::<u32>().unwrap()));
     let capture = Capture {
         gpu: &gpu,
-        terrain: &terrain,
-        dynamics: &dynamics,
-        weather: &weather,
-        snapshot,
-        ocean_level,
-        thin_lift: setting("cloud_thin_lift", 0.0),
+        terrain: &planet.terrain,
+        dynamics: &planet.dynamics,
+        weather: &planet.weather,
+        snapshot: planet.snapshot,
+        ocean_level: planet.ocean_level,
+        thin_lift: planet.thin_lift,
+        storm_intensity: planet.storm_intensity,
         out: out.clone(),
-        seed,
+        seed: planet.seed,
     };
     capture.render(&Job {
         width,
@@ -206,6 +134,187 @@ fn main() {
     }
 }
 
+/// The default planet of `seed`, with only the cloud settings of a planet file.
+fn default_planet(gpu: &GpuContext, seed: u32, cloud_settings: &serde_json::Value) -> Planet {
+    let setting = |name: &str, fallback: f32| {
+        cloud_settings[name]
+            .as_f64()
+            .map(|value| value as f32)
+            .unwrap_or(fallback)
+    };
+    let params = PlanetParams {
+        seed,
+        ..PlanetParams::default()
+    };
+    let derived = DerivedProperties::from_params(&params);
+    let ocean_level = -0.5 + 1.7 * derived.ocean_fraction * 0.5;
+    let plates = generate_plates(&PlateGenParams {
+        seed: params.seed,
+        mass_earth: params.mass_earth,
+        ocean_fraction: derived.ocean_fraction * 0.5,
+        tectonics_factor: derived.tectonics_factor,
+        continental_scale: 1.0,
+        num_plates_override: 0,
+        num_continents: 4,
+        continent_size_variety: 0.35,
+    });
+    let terrain_size = 512;
+    let terrain = TerrainComputePipeline::new(gpu).generate(
+        gpu,
+        &plates,
+        terrain_size,
+        params.seed,
+        1.2,
+        1.5,
+        (8.0 + 4.0 * (params.axial_tilt_deg / 90.0) * derived.tectonics_factor) as u32,
+        2.0_f32.powf(-(1.47_f32 - 1.0) / 2.0),
+        2.1,
+        1.0,
+        0.10,
+        1.0,
+        1.0,
+        derived.surface_gravity,
+        derived.tectonics_factor,
+        derived.surface_age,
+        1.0,
+    );
+    let resolution = DEFAULT_WEATHER_RESOLUTION;
+    let wind = WindFieldPipeline::new(gpu).unwrap();
+    let dynamics = wind.create_textures(gpu, resolution, &terrain, ocean_level);
+    let weather_pipeline = WeatherFieldPipeline::new(gpu).unwrap();
+    let weather = weather_pipeline.create_textures(gpu, resolution);
+    let snapshot = WeatherSnapshot {
+        resolution,
+        surface_seed: params.seed,
+        ocean_fraction: derived.ocean_fraction * setting("climate_moisture", 1.0),
+        seed: cloud_settings["cloud_seed"]
+            .as_u64()
+            .map(|seed| seed as u32)
+            .unwrap_or_else(|| params.seed.wrapping_add(1000)),
+        storm_count: cloud_settings["storm_count"]
+            .as_u64()
+            .map(|count| count as u32)
+            .unwrap_or(2),
+        coverage: setting("cloud_coverage", 0.5),
+        moisture: setting("climate_moisture", 1.0),
+        surface_pressure_bar: derived.surface_pressure_bar,
+        base_temp_c: derived.base_temperature_c,
+        ocean_level,
+        axial_tilt_rad: params.axial_tilt_deg.to_radians(),
+        season: setting("season", 0.5),
+        storm_size: setting("storm_size", 1.0),
+        radius_km: derived.radius_km,
+        rotation_rate_rad_s: derived.rotation_rate_rad_s,
+        wind_scale: setting("wind_scale", 1.0),
+        face: 0,
+    };
+    wind.generate_gpu(
+        gpu,
+        &terrain,
+        &dynamics,
+        snapshot.seed,
+        ocean_level,
+        snapshot.axial_tilt_rad,
+        snapshot.season,
+        earth_relative_rotation_rate(snapshot.rotation_rate_rad_s),
+        snapshot.base_temp_c,
+        snapshot.surface_pressure_bar,
+        snapshot.wind_scale,
+    );
+    weather_pipeline.generate(gpu, snapshot, &terrain, &dynamics, &weather);
+    Planet {
+        terrain,
+        dynamics,
+        weather,
+        snapshot,
+        ocean_level,
+        thin_lift: setting("cloud_thin_lift", 0.0),
+        strength: setting("cloud_synthesis", 1.0),
+        storm_intensity: setting("storm_intensity", DEFAULT_STORM_INTENSITY),
+        seed,
+    }
+}
+
+/// A saved planet through the app's settings path, as `planet_capture` and
+/// the export build it.
+fn file_planet(gpu: &GpuContext, path: &str) -> Planet {
+    let json = std::fs::read_to_string(path).expect("read planet file");
+    let file = planet_file::checked_load(&json).expect("load planet file");
+    let derived = scene::derived(&file);
+    let ocean_level = scene::sea_level(&derived, file.water_loss);
+    let terrain_ocean_level = scene::terrain_sea_level(&derived, file.water_loss);
+    let plates = generate_plates(&scene::plate_params(&file, &derived));
+    let plates =
+        planet_gen::tectonic_history::plate_records(&plates, file.seed, file.geologic_time_myr);
+    let res = planet_gen::preview::DEFAULT_PREVIEW_SIZE;
+    let mut terrain = TerrainComputePipeline::new(gpu).generate_params(
+        gpu,
+        &plates,
+        res,
+        &scene::terrain_params(&file, &derived),
+    );
+    if file.show_erosion {
+        ErosionPipeline::new(gpu)
+            .erode(
+                gpu,
+                &mut terrain,
+                scene::preview_erosion_iterations(res, file.erosion_iterations),
+                terrain_ocean_level,
+                ErosionClimate {
+                    seed: file.seed,
+                    base_temp_c: derived.base_temperature_c,
+                    axial_tilt_rad: file.axial_tilt_deg.to_radians(),
+                    moisture: file.climate_moisture,
+                    ocean_fraction: derived.ocean_fraction,
+                },
+            )
+            .expect("erosion");
+    }
+    let resolution = DEFAULT_WEATHER_RESOLUTION;
+    let snapshot = scene::weather_snapshot(&file, &derived, resolution, ocean_level);
+    let wind = WindFieldPipeline::new(gpu).unwrap();
+    let dynamics = wind.create_textures(gpu, resolution, &terrain, terrain_ocean_level);
+    wind.generate_gpu(
+        gpu,
+        &terrain,
+        &dynamics,
+        snapshot.seed,
+        snapshot.ocean_level,
+        snapshot.axial_tilt_rad,
+        snapshot.season,
+        earth_relative_rotation_rate(snapshot.rotation_rate_rad_s),
+        snapshot.base_temp_c,
+        snapshot.surface_pressure_bar,
+        snapshot.wind_scale,
+    );
+    let weather_pipeline = WeatherFieldPipeline::new(gpu).unwrap();
+    let weather = weather_pipeline.create_textures(gpu, resolution);
+    weather_pipeline.generate(gpu, snapshot, &terrain, &dynamics, &weather);
+    Planet {
+        terrain,
+        dynamics,
+        weather,
+        snapshot,
+        ocean_level,
+        thin_lift: file.cloud_thin_lift,
+        strength: file.cloud_synthesis,
+        storm_intensity: file.storm_intensity,
+        seed: file.seed,
+    }
+}
+
+struct Planet {
+    terrain: TectonicTerrain,
+    dynamics: DynamicsTextures,
+    weather: WeatherTextures,
+    snapshot: WeatherSnapshot,
+    ocean_level: f32,
+    thin_lift: f32,
+    strength: f32,
+    storm_intensity: f32,
+    seed: u32,
+}
+
 struct Job {
     width: u32,
     rows: Option<(u32, u32)>,
@@ -222,6 +331,7 @@ struct Capture<'a> {
     snapshot: WeatherSnapshot,
     ocean_level: f32,
     thin_lift: f32,
+    storm_intensity: f32,
     out: String,
     seed: u32,
 }
@@ -230,9 +340,10 @@ impl Capture<'_> {
     fn render(&self, job: &Job) {
         let width = job.width;
         let (first_row, height) = job.rows.unwrap_or((0, width / 2));
-        let synthesis = weather_systems(&self.snapshot, job.strength, |d| {
-            terrain_height(self.terrain, d) < self.ocean_level
-        });
+        let synthesis =
+            weather_systems_with_storms(&self.snapshot, job.strength, self.storm_intensity, |d| {
+                terrain_height(self.terrain, d) < self.ocean_level
+            });
         println!(
             "synthesis={} systems={}",
             job.strength,
