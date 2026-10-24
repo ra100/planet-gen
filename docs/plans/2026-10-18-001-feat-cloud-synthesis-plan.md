@@ -221,3 +221,9 @@ salt-and-pepper grain (sub-pixel cumulus); it disappears at 8K.
   job file. `--rotation-hours H` and `--wind-scale W` regenerate the planet
   with another day length or wind. Seed 42 at 44,157 is a closed-cell deck,
   -44,-74 storm-track open cells, 37,-113 cirrus over broken cumulus.
+- A saved planet instead of a seed: `cloud_capture OUT 0 2048 --file PLANET.json`
+  builds it through the scene path (terrain, erosion, storms).
+- Blender bridge: `planet_capture OUT --file PLANET.json --export 4096` writes
+  the maps the bridge reads, `scripts/cloud_eval/render_bridge.py` renders
+  them through `blender_addon/cloud_bridge.py` in headless Cycles (`pip install
+  bpy`). Check a globe, a mid-range and a close-up view together.

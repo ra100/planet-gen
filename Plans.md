@@ -432,3 +432,18 @@ Requirements: [docs/brainstorms/2026-10-20-rocky-worlds-requirements.md](docs/br
 | 16.4 | Look: lunar palette with maria, fresh craters and rays, Mercury LRM and bright plains, Mars dust over basalt, frost caps with spiral troughs, lunar-Lambert and opposition surge, black airless shadows, relief cast shadows with phase-aware hiding, delta-M Mars dust haze, no clouds in thin air; export albedo and roughness parity | Moon albedo 0.14, red/blue 1.24; Mars red/blue 3.29; Mercury 0.13; rocky case in `tile_local_gpu_maps_match_monolithic_output`; Earth captures identical | 16.3 | cc:完了 [8ccd281] |
 | 16.5 | Controls: TERRAIN > surface history (Plate activity, Crater age, Maria, Volcanoes with AUTO, Dichotomy), CLIMATE > Pressure (log) and Dust, inspector pressure and crater age, GEOLOGY view, planet-file fields, MARS preset dichotomy | `surface_overrides_roundtrip`; before/after images in project files `rocky-worlds/` | 16.2 | cc:完了 [c0bc5b2] |
 | 16.6 | Review fixes: export albedo keeps Earth's mountain snow, terrain/export sea-level rounding kept (`scene::terrain_sea_level`), Mars frost in export roughness; horizon march curvature +d²/2 and solar-disk penumbra, Neukum fill normalised by the octaves' saturated density, ejecta cutoff covers the rim wobble, cap spiral about the tilted pole, atmosphere label follows a pressure override | Earth export (height, albedo, AO, normal, roughness, water mask, emission) byte-identical to main at water loss 0.5 and 0.35; rocky roughness parity case; Mars cap roughness 0.80; `pressure_override_restores_liquid_water_and_greenhouse` | 16.4 | cc:完了 [88af597, 1be10ae] |
+
+---
+
+## Phase 17: Blender Cloud Close-ups
+
+Close Blender renders of R's `planet_risa_06` preset showed clusters of small, hard, dark-rimmed blobs, and `cloud_density.exr` read as flat white patches with holes punched in them. The export now stages clouds at the equirect pixel's footprint, resolved cumulus are domes, and the bridge samples and erodes the map at its own scale with distance-aware billows and relief.
+
+Plan: [docs/plans/2026-10-24-001-fix-blender-closeup-clouds-plan.md](docs/plans/2026-10-24-001-fix-blender-closeup-clouds-plan.md)
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 17.1 | Staged cloud columns use the equirect pixel (`pi / N`) as the synthesis footprint instead of the cube texel | `staged_cloud_faces_carry_no_detail_finer_than_the_equirect_pixel` (roughness 0.0206 vs direct 0.0223; texel footprint 0.0251) | 15.4 | cc:完了 [806ec77] |
+| 17.2 | Resolved cumulus domes: optical depth `exp(0.8 hi)` of the fine band, normalized to the cloudy mean, gated by the breakup weight | `synthesized_cloud_amount_does_not_depend_on_export_resolution`; zoom-20 preview close-ups unchanged apart from brighter cumulus tops | 15.7 | cc:完了 [806ec77] |
+| 17.3 | Bridge: cubic density sampling, Scale = four map texels per billow cell (set by Drive Clouds), octaves fade by camera distance, Erosion 0.5, relief distance eased from 0.002 to ~2 km up close | Headless Cycles before/after of the preset at 600 km, 2500 km and globe; images in project files `blender-closeup/` | 14.6 | cc:完了 [be5e992] |
+| 17.4 | Tooling: `cloud_capture --file PLANET.json`, `planet_capture --export FACE_RES`, `scripts/cloud_eval/render_bridge.py` (headless Cycles through the bridge) | Preset reproduced headless at 8K | - | cc:完了 [af2998b, d147d02] |
