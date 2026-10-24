@@ -11,7 +11,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         f32(params.tile_offset_y + id.y) / f32(params.full_resolution - 1u),
     );
     let direction = cube_to_sphere(params.face, uv);
-    let footprint = 2.0 / f32(params.full_resolution);
+    // The faces are resampled into a 2N x N equirectangular map whose pixels
+    // span pi / N radians, up to 1.6x a face-centre texel and 3x a corner
+    // one. Structure resolved at the texel would alias into speckle there.
+    let footprint = 3.1415927 / f32(params.full_resolution);
     let cloud = cloud_synthesis_cloud(direction, footprint);
     output[pixel] = cloud_column_sample_cloud(
         direction, footprint, cloud.mass, cloud.geometry, cs_strength() <= 0.0,

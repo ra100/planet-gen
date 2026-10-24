@@ -64,6 +64,8 @@ const CS_OPEN_STATS: vec2<f32> = vec2<f32>(0.345, 0.319);
 // Meridional compression of the noise domain by the zonal jets.
 const CS_ZONAL_STRETCH: f32 = 2.2;
 const CS_CIRRUS_STRETCH: f32 = 6.0;
+// Log optical depth per unit of the fine band within resolved clouds.
+const CS_DOME_GAIN: f32 = 0.8;
 
 struct CloudSystem {
     center: vec4<f32>,
@@ -1158,6 +1160,7 @@ fn cs_synthesize(p: vec3<f32>, footprint: f32, solver: vec4<f32>, solver_geometr
     var filled = fill;
     // Thickness ramp at the edges of individual clouds once they resolve.
     var fill_margin = 1.0;
+    var fill_dome = 1.0;
     let fine_resolved = smooth_step(0.4, 0.8, 1.0 - octaves.hi_unresolved);
     if (fill < 0.95 && fine_resolved > 0.0) {
         let fill_threshold = cs_probit(1.0 - fill) * sqrt(1.0 + fill_soft * fill_soft);
@@ -1167,6 +1170,15 @@ fn cs_synthesize(p: vec3<f32>, footprint: f32, solver: vec4<f32>, solver_geometr
         let breakup = fine_resolved * (1.0 - smooth_step(0.8, 0.95, fill));
         filled = mix(fill, holes, breakup);
         fill_margin = mix(1.0, smooth_step(-0.2, 0.9, octaves.hi - fill_threshold), breakup);
+        // Resolved clouds are domes: optical depth grows with the fine band's
+        // height above the fill threshold, thin at the margins and thickest on
+        // the tops, instead of one flat level with holes punched in it. The
+        // lognormal is normalized to the mean over the cloudy part.
+        let v = max(1.0 - octaves.hi_unresolved, 1.0e-3);
+        let sd = sqrt(v);
+        let mean_cloudy = exp(0.5 * CS_DOME_GAIN * CS_DOME_GAIN * v)
+            * cs_logistic((CS_DOME_GAIN * v - fill_threshold) / sd) / max(cs_logistic(-fill_threshold / sd), 1.0e-3);
+        fill_dome = mix(1.0, exp(CS_DOME_GAIN * octaves.hi) / mean_cloudy, breakup);
     }
     // Broken cumulus margins thin out to nothing rather than a gray veil.
     var mask = clustered * filled * mix(1.0, smooth_step(0.04, 0.25, clustered), wm.w);
@@ -1185,7 +1197,7 @@ fn cs_synthesize(p: vec3<f32>, footprint: f32, solver: vec4<f32>, solver_geometr
     let tau_in = tau * interior * exp(texture * (
         0.4 * octaves.mid * (1.0 - octaves.mid_unresolved) + 0.6 * octaves.hi * (1.0 - octaves.hi_unresolved)));
     let lanes = mix(1.0, closed_lanes, wm.y);
-    var tau_liquid = mask * tau_in * margin * lanes * (1.0 - 0.45 * frozen);
+    var tau_liquid = mask * tau_in * margin * fill_dome * lanes * (1.0 - 0.45 * frozen);
     // A clear eye: the eyewall's optical depth falls geometrically down its
     // sloped inner wall (a linear blend stays opaque until the last step and
     // cuts a hard rim), onto broken low stratocumulus over a third of the
