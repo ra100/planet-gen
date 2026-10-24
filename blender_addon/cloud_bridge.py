@@ -47,13 +47,15 @@ CLOUD_DEFAULTS = {
     # full-thickness column that billows no longer erode.
     "Density Low": 0.05,
     "Density High": 0.35,
-    # Base billow cell frequency in the 0-1 shell domain (250 ~ 50 km cells on an
-    # Earth-size planet).
+    # Base billow cell frequency in the 0-1 shell domain. `apply` replaces it
+    # with BILLOW_CELL_TEXELS map texels per cell (~1300, 10 km cells, for an 8K
+    # export): the map already holds everything coarser.
     "Scale": 250.0,
-    # How far billows eat into the cloud; varies 0.5-1.5x by region. The export
-    # already carries margins, cells and gaps (Clouds > Structure), so billows
-    # only add close-range detail; raise it for solver-only exports.
-    "Erosion": 0.15,
+    # How far billows eat into the cloud; varies 0.5-1.5x by region. Billows
+    # are finer than the map's own structure (a few texels down), so they
+    # break the visible margins into puffs without a second pattern; thick
+    # cores keep their depth.
+    "Erosion": 0.5,
     # Low-frequency noise scale that varies the erosion between regions.
     "Variety Scale": 6.0,
     # Fine Perlin FBM added to the billows (wisps).
@@ -82,8 +84,34 @@ CLOUD_DEFAULTS = {
 BILLOW_OCTAVES = ((1.0, 0.5), (2.0, 0.24), (4.0, 0.13), (8.0, 0.07), (16.0, 0.04), (32.0, 0.02))
 # Fine FBM frequency multiplier relative to Scale.
 WISP_FREQUENCY = 12.0
+# Mean of one inverted Worley F1 octave (3D, randomness 1), what an octave
+# finer than the pixel averages to.
+BILLOW_OCTAVE_MEAN = 0.48
+# Pixel footprint per unit of camera distance, a 45 degree view over ~1000 px.
+# Octaves fade to their mean once their cells shrink to a few pixels, so
+# erosion turns into a smooth thinning far away instead of sub-pixel grain.
+PIXEL_ANGLE = 8.0e-4
 # p5-p95 of the summed billows, mapped to 0-1.
 BILLOW_RANGE = (0.31, 0.65)
+# Density-map texels per base billow cell. Billows only add what the map cannot
+# hold: coarser cells would erode the exported clouds with a second pattern.
+BILLOW_CELL_TEXELS = 4.0
+# Relief bump distance (object units, planet radius 1) per unit of opacity from
+# RELIEF_FAR_VIEW away or farther, so ripples read on a globe. Closer cameras
+# get proportionally less, down to RELIEF_NEAR_KM on an Earth-size shell (about
+# a cumulus' height), so a close-up does not turn every puff into a
+# steep-walled lump with dark rims.
+RELIEF_DISTANCE = 0.002
+RELIEF_FAR_VIEW = 1.5
+RELIEF_NEAR_KM = 2.0
+
+
+def billow_scale(density):
+    """Base billow frequency for a density map: BILLOW_CELL_TEXELS of its
+    equirect texels (pi / height radians) per cell. The shell domain is the unit
+    direction halved, so one domain unit spans 2 radians."""
+    height = density.size[1] if density.size[1] > 0 else 2048
+    return 2.0 * height / (math.pi * BILLOW_CELL_TEXELS)
 
 
 # ============ Images ============
@@ -267,9 +295,10 @@ def build_sampler_group(density, drivers):
         links.new(tex.outputs["Color"], rgb.inputs[0])
         return rgb.outputs, tex.outputs["Alpha"]
 
-    # The density map is full export size; driver maps are low resolution, where
-    # cubic keeps texel diamonds out of the result.
-    density_rgb, _ = sample(density, 0, "Linear")
+    # Cubic everywhere: magnified, linear interpolation draws the texel grid
+    # into every cloud edge as steps and diamonds once the contrast curve and
+    # relief sharpen it.
+    density_rgb, _ = sample(density, 0, "Cubic")
     links.new(density_rgb[0], group_out.inputs["Density"])
 
     wind, wind_a = sample(drivers["wind"], 1, "Cubic")
@@ -301,7 +330,7 @@ def build_sampler_group(density, drivers):
 
 # ============ Billow clouds ============
 
-def build_cloud_group(sampler):
+def build_cloud_group(sampler, scale=None):
     """Solver density eroded at its edges by multi-octave Worley billows.
 
         m       = clamp((density - Low) / (High - Low))
@@ -323,7 +352,10 @@ def build_cloud_group(sampler):
     tree = group
     _socket(group, "Shader", "OUTPUT", "NodeSocketShader")
     _socket(group, "Density", "OUTPUT", "NodeSocketFloat")
-    for name, value in CLOUD_DEFAULTS.items():
+    defaults = dict(CLOUD_DEFAULTS)
+    if scale is not None:
+        defaults["Scale"] = scale
+    for name, value in defaults.items():
         _socket(group, name, "INPUT", "NodeSocketFloat", value)
 
     gi = tree.nodes.new("NodeGroupInput")
@@ -371,7 +403,26 @@ def build_cloud_group(sampler):
     offset = _vmath(tree, "SCALE", drivers.outputs["Wind"], scale=amount, location=(-1500, 400))
     domain = _vmath(tree, "ADD", domain, offset, location=(-1350, 300))
 
-    # Billows: inverted Worley F1 octaves plus zero-mean fine FBM wisps.
+    # Billows: inverted Worley F1 octaves plus zero-mean fine FBM wisps, each
+    # faded to its mean as its cells shrink below a few pixels.
+    camera = tree.nodes.new("ShaderNodeCameraData")
+    camera.location = (-1600, -700)
+    # Pixel footprint in base cells: distance x angle / (2 / Scale), since one
+    # domain unit spans two object units.
+    pixel_cells = _math(tree, "MULTIPLY", camera.outputs["View Distance"], PIXEL_ANGLE * 0.5, (-1450, -700))
+    pixel_cells = _math(tree, "MULTIPLY", pixel_cells, inp["Scale"], (-1300, -700))
+
+    def resolved(multiplier, y):
+        fade = tree.nodes.new("ShaderNodeMapRange")
+        fade.interpolation_type = "SMOOTHSTEP"
+        fade.location = (-1000, y - 100)
+        links.new(_math(tree, "MULTIPLY", pixel_cells, multiplier, (-1150, y - 100)), fade.inputs["Value"])
+        fade.inputs["From Min"].default_value = 0.25
+        fade.inputs["From Max"].default_value = 0.6
+        fade.inputs["To Min"].default_value = 1.0
+        fade.inputs["To Max"].default_value = 0.0
+        return fade.outputs["Result"]
+
     total = None
     for index, (multiplier, weight) in enumerate(BILLOW_OCTAVES):
         y = 900 - index * 220
@@ -382,7 +433,9 @@ def build_cloud_group(sampler):
         cell.inputs["Randomness"].default_value = 1.0
         links.new(domain, cell.inputs["Vector"])
         links.new(_math(tree, "MULTIPLY", inp["Scale"], multiplier, (-1250, y)), cell.inputs["Scale"])
-        inverted = _math(tree, "SUBTRACT", 1.0, cell.outputs["Distance"], (-900, y))
+        deviation = _math(tree, "SUBTRACT", 1.0 - BILLOW_OCTAVE_MEAN, cell.outputs["Distance"], (-900, y))
+        deviation = _math(tree, "MULTIPLY", deviation, resolved(multiplier, y), (-850, y))
+        inverted = _math(tree, "ADD", deviation, BILLOW_OCTAVE_MEAN, (-800, y))
         weighted = _math(tree, "MULTIPLY", inverted, weight, (-750, y))
         total = weighted if total is None else _math(tree, "ADD", total, weighted, (-600, y))
     wisp = tree.nodes.new("ShaderNodeTexNoise")
@@ -392,6 +445,7 @@ def build_cloud_group(sampler):
     links.new(domain, wisp.inputs["Vector"])
     links.new(_math(tree, "MULTIPLY", inp["Scale"], WISP_FREQUENCY, (-1250, -500)), wisp.inputs["Scale"])
     centred = _math(tree, "SUBTRACT", wisp.outputs["Fac"], 0.5, (-900, -500))
+    centred = _math(tree, "MULTIPLY", centred, resolved(WISP_FREQUENCY, -500), (-850, -500))
     total = _math(tree, "ADD", total, _math(tree, "MULTIPLY", centred, inp["Wisps"], (-750, -500)), (-600, -500))
     low, high = BILLOW_RANGE
     billow = _math(tree, "SUBTRACT", total, low, (-450, 200))
@@ -431,11 +485,14 @@ def build_cloud_group(sampler):
 
     bump = tree.nodes.new("ShaderNodeBump")
     bump.location = (900, 0)
-    bump.inputs["Distance"].default_value = 0.002
     links.new(inp["Relief"], bump.inputs["Strength"])
+    distance = _math(tree, "MULTIPLY", camera.outputs["View Distance"], RELIEF_DISTANCE / RELIEF_FAR_VIEW,
+                     (600, -200))
+    distance = _math(tree, "MAXIMUM", distance, RELIEF_NEAR_KM / 6371.0, (750, -200))
+    links.new(_math(tree, "MINIMUM", distance, RELIEF_DISTANCE, (900, -200)), bump.inputs["Distance"])
     # Height is the visible cloud itself, so the solver's ripples and cells get
-    # sunlit and shaded sides. Billow octaves are left out: unfiltered, they are
-    # only a few pixels wide at most distances and shade as sandpaper grain.
+    # sunlit and shaded sides. Billow octaves are not added to it: even
+    # filtered, their Worley creases shade as grain.
     links.new(opacity, bump.inputs["Height"])
 
     bsdf = tree.nodes.new("ShaderNodeBsdfPrincipled")
@@ -480,7 +537,7 @@ def apply(directory, obj=None):
     billow cloud material, assigned to ``obj`` when given."""
     density, drivers = load_images(directory)
     sampler = build_sampler_group(density, drivers)
-    group = build_cloud_group(sampler)
+    group = build_cloud_group(sampler, billow_scale(density))
     material = build_cloud_material(group)
     if obj is not None:
         if obj.data.materials:
