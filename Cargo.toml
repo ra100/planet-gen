@@ -49,3 +49,16 @@ pkg-config = "0.3"
 # preview/export hot paths; as_chunks tuples do not compose with .zip()
 # chains, so keep the existing idiom.
 chunks_exact_to_as_chunks = "allow"
+
+# Debug builds spend most of their startup inside naga's WGSL translation and
+# wgpu-core validation (the weather and preview shaders are large): unoptimized,
+# the first frame took ~100s. Optimizing just these crates keeps `cargo run`
+# starting in seconds without slowing incremental builds of our own code.
+[profile.dev.package.naga]
+opt-level = 3
+
+[profile.dev.package.wgpu-core]
+opt-level = 3
+
+[profile.dev.package.wgpu-hal]
+opt-level = 3
