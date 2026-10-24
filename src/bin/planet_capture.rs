@@ -4,15 +4,21 @@
 //!
 //! cargo run --release --bin planet_capture -- OUT_DIR [--preset NAME]... [--file PLANET.json]...
 //!     [--size 768] [--res 768] [--seed N] [--set FIELD=JSON]... [--terrain-only]
+//!     [--export FACE_RES]
 //!
 //! Writes per planet: `NAME-globe.png` (the file's own light), `NAME-full.png`
 //! (zero phase, four longitudes), `NAME-terminator.png` (low sun),
 //! `NAME-closeup.png` (zoom 4 at low sun), `NAME-albedo.png` (unlit surface
 //! albedo), `NAME-height.png`, `NAME-heightmap.png` (equirectangular terrain)
 //! and `NAME-stats.json` (hypsometry in km and the disk-mean linear albedo).
+//!
+//! `--export FACE_RES` instead runs the app's export (albedo and the cloud
+//! maps the Blender bridge reads) into `OUT_DIR/NAME/`, at FACE_RES per cube
+//! face (4096 is the app's 4K).
 
 use planet_gen::{
     cloud_synthesis::weather_systems_with_storms,
+    export::{self, ExportConfig, ExportLayers, ExportProgress},
     gpu::GpuContext,
     planet_file::{self, PlanetFile},
     plates::generate_plates,
@@ -395,6 +401,65 @@ fn capture(
     println!("{stats}");
 }
 
+/// The app's export of `file` (albedo and cloud maps) into `out/name/`.
+fn export(gpu: &GpuContext, out: &str, name: &str, file: &PlanetFile, face_resolution: u32) {
+    let derived = scene::derived(file);
+    let ocean_level = scene::sea_level(&derived, file.water_loss);
+    let config = ExportConfig {
+        face_resolution,
+        tile_size: export::TILE_SIZE,
+        output_dir: out.into(),
+        planet_name: name.to_owned(),
+        erosion_iterations: if file.show_erosion {
+            file.erosion_iterations
+        } else {
+            0
+        },
+        layers: ExportLayers {
+            height: false,
+            albedo: true,
+            ao: false,
+            normals: false,
+            roughness: false,
+            water_mask: false,
+            clouds: true,
+            emission: false,
+            cloud_reconstruction: false,
+            cloud_drivers: false,
+        },
+        weather: scene::weather_snapshot(file, &derived, DEFAULT_WEATHER_RESOLUTION, ocean_level),
+        night_lights: file.night_lights,
+        albedo_ao: None,
+        cloud_thin_lift: file.cloud_thin_lift,
+        cloud_synthesis: file.cloud_synthesis,
+        storm_intensity: file.storm_intensity,
+    };
+    let (progress_tx, progress_rx) = std::sync::mpsc::channel();
+    let started = std::time::Instant::now();
+    let result = export::run_export(
+        gpu,
+        &config,
+        &scene::planet_params(file),
+        &derived,
+        file.continental_scale,
+        file.water_loss,
+        scene::terrain_params(file, &derived),
+        &progress_tx,
+        &std::sync::atomic::AtomicBool::new(false),
+    );
+    for progress in progress_rx.try_iter() {
+        if let ExportProgress::Error(message) = progress {
+            println!("{name}: export error {message}");
+        }
+    }
+    let path = result.expect("export");
+    println!(
+        "{name}: exported {} in {:.1}s",
+        path.display(),
+        started.elapsed().as_secs_f32()
+    );
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let out = args
@@ -402,7 +467,7 @@ fn main() {
         .filter(|arg| !arg.starts_with("--"))
         .expect(
             "planet_capture OUT_DIR [--preset NAME]... [--file PLANET.json]... [--size 768] \
-             [--res 768] [--seed N] [--set FIELD=JSON]... [--terrain-only]",
+             [--res 768] [--seed N] [--set FIELD=JSON]... [--terrain-only] [--export FACE_RES]",
         )
         .clone();
     let value = |flag: &str| {
@@ -416,6 +481,7 @@ fn main() {
     });
     let seed: Option<u32> = value("--seed").map(|v| v.parse().unwrap());
     let terrain_only = args.iter().any(|arg| arg == "--terrain-only");
+    let export_resolution: Option<u32> = value("--export").map(|v| v.parse().unwrap());
     // Planet-file fields set on every planet, e.g. `--set crater_age_override=1.0`.
     let overrides: Vec<(String, serde_json::Value)> = args
         .windows(2)
@@ -480,6 +546,10 @@ fn main() {
             }
             file = serde_json::from_value(json).expect("invalid --set value");
         }
-        capture(&gpu, &out, &name, &file, size, res, terrain_only);
+        if let Some(face_resolution) = export_resolution {
+            export(&gpu, &out, &name, &file, face_resolution);
+        } else {
+            capture(&gpu, &out, &name, &file, size, res, terrain_only);
+        }
     }
 }
