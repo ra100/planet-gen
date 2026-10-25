@@ -19,7 +19,7 @@ Every export with the **clouds** layer writes:
 | File | Content | Used by the bridge |
 |------|---------|--------------------|
 | `cloud_density.exr` | Y optical depth, export size (includes the app's Clouds > Advanced > Thin lift) | yes, the cloud |
-| `cloud_height.exr` | Y cloud top / 20 km; `height_km` midpoint, `base_km`, `top_km` | no (volumetric setups with a base; for PCO, drive the layer height from `cloud_density.exr` Y) |
+| `cloud_height.exr` | Y cloud top / 20 km; `height_km` midpoint, `base_km`, `top_km`. Heights follow each cloud system's layer mix, and clear texels carry the heights of the cloud around them, so the map interpolates cleanly across cloud edges | no (volumetric setups with a base; for PCO, drive the layer height from `cloud_density.exr` Y) |
 | `wind_drivers.exr` | RGB tangent wind (Y-up planet space), A speed, weather resolution | yes, streaks the detail |
 
 Opt-in under the clouds layer (off by default):

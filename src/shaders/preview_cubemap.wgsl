@@ -1960,9 +1960,7 @@ fn shade_planet(in: VertexOutput) -> vec4<f32> {
             }
             case 22u: { debug_color = rocky_geology(rotated, height); }
             case 21u: {
-                let cloud = cloud_synthesis_cloud(rotated, angular_pixel_footprint);
-                let column = cloud_column_sample_cloud(rotated, angular_pixel_footprint,
-                    cloud.mass, cloud.geometry, cs_strength() <= 0.0);
+                let column = cloud_column_sample_synthesized(rotated, angular_pixel_footprint);
                 let altitude = select(0.0, column.base_km + column.thickness_km, column.y > 0.0);
                 debug_color = vec3<f32>(clamp(altitude / 20.0, 0.0, 1.0));
             }

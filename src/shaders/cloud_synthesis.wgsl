@@ -66,6 +66,12 @@ const CS_ZONAL_STRETCH: f32 = 2.2;
 const CS_CIRRUS_STRETCH: f32 = 6.0;
 // Log optical depth per unit of the fine band within resolved clouds.
 const CS_DOME_GAIN: f32 = 0.8;
+// Footprint, km, of the cloud whose layer mix sets the exported base and
+// thickness: the systems' mix, not the fine band's holes. 40 or 60 km
+// changed the 16K jumps by under 10 %.
+const CS_HEIGHT_FOOTPRINT_KM: f32 = 25.0;
+// Share of the pixel's own low and deep mass in that mix.
+const CS_HEIGHT_PIXEL_SHARE: f32 = 0.1;
 
 struct CloudSystem {
     center: vec4<f32>,
@@ -1297,6 +1303,35 @@ fn cloud_synthesis_cloud(direction: vec3<f32>, footprint: f32) -> CsCloud {
     if (strength <= 0.0) { return CsCloud(solver, solver_geometry); }
     let synthesized = cs_synthesize(normalize(direction), max(footprint, 1.0e-6), solver, solver_geometry);
     return CsCloud(mix(solver, synthesized.mass, strength), mix(solver_geometry, synthesized.geometry, strength));
+}
+
+// The exported column: optical depth and families at the pixel; base and
+// thickness from the pixel's layer geometry, mixed by the optical weights of
+// the cloud at CS_HEIGHT_FOOTPRINT_KM (the solver field's filtered moments
+// without synthesis). Mixed at the pixel, a hole in a resolved low deck showed
+// the cirrus above it and the heights jumped by up to 12 km between
+// neighbours. Clear columns get the heights of the cloud around them, so a
+// height map interpolated at a cloud's edge does not drop to the ground.
+fn cloud_column_sample_synthesized(direction: vec3<f32>, footprint: f32) -> CloudColumn {
+    let cloud = cloud_synthesis_cloud(direction, footprint);
+    var column = cloud_column_sample_cloud(direction, footprint, cloud.mass, cloud.geometry, false);
+    var heights: vec2<f32>;
+    if (cs_strength() > 0.0) {
+        let wide = cloud_synthesis_cloud(direction,
+            max(footprint, CS_HEIGHT_FOOTPRINT_KM / max(uniforms.planet_radius_km, 1.0)));
+        // Small cumulus the wide cloud thresholds away keep their own height
+        // instead of taking a trace of cirrus's. Pixel cirrus is left out: it
+        // is what flips over the holes in a deck.
+        let mass = wide.mass + CS_HEIGHT_PIXEL_SHARE * vec4<f32>(cloud.mass.rg, 0.0, 0.0);
+        heights = cloud_layer_geometry(cloud.geometry, CloudLayers(
+            mass.r * LOW_OPTICAL_WEIGHT, mass.g, mass.b * 0.28,
+        )).yz;
+    } else {
+        heights = filtered_cloud_geometry(direction);
+    }
+    column.base_km = heights.x;
+    column.thickness_km = heights.y;
+    return column;
 }
 
 fn cloud_synthesis_mass(direction: vec3<f32>, footprint: f32) -> vec4<f32> {

@@ -178,8 +178,10 @@ pub const CLOUD_EXR_CHANNELS: [&str; 6] = [
     "cirrus",
 ];
 /// `cloud_height.exr`: `Y` cloud top / 20 km (what PCO-style layers read as the column
-/// top), `height_km` the layer midpoint, and the layer's `base_km` / `top_km`. All four
-/// are zero in clear texels.
+/// top), `height_km` the layer midpoint, and the layer's `base_km` / `top_km`. Heights
+/// follow each cloud system's layer mix rather than the pixel's, and clear texels carry
+/// the heights of the cloud around them (zero far from any cloud), so the map can be
+/// interpolated across cloud edges.
 pub const CLOUD_HEIGHT_EXR_CHANNELS: [&str; 4] = ["Y", "height_km", "base_km", "top_km"];
 pub const CLOUD_HEIGHT_SCALE_KM: f32 = 20.0;
 
@@ -3165,11 +3167,7 @@ fn export_staged_cloud_maps(
                 .zip(row.chunks_exact(CLOUD_EXR_CHANNELS.len()))
             {
                 *density = column[0];
-                let (base_km, thickness_km) = if column[0] > 0.0 {
-                    (column[2], column[3])
-                } else {
-                    (0.0, 0.0)
-                };
+                let (base_km, thickness_km) = (column[2], column[3]);
                 let top_km = base_km + thickness_km;
                 altitude[0] = (top_km / CLOUD_HEIGHT_SCALE_KM).clamp(0.0, 1.0);
                 altitude[1] = base_km + 0.5 * thickness_km;
@@ -4830,11 +4828,8 @@ mod tests {
             for value in read("cloud_density.exr", "Y", 1) {
                 assert!((value - density).abs() < 1.0e-6);
             }
-            let (expected_base, expected_top) = if density > 0.0 {
-                (base, base + thickness)
-            } else {
-                (0.0, 0.0)
-            };
+            // Clear texels keep the heights of the cloud around them.
+            let (expected_base, expected_top) = (base, base + thickness);
             let expected_mid = 0.5 * (expected_base + expected_top);
             for value in read("cloud_height.exr", "Y", 4) {
                 assert!((0.0..=1.0).contains(&value));
@@ -5486,6 +5481,105 @@ mod tests {
             "staged map rougher than its pixels allow: {staged_roughness:.4} vs direct {direct_roughness:.4}"
         );
         println!("roughness staged {staged_roughness:.4} direct {direct_roughness:.4}");
+    }
+
+    #[test]
+    fn exported_cloud_heights_stay_continuous_where_the_fine_band_resolves() {
+        // Base and thickness mix the low, deep and cirrus layers by optical
+        // weight. Mixed at the pixel, a hole in a resolved low deck showed the
+        // cirrus above it and the heights jumped by up to 12 km between
+        // neighbours; height maps interpolated across those jumps fold.
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let snapshot = WeatherSnapshot {
+            resolution: 64,
+            ..u5_validation_snapshot()
+        };
+        let terrain = directional_terrain(snapshot.resolution);
+        let wind = WindFieldPipeline::new(&gpu).expect("wind pipeline");
+        let dynamics =
+            wind.create_textures(&gpu, snapshot.resolution, &terrain, snapshot.ocean_level);
+        wind.generate_gpu(
+            &gpu,
+            &terrain,
+            &dynamics,
+            snapshot.seed,
+            snapshot.ocean_level,
+            snapshot.axial_tilt_rad,
+            snapshot.season,
+            earth_relative_rotation_rate(snapshot.rotation_rate_rad_s),
+            snapshot.base_temp_c,
+            snapshot.surface_pressure_bar,
+            snapshot.wind_scale,
+        );
+        let weather_pipeline = WeatherFieldPipeline::new(&gpu).expect("weather pipeline");
+        let weather = weather_pipeline.create_textures(&gpu, snapshot.resolution);
+        weather_pipeline.generate(&gpu, snapshot, &terrain, &dynamics, &weather);
+        let synthesis = crate::cloud_synthesis::weather_systems(&snapshot, 1.0, |direction| {
+            sample_cubemap_height(&terrain, direction) < snapshot.ocean_level
+        });
+        // A 16K band near 20 N, where cirrus overlies broken low cloud.
+        let width = 16384u32;
+        let (first_row, rows) = (3072u32, 256u32);
+        let columns = render_cloud_columns_equirect(
+            &gpu,
+            &terrain,
+            &dynamics,
+            &weather,
+            snapshot,
+            0.0,
+            &synthesis,
+            None,
+            width,
+            Some((first_row, rows)),
+        )
+        .expect("render columns");
+        let column = |x: u32, y: u32| {
+            let index = (y * width + x % width) as usize * CLOUD_EXR_CHANNELS.len();
+            &columns[index..index + CLOUD_EXR_CHANNELS.len()]
+        };
+        // East-west steps of base or top, km, between cloudy neighbours of
+        // similar optical depth: where the cloud does not change, its height
+        // should not either. Towers rising out of thin cloud are left out.
+        let mut steps = Vec::new();
+        let (mut clear_edges, mut filled_edges) = (0, 0);
+        for y in 0..rows {
+            for x in 0..width {
+                let (a, b) = (column(x, y), column(x + 1, y));
+                let (thin, thick) = (a[0].min(b[0]), a[0].max(b[0]));
+                if thin > 0.05 && thick < 2.0 * thin {
+                    steps.push((a[2] - b[2]).abs().max((a[2] + a[3] - b[2] - b[3]).abs()));
+                }
+                if thick > 0.05 && thin <= 0.0 {
+                    clear_edges += 1;
+                    filled_edges += usize::from(a[3].min(b[3]) > 0.0);
+                }
+            }
+        }
+        steps.sort_by(f32::total_cmp);
+        let p999 = steps[(steps.len() - 1) * 999 / 1000];
+        let large = steps.iter().filter(|step| **step > 3.0).count();
+        // Mixed at the pixel: p99.9 3.65 km, 3783 steps over 3 km in 1.97M.
+        println!(
+            "height steps over {} pairs: p99.9 {p999:.3} km, {large} over 3 km; \
+             clear edges filled {filled_edges}/{clear_edges}",
+            steps.len()
+        );
+        assert!(steps.len() > 100_000, "cloudy band expected");
+        assert!(
+            p999 < 1.5,
+            "cloud heights jump between neighbours: p99.9 {p999:.3} km"
+        );
+        assert!(
+            large * 10_000 < steps.len(),
+            "cloud heights jump by over 3 km at {large} of {} pairs",
+            steps.len()
+        );
+        // Clear texels at a cloud's edge carry its heights, so interpolating
+        // the height map there does not pull the edge to the ground.
+        assert!(
+            filled_edges * 100 >= clear_edges * 99,
+            "clear edge texels without heights: {filled_edges}/{clear_edges}"
+        );
     }
 
     #[test]
