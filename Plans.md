@@ -449,3 +449,12 @@ Plan: [docs/plans/2026-10-24-001-fix-blender-closeup-clouds-plan.md](docs/plans/
 | 17.4 | Tooling: `cloud_capture --file PLANET.json`, `planet_capture --export FACE_RES`, `scripts/cloud_eval/render_bridge.py` (headless Cycles through the bridge) | Preset reproduced headless at 8K | - | cc:完了 [fe9faf8, d8ead00] |
 | 17.5 | Exported cloud heights: base and thickness mix the pixel's layer geometry by the optical weights of the cloud at a 25 km footprint, plus 0.1 of the pixel's own low and deep mass; clear texels carry the surrounding heights. Mixed at the pixel, holes in a resolved low deck showed the cirrus above and heights jumped up to 12 km between 16K neighbours | `exported_cloud_heights_stay_continuous_where_the_fine_band_resolves` (16K band, neighbours within 2x optical depth: p99.9 step 3.65 -> 1.06 km, steps over 3 km 3783 -> 17 of 1.97M; clear edge texels filled 942/943) | 17.1 | cc:完了 |
 | 17.6 | Exported clouds are cut only from fine-band octaves resolved at two pixels (`cs_magnified`, set by the export entry points): fill holes, their margins and domes, ragged cluster and cell edges; nearly full decks stay whole from fill 0.7-0.9. Preview unchanged ([plan](docs/plans/2026-10-25-001-fix-noisy-cloud-blobs-plan.md)) | `exported_clouds_are_not_cut_at_one_pixel_and_keep_their_cover` (8K tropics: roughness 0.024 vs 0.25, cover 0.263 both); preset ITCZ band roughness 0.207 -> 0.019; Cycles before/after at 200, 500, 600 and 2500 km, globe unchanged; images in project files `blender-noisy-blobs/` | 17.2 | cc:完了 [6778fec] |
+
+## Phase 18: Export Progress
+
+The export bar showed `EXPORT 104%`: the step total missed the 8K meso terrain and emission tiles. Exports now send a step plan and a weighted, monotonic fraction; the panel shows the steps as a checklist with time remaining.
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 18.1 | `ProgressTracker` runs a planned step list (`plan_export_steps`) with per-step weights; fraction clamped to [0, 1] and never decreasing; file writes report rows through materialization checkpoints | `progress_stays_within_one_and_never_decreases_when_steps_overshoot`, `progress_plan_follows_selected_layers` | - | cc:完了 [e7fc644] |
+| 18.2 | Export panel: todo-style step list (done / running with % / pending), elapsed and smoothed time remaining; status bar `EXPORT n% · ~ETA LEFT` | `remaining_time_extrapolates_and_formats` | 18.1 | cc:完了 [e7fc644] |
