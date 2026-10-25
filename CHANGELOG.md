@@ -9,6 +9,11 @@ behaviour).
 
 ### Fixed
 
+- Exported clouds at 8K and 16K no longer fill broken cumulus with one- and
+  two-pixel holes and specks, which Blender close-ups magnified into a carpet
+  of equal soft blobs. The export cuts individual clouds and holes only from
+  structure at least two pixels across; the cloud cover is unchanged and the
+  app preview is identical.
 - `cloud_height.exr` heights no longer jump between neighbouring pixels. At
   16K, a hole in a low cloud deck took the height of the cirrus above it, up
   to 12 km higher than the pixel next to it. The layer mix now comes from the
