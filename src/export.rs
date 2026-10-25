@@ -5484,6 +5484,111 @@ mod tests {
     }
 
     #[test]
+    fn exported_clouds_are_not_cut_at_one_pixel_and_keep_their_cover() {
+        // Blender magnifies the exported map, so clouds and holes thresholded
+        // from octaves barely resolved at the pixel turn into a field of
+        // smooth blobs. The export cuts only at two pixels; the preview's cut
+        // (scale 1) is rebuilt here from the same shader for comparison, on an
+        // 8K band across the tropics, where the fine band resolves.
+        let gpu = GpuContext::new().expect("GPU init failed");
+        let snapshot = WeatherSnapshot {
+            resolution: 64,
+            // Broken cloud, as in the presets (0.4); 0.65 is mostly decks.
+            coverage: 0.35,
+            ..u5_validation_snapshot()
+        };
+        let terrain = directional_terrain(snapshot.resolution);
+        let wind = WindFieldPipeline::new(&gpu).expect("wind pipeline");
+        let dynamics =
+            wind.create_textures(&gpu, snapshot.resolution, &terrain, snapshot.ocean_level);
+        wind.generate_gpu(
+            &gpu,
+            &terrain,
+            &dynamics,
+            snapshot.seed,
+            snapshot.ocean_level,
+            snapshot.axial_tilt_rad,
+            snapshot.season,
+            earth_relative_rotation_rate(snapshot.rotation_rate_rad_s),
+            snapshot.base_temp_c,
+            snapshot.surface_pressure_bar,
+            snapshot.wind_scale,
+        );
+        let weather_pipeline = WeatherFieldPipeline::new(&gpu).expect("weather pipeline");
+        let weather = weather_pipeline.create_textures(&gpu, snapshot.resolution);
+        weather_pipeline.generate(&gpu, snapshot, &terrain, &dynamics, &weather);
+        let synthesis = crate::cloud_synthesis::weather_systems(&snapshot, 1.0, |direction| {
+            sample_cubemap_height(&terrain, direction) < snapshot.ocean_level
+        });
+        let pixel_cut = CLOUD_SYNTHESIS_WGSL
+            .replace(
+                "select(1.0, CS_MAGNIFIED_HOLE_FOOTPRINT, cs_magnified)",
+                "1.0",
+            )
+            .replace(
+                "select(vec2<f32>(0.8, 0.95), vec2<f32>(0.7, 0.9), cs_magnified)",
+                "vec2<f32>(0.8, 0.95)",
+            );
+        assert_ne!(pixel_cut, CLOUD_SYNTHESIS_WGSL, "the magnified cut moved");
+        let width = 16384;
+        let height = 96;
+        let rows = (width / 4 - height / 2, height);
+        let render = |source: Option<&str>| -> Vec<f32> {
+            render_cloud_columns_equirect(
+                &gpu,
+                &terrain,
+                &dynamics,
+                &weather,
+                snapshot,
+                0.0,
+                &synthesis,
+                source,
+                width,
+                Some(rows),
+            )
+            .expect("render columns")
+            .chunks_exact(CLOUD_EXR_CHANNELS.len())
+            .map(|column| column[0])
+            .collect()
+        };
+        let (exported, pixel) = (render(None), render(Some(&pixel_cut)));
+        // Mean squared east-west step over the variance, and the cloud
+        // fraction.
+        let stats = |map: &[f32]| {
+            let (mut steps, mut sum, mut sum_sq, mut cloudy, mut count) =
+                (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
+            for y in 0..height {
+                for x in 0..width {
+                    let value = f64::from(map[(y * width + x) as usize]);
+                    let next = f64::from(map[(y * width + (x + 1) % width) as usize]);
+                    steps += (next - value).powi(2);
+                    sum += value;
+                    sum_sq += value * value;
+                    cloudy += f64::from(u8::from(value > 0.05));
+                    count += 1.0;
+                }
+            }
+            let variance = sum_sq / count - (sum / count).powi(2);
+            (steps / count / variance.max(1.0e-12), cloudy / count)
+        };
+        let ((exported_roughness, exported_cover), (pixel_roughness, pixel_cover)) =
+            (stats(&exported), stats(&pixel));
+        println!(
+            "roughness exported {exported_roughness:.4} pixel cut {pixel_roughness:.4}; \
+             cover {exported_cover:.4} vs {pixel_cover:.4}"
+        );
+        // 0.024 vs 0.25 here, cover 0.263 either way.
+        assert!(
+            exported_roughness < 0.25 * pixel_roughness,
+            "exported clouds still cut at the pixel: roughness {exported_roughness:.4} vs {pixel_roughness:.4}"
+        );
+        assert!(
+            (exported_cover - pixel_cover).abs() < 0.01,
+            "the cut changed the cloud fraction: {exported_cover:.4} vs {pixel_cover:.4}"
+        );
+    }
+
+    #[test]
     fn exported_cloud_heights_stay_continuous_where_the_fine_band_resolves() {
         // Base and thickness mix the low, deep and cirrus layers by optical
         // weight. Mixed at the pixel, a hole in a resolved low deck showed the

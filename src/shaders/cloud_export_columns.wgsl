@@ -15,6 +15,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     // span pi / N radians, up to 1.6x a face-centre texel and 3x a corner
     // one. Structure resolved at the texel would alias into speckle there.
     let footprint = 3.1415927 / f32(params.full_resolution);
+    cs_magnified = true;
     output[pixel] = cloud_column_sample_synthesized(direction, footprint);
 }
 
@@ -30,5 +31,6 @@ fn equirect(@builtin(global_invocation_id) id: vec3<u32>) {
     let lat = 3.1415927 * (0.5 - (f32(y) + 0.5) / f32(params.full_resolution));
     let direction = vec3<f32>(cos(lat) * sin(lon), sin(lat), cos(lat) * cos(lon));
     let footprint = 6.2831853 / f32(params.tile_width);
+    cs_magnified = true;
     output[id.y * params.tile_width + id.x] = cloud_column_sample_synthesized(direction, footprint);
 }

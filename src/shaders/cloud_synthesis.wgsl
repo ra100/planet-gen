@@ -72,6 +72,17 @@ const CS_DOME_GAIN: f32 = 0.8;
 const CS_HEIGHT_FOOTPRINT_KM: f32 = 25.0;
 // Share of the pixel's own low and deep mass in that mix.
 const CS_HEIGHT_PIXEL_SHARE: f32 = 0.1;
+// Pixels a fine-band octave must resolve at before it cuts individual clouds,
+// holes and ragged edges in a magnified texture (cs_magnified).
+const CS_MAGNIFIED_HOLE_FOOTPRINT: f32 = 2.0;
+
+// Set by the export entry points: the exported maps are textures that Blender
+// magnifies, so a cloud or hole thresholded at one or two pixels turns into a
+// smooth blob, and fields of them into noise. Magnified, clouds are cut only
+// from octaves resolved at two pixels (finer ones still vary brightness), and
+// nearly full decks stay whole from a lower fill. The preview draws its
+// pixels as they are and keeps the finest cut.
+var<private> cs_magnified: bool = false;
 
 struct CloudSystem {
     center: vec4<f32>,
@@ -796,15 +807,22 @@ struct CsOctaves {
     lo_unresolved: f32,
     mid_unresolved: f32,
     hi_unresolved: f32,
+    // The fine band as it cuts clouds, holes and ragged edges: the same
+    // octaves, each counted as resolved only at `hole_scale` times the
+    // footprint. Equal to hi with a scale of 1.
+    holes: f32,
+    holes_unresolved: f32,
 }
 
 fn cs_fbm(
     q_lo: vec3<f32>, q_mid: vec3<f32>, q_hi: vec3<f32>, footprint: vec3<f32>, radius_km: f32, seed: u32,
-    stream: u32,
+    stream: u32, hole_scale: f32,
 ) -> CsOctaves {
     var sum = vec3<f32>(0.0);
     var variance = vec3<f32>(0.0);
     var unresolved = vec3<f32>(0.0);
+    var holes = 0.0;
+    var holes_unresolved = 0.0;
     for (var k = 0; k < CS_OCTAVES; k++) {
         let size = CS_LARGEST_KM * exp2(-f32(k)) / radius_km;
         // The synoptic band falls off from 1200 km, so thresholding it
@@ -830,10 +848,16 @@ fn cs_fbm(
         sum[band] += amp * resolved * n;
         variance[band] += a2;
         unresolved[band] += a2 * (1.0 - resolved * resolved);
+        if (band == 2) {
+            let cut = cs_resolved(footprint[band] * hole_scale, size);
+            holes += amp * cut * n;
+            holes_unresolved += a2 * (1.0 - cut * cut);
+        }
     }
     let scale = inverseSqrt(variance);
     let share = unresolved / variance;
-    return CsOctaves(sum.x * scale.x, sum.y * scale.y, sum.z * scale.z, share.x, share.y, share.z);
+    return CsOctaves(sum.x * scale.x, sum.y * scale.y, sum.z * scale.z, share.x, share.y, share.z,
+        holes * scale.z, holes_unresolved / variance.z);
 }
 
 // A synthesized column: mass (low, deep, high, occupancy) in solver units and
@@ -1024,7 +1048,8 @@ fn cs_synthesize(p: vec3<f32>, footprint: f32, solver: vec4<f32>, solver_geometr
         + warp_2 * 0.8;
     let q_cells = cs_street(q_cells_still, street_axis, sqrt(street));
     let octaves = cs_fbm(q_lo, q_mid, q_hi, vec3<f32>(fp, cs_stretch_footprint(footprint, cs_band_stretch(1.8)),
-        cs_stretch_footprint(footprint, cs_band_stretch(1.25))), radius_km, seed, 40u);
+        cs_stretch_footprint(footprint, cs_band_stretch(1.25))), radius_km, seed, 40u,
+        select(1.0, CS_MAGNIFIED_HOLE_FOOTPRINT, cs_magnified));
 
     // Cellular morphologies, each zero-mean and unit variance when resolved.
     // Real cells are not Voronoi polygons: their walls bend and wander, their
@@ -1041,7 +1066,7 @@ fn cs_synthesize(p: vec3<f32>, footprint: f32, solver: vec4<f32>, solver_geometr
         if (resolved > 0.0) {
             let qc = cs_cell_warp(q_cells_still / size, seed ^ 0x51u, fp_cells / size);
             let cells = cs_worley(qc, seed ^ 0x51u);
-            let fray = 0.05 * octaves.hi * (1.0 - octaves.hi_unresolved);
+            let fray = 0.05 * octaves.holes * (1.0 - octaves.holes_unresolved);
             let lane = smooth_step(0.0, 0.32, cells.y - cells.x + fray);
             let dome = 0.8 + 0.2 * (1.0 - min(cells.x, 1.0));
             closed_lanes = mix(1.0, (0.4 + 0.6 * lane) * dome, resolved);
@@ -1059,7 +1084,7 @@ fn cs_synthesize(p: vec3<f32>, footprint: f32, solver: vec4<f32>, solver_geometr
             // distance to the cell's own point, not to the Voronoi wall: wall
             // lines warped by noise turned into squiggles). The rings are
             // strings of cumulus clumps rather than continuous walls.
-            let fray = 0.06 * octaves.hi * (1.0 - octaves.hi_unresolved);
+            let fray = 0.06 * octaves.holes * (1.0 - octaves.holes_unresolved);
             let clump_resolved = cs_resolved(fp_cells, size * 0.3);
             let clump = mix(0.5, smooth_step(-0.6, 0.6,
                 snoise(qo * 3.3 + noise_seed_offset(seed, 97u)) / CS_SIMPLEX_SIGMA), clump_resolved);
@@ -1080,7 +1105,7 @@ fn cs_synthesize(p: vec3<f32>, footprint: f32, solver: vec4<f32>, solver_geometr
             // 130-510 km across, elongated, with ragged anvil edges; they
             // swell where the synoptic band is moist, so they gather in
             // groups instead of a string of pearls.
-            let ragged = 0.1 * octaves.lo + 0.25 * octaves.hi * (1.0 - octaves.hi_unresolved);
+            let ragged = 0.1 * octaves.lo + 0.25 * octaves.holes * (1.0 - octaves.holes_unresolved);
             let blob = cs_blobs(q_cluster / size + vec3<f32>(-23.0), seed ^ 0x77u, 0.42,
                 vec2<f32>(0.2, 0.8), 0.15, ragged);
             var small = 0.0;
@@ -1108,7 +1133,7 @@ fn cs_synthesize(p: vec3<f32>, footprint: f32, solver: vec4<f32>, solver_geometr
             // Drawn out along the trades into short streets.
             let q_flowers = cs_street(cs_zonal_stretch(synoptic.point_meso, pole, cs_band_stretch(1.8)) + warp_1 * 0.5
                 + warp_2 * 0.8, street_axis, street);
-            let ragged = 0.3 * octaves.hi * (1.0 - octaves.hi_unresolved);
+            let ragged = 0.3 * octaves.holes * (1.0 - octaves.holes_unresolved);
             let blob = cs_blobs(q_flowers / size + vec3<f32>(41.0), seed ^ 0x3bu, 0.6,
                 vec2<f32>(0.25, 0.75), 0.2, ragged);
             flowers = resolved * (blob - CS_FLOWER_STATS.x) / CS_FLOWER_STATS.y;
@@ -1170,21 +1195,23 @@ fn cs_synthesize(p: vec3<f32>, footprint: f32, solver: vec4<f32>, solver_geometr
     let fine_resolved = smooth_step(0.4, 0.8, 1.0 - octaves.hi_unresolved);
     if (fill < 0.95 && fine_resolved > 0.0) {
         let fill_threshold = cs_probit(1.0 - fill) * sqrt(1.0 + fill_soft * fill_soft);
-        let holes = cs_logistic((octaves.hi - fill_threshold) / sqrt(octaves.hi_unresolved + fill_soft * fill_soft));
+        let holes = cs_logistic((octaves.holes - fill_threshold)
+            / sqrt(octaves.holes_unresolved + fill_soft * fill_soft));
         // A nearly full deck stays whole: a few percent of holes thresholded
         // from the fine band read as pinhole stipple, not as broken cloud.
-        let breakup = fine_resolved * (1.0 - smooth_step(0.8, 0.95, fill));
+        let whole = select(vec2<f32>(0.8, 0.95), vec2<f32>(0.7, 0.9), cs_magnified);
+        let breakup = fine_resolved * (1.0 - smooth_step(whole.x, whole.y, fill));
         filled = mix(fill, holes, breakup);
-        fill_margin = mix(1.0, smooth_step(-0.2, 0.9, octaves.hi - fill_threshold), breakup);
+        fill_margin = mix(1.0, smooth_step(-0.2, 0.9, octaves.holes - fill_threshold), breakup);
         // Resolved clouds are domes: optical depth grows with the fine band's
         // height above the fill threshold, thin at the margins and thickest on
         // the tops, instead of one flat level with holes punched in it. The
         // lognormal is normalized to the mean over the cloudy part.
-        let v = max(1.0 - octaves.hi_unresolved, 1.0e-3);
+        let v = max(1.0 - octaves.holes_unresolved, 1.0e-3);
         let sd = sqrt(v);
         let mean_cloudy = exp(0.5 * CS_DOME_GAIN * CS_DOME_GAIN * v)
             * cs_logistic((CS_DOME_GAIN * v - fill_threshold) / sd) / max(cs_logistic(-fill_threshold / sd), 1.0e-3);
-        fill_dome = mix(1.0, exp(CS_DOME_GAIN * octaves.hi) / mean_cloudy, breakup);
+        fill_dome = mix(1.0, exp(CS_DOME_GAIN * octaves.holes) / mean_cloudy, breakup);
     }
     // Broken cumulus margins thin out to nothing rather than a gray veil.
     var mask = clustered * filled * mix(1.0, smooth_step(0.04, 0.25, clustered), wm.w);
@@ -1226,7 +1253,7 @@ fn cs_synthesize(p: vec3<f32>, footprint: f32, solver: vec4<f32>, solver_geometr
         let qc = cs_zonal_stretch(synoptic.point, pole, cs_band_stretch(CS_CIRRUS_STRETCH)) + warp_1 * 1.4;
         let qc_fine = cs_zonal_stretch(synoptic.point_meso, pole, cs_band_stretch(CS_CIRRUS_STRETCH)) + warp_1;
         let fp_cirrus = cs_stretch_footprint(footprint, cs_band_stretch(CS_CIRRUS_STRETCH));
-        let fibres = cs_fbm(qc, qc_fine, qc_fine, vec3<f32>(fp_cirrus), radius_km, seed, 60u);
+        let fibres = cs_fbm(qc, qc_fine, qc_fine, vec3<f32>(fp_cirrus), radius_km, seed, 60u, 1.0);
         let ci_shape = 0.7 * fibres.lo + 0.6 * fibres.mid + 0.4 * fibres.hi;
         let ci_unres = 0.49 * fibres.lo_unresolved + 0.36 * fibres.mid_unresolved + 0.16 * fibres.hi_unresolved;
         // Veils fade out at their margins instead of ending in streaky smears.
