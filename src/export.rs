@@ -187,11 +187,46 @@ pub const CLOUD_HEIGHT_SCALE_KM: f32 = 20.0;
 
 // ============ Progress ============
 
+/// One row of the export's step list, sent once when the export starts.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExportStepInfo {
+    pub label: String,
+}
+
 #[derive(Clone, Debug)]
 pub enum ExportProgress {
-    Progress { message: String, fraction: f32 },
+    /// The ordered steps this export will run; later `Progress` events index into it.
+    Plan(Vec<ExportStepInfo>),
+    /// `fraction` is the whole export in [0, 1] and never decreases; `step` is
+    /// the running step's index into the plan and `step_fraction` its own progress.
+    Progress {
+        message: String,
+        fraction: f32,
+        step: usize,
+        step_fraction: f32,
+    },
     Complete,
     Error(String),
+}
+
+/// Remaining time from linear extrapolation of the weighted export fraction.
+/// `None` until enough work is done for the estimate to mean something.
+pub fn estimate_remaining(elapsed: Duration, fraction: f32) -> Option<Duration> {
+    if !(0.02..1.0).contains(&fraction) || elapsed < Duration::from_secs(2) {
+        return None;
+    }
+    let fraction = f64::from(fraction);
+    Some(elapsed.mul_f64((1.0 - fraction) / fraction))
+}
+
+/// Compact `1h 02m`, `3m 05s` or `42s` duration text.
+pub fn format_duration(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    match (seconds / 3600, seconds / 60 % 60, seconds % 60) {
+        (0, 0, s) => format!("{s}s"),
+        (0, m, s) => format!("{m}m {s:02}s"),
+        (h, m, _) => format!("{h}h {m:02}m"),
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -2073,6 +2108,7 @@ fn stage_cloud_faces(
     cloud_thin_lift: f32,
     synthesis: &CloudSynthesisGpu,
     coordinator: &TileCoordinator,
+    progress: &mut ProgressTracker,
     cancel: &AtomicBool,
 ) -> Result<ExportStage, String> {
     let stage = ExportStage::create(
@@ -2120,6 +2156,7 @@ fn stage_cloud_faces(
                     region.crop_height,
                     &values,
                 )?;
+                progress.advance(&format!("Cloud face {face}"));
             }
         }
     }
@@ -2437,29 +2474,267 @@ fn stage_map_layer_with<P: Pod>(
 
 // ============ Progress Tracker ============
 
+/// A planned export step: `units` ticks of `advance` complete it, and
+/// `weight` is its rough share of wall time relative to the other steps.
+struct PlannedStep {
+    id: &'static str,
+    label: String,
+    units: u32,
+    weight: f32,
+}
+
 struct ProgressTracker<'a> {
     tx: &'a Sender<ExportProgress>,
-    current: u32,
-    total: u32,
+    steps: Vec<PlannedStep>,
+    current: usize,
+    done_units: u32,
+    step_fraction: f32,
+    last_fraction: f32,
 }
 
 impl<'a> ProgressTracker<'a> {
+    /// A single unnamed step of `total` units, for callers without a plan.
+    #[cfg(test)]
     fn new(tx: &'a Sender<ExportProgress>, total: u32) -> Self {
+        Self::with_steps(
+            tx,
+            vec![PlannedStep {
+                id: "work",
+                label: String::new(),
+                units: total,
+                weight: 1.0,
+            }],
+        )
+    }
+
+    fn with_steps(tx: &'a Sender<ExportProgress>, steps: Vec<PlannedStep>) -> Self {
         Self {
             tx,
+            steps,
             current: 0,
-            total,
+            done_units: 0,
+            step_fraction: 0.0,
+            last_fraction: 0.0,
         }
     }
 
+    /// Publishes the step list so the UI can show it before work starts.
+    fn send_plan(&self) {
+        let plan = self
+            .steps
+            .iter()
+            .map(|step| ExportStepInfo {
+                label: step.label.clone(),
+            })
+            .collect();
+        let _ = self.tx.send(ExportProgress::Plan(plan));
+    }
+
+    /// Starts step `id`; every earlier step counts as done.
+    fn begin(&mut self, id: &str) {
+        let Some(index) = self.steps.iter().position(|step| step.id == id) else {
+            debug_assert!(false, "export step {id} is not planned");
+            return;
+        };
+        self.current = index.max(self.current);
+        self.done_units = 0;
+        self.step_fraction = 0.0;
+        let label = self.steps[self.current].label.clone();
+        self.send(label);
+    }
+
+    /// Ticks one unit of the running step.
     fn advance(&mut self, message: &str) {
-        self.current += 1;
-        let fraction = self.current as f32 / self.total as f32;
+        let Some(step) = self.steps.get(self.current) else {
+            return;
+        };
+        self.done_units = (self.done_units + 1).min(step.units);
+        self.step_fraction = self.done_units as f32 / step.units.max(1) as f32;
+        self.send(message.to_string());
+    }
+
+    /// Sets the running step's own progress directly, e.g. from written rows.
+    fn set_step_fraction(&mut self, fraction: f32, message: String) {
+        self.step_fraction = fraction.clamp(0.0, 1.0).max(self.step_fraction);
+        self.send(message);
+    }
+
+    /// Marks every step done.
+    fn finish(&mut self) {
+        self.current = self.steps.len();
+        self.step_fraction = 0.0;
+        self.send("Export complete".into());
+    }
+
+    fn fraction(&self) -> f32 {
+        let total: f32 = self.steps.iter().map(|step| step.weight).sum();
+        if total <= 0.0 {
+            return 0.0;
+        }
+        let done: f32 = self.steps[..self.current.min(self.steps.len())]
+            .iter()
+            .map(|step| step.weight)
+            .sum();
+        let running = self
+            .steps
+            .get(self.current)
+            .map_or(0.0, |step| step.weight * self.step_fraction);
+        ((done + running) / total).clamp(0.0, 1.0)
+    }
+
+    fn send(&mut self, message: String) {
+        self.last_fraction = self.fraction().max(self.last_fraction);
         let _ = self.tx.send(ExportProgress::Progress {
-            message: message.to_string(),
-            fraction,
+            message,
+            fraction: self.last_fraction,
+            step: self.current,
+            step_fraction: self.step_fraction,
         });
     }
+}
+
+/// Forwards materialization checkpoints and reports their written rows as the
+/// running step's progress.
+fn tracked_checkpoints<'p, 'c: 'p>(
+    progress: &'p mut ProgressTracker<'_>,
+    checkpoints: &'p mut (
+                dyn for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String> + 'c
+            ),
+) -> impl for<'a> FnMut(&'a LayerMaterializationCheckpoint) -> Result<(), String> + 'p {
+    move |checkpoint| {
+        if checkpoint.rows_total > 0 {
+            let label = progress
+                .steps
+                .get(progress.current)
+                .map_or("Writing", |step| step.label.as_str());
+            let message = format!(
+                "{label}: {}/{} rows",
+                checkpoint.rows_completed, checkpoint.rows_total
+            );
+            progress.set_step_fraction(
+                checkpoint.rows_completed as f32 / checkpoint.rows_total as f32,
+                message,
+            );
+        }
+        checkpoints(checkpoint)
+    }
+}
+
+fn planned_step(id: &'static str, label: &str, units: u32, weight: f32) -> PlannedStep {
+    PlannedStep {
+        id,
+        label: label.to_string(),
+        units,
+        weight,
+    }
+}
+
+/// Builds the export's step list from the selected layers, in run order.
+/// Weights are rough relative wall-time shares; they only shape the bar and ETA.
+fn plan_export_steps(
+    config: &ExportConfig,
+    coordinator: &TileCoordinator,
+    meso_tiles: Option<u32>,
+) -> Vec<PlannedStep> {
+    let layers = &config.layers;
+    let face_tiles = 6 * coordinator.tiles_per_face();
+    let map_layer = |steps: &mut Vec<PlannedStep>, ids: [&'static str; 2], name, file, weight| {
+        steps.push(planned_step(
+            ids[0],
+            &format!("Render {name} tiles"),
+            face_tiles,
+            weight,
+        ));
+        steps.push(planned_step(ids[1], &format!("Write {file}"), 1, 1.0));
+    };
+    let mut steps = vec![planned_step(
+        "terrain",
+        "Generate terrain",
+        coordinator.total_tiles(),
+        1.0,
+    )];
+    if let Some(tiles) = meso_tiles {
+        steps.push(planned_step(
+            "meso_terrain",
+            "Generate erosion terrain",
+            tiles,
+            0.1,
+        ));
+    }
+    if config.erosion_iterations > 0 {
+        steps.push(planned_step("erosion", "Erode terrain", 1, 1.5));
+    }
+    if layers.ao || (layers.albedo && config.albedo_ao.is_some()) {
+        steps.push(planned_step("broad_ao", "Compute broad AO", 1, 0.5));
+    }
+    if layers.height {
+        map_layer(
+            &mut steps,
+            ["height", "height_write"],
+            "height",
+            "height.exr",
+            0.5,
+        );
+    }
+    if layers.normals {
+        map_layer(
+            &mut steps,
+            ["normals", "normals_write"],
+            "normal",
+            "normal.exr",
+            1.0,
+        );
+    }
+    if layers.roughness {
+        map_layer(
+            &mut steps,
+            ["roughness", "roughness_write"],
+            "roughness",
+            "roughness.png",
+            0.8,
+        );
+    }
+    if layers.albedo {
+        map_layer(
+            &mut steps,
+            ["albedo", "albedo_write"],
+            "albedo",
+            "albedo.png",
+            1.5,
+        );
+    }
+    if layers.ao {
+        map_layer(&mut steps, ["ao", "ao_write"], "AO", "ao.png", 0.5);
+    }
+    if layers.water_mask {
+        steps.push(planned_step(
+            "water_mask_write",
+            "Write water_mask.png",
+            1,
+            0.8,
+        ));
+    }
+    if layers.clouds {
+        steps.push(planned_step("weather", "Simulate export weather", 1, 0.5));
+        steps.push(planned_step(
+            "clouds",
+            "Render cloud tiles",
+            face_tiles,
+            2.0,
+        ));
+        steps.push(planned_step("clouds_write", "Write cloud EXRs", 1, 1.5));
+        steps.push(planned_step("cloud_drivers", "Write cloud drivers", 1, 0.3));
+    }
+    if layers.emission {
+        map_layer(
+            &mut steps,
+            ["emission", "emission_write"],
+            "emission",
+            "emission.exr",
+            0.5,
+        );
+    }
+    steps
 }
 
 // ============ Equirectangular Export Functions ============
@@ -3826,38 +4101,31 @@ pub fn run_export_with_timings_and_checkpoints(
     let rocky = RockyUniforms::from_derived(derived, params.star_distance_au);
     let ocean_level = crate::scene::terrain_sea_level(derived, water_loss);
 
-    // Compute total steps for progress based on selected layers
     let layers = &config.layers;
-    let tiles_per_face = coordinator.tiles_per_face();
-    let map_count = [
-        layers.height,
-        layers.normals,
-        layers.roughness,
-        layers.albedo,
-        layers.ao,
-    ]
-    .iter()
-    .filter(|&&b| b)
-    .count() as u32;
-    let export_count = [
-        layers.height,
-        layers.albedo,
-        layers.normals,
-        layers.roughness,
-        layers.ao,
-        layers.water_mask,
-        layers.clouds,
-    ]
-    .iter()
-    .filter(|&&b| b)
-    .count() as u32;
-    let total_steps = coordinator.total_tiles() // terrain generation
-        + 6 // erosion
-        + map_count * 6 * tiles_per_face // map tiles for selected layers
-        + 6 * export_count // file writes
-        + u32::from(layers.clouds) // cloud driver maps
-        + u32::from(layers.ao || (layers.albedo && config.albedo_ao.is_some())); // broad AO field
-    let mut progress = ProgressTracker::new(progress_tx, total_steps);
+    let meso_coordinator = if config.face_resolution >= 8192 && config.erosion_iterations > 0 {
+        let meso_tile_size = select_tile_size(
+            MESO_EROSION_RESOLUTION,
+            config.tile_size,
+            &gpu.device.limits(),
+            16,
+        )?;
+        Some(TileCoordinator::try_new(
+            MESO_EROSION_RESOLUTION,
+            meso_tile_size,
+        )?)
+    } else {
+        None
+    };
+    let mut progress = ProgressTracker::with_steps(
+        progress_tx,
+        plan_export_steps(
+            config,
+            &coordinator,
+            meso_coordinator.as_ref().map(TileCoordinator::total_tiles),
+        ),
+    );
+    progress.send_plan();
+    progress.begin("terrain");
 
     let generation_started = Instant::now();
     // --- Phase 1: Generate plates ---
@@ -3902,31 +4170,23 @@ pub fn run_export_with_timings_and_checkpoints(
         moisture: config.weather.moisture,
         ocean_fraction: derived.ocean_fraction,
     };
-    for face in 0..6u32 {
-        if cancel.load(Ordering::Relaxed) {
-            return Err("Cancelled".into());
-        }
-        progress.advance(&format!("Eroding face {face}"));
+    if cancel.load(Ordering::Relaxed) {
+        return Err("Cancelled".into());
     }
-    if config.face_resolution >= 8192 && config.erosion_iterations > 0 {
-        let meso_tile_size = select_tile_size(
-            MESO_EROSION_RESOLUTION,
-            config.tile_size,
-            &gpu.device.limits(),
-            16,
-        )?;
-        let meso_coordinator = TileCoordinator::try_new(MESO_EROSION_RESOLUTION, meso_tile_size)?;
+    if let Some(meso_coordinator) = meso_coordinator.as_ref() {
+        progress.begin("meso_terrain");
         let mut meso_terrain = generate_terrain_tiled(
             gpu,
             &terrain_pipeline,
             &plates_buffer,
-            &meso_coordinator,
+            meso_coordinator,
             num_plates,
             &terrain_params,
             &mut progress,
             cancel,
         )?;
         let meso_uneroded = meso_terrain.clone();
+        progress.begin("erosion");
         erosion_pipeline
             .erode_with_cancel(
                 gpu,
@@ -3945,7 +4205,8 @@ pub fn run_export_with_timings_and_checkpoints(
             .map_err(|error| error.to_string())?;
         timings.delta_reconstruction_ms = reconstruction_started.elapsed().as_secs_f64() * 1000.0;
         timings.delta_reconstruction_completed = true;
-    } else {
+    } else if config.erosion_iterations > 0 {
+        progress.begin("erosion");
         erosion_pipeline
             .erode_with_cancel(
                 gpu,
@@ -4028,7 +4289,7 @@ pub fn run_export_with_timings_and_checkpoints(
     };
     let bake_ao = layers.albedo && config.albedo_ao.is_some();
     let broad_ao = if layers.ao || bake_ao {
-        progress.advance("Computing broad AO...");
+        progress.begin("broad_ao");
         Some(BroadAoField::from_terrain(&terrain, ocean_level, cancel)?)
     } else {
         None
@@ -4056,7 +4317,7 @@ pub fn run_export_with_timings_and_checkpoints(
     let eq_ht = full_res;
 
     if layers.height {
-        progress.advance("Exporting height...");
+        progress.begin("height");
         let pipeline = MapPipeline::new(
             gpu,
             &ice_shader(include_str!("shaders/ice_height_map.wgsl")),
@@ -4086,6 +4347,7 @@ pub fn run_export_with_timings_and_checkpoints(
             &planet_dir,
             &mut timings.map_batch_metrics,
         )?;
+        progress.begin("height_write");
         merge_staged_export(
             timings,
             export_staged_equirect_exr(
@@ -4096,12 +4358,13 @@ pub fn run_export_with_timings_and_checkpoints(
                 1,
                 &planet_dir.join("height.exr"),
                 cancel,
-                checkpoints,
+                &mut tracked_checkpoints(&mut progress, checkpoints),
             ),
         )?;
     }
 
     if let Some(pipeline) = normal_pipeline.as_ref() {
+        progress.begin("normals");
         let stage = stage_map_layer(
             gpu,
             pipeline,
@@ -4125,7 +4388,7 @@ pub fn run_export_with_timings_and_checkpoints(
             &planet_dir,
             &mut timings.map_batch_metrics,
         )?;
-        progress.advance("Exporting normals...");
+        progress.begin("normals_write");
         merge_staged_export(
             timings,
             export_staged_equirect_exr(
@@ -4136,12 +4399,13 @@ pub fn run_export_with_timings_and_checkpoints(
                 4,
                 &planet_dir.join("normal.exr"),
                 cancel,
-                checkpoints,
+                &mut tracked_checkpoints(&mut progress, checkpoints),
             ),
         )?;
     }
 
     if let Some(pipeline) = roughness_pipeline.as_ref() {
+        progress.begin("roughness");
         let stage = stage_map_layer(
             gpu,
             pipeline,
@@ -4172,7 +4436,7 @@ pub fn run_export_with_timings_and_checkpoints(
             &planet_dir,
             &mut timings.map_batch_metrics,
         )?;
-        progress.advance("Exporting roughness...");
+        progress.begin("roughness_write");
         merge_staged_export(
             timings,
             export_staged_equirect_png(
@@ -4183,12 +4447,13 @@ pub fn run_export_with_timings_and_checkpoints(
                 QuantizedLayer::Roughness,
                 &planet_dir.join("roughness.png"),
                 cancel,
-                checkpoints,
+                &mut tracked_checkpoints(&mut progress, checkpoints),
             ),
         )?;
     }
 
     if let Some(pipeline) = albedo_pipeline.as_ref() {
+        progress.begin("albedo");
         let terrain = &terrain;
         let albedo_bake = match (broad_ao.as_ref(), config.albedo_ao) {
             (Some(field), Some(strength)) => Some(
@@ -4235,7 +4500,7 @@ pub fn run_export_with_timings_and_checkpoints(
             &mut timings.map_batch_metrics,
             albedo_bake.as_ref().map(|bake| bake as TilePostprocess),
         )?;
-        progress.advance("Exporting albedo...");
+        progress.begin("albedo_write");
         merge_staged_export(
             timings,
             export_staged_equirect_png(
@@ -4246,12 +4511,13 @@ pub fn run_export_with_timings_and_checkpoints(
                 QuantizedLayer::Albedo,
                 &planet_dir.join("albedo.png"),
                 cancel,
-                checkpoints,
+                &mut tracked_checkpoints(&mut progress, checkpoints),
             ),
         )?;
     }
 
     if let Some(field) = broad_ao.as_ref().filter(|_| layers.ao) {
+        progress.begin("ao");
         let stage = stage_broad_ao(
             field,
             &terrain,
@@ -4261,7 +4527,7 @@ pub fn run_export_with_timings_and_checkpoints(
             cancel,
             &planet_dir,
         )?;
-        progress.advance("Exporting AO...");
+        progress.begin("ao_write");
         merge_staged_export(
             timings,
             export_staged_equirect_png(
@@ -4272,15 +4538,15 @@ pub fn run_export_with_timings_and_checkpoints(
                 QuantizedLayer::AmbientOcclusion,
                 &planet_dir.join("ao.png"),
                 cancel,
-                checkpoints,
+                &mut tracked_checkpoints(&mut progress, checkpoints),
             ),
         )?;
     }
 
     if layers.water_mask {
+        progress.begin("water_mask_write");
         let stage =
             stage_ocean_mask_faces(&planet_dir, &terrain, &coordinator, ocean_level, cancel)?;
-        progress.advance("Exporting water mask...");
         merge_staged_export(
             timings,
             export_staged_equirect_png(
@@ -4291,13 +4557,13 @@ pub fn run_export_with_timings_and_checkpoints(
                 QuantizedLayer::WaterMask,
                 &planet_dir.join("water_mask.png"),
                 cancel,
-                checkpoints,
+                &mut tracked_checkpoints(&mut progress, checkpoints),
             ),
         )?;
     }
 
     if layers.clouds {
-        progress.advance("Exporting clouds...");
+        progress.begin("weather");
         let weather_started = Instant::now();
         // Snapshot values are copied before the background export begins; no app polling here.
         let terrain_stage = stage_terrain_faces(&planet_dir, &terrain, &coordinator, cancel)?;
@@ -4335,6 +4601,7 @@ pub fn run_export_with_timings_and_checkpoints(
         weather_pipeline.generate(gpu, snapshot, &weather_terrain, &dynamics, &weather);
         wait_for_gpu_completion(gpu, cancel)?;
         timings.export_weather_wall_ms = weather_started.elapsed().as_secs_f64() * 1000.0;
+        progress.begin("clouds");
         let cloud_tiles_started = Instant::now();
         let synthesis = weather_systems_with_storms(
             &snapshot,
@@ -4352,10 +4619,12 @@ pub fn run_export_with_timings_and_checkpoints(
             config.cloud_thin_lift,
             &synthesis,
             &coordinator,
+            &mut progress,
             cancel,
         )?;
         timings.cloud_tile_dispatch_readback_wall_ms =
             cloud_tiles_started.elapsed().as_secs_f64() * 1000.0;
+        progress.begin("clouds_write");
         merge_staged_export(
             timings,
             export_staged_cloud_maps(
@@ -4365,11 +4634,11 @@ pub fn run_export_with_timings_and_checkpoints(
                 eq_ht,
                 layers.cloud_reconstruction,
                 cancel,
-                checkpoints,
+                &mut tracked_checkpoints(&mut progress, checkpoints),
             )
             .map_err(|failure| *failure),
         )?;
-        progress.advance("Exporting cloud drivers...");
+        progress.begin("cloud_drivers");
         export_cloud_drivers(
             gpu,
             &planet_dir,
@@ -4383,6 +4652,7 @@ pub fn run_export_with_timings_and_checkpoints(
     }
 
     if let Some(pipeline) = emission_pipeline.as_ref() {
+        progress.begin("emission");
         let stage = stage_map_layer(
             gpu,
             pipeline,
@@ -4409,7 +4679,7 @@ pub fn run_export_with_timings_and_checkpoints(
             &planet_dir,
             &mut timings.map_batch_metrics,
         )?;
-        progress.advance("Exporting emission...");
+        progress.begin("emission_write");
         merge_staged_export(
             timings,
             export_staged_equirect_exr(
@@ -4420,7 +4690,7 @@ pub fn run_export_with_timings_and_checkpoints(
                 1,
                 &planet_dir.join("emission.exr"),
                 cancel,
-                checkpoints,
+                &mut tracked_checkpoints(&mut progress, checkpoints),
             ),
         )?;
     }
@@ -4435,6 +4705,7 @@ pub fn run_export_with_timings_and_checkpoints(
     timings.writer_output_wall_ms = timings.staged_io_metrics.output_write_ms;
     timings.writer_finish_wall_ms = timings.staged_io_metrics.output_finish_ms;
     timings.total_wall_ms = total_started.elapsed().as_secs_f64() * 1000.0;
+    progress.finish();
     let _ = progress_tx.send(ExportProgress::Complete);
     Ok(planet_dir)
 }
@@ -4541,6 +4812,110 @@ pub fn spawn_export(
 mod tests {
     use super::*;
     use crate::gpu::GpuContext;
+
+    fn progress_test_config(face_resolution: u32, erosion_iterations: u32) -> ExportConfig {
+        ExportConfig {
+            face_resolution,
+            tile_size: 512,
+            output_dir: std::env::temp_dir(),
+            planet_name: "progress".into(),
+            erosion_iterations,
+            layers: ExportLayers::default(),
+            weather: WeatherSnapshot::default(),
+            night_lights: 0.0,
+            albedo_ao: Some(0.5),
+            cloud_thin_lift: 0.0,
+            cloud_synthesis: 0.0,
+            storm_intensity: crate::cloud_synthesis::DEFAULT_STORM_INTENSITY,
+        }
+    }
+
+    #[test]
+    fn progress_stays_within_one_and_never_decreases_when_steps_overshoot() {
+        let config = progress_test_config(8192, 25);
+        let coordinator = TileCoordinator::try_new(8192, 512).unwrap();
+        let steps = plan_export_steps(&config, &coordinator, Some(16));
+        let ids: Vec<_> = steps.iter().map(|step| (step.id, step.units)).collect();
+        assert!(ids.iter().any(|(id, _)| *id == "meso_terrain"));
+        assert!(ids.iter().any(|(id, _)| *id == "emission"));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut progress = ProgressTracker::with_steps(&tx, steps);
+        progress.send_plan();
+        for (id, units) in ids {
+            progress.begin(id);
+            for _ in 0..units + 5 {
+                progress.advance("tick");
+            }
+            progress.set_step_fraction(2.0, "rows".into());
+        }
+        progress.finish();
+        drop(tx);
+        let mut last = 0.0;
+        let mut plan_len = 0;
+        for event in rx {
+            match event {
+                ExportProgress::Plan(plan) => plan_len = plan.len(),
+                ExportProgress::Progress {
+                    fraction,
+                    step,
+                    step_fraction,
+                    ..
+                } => {
+                    assert!((0.0..=1.0).contains(&fraction), "fraction {fraction}");
+                    assert!((0.0..=1.0).contains(&step_fraction));
+                    assert!(fraction >= last, "fraction went back {last} -> {fraction}");
+                    assert!(step <= plan_len);
+                    last = fraction;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(last, 1.0);
+    }
+
+    #[test]
+    fn progress_plan_follows_selected_layers() {
+        let mut config = progress_test_config(2048, 0);
+        config.layers = ExportLayers {
+            height: false,
+            albedo: true,
+            ao: false,
+            normals: false,
+            roughness: false,
+            water_mask: true,
+            clouds: false,
+            emission: false,
+            cloud_reconstruction: false,
+            cloud_drivers: false,
+        };
+        let coordinator = TileCoordinator::try_new(2048, 512).unwrap();
+        let labels: Vec<_> = plan_export_steps(&config, &coordinator, None)
+            .into_iter()
+            .map(|step| step.label)
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "Generate terrain",
+                "Compute broad AO",
+                "Render albedo tiles",
+                "Write albedo.png",
+                "Write water_mask.png",
+            ]
+        );
+    }
+
+    #[test]
+    fn remaining_time_extrapolates_and_formats() {
+        assert_eq!(estimate_remaining(Duration::from_secs(1), 0.5), None);
+        assert_eq!(estimate_remaining(Duration::from_secs(60), 0.01), None);
+        assert_eq!(estimate_remaining(Duration::from_secs(60), 1.0), None);
+        let remaining = estimate_remaining(Duration::from_secs(60), 0.25).unwrap();
+        assert_eq!(remaining.as_secs(), 180);
+        assert_eq!(format_duration(Duration::from_secs(42)), "42s");
+        assert_eq!(format_duration(Duration::from_secs(185)), "3m 05s");
+        assert_eq!(format_duration(Duration::from_secs(3720)), "1h 02m");
+    }
 
     #[test]
     fn export_config_copies_weather_snapshot_and_weather_defaults_are_stable() {
@@ -5122,6 +5497,7 @@ mod tests {
                 sample_cubemap_height(terrain, direction) < snapshot.ocean_level
             }),
             &coordinator,
+            &mut ProgressTracker::new(&std::sync::mpsc::channel().0, 1),
             &AtomicBool::new(false),
         )
         .expect("stage U5 cloud validation faces");
@@ -5436,6 +5812,7 @@ mod tests {
             0.0,
             &synthesis,
             &coordinator,
+            &mut ProgressTracker::new(&std::sync::mpsc::channel().0, 1),
             &AtomicBool::new(false),
         )
         .expect("stage cloud faces");

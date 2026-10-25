@@ -132,6 +132,14 @@ pub struct PlanetGenApp {
     export_handle: Option<ExportHandle>,
     export_status: String,
     export_progress: f32,
+    /// Step labels from the export's plan, in run order.
+    export_steps: Vec<String>,
+    /// Index of the running step; steps before it are done.
+    export_step: usize,
+    export_step_fraction: f32,
+    export_started: Option<std::time::Instant>,
+    /// Smoothed time remaining and when it was last updated.
+    export_eta: Option<(std::time::Duration, std::time::Instant)>,
     export_done_ok: bool,
     export_destination: String,
     export_layers: String,
@@ -295,6 +303,11 @@ impl PlanetGenApp {
             export_handle: None,
             export_status: String::new(),
             export_progress: 0.0,
+            export_steps: Vec::new(),
+            export_step: 0,
+            export_step_fraction: 0.0,
+            export_started: None,
+            export_eta: None,
             export_done_ok: false,
             export_destination: String::new(),
             export_layers: String::new(),
@@ -731,6 +744,11 @@ impl PlanetGenApp {
             self.export_destination, self.export_layers
         );
         self.export_progress = 0.0;
+        self.export_steps.clear();
+        self.export_step = 0;
+        self.export_step_fraction = 0.0;
+        self.export_started = Some(std::time::Instant::now());
+        self.export_eta = None;
         self.export_done_ok = false;
     }
 
@@ -743,9 +761,19 @@ impl PlanetGenApp {
         if let Some(ref handle) = self.export_handle {
             while let Ok(progress) = handle.progress_rx.try_recv() {
                 match progress {
-                    ExportProgress::Progress { message, fraction } => {
+                    ExportProgress::Plan(steps) => {
+                        self.export_steps = steps.into_iter().map(|step| step.label).collect();
+                    }
+                    ExportProgress::Progress {
+                        message,
+                        fraction,
+                        step,
+                        step_fraction,
+                    } => {
                         self.export_status = message;
                         self.export_progress = fraction;
+                        self.export_step = step;
+                        self.export_step_fraction = step_fraction;
                     }
                     ExportProgress::Complete => {
                         self.export_status = format!(
@@ -753,6 +781,7 @@ impl PlanetGenApp {
                             self.export_destination, self.export_layers
                         );
                         self.export_progress = 1.0;
+                        self.export_step = self.export_steps.len();
                         self.export_done_ok = true;
                         finished = true;
                     }
@@ -778,7 +807,36 @@ impl PlanetGenApp {
         }
         if finished {
             self.export_handle = None;
+            self.export_started = None;
+            self.export_eta = None;
             self.restore_preview_after_export();
+        } else {
+            self.update_export_eta();
+        }
+    }
+
+    /// Blends each frame's raw estimate into the shown one so the countdown
+    /// stays steady while step weights over- or under-shoot.
+    fn update_export_eta(&mut self) {
+        let Some(started) = self.export_started else {
+            return;
+        };
+        let now = std::time::Instant::now();
+        let raw = export::estimate_remaining(started.elapsed(), self.export_progress);
+        self.export_eta = match (raw, self.export_eta) {
+            (Some(raw), Some((shown, at))) => {
+                let carried = shown.saturating_sub(now - at);
+                Some((carried.mul_f32(0.9) + raw.mul_f32(0.1), now))
+            }
+            (raw, _) => raw.map(|raw| (raw, now)),
+        };
+    }
+
+    /// `~3m 05s left`, or `estimating…` until there is enough progress.
+    fn export_eta_text(&self) -> String {
+        match self.export_eta {
+            Some((eta, _)) => format!("~{} left", export::format_duration(eta)),
+            None => "estimating…".into(),
         }
     }
 
@@ -1585,7 +1643,11 @@ impl PlanetGenApp {
                 }
                 if self.export_handle.is_some() {
                     ui.label(
-                        RichText::new(format!("EXPORT {:.0}%", self.export_progress * 100.0))
+                        RichText::new(format!(
+                            "EXPORT {:.0}% · {}",
+                            self.export_progress * 100.0,
+                            self.export_eta_text().to_uppercase()
+                        ))
                             .monospace()
                             .size(10.5)
                             .color(theme::ACCENT),
@@ -2715,10 +2777,24 @@ impl PlanetGenApp {
                         let has_layers = self.export_layer_flags().iter().any(|f| *f);
                         ui.add_space(6.0);
                         if is_exporting {
-                            ui.add(
-                                egui::ProgressBar::new(self.export_progress)
-                                    .text(RichText::new(&self.export_status).small()),
+                            let elapsed = self
+                                .export_started
+                                .map(|started| export::format_duration(started.elapsed()))
+                                .unwrap_or_default();
+                            ui.add(egui::ProgressBar::new(self.export_progress).text(
+                                RichText::new(format!(
+                                    "{:.0}% · {} · {elapsed} elapsed",
+                                    self.export_progress * 100.0,
+                                    self.export_eta_text()
+                                ))
+                                .small(),
+                            ));
+                            ui.label(
+                                RichText::new(&self.export_status)
+                                    .small()
+                                    .color(theme::TEXT_DIM),
                             );
+                            self.export_step_list(ui);
                             if ui.button("Cancel export").clicked()
                                 && let Some(ref handle) = self.export_handle
                             {
@@ -2748,6 +2824,37 @@ impl PlanetGenApp {
                         }
                     });
             });
+    }
+
+    /// Todo-style list of the export's steps: done, running (with its own
+    /// percentage), and pending.
+    fn export_step_list(&self, ui: &mut egui::Ui) {
+        ui.add_space(2.0);
+        for (index, label) in self.export_steps.iter().enumerate() {
+            let (glyph, color, detail) = match index.cmp(&self.export_step) {
+                std::cmp::Ordering::Less => ("✔", theme::OK, String::new()),
+                std::cmp::Ordering::Equal => (
+                    "●",
+                    theme::ACCENT,
+                    format!("  {:.0}%", self.export_step_fraction * 100.0),
+                ),
+                std::cmp::Ordering::Greater => ("●", theme::EDGE_STRONG, String::new()),
+            };
+            let text_color = if index == self.export_step {
+                theme::TEXT
+            } else {
+                theme::TEXT_DIM
+            };
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.label(RichText::new(glyph).small().color(color));
+                ui.label(
+                    RichText::new(format!("{label}{detail}"))
+                        .small()
+                        .color(text_color),
+                );
+            });
+        }
     }
 
     fn hud_overlay(&self, ctx: &egui::Context) {
