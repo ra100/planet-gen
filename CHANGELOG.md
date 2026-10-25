@@ -5,6 +5,16 @@ All notable changes to Planet Gen are recorded here. The format follows
 [Semantic Versioning](https://semver.org/) (pre-1.0: minor releases may change
 behaviour).
 
+## [Unreleased]
+
+### Fixed
+
+- `cloud_height.exr` heights no longer jump between neighbouring pixels. At
+  16K, a hole in a low cloud deck took the height of the cirrus above it, up
+  to 12 km higher than the pixel next to it. The layer mix now comes from the
+  cloud system, about 25 km across. Clear texels carry the heights of the
+  cloud around them instead of zero. The Cloud top view matches.
+
 ## [0.2.0] - 2026-10-20
 
 ### Added
