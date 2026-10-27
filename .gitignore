@@ -74,6 +74,6 @@ data
 # graft's local repository settings — not committed.
 /.graft/
 
-# Research evidence images and logs live outside the repo (see
+# Research evidence images and logs live in the ra100/kb vault (see
 # docs/research/shallow-volumetric-cloud-validation.md).
 /docs/research/artifacts/
