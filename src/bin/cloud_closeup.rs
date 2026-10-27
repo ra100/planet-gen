@@ -56,8 +56,8 @@ fn main() {
         .map(|v| v.parse::<u32>().expect("size must be a u32"))
         .unwrap_or(512);
     assert!(size.is_multiple_of(64), "size must be divisible by 64");
-    std::fs::create_dir_all(&out).unwrap();
-    let gpu = GpuContext::new().unwrap();
+    std::fs::create_dir_all(&out).expect("create output directory");
+    let gpu = GpuContext::new().expect("create GPU context");
     println!("adapter={}", gpu.adapter_info.name);
     let mut params = PlanetParams {
         seed,
@@ -103,9 +103,9 @@ fn main() {
         )
     };
     let terrain = generate(&plates, 0.10);
-    let wind = WindFieldPipeline::new(&gpu).unwrap();
+    let wind = WindFieldPipeline::new(&gpu).expect("create wind pipeline");
     let dynamics = wind.create_textures(&gpu, 384, &terrain, ocean_level);
-    let weather_pipeline = WeatherFieldPipeline::new(&gpu).unwrap();
+    let weather_pipeline = WeatherFieldPipeline::new(&gpu).expect("create weather pipeline");
     let weather = weather_pipeline.create_textures(&gpu, 384);
     let snapshot = WeatherSnapshot {
         resolution: 384,
@@ -295,7 +295,7 @@ fn main() {
                 size,
                 image::ColorType::Rgba8,
             )
-            .unwrap();
+            .expect("save closeup PNG");
             println!("saved {name}");
         }
     };

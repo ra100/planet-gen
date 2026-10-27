@@ -478,7 +478,10 @@ impl PreviewRenderer {
         gpu.queue.submit(Some(encoder.finish()));
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "render encoding takes the GPU context, targets and per-frame state explicitly"
+    )]
     fn encode_render(
         &self,
         gpu: &GpuContext,

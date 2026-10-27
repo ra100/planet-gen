@@ -22,9 +22,10 @@ fn gamma_encode(u: f32) -> f32 {
 
 /// OKLCH -> `Color32` (exact; for dynamic tints). Tokens use the hardcoded
 /// constants below so hot paths and const contexts stay allocation-free.
-// Matrix literals are published Oklab spec constants, kept at full precision
-// intentionally for provenance.
-#[allow(clippy::excessive_precision)]
+#[expect(
+    clippy::excessive_precision,
+    reason = "matrix literals are published Oklab spec constants, kept at full precision for provenance"
+)]
 pub fn ok(l: f32, c: f32, h_deg: f32) -> Color32 {
     let h = h_deg.to_radians();
     let a = c * h.cos();

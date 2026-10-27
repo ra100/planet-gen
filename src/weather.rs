@@ -871,7 +871,10 @@ impl WeatherFieldPipeline {
     /// adapters, covering the branch incapable adapters always take.
     #[cfg(any(test, feature = "validation"))]
     #[doc(hidden)]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "weather runs take the GPU context, snapshot and solver inputs explicitly"
+    )]
     pub fn validation_tracer_trace_for_sweep(
         &self,
         gpu: &GpuContext,
@@ -903,7 +906,10 @@ impl WeatherFieldPipeline {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "weather runs take the GPU context, snapshot and solver inputs explicitly"
+    )]
     fn generate_with_provenance_mode(
         &self,
         gpu: &GpuContext,
@@ -1558,7 +1564,10 @@ impl WeatherFieldPipeline {
 
     /// Validation/test-only paired continuations from a single upstream front.
     #[cfg(any(test, feature = "validation"))]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "weather runs take the GPU context, snapshot and solver inputs explicitly"
+    )]
     fn paired_validation_continuation(
         &self,
         gpu: &GpuContext,
@@ -1603,7 +1612,10 @@ impl WeatherFieldPipeline {
     }
 
     #[cfg(any(test, feature = "validation"))]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "weather runs take the GPU context, snapshot and solver inputs explicitly"
+    )]
     fn validation_spinup_state(
         &self,
         gpu: &GpuContext,
@@ -5553,7 +5565,10 @@ mod tests {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "weather runs take the GPU context, snapshot and solver inputs explicitly"
+    )]
     fn ds045_run(
         gpu: &GpuContext,
         pipeline: &WeatherFieldPipeline,

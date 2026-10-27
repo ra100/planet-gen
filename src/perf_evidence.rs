@@ -550,7 +550,8 @@ fn json_escape(value: &str) -> String {
             '\t' => escaped.push_str("\\t"),
             character if character.is_control() => {
                 use std::fmt::Write as _;
-                write!(escaped, "\\u{:04x}", character as u32).unwrap();
+                write!(escaped, "\\u{:04x}", character as u32)
+                    .expect("writing to a String cannot fail");
             }
             character => escaped.push(character),
         }
@@ -595,7 +596,11 @@ pub fn sha256(bytes: &[u8]) -> String {
     for chunk in input.chunks_exact(64) {
         let mut words = [0u32; 64];
         for (index, word) in words[..16].iter_mut().enumerate() {
-            *word = u32::from_be_bytes(chunk[index * 4..index * 4 + 4].try_into().unwrap());
+            *word = u32::from_be_bytes(
+                chunk[index * 4..index * 4 + 4]
+                    .try_into()
+                    .expect("a four-byte slice converts to [u8; 4]"),
+            );
         }
         for index in 16..64 {
             let a = words[index - 15].rotate_right(7)

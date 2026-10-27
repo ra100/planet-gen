@@ -547,7 +547,7 @@ impl PlanetGenApp {
                 17 => &dynamics.pressure,
                 _ => &dynamics.wind_continentality,
             });
-            let renderer = self.render_state.renderer.clone();
+            let renderer = Arc::clone(&self.render_state.renderer);
             let texture_id = self.texture_id;
             self.preview_renderer
                 .resize_target(&self.gpu, size, |view| {
@@ -581,9 +581,17 @@ impl PlanetGenApp {
                 DEFAULT_WEATHER_RESOLUTION,
             ));
         }
-        let resolution = self.weather.as_ref().unwrap().front().resolution;
+        let resolution = self
+            .weather
+            .as_ref()
+            .expect("weather lifecycle is created above")
+            .front()
+            .resolution;
         let snapshot = self.weather_snapshot(resolution, ocean_level);
-        self.weather.as_mut().unwrap().request(snapshot);
+        self.weather
+            .as_mut()
+            .expect("weather lifecycle is created above")
+            .request(snapshot);
     }
 
     fn weather_snapshot(&self, resolution: u32, ocean_level: f32) -> WeatherSnapshot {
@@ -723,7 +731,7 @@ impl PlanetGenApp {
         let terrain_params = self.terrain_params();
 
         let handle = export::spawn_export(
-            self.gpu.clone(),
+            Arc::clone(&self.gpu),
             config,
             self.params.clone(),
             self.derived.clone(),

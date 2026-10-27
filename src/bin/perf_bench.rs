@@ -102,7 +102,11 @@ fn report(gpu: &GpuContext, mode: &str, resolution: u32, owned_live_bytes: u64) 
     report.max_storage_buffer_binding_size =
         Some(u64::from(limits.max_storage_buffer_binding_size));
     report.max_texture_dimension_2d = Some(limits.max_texture_dimension_2d);
-    report.gate_owned_bytes = if report.owned_live_bytes.unwrap() <= MAX_8K_OWNED_LIVE_BYTES {
+    report.gate_owned_bytes = if report
+        .owned_live_bytes
+        .expect("owned live bytes are measured before gating")
+        <= MAX_8K_OWNED_LIVE_BYTES
+    {
         GateStatus::Pass
     } else {
         GateStatus::Fail

@@ -7,6 +7,13 @@ behaviour).
 
 ## [Unreleased]
 
+### Changed
+
+- Contributor tooling: the Beautiful Rust skills are vendored for Claude Code,
+  and clippy now rejects `unwrap()` outside tests, `#[allow]` in place of a
+  reasoned `#[expect]`, and undocumented `unsafe` blocks. Capture tools now
+  name what failed when they stop.
+
 ## [0.3.0] - 2026-10-27
 
 ### Added

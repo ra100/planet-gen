@@ -45,14 +45,18 @@ fn read_interactive(gpu: &GpuContext, renderer: &PreviewRenderer, size: u32) -> 
     let (tx, rx) = std::sync::mpsc::channel();
     buffer
         .slice(..)
-        .map_async(wgpu::MapMode::Read, move |result| tx.send(result).unwrap());
+        .map_async(wgpu::MapMode::Read, move |result| {
+            tx.send(result).expect("readback receiver is alive");
+        });
     gpu.device
         .poll(wgpu::PollType::Wait {
             submission_index: None,
             timeout: None,
         })
-        .unwrap();
-    rx.recv().unwrap().unwrap();
+        .expect("poll GPU readback");
+    rx.recv()
+        .expect("readback callback ran")
+        .expect("map readback buffer");
     buffer.slice(..).get_mapped_range().to_vec()
 }
 
@@ -64,7 +68,7 @@ fn save(out: &str, size: u32, name: &str, pixels: &[u8]) {
         size,
         image::ColorType::Rgba8,
     )
-    .unwrap();
+    .expect("save capture PNG");
     println!("saved {name}");
 }
 
@@ -109,8 +113,8 @@ fn main() {
         (64..=1536).contains(&size) && size.is_multiple_of(64),
         "size must be 64..1536 and divisible by 64"
     );
-    std::fs::create_dir_all(out).unwrap();
-    let gpu = GpuContext::new().unwrap();
+    std::fs::create_dir_all(out).expect("create output directory");
+    let gpu = GpuContext::new().expect("create GPU context");
     println!("adapter={}", gpu.adapter_info.name);
     let params = PlanetParams {
         seed,
@@ -193,9 +197,9 @@ fn main() {
         derived.atmosphere_shell_height() * derived.radius_km
     );
     let terrain_view = renderer.upload_terrain(&gpu, &terrain);
-    let wind = WindFieldPipeline::new(&gpu).unwrap();
+    let wind = WindFieldPipeline::new(&gpu).expect("create wind pipeline");
     let dynamics = wind.create_textures(&gpu, 384, &terrain, ocean_level);
-    let weather_pipeline = WeatherFieldPipeline::new(&gpu).unwrap();
+    let weather_pipeline = WeatherFieldPipeline::new(&gpu).expect("create weather pipeline");
     let weather = weather_pipeline.create_textures(&gpu, 384);
     let snapshot = WeatherSnapshot {
         resolution: 384,
@@ -551,7 +555,7 @@ fn main() {
                 .zip(&interactive)
                 .map(|(a, b)| a.abs_diff(*b))
                 .max()
-                .unwrap();
+                .expect("capture has pixels");
             println!("{name} live_png_max_channel_delta={max_delta}");
             assert!(max_delta <= 2, "live/PNG encoding regression");
             let i = (size as usize / 2 * size as usize + size as usize / 2) * 4;
@@ -568,13 +572,13 @@ fn main() {
         format!("{out}/weather-mass.f32"),
         bytemuck::cast_slice::<f32, u8>(&mass),
     )
-    .unwrap();
+    .expect("write weather mass");
     let heights: Vec<f32> = terrain.faces.iter().flatten().copied().collect();
     std::fs::write(
         format!("{out}/terrain-height.f32"),
         bytemuck::cast_slice::<f32, u8>(&heights),
     )
-    .unwrap();
+    .expect("write terrain heights");
     std::fs::write(
         format!("{out}/weather-settings.json"),
         serde_json::to_vec_pretty(&serde_json::json!({
@@ -590,9 +594,9 @@ fn main() {
             "coverage": snapshot.coverage,
             "moisture": snapshot.moisture,
         }))
-        .unwrap(),
+        .expect("serialize weather settings"),
     )
-    .unwrap();
+    .expect("write weather settings");
     let face_values = (weather.resolution * weather.resolution * 4) as usize;
     let geometry_faces =
         std::array::from_fn(|face| geometry[face * face_values..(face + 1) * face_values].to_vec());

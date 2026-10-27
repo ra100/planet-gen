@@ -809,8 +809,9 @@ impl FaceStage {
         }
         let file = File::open(self.face_path(face))
             .map_err(|error| format!("failed to open staged face: {error}"))?;
+        // SAFETY: `Mmap::map` requires that the file is not modified while mapped.
         // Face files are fully written and size-validated before any sampler is
-        // constructed, so the mapping never observes a partial file.
+        // constructed, so the mapping never observes a partial or changing file.
         let mmap = Arc::new(unsafe {
             Mmap::map(&file).map_err(|error| format!("failed to map staged face: {error}"))?
         });

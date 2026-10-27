@@ -103,7 +103,10 @@ pub fn terrain_params(file: &PlanetFile, derived: &DerivedProperties) -> Terrain
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "maps each independent planet parameter onto terrain params one-to-one"
+)]
 pub fn derive_terrain_params(
     params: &PlanetParams,
     derived: &DerivedProperties,
