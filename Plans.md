@@ -458,3 +458,14 @@ The export bar showed `EXPORT 104%`: the step total missed the 8K meso terrain a
 |------|------|-----|---------|--------|
 | 18.1 | `ProgressTracker` runs a planned step list (`plan_export_steps`) with per-step weights; fraction clamped to [0, 1] and never decreasing; file writes report rows through materialization checkpoints | `progress_stays_within_one_and_never_decreases_when_steps_overshoot`, `progress_plan_follows_selected_layers` | - | cc:完了 [e7fc644] |
 | 18.2 | Export panel: todo-style step list (done / running with % / pending), elapsed and smoothed time remaining; status bar `EXPORT n% · ~ETA LEFT` | `remaining_time_extrapolates_and_formats` | 18.1 | cc:完了 [e7fc644] |
+
+## Phase 19: Distribution
+
+Planet Gen could only be run by building it with Rust and OpenEXR. Tagged releases now publish installable bundles for Windows, macOS and Linux plus the Blender add-on, and the README leads with downloads. Release steps: [docs/RELEASING.md](docs/RELEASING.md).
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 19.1 | `release.yml`: tag `vX.Y.Z` builds a Linux tarball (ubuntu-22.04, static vcpkg OpenEXR), macOS arm64 `.dmg` (static, ad-hoc signed), Windows zip (exe + OpenEXR DLLs), Blender 4.2+ extension and 4.1 legacy zips; drafts a release with CHANGELOG notes and SHA256SUMS. `build.rs` emits pkg-config link flags after the writer for static linking | PR #22 run: every bundle smoke-tested with `--version`; Linux `ldd` only libc/libstdc++, macOS `otool -L` only system libraries | - | cc:完了 [254f4f4] |
+| 19.2 | Onboarding: MIT `LICENSE`, README download / first planet / troubleshooting, CONTRIBUTING, issue templates, `--version`/`--help`, no console window on Windows, Cargo metadata and `default-run` | README sections render; CI green on all platforms | - | cc:完了 [254f4f4] |
+| 19.3 | First release v0.3.0 | Draft release with all bundles | 19.1 | cc:TODO |
+| 19.4 | Open: macOS notarization and Windows signing (paid certificates), Intel macOS / Linux ARM builds, `docs/research` artifacts (215 MB) out of the clone, licence for `reference/` images | R's call | - | cc:TODO |

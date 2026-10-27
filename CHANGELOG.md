@@ -7,6 +7,8 @@ behaviour).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-27
+
 ### Added
 
 - Downloadable builds: tagged releases now ship a Windows zip, a macOS app
