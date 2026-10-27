@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Planet Gen
+GenericName=Planet Generator
+Comment=GPU-accelerated procedural planet generator
+Exec=planet-gen
+Icon=planet-gen
+Terminal=false
+Categories=Graphics;3DGraphics;
+Keywords=planet;procedural;terrain;texture;

@@ -1,8 +1,11 @@
 # Planet Gen Blender add-on
 
-Install `blender_addon/` as an add-on (zip the folder, or symlink it into
-Blender's `scripts/addons/` as `planetgen_addon`). Blender 4.1 or newer. The
-panel is under **View3D > Sidebar > Planet Gen**.
+Download `planet-gen-blender-*.zip` from the
+[Releases page](https://github.com/ra100/planet-gen/releases/latest) and install
+it in Blender 4.2+ with Edit > Preferences > Get Extensions > Install from Disk
+(Blender 4.1: the `-legacy.zip` under Add-ons > Install). From a checkout, zip
+this folder's contents, or symlink it into Blender's `scripts/addons/` as
+`planetgen_addon`. The panel is under **View3D > Sidebar > Planet Gen**.
 
 ## Cloud bridge
 

@@ -1,0 +1,324 @@
+name: Release
+
+# Pushing a tag `vX.Y.Z` (matching Cargo.toml's version) builds installable
+# bundles for Linux, Windows and macOS plus the Blender add-on, and attaches
+# them to a draft GitHub Release with notes from CHANGELOG.md. Publish the
+# draft by hand after checking it.
+#
+# Run it from the Actions tab (workflow_dispatch) or on a pull request that
+# touches packaging to get the same bundles as workflow artifacts without a
+# release.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/release.yml"
+      - "packaging/**"
+      - "build.rs"
+      - "blender_addon/**"
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read version and check the tag
+        id: version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF" == refs/tags/v* && "${GITHUB_REF_NAME#v}" != "$version" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          fi
+
+  linux:
+    needs: version
+    # The oldest supported runner keeps the glibc requirement low.
+    runs-on: ubuntu-22.04
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      TRIPLET: planetgen-x64-linux
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libxcb-render0-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev pkg-config
+      - name: Cache vcpkg OpenEXR
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/vcpkg-installed
+          key: vcpkg-${{ env.TRIPLET }}-${{ hashFiles('packaging/vcpkg-triplets/*') }}-openexr-1
+      - name: Build static OpenEXR
+        run: |
+          "$VCPKG_INSTALLATION_ROOT/vcpkg" install openexr --triplet "$TRIPLET" \
+            --overlay-triplets packaging/vcpkg-triplets \
+            --x-install-root "$RUNNER_TEMP/vcpkg-installed"
+          echo "PKG_CONFIG_PATH=$RUNNER_TEMP/vcpkg-installed/$TRIPLET/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_ALL_STATIC=1" >> "$GITHUB_ENV"
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Build
+        run: cargo build --release --locked --bin planet-gen
+      - name: Check the binary is self-contained
+        run: |
+          ldd target/release/planet-gen
+          if ldd target/release/planet-gen | grep -Ei 'openexr|imath|deflate|openjph'; then
+            echo "::error::planet-gen links OpenEXR dynamically"
+            exit 1
+          fi
+          target/release/planet-gen --version
+      - name: Package
+        run: |
+          name="planet-gen-$VERSION-linux-x86_64"
+          mkdir -p "dist/$name"
+          cp target/release/planet-gen "dist/$name/"
+          strip "dist/$name/planet-gen"
+          cp packaging/linux/planet-gen.desktop packaging/linux/install.sh "dist/$name/"
+          cp assets/planet-gen-icon.png "dist/$name/planet-gen.png"
+          cp LICENSE README.md CHANGELOG.md "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/*.tar.gz
+
+  macos:
+    needs: version
+    runs-on: macos-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      TRIPLET: planetgen-arm64-osx
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Locate vcpkg
+        run: |
+          root="${VCPKG_INSTALLATION_ROOT:-}"
+          if [ -z "$root" ] || [ ! -x "$root/vcpkg" ]; then
+            root="$RUNNER_TEMP/vcpkg"
+            git clone --depth 1 https://github.com/microsoft/vcpkg "$root"
+            "$root/bootstrap-vcpkg.sh" -disableMetrics
+          fi
+          echo "VCPKG=$root/vcpkg" >> "$GITHUB_ENV"
+          brew list pkgconf >/dev/null 2>&1 || brew install pkgconf
+      - name: Cache vcpkg OpenEXR
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/vcpkg-installed
+          key: vcpkg-${{ env.TRIPLET }}-${{ hashFiles('packaging/vcpkg-triplets/*') }}-openexr-1
+      - name: Build static OpenEXR
+        run: |
+          "$VCPKG" install openexr --triplet "$TRIPLET" \
+            --overlay-triplets packaging/vcpkg-triplets \
+            --x-install-root "$RUNNER_TEMP/vcpkg-installed"
+          echo "PKG_CONFIG_PATH=$RUNNER_TEMP/vcpkg-installed/$TRIPLET/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_ALL_STATIC=1" >> "$GITHUB_ENV"
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Build
+        run: cargo build --release --locked --bin planet-gen
+      - name: Check the binary is self-contained
+        run: |
+          otool -L target/release/planet-gen
+          if otool -L target/release/planet-gen | tail -n +2 | grep -Ev '^\s+(/System/|/usr/lib/)'; then
+            echo "::error::planet-gen links libraries outside the system"
+            exit 1
+          fi
+          target/release/planet-gen --version
+      - name: Build app bundle and disk image
+        run: |
+          app="dist/Planet Gen.app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp target/release/planet-gen "$app/Contents/MacOS/"
+          strip "$app/Contents/MacOS/planet-gen"
+          sed "s/@VERSION@/$VERSION/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
+
+          iconset="$RUNNER_TEMP/planet-gen.iconset"
+          mkdir -p "$iconset"
+          for size in 16 32 128 256 512; do
+            sips -s format png -z $size $size assets/planet-gen-icon.png \
+              --out "$iconset/icon_${size}x${size}.png" >/dev/null
+            double=$((size * 2))
+            if [ $double -le 512 ]; then
+              sips -s format png -z $double $double assets/planet-gen-icon.png \
+                --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
+            fi
+          done
+          iconutil -c icns "$iconset" -o "$app/Contents/Resources/planet-gen.icns"
+
+          # Ad-hoc signature: not notarized, so first launch needs
+          # right-click > Open (see README).
+          codesign --force --deep --sign - "$app"
+          "$app/Contents/MacOS/planet-gen" --version
+
+          staging="$RUNNER_TEMP/dmg"
+          mkdir -p "$staging"
+          cp -R "$app" "$staging/"
+          ln -s /Applications "$staging/Applications"
+          cp LICENSE "$staging/LICENSE.txt"
+          hdiutil create -volname "Planet Gen" -srcfolder "$staging" -ov -format UDZO \
+            "dist/planet-gen-$VERSION-macos-arm64.dmg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/*.dmg
+
+  windows:
+    needs: version
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      TRIPLET: planetgen-x64-windows
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache vcpkg OpenEXR
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}\vcpkg-installed
+          key: vcpkg-${{ env.TRIPLET }}-${{ hashFiles('packaging/vcpkg-triplets/*') }}-openexr-1
+      - name: Build OpenEXR
+        shell: pwsh
+        run: |
+          $root = "$env:RUNNER_TEMP\vcpkg-installed"
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install openexr --triplet $env:TRIPLET `
+            --overlay-triplets packaging/vcpkg-triplets --x-install-root $root
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Add-Content -Path $env:GITHUB_ENV -Value "OPENEXR_INCLUDE_DIR=$root\$env:TRIPLET\include"
+          Add-Content -Path $env:GITHUB_ENV -Value "OPENEXR_LIB_DIR=$root\$env:TRIPLET\lib"
+          Add-Content -Path $env:GITHUB_ENV -Value "OPENEXR_BIN_DIR=$root\$env:TRIPLET\bin"
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Build
+        run: cargo build --release --locked --bin planet-gen
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = "planet-gen-$env:VERSION-windows-x86_64"
+          $dir = "dist\$name"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          Copy-Item target\release\planet-gen.exe $dir
+          Copy-Item "$env:OPENEXR_BIN_DIR\*.dll" $dir
+          Copy-Item LICENSE, README.md, CHANGELOG.md $dir
+          Get-ChildItem $dir
+          # The exe is a GUI app, so check the exit code: a missing DLL fails
+          # with 0xC0000135 before main runs.
+          $proc = Start-Process -FilePath "$dir\planet-gen.exe" -ArgumentList "--version" `
+            -WorkingDirectory $dir -Wait -PassThru
+          if ($proc.ExitCode -ne 0) { throw "planet-gen.exe failed to start: $($proc.ExitCode)" }
+          Compress-Archive -Path $dir -DestinationPath "dist\$name.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*.zip
+
+  blender:
+    needs: version
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Package add-on
+        run: |
+          python3 - <<'EOF'
+          import ast, tomllib
+          manifest = tomllib.load(open("blender_addon/blender_manifest.toml", "rb"))
+          tree = ast.parse(open("blender_addon/__init__.py").read())
+          bl_info = next(
+              ast.literal_eval(node.value) for node in tree.body
+              if isinstance(node, ast.Assign) and node.targets[0].id == "bl_info"
+          )
+          legacy = ".".join(map(str, bl_info["version"]))
+          assert manifest["version"] == legacy, (manifest["version"], legacy)
+          EOF
+          mkdir -p dist
+          # Blender 4.2+ extension: manifest at the zip root.
+          (cd blender_addon && zip -r "../dist/planet-gen-blender-$VERSION.zip" . -x '__pycache__/*')
+          # Blender 4.1 legacy add-on: one package folder, no manifest.
+          legacy="$RUNNER_TEMP/legacy/planetgen_addon"
+          mkdir -p "$legacy"
+          cp blender_addon/*.py blender_addon/README.md "$legacy/"
+          (cd "$RUNNER_TEMP/legacy" && zip -r "$GITHUB_WORKSPACE/dist/planet-gen-blender-$VERSION-legacy.zip" planetgen_addon)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blender
+          path: dist/*.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [version, linux, macos, windows, blender]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Release notes from CHANGELOG
+        run: |
+          awk -v v="$VERSION" '
+            $0 ~ "^## \\[" v "\\]" { found = 1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "See [CHANGELOG.md](CHANGELOG.md)." > notes.md
+          fi
+          cat >> notes.md <<'EOF'
+
+          ### Downloads
+
+          | Platform | File |
+          | --- | --- |
+          | Windows 10/11 (x64) | `planet-gen-*-windows-x86_64.zip`: unzip and run `planet-gen.exe` |
+          | macOS 11+ (Apple Silicon) | `planet-gen-*-macos-arm64.dmg`: drag to Applications; first launch with right-click > Open |
+          | Linux (x86_64, glibc 2.35+) | `planet-gen-*-linux-x86_64.tar.gz`: run `./planet-gen` or `./install.sh` |
+          | Blender 4.2+ | `planet-gen-blender-*.zip`: Edit > Preferences > Get Extensions > Install from Disk |
+          | Blender 4.1 | `planet-gen-blender-*-legacy.zip`: Edit > Preferences > Add-ons > Install |
+          EOF
+          (cd dist && sha256sum * > SHA256SUMS.txt)
+      - name: Create draft release
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --draft --title "Planet Gen $VERSION" --notes-file notes.md

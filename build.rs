@@ -69,7 +69,15 @@ fn main() {
 
     let mut build = cc::Build::new();
     build.cpp(true).file("src/openexr_writer.cpp");
-    if let Ok(library) = pkg_config::Config::new().probe("OpenEXR") {
+    // Probe quietly first for the headers; the link flags are emitted after
+    // `compile` so the writer precedes OpenEXR on the link line, which a
+    // static OpenEXR (release bundles, PKG_CONFIG_ALL_STATIC=1) depends on.
+    let mut pkg_config_found = false;
+    if let Ok(library) = pkg_config::Config::new()
+        .cargo_metadata(false)
+        .probe("OpenEXR")
+    {
+        pkg_config_found = true;
         for path in library.include_paths {
             build.include(path);
         }
@@ -98,4 +106,9 @@ fn main() {
         );
     }
     build.compile("planet_gen_openexr");
+    if pkg_config_found {
+        pkg_config::Config::new()
+            .probe("OpenEXR")
+            .expect("OpenEXR pkg-config probe succeeded once and must again");
+    }
 }

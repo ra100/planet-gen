@@ -1,0 +1,15 @@
+name: Feature request
+description: An idea for a new planet feature, export format, or workflow
+labels: [enhancement]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like?
+      description: Describe the feature and what you would use it for. Reference images are welcome.
+    validations:
+      required: true
+  - type: textarea
+    id: workaround
+    attributes:
+      label: How do you work around it today?
