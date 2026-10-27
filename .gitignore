@@ -73,3 +73,7 @@ data
 
 # graft's local repository settings — not committed.
 /.graft/
+
+# Research evidence images and logs live outside the repo (see
+# docs/research/shallow-volumetric-cloud-validation.md).
+/docs/research/artifacts/

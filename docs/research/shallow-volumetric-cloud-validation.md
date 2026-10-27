@@ -1,5 +1,7 @@
 # Shallow Volumetric Cloud Validation
 
+> The `docs/research/artifacts/` files cited below (270 contact-sheet PNGs and 21 metric logs, 215 MB) were moved out of the repository on 2026-10-27 to keep clones and source archives small. They are archived with their paths unchanged in the PlanetGen project files as `research-artifacts/planet-gen-research-artifacts-2026-07.tar` (`sha256:22a9ed2998885e92b934a2b6e6f1a73045493bf80212502789f97d98a8b99377`), and remain in git history before that date.
+
 ## Frozen Append-Only Protocol
 
 This file is the append-only evidence ledger for the active shallow-volumetric-cloud plan. Add a new row for every required scenario; never replace or delete a recorded row. The schema is frozen:
