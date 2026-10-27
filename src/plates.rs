@@ -55,7 +55,7 @@ pub fn generate_plates(params: &PlateGenParams) -> Vec<PlateGpu> {
     let mut plate_scores: Vec<(usize, f32)> = (0..n)
         .map(|i| (i, hash_f32(params.seed.wrapping_add(7777), i as u32, 3)))
         .collect();
-    plate_scores.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+    plate_scores.sort_by(|a, b| a.1.partial_cmp(&b.1).expect("plate scores are finite"));
     let continental_indices: Vec<bool> = {
         let mut is_continental = vec![false; n];
         for k in 0..continental_count.min(n) {
@@ -65,7 +65,7 @@ pub fn generate_plates(params: &PlateGenParams) -> Vec<PlateGpu> {
     };
 
     // Apply continent size variety: cluster continental centers toward an attractor
-    let mut final_centers = centers.clone();
+    let mut final_centers = centers;
     if params.continent_size_variety > 0.0 {
         // Seed-derived attractor point on sphere
         let ax = hash_f32(params.seed.wrapping_add(9999), 0, 0);

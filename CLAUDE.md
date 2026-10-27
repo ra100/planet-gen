@@ -86,6 +86,10 @@ Cloud synthesis (`cloud_synthesis` strength, Clouds > Structure) rebuilds each c
 2. Create implementation plan in `docs/plans/` with frontmatter (title, type, status, date, origin)
 3. Add a new phase section to `Plans.md` linking to the plan
 
+### Rust style
+
+Rust follows the vendored Beautiful Rust skills in `.claude/skills/` (`rust-best-practices`, `rust-review`, `rust-port`; see `.claude/skills/BEAUTIFUL_RUST.md`). Their machine-checkable rules are lints in `Cargo.toml`: no `unwrap()` outside tests (use `?` or `expect("why")`), suppressions as `#[expect(lint, reason = "...")]`, and a `// SAFETY:` comment on every `unsafe` block.
+
 ### Commits
 
 Follow existing commit message style with gitmoji prefixes: ✨ feature, 🐛 fix, ♻️ refactor, 📋 plan, 📝 docs

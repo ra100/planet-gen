@@ -83,7 +83,7 @@ fn save_height_map(path: &str, terrain: &TectonicTerrain, low: f32, high: f32) {
         height as u32,
         image::ColorType::L8,
     )
-    .unwrap();
+    .expect("save height PNG");
 }
 
 fn rotation_y(longitude_deg: f32) -> [[f32; 3]; 3] {
@@ -121,7 +121,8 @@ fn srgb_to_linear(v: u8) -> f64 {
 }
 
 fn save(path: &str, size: u32, pixels: &[u8]) {
-    image::save_buffer(path, pixels, size, size, image::ColorType::Rgba8).unwrap();
+    image::save_buffer(path, pixels, size, size, image::ColorType::Rgba8)
+        .expect("save capture PNG");
     println!("saved {path}");
 }
 
@@ -208,9 +209,9 @@ fn capture(
     renderer.resize_target(gpu, size, |_| {});
     renderer.upload_plates(gpu, &plates, tp.seed, tp.warp_strength);
     let terrain_view = renderer.upload_terrain(gpu, &terrain);
-    let wind = WindFieldPipeline::new(gpu).unwrap();
+    let wind = WindFieldPipeline::new(gpu).expect("create wind pipeline");
     let dynamics = wind.create_textures(gpu, (res / 2).max(192), &terrain, terrain_ocean_level);
-    let weather_pipeline = WeatherFieldPipeline::new(gpu).unwrap();
+    let weather_pipeline = WeatherFieldPipeline::new(gpu).expect("create weather pipeline");
     let weather = weather_pipeline.create_textures(gpu, DEFAULT_WEATHER_RESOLUTION);
     let snapshot = scene::weather_snapshot(file, &derived, DEFAULT_WEATHER_RESOLUTION, ocean_level);
     wind.generate_gpu(
@@ -272,7 +273,7 @@ fn capture(
         size * 2,
         image::ColorType::Rgba8,
     )
-    .unwrap();
+    .expect("save montage PNG");
     println!("saved {}", path("full"));
     let low_sun = PreviewUniforms {
         light_dir: light(0.25, 0.12),
@@ -395,9 +396,9 @@ fn capture(
     });
     std::fs::write(
         format!("{out}/{name}-stats.json"),
-        serde_json::to_string_pretty(&stats).unwrap(),
+        serde_json::to_string_pretty(&stats).expect("serialize stats"),
     )
-    .unwrap();
+    .expect("write stats JSON");
     println!("{stats}");
 }
 
@@ -475,13 +476,14 @@ fn main() {
             .find(|pair| pair[0] == flag)
             .map(|pair| pair[1].clone())
     };
-    let size: u32 = value("--size").map_or(768, |v| v.parse().unwrap());
+    let size: u32 = value("--size").map_or(768, |v| v.parse().expect("--size is a u32"));
     let res: u32 = value("--res").map_or(planet_gen::preview::DEFAULT_PREVIEW_SIZE, |v| {
-        v.parse().unwrap()
+        v.parse().expect("--res is a u32")
     });
-    let seed: Option<u32> = value("--seed").map(|v| v.parse().unwrap());
+    let seed: Option<u32> = value("--seed").map(|v| v.parse().expect("--seed is a u32"));
     let terrain_only = args.iter().any(|arg| arg == "--terrain-only");
-    let export_resolution: Option<u32> = value("--export").map(|v| v.parse().unwrap());
+    let export_resolution: Option<u32> =
+        value("--export").map(|v| v.parse().expect("--export is a u32"));
     // Planet-file fields set on every planet, e.g. `--set crater_age_override=1.0`.
     let overrides: Vec<(String, serde_json::Value)> = args
         .windows(2)
@@ -498,7 +500,7 @@ fn main() {
         (64..=1536).contains(&size) && size.is_multiple_of(64),
         "size must be 64..1536 and divisible by 64"
     );
-    std::fs::create_dir_all(&out).unwrap();
+    std::fs::create_dir_all(&out).expect("create output directory");
 
     let mut planets = Vec::new();
     for pair in args.windows(2) {
@@ -517,7 +519,7 @@ fn main() {
                 let file = planet_file::checked_load(&json).expect("load planet file");
                 let stem = std::path::Path::new(&pair[1])
                     .file_stem()
-                    .unwrap()
+                    .expect("planet file path has a file name")
                     .to_string_lossy()
                     .into_owned();
                 planets.push((stem, file));
@@ -528,7 +530,7 @@ fn main() {
     if planets.is_empty() {
         planets.push(("earth".to_owned(), presets::preset_file("EARTH")));
     }
-    let gpu = GpuContext::new().unwrap();
+    let gpu = GpuContext::new().expect("create GPU context");
     println!("adapter={}", gpu.adapter_info.name);
     for (name, mut file) in planets {
         if let Some(seed) = seed {
@@ -536,7 +538,7 @@ fn main() {
             file.cloud_seed = seed.wrapping_add(1000);
         }
         if !overrides.is_empty() {
-            let mut json = serde_json::to_value(&file).unwrap();
+            let mut json = serde_json::to_value(&file).expect("serialize planet file");
             for (field, value) in &overrides {
                 assert!(
                     json.get(field).is_some(),

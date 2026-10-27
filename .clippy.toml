@@ -1,3 +1,7 @@
 # StagedExportFailure intentionally carries full StagedIoMetrics (~120 B) so
 # failed exports still report their I/O ledger; keep it unboxed.
 large-error-threshold = 256
+
+# Tests may unwrap: a panic is the assertion. Everywhere else `unwrap_used`
+# (Cargo.toml [lints]) asks for `?` or `expect("why this cannot fail")`.
+allow-unwrap-in-tests = true

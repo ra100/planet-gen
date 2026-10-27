@@ -57,6 +57,23 @@ pkg-config = "0.3"
 # chains, so keep the existing idiom.
 chunks_exact_to_as_chunks = "allow"
 
+# Machine-checkable rules from the rust-best-practices skill
+# (.claude/skills/rust-best-practices). CI runs clippy with -D warnings.
+# Panics carry a reason: use `?`, or `expect("why this cannot fail")`.
+unwrap_used = "warn"
+# Suppressions are `#[expect(lint, reason = "...")]`, which warns once stale.
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+# Every unsafe block states why its invariants hold.
+undocumented_unsafe_blocks = "warn"
+# Clones are deliberate, and cheap reference-count clones read as such.
+redundant_clone = "warn"
+clone_on_ref_ptr = "warn"
+# Debugging leftovers and string building with `+`.
+dbg_macro = "warn"
+todo = "warn"
+string_add = "warn"
+
 # Debug builds spend most of their startup inside naga's WGSL translation and
 # wgpu-core validation (the weather and preview shaders are large): unoptimized,
 # the first frame took ~100s. Optimizing just these crates keeps `cargo run`

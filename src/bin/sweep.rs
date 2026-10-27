@@ -7218,7 +7218,10 @@ fn ds046_low_pass(grid_condensate: &[f32], width: usize, height: usize, k: usize
     result
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "metric runs take each sweep input explicitly"
+)]
 fn run_ds046_a_metrics(
     gpu: &GpuContext,
     weather_pipeline: &WeatherFieldPipeline,

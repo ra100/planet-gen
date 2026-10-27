@@ -387,7 +387,10 @@ impl TerrainComputePipeline {
     }
 
     /// Generate tectonic terrain for all 6 cube faces.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "terrain passes take the GPU context, grid layout and generation inputs explicitly"
+    )]
     pub fn generate(
         &self,
         gpu: &GpuContext,
@@ -742,7 +745,10 @@ impl MultiPassTerrainPipeline {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "terrain passes take the GPU context, grid layout and generation inputs explicitly"
+    )]
     pub fn generate(
         &self,
         gpu: &GpuContext,
@@ -1335,7 +1341,10 @@ impl ErosionPipeline {
         self.erode_batched(gpu, terrain, iterations, ocean_level, climate, cancel, 32)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "terrain passes take the GPU context, grid layout and generation inputs explicitly"
+    )]
     fn erode_batched(
         &self,
         gpu: &GpuContext,
@@ -2028,7 +2037,10 @@ impl WindFieldPipeline {
         textures
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "terrain passes take the GPU context, grid layout and generation inputs explicitly"
+    )]
     fn dispatch_mode(
         &self,
         gpu: &GpuContext,
@@ -2107,7 +2119,10 @@ impl WindFieldPipeline {
         gpu.queue.submit(std::iter::once(enc.finish()));
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "terrain passes take the GPU context, grid layout and generation inputs explicitly"
+    )]
     pub fn generate(
         &self,
         gpu: &GpuContext,
@@ -2304,7 +2319,10 @@ impl WindFieldPipeline {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "terrain passes take the GPU context, grid layout and generation inputs explicitly"
+    )]
     pub fn generate_gpu(
         &self,
         gpu: &GpuContext,
@@ -2473,7 +2491,9 @@ impl WindFieldPipeline {
             submission_index: None,
             timeout: None,
         });
-        rx.recv().unwrap().unwrap();
+        rx.recv()
+            .expect("readback callback ran")
+            .expect("map wind readback buffer");
 
         let data = slice.get_mapped_range();
         bytemuck::cast_slice::<u8, f32>(&data).to_vec()

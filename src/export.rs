@@ -1068,7 +1068,10 @@ impl CloudExportPipeline {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "export stages take the GPU context, pipelines, layout and progress state explicitly"
+    )]
     fn dispatch_tile(
         &self,
         gpu: &GpuContext,
@@ -1094,7 +1097,10 @@ impl CloudExportPipeline {
     }
 
     /// Runs one `tile_width` x `tile_height` grid writing `components` floats per invocation.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "export stages take the GPU context, pipelines, layout and progress state explicitly"
+    )]
     fn dispatch(
         &self,
         gpu: &GpuContext,
@@ -1299,7 +1305,6 @@ pub fn map_tile_fits_device(
     Ok(())
 }
 
-#[allow(dead_code)]
 struct MapTileDispatch {
     _heightmap: wgpu::Buffer,
     _params: wgpu::Buffer,
@@ -1312,7 +1317,6 @@ struct MapTileDispatch {
     tile_height: u32,
 }
 
-#[allow(dead_code)]
 struct MapTileBatch {
     tiles: Vec<MapTileDispatch>,
     owned_bytes: u64,
@@ -1346,7 +1350,6 @@ struct MapBatchFailure {
     metrics: MapBatchMetrics,
 }
 
-#[allow(dead_code)]
 impl MapTileBatch {
     fn new(byte_cap: u64) -> Self {
         Self {
@@ -1356,11 +1359,6 @@ impl MapTileBatch {
             pending_reservations: 0,
             byte_cap,
         }
-    }
-
-    fn push(&mut self, tile: MapTileDispatch) -> Result<(), String> {
-        self.reserve(tile.owned_bytes)?;
-        self.push_reserved(tile)
     }
 
     fn push_reserved(&mut self, tile: MapTileDispatch) -> Result<(), String> {
@@ -1378,6 +1376,7 @@ impl MapTileBatch {
         Ok(())
     }
 
+    #[cfg(test)]
     fn release_reservation(&mut self, tile_bytes: u64) -> Result<(), String> {
         if self.reserved_bytes < tile_bytes || self.pending_reservations == 0 {
             return Err("map tile reservation is not active".into());
@@ -1518,12 +1517,14 @@ impl MapTileBatch {
 }
 
 impl MapPipeline {
-    #[allow(dead_code)]
     fn begin_batch(&self, byte_cap: u64) -> MapTileBatch {
         MapTileBatch::new(byte_cap)
     }
 
-    #[allow(dead_code, clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "export stages take the GPU context, pipelines, layout and progress state explicitly"
+    )]
     fn prepare_owned_tile(
         &self,
         gpu: &GpuContext,
@@ -1710,7 +1711,10 @@ fn wait_for_readback(
 
 // ============ Tiled Terrain Generation ============
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "export stages take the GPU context, pipelines, layout and progress state explicitly"
+)]
 fn generate_terrain_tiled(
     gpu: &GpuContext,
     terrain_pipeline: &TerrainComputePipeline,
@@ -1776,7 +1780,10 @@ fn generate_terrain_tiled(
 // ============ Tiled Map Generation ============
 
 #[cfg(test)]
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "export stages take the GPU context, pipelines, layout and progress state explicitly"
+)]
 fn generate_map_tiled<P: Pod>(
     gpu: &GpuContext,
     pipeline: &MapPipeline,
@@ -2097,7 +2104,10 @@ fn create_cloud_export_height_texture(
     Ok((texture, view))
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "export stages take the GPU context, pipelines, layout and progress state explicitly"
+)]
 fn stage_cloud_faces(
     gpu: &GpuContext,
     output_dir: &Path,
@@ -2298,7 +2308,10 @@ fn bake_ao_into_albedo_tile(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "export stages take the GPU context, pipelines, layout and progress state explicitly"
+)]
 fn stage_map_layer<P: Pod>(
     gpu: &GpuContext,
     pipeline: &MapPipeline,
@@ -2332,7 +2345,10 @@ fn stage_map_layer<P: Pod>(
 /// origin x/y, width, height and the tile's f32 components.
 type TilePostprocess<'a> = &'a dyn Fn(u32, u32, u32, u32, u32, &mut [f32]);
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "export stages take the GPU context, pipelines, layout and progress state explicitly"
+)]
 fn stage_map_layer_with<P: Pod>(
     gpu: &GpuContext,
     pipeline: &MapPipeline,
@@ -2885,7 +2901,10 @@ fn export_equirect_exr_gray(
     .map_err(|e| format!("EXR write error: {e}"))
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "export stages take the GPU context, pipelines, layout and progress state explicitly"
+)]
 fn materialize_staged_equirect<F>(
     layer: &'static str,
     stage: &ExportStage,
@@ -2919,7 +2938,10 @@ where
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "export stages take the GPU context, pipelines, layout and progress state explicitly"
+)]
 fn materialize_staged_equirect_with_worker_cap<F>(
     layer: &'static str,
     stage: &ExportStage,
@@ -2980,7 +3002,10 @@ where
     Ok((intermediate, metrics))
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "export stages take the GPU context, pipelines, layout and progress state explicitly"
+)]
 fn consume_staged_equirect_rows_with_worker_cap<F, G>(
     layer: &'static str,
     stage: &ExportStage,
@@ -3066,7 +3091,7 @@ where
                         Ok(generator) => generator,
                         Err(message) => {
                             stop.store(true, Ordering::Relaxed);
-                            let _ = row_tx.send(ParallelRow::failure(message.to_string()));
+                            let _ = row_tx.send(ParallelRow::failure(message));
                             return;
                         }
                     };
@@ -3282,7 +3307,10 @@ fn emit_materialization_checkpoint(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "export stages take the GPU context, pipelines, layout and progress state explicitly"
+)]
 fn export_staged_equirect_exr(
     layer: &'static str,
     stage: &ExportStage,
@@ -3376,7 +3404,6 @@ fn export_staged_cloud_exr(
 
 /// Writes `cloud_density.exr` and `cloud_height.exr` next to `path`, and `path`
 /// itself (`clouds.exr`, the reconstruction channels) only when `reconstruction`.
-#[allow(clippy::too_many_arguments)]
 fn export_staged_cloud_maps(
     stage: &ExportStage,
     path: &Path,
@@ -3546,7 +3573,10 @@ pub const fn cloud_driver_dimensions(weather_resolution: u32) -> (u32, u32) {
 
 /// Writes the weather solver's low-frequency cloud, climate and wind fields so a
 /// renderer can place its own high-frequency cloud detail without a full-size export.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "export stages take the GPU context, pipelines, layout and progress state explicitly"
+)]
 fn export_cloud_drivers(
     gpu: &GpuContext,
     output_dir: &Path,
@@ -3634,7 +3664,10 @@ fn export_cloud_drivers(
 /// shader and weather inputs as `cloud_density.exr`, without cube staging.
 /// `synthesis_source` replaces the built-in `cloud_synthesis.wgsl` so tools
 /// can iterate on it without a rebuild.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "export stages take the GPU context, pipelines, layout and progress state explicitly"
+)]
 pub fn render_cloud_columns_equirect(
     gpu: &GpuContext,
     terrain: &TectonicTerrain,
@@ -3744,7 +3777,10 @@ fn encode_quantized_png_row(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "export stages take the GPU context, pipelines, layout and progress state explicitly"
+)]
 fn export_staged_equirect_png_direct(
     layer: &'static str,
     stage: &ExportStage,
@@ -3814,7 +3850,10 @@ fn export_staged_equirect_png_direct(
     Ok(metrics)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "export stages take the GPU context, pipelines, layout and progress state explicitly"
+)]
 fn export_staged_equirect_png(
     layer: &'static str,
     stage: &ExportStage,
@@ -4003,7 +4042,10 @@ fn reconstruct_meso_delta_in_place(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "export stages take the GPU context, pipelines, layout and progress state explicitly"
+)]
 pub fn run_export(
     gpu: &GpuContext,
     config: &ExportConfig,
@@ -4030,7 +4072,10 @@ pub fn run_export(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "export stages take the GPU context, pipelines, layout and progress state explicitly"
+)]
 pub fn run_export_with_timings(
     gpu: &GpuContext,
     config: &ExportConfig,
@@ -4059,7 +4104,10 @@ pub fn run_export_with_timings(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "export stages take the GPU context, pipelines, layout and progress state explicitly"
+)]
 pub fn run_export_with_timings_and_checkpoints(
     gpu: &GpuContext,
     config: &ExportConfig,
@@ -4763,7 +4811,7 @@ pub fn spawn_export(
 ) -> ExportHandle {
     let (tx, rx) = std::sync::mpsc::channel();
     let cancel = Arc::new(AtomicBool::new(false));
-    let cancel_clone = cancel.clone();
+    let cancel_clone = Arc::clone(&cancel);
 
     let thread = std::thread::spawn(move || {
         // A fatal GPU error (out-of-memory / device lost) panics inside wgpu.

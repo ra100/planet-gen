@@ -56,8 +56,8 @@ fn main() {
                 .expect("parse cloud settings")
         })
         .unwrap_or(serde_json::Value::Null);
-    std::fs::create_dir_all(&out).unwrap();
-    let gpu = GpuContext::new().unwrap();
+    std::fs::create_dir_all(&out).expect("create output directory");
+    let gpu = GpuContext::new().expect("create GPU context");
     println!("adapter={}", gpu.adapter_info.name);
 
     let planet = match args.windows(2).find(|pair| pair[0] == "--file") {
@@ -70,10 +70,12 @@ fn main() {
         .find(|pair| pair[0] == "--synthesis")
         .map(|pair| pair[1].parse::<f32>().expect("synthesis must be a number"))
         .unwrap_or(planet.strength);
-    let rows = args
-        .windows(3)
-        .find(|w| w[0] == "--rows")
-        .map(|w| (w[1].parse::<u32>().unwrap(), w[2].parse::<u32>().unwrap()));
+    let rows = args.windows(3).find(|w| w[0] == "--rows").map(|w| {
+        (
+            w[1].parse::<u32>().expect("--rows start is a u32"),
+            w[2].parse::<u32>().expect("--rows end is a u32"),
+        )
+    });
     let capture = Capture {
         gpu: &gpu,
         terrain: &planet.terrain,
@@ -83,7 +85,7 @@ fn main() {
         ocean_level: planet.ocean_level,
         thin_lift: planet.thin_lift,
         storm_intensity: planet.storm_intensity,
-        out: out.clone(),
+        out,
         seed: planet.seed,
     };
     capture.render(&Job {
@@ -119,9 +121,12 @@ fn main() {
                 }
                 let job = Job {
                     width: json["width"].as_u64().map_or(width, |w| w as u32),
-                    rows: json["rows"]
-                        .as_array()
-                        .map(|r| (r[0].as_u64().unwrap() as u32, r[1].as_u64().unwrap() as u32)),
+                    rows: json["rows"].as_array().map(|r| {
+                        (
+                            r[0].as_u64().expect("rows[0] is an integer") as u32,
+                            r[1].as_u64().expect("rows[1] is an integer") as u32,
+                        )
+                    }),
                     strength: json["synthesis"].as_f64().map_or(strength, |v| v as f32),
                     tag: json["tag"].as_str().unwrap_or("watch").to_owned(),
                     shader: json["shader"].as_str().map(str::to_owned),
@@ -179,9 +184,9 @@ fn default_planet(gpu: &GpuContext, seed: u32, cloud_settings: &serde_json::Valu
         1.0,
     );
     let resolution = DEFAULT_WEATHER_RESOLUTION;
-    let wind = WindFieldPipeline::new(gpu).unwrap();
+    let wind = WindFieldPipeline::new(gpu).expect("create wind pipeline");
     let dynamics = wind.create_textures(gpu, resolution, &terrain, ocean_level);
-    let weather_pipeline = WeatherFieldPipeline::new(gpu).unwrap();
+    let weather_pipeline = WeatherFieldPipeline::new(gpu).expect("create weather pipeline");
     let weather = weather_pipeline.create_textures(gpu, resolution);
     let snapshot = WeatherSnapshot {
         resolution,
@@ -272,7 +277,7 @@ fn file_planet(gpu: &GpuContext, path: &str) -> Planet {
     }
     let resolution = DEFAULT_WEATHER_RESOLUTION;
     let snapshot = scene::weather_snapshot(&file, &derived, resolution, ocean_level);
-    let wind = WindFieldPipeline::new(gpu).unwrap();
+    let wind = WindFieldPipeline::new(gpu).expect("create wind pipeline");
     let dynamics = wind.create_textures(gpu, resolution, &terrain, terrain_ocean_level);
     wind.generate_gpu(
         gpu,
@@ -287,7 +292,7 @@ fn file_planet(gpu: &GpuContext, path: &str) -> Planet {
         snapshot.surface_pressure_bar,
         snapshot.wind_scale,
     );
-    let weather_pipeline = WeatherFieldPipeline::new(gpu).unwrap();
+    let weather_pipeline = WeatherFieldPipeline::new(gpu).expect("create weather pipeline");
     let weather = weather_pipeline.create_textures(gpu, resolution);
     weather_pipeline.generate(gpu, snapshot, &terrain, &dynamics, &weather);
     Planet {
@@ -409,7 +414,7 @@ impl Capture<'_> {
                 height,
                 image::ColorType::L8,
             )
-            .unwrap();
+            .expect("save capture PNG");
             println!("saved {name}-{suffix}.png");
         };
         save("clouds", gray(&depth, &|d| reflectance(physical(d))));
@@ -432,7 +437,8 @@ impl Capture<'_> {
         }
         save("land", land);
         let raw: Vec<u8> = columns.iter().flat_map(|v| v.to_le_bytes()).collect();
-        std::fs::write(format!("{}/columns-{suffix}.f32", self.out), raw).unwrap();
+        std::fs::write(format!("{}/columns-{suffix}.f32", self.out), raw)
+            .expect("write column dump");
         println!("channels={channels} width={width} height={height}");
     }
 }

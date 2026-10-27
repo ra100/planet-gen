@@ -34,13 +34,13 @@ fn root() -> TempRoot {
     let unique = UNIQUE.fetch_add(1, Ordering::Relaxed);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .expect("system clock is after the Unix epoch")
         .as_nanos();
     let root = std::env::temp_dir().join(format!(
         "procedural-terrain-cli-{}-{nanos}-{unique}",
         std::process::id()
     ));
-    fs::create_dir(&root).unwrap();
+    fs::create_dir(&root).expect("create temp root");
     TempRoot(root)
 }
 
@@ -49,7 +49,7 @@ fn run(root: &Path, args: &[&str]) -> Output {
         .current_dir(root)
         .args(args)
         .output()
-        .unwrap()
+        .expect("run procedural_terrain_eval")
 }
 
 fn cube_to_sphere(face: usize, u: f32, v: f32) -> [f32; 3] {
@@ -69,7 +69,7 @@ fn cube_to_sphere(face: usize, u: f32, v: f32) -> [f32; 3] {
 
 fn write_analytic_artifact(root: &Path, name: &str, n: usize) {
     let dir = root.join(name);
-    fs::create_dir(&dir).unwrap();
+    fs::create_dir(&dir).expect("create artifact directory");
     for (face, file) in FACES.into_iter().enumerate() {
         let mut bytes = Vec::with_capacity(n * n * 4);
         for y in 0..n {
@@ -83,15 +83,15 @@ fn write_analytic_artifact(root: &Path, name: &str, n: usize) {
                 bytes.extend_from_slice(&value.to_le_bytes());
             }
         }
-        fs::write(dir.join(file), bytes).unwrap();
+        fs::write(dir.join(file), bytes).expect("write analytic face");
     }
 }
 
 fn write_artifact(root: &Path, name: &str, bytes: &[u8]) {
     let dir = root.join(name);
-    fs::create_dir(&dir).unwrap();
+    fs::create_dir(&dir).expect("create artifact directory");
     for face in FACES {
-        fs::write(dir.join(face), bytes).unwrap();
+        fs::write(dir.join(face), bytes).expect("write artifact face");
     }
 }
 

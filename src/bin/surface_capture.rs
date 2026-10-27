@@ -15,11 +15,17 @@ fn main() {
     let out = args
         .get(1)
         .expect("surface_capture OUTPUT_DIR [SEED] [SIZE]");
-    let seed = args.get(2).map(|v| v.parse().unwrap()).unwrap_or(42);
-    let size: u32 = args.get(3).map(|v| v.parse().unwrap()).unwrap_or(768);
+    let seed = args
+        .get(2)
+        .map(|v| v.parse().expect("SEED is a u32"))
+        .unwrap_or(42);
+    let size: u32 = args
+        .get(3)
+        .map(|v| v.parse().expect("SIZE is a u32"))
+        .unwrap_or(768);
     assert!((128..=1536).contains(&size) && size.is_multiple_of(64));
-    std::fs::create_dir_all(out).unwrap();
-    let gpu = GpuContext::new().unwrap();
+    std::fs::create_dir_all(out).expect("create output directory");
+    let gpu = GpuContext::new().expect("create GPU context");
     let params = PlanetParams {
         seed,
         ..Default::default()
@@ -58,7 +64,7 @@ fn main() {
     );
     let renderer = PreviewRenderer::new(&gpu);
     let terrain_view = renderer.upload_terrain(&gpu, &terrain);
-    let wind = WindFieldPipeline::new(&gpu).unwrap();
+    let wind = WindFieldPipeline::new(&gpu).expect("create wind pipeline");
     let dynamics = wind.create_textures(&gpu, 128, &terrain, ocean_level);
     wind.generate_gpu(
         &gpu,
@@ -119,7 +125,7 @@ fn main() {
                 size,
                 image::ColorType::Rgba8,
             )
-            .unwrap();
+            .expect("save surface PNG");
         }
     }
     println!("saved seed {seed}, four surface/albedo views to {out}");
@@ -189,7 +195,7 @@ fn main() {
             &tx,
             &std::sync::atomic::AtomicBool::new(false),
         )
-        .unwrap();
+        .expect("export albedo");
         println!("saved exported albedo to {out}/export/albedo.png");
     }
 }

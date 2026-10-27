@@ -928,7 +928,10 @@ fn mutate_face_swap(terrain: &mut TectonicTerrain) {
     terrain.faces.swap(0, 1);
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "report printers take each measured statistic explicitly"
+)]
 fn print_validation(
     command: &str,
     artifact: &str,
@@ -1248,7 +1251,10 @@ fn preview_uniforms(params: &PlanetParams, derived: &DerivedProperties) -> Previ
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "report printers take each measured statistic explicitly"
+)]
 fn print_preview(
     command: &str,
     artifact: &str,
