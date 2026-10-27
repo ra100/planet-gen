@@ -1,6 +1,28 @@
+// Release builds are GUI apps: no console window alongside them on Windows.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use planet_gen::app::PlanetGenApp;
 
 fn main() -> eframe::Result {
+    // `--version` lets packaging smoke-test a bundled binary without a GPU.
+    if let Some(arg) = std::env::args().nth(1) {
+        match arg.as_str() {
+            "--version" | "-V" => {
+                println!("planet-gen {}", env!("CARGO_PKG_VERSION"));
+                return Ok(());
+            }
+            "--help" | "-h" => {
+                println!(
+                    "planet-gen {}\n{}\n\nUsage: planet-gen [--version | --help]\n\nSet RUST_LOG=info for diagnostics.",
+                    env!("CARGO_PKG_VERSION"),
+                    env!("CARGO_PKG_DESCRIPTION"),
+                );
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+
     env_logger::init();
 
     let icon = image::load_from_memory(include_bytes!("../assets/planet-gen-icon.png"))

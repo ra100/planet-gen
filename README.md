@@ -12,17 +12,42 @@ Built with Rust, wgpu (WebGPU), and egui.
   <img src="docs/images/earth.png" width="900" alt="Planet Gen: Earth-like terrestrial planet with plate tectonics, biomes, clouds, and atmosphere in the real-time preview">
 </p>
 
-## Quick Start
+## Download
+
+Grab the latest build from the [Releases page](https://github.com/ra100/planet-gen/releases/latest). Nothing else needs to be installed.
+
+| Platform | File | How to run |
+| --- | --- | --- |
+| Windows 10/11 (x64) | `planet-gen-*-windows-x86_64.zip` | Unzip anywhere and run `planet-gen.exe` |
+| macOS 11+ (Apple Silicon) | `planet-gen-*-macos-arm64.dmg` | Drag **Planet Gen** to Applications. The app is not notarized yet, so the first time right-click it and choose **Open** |
+| Linux (x86_64, glibc 2.35+, e.g. Ubuntu 22.04+) | `planet-gen-*-linux-x86_64.tar.gz` | Extract and run `./planet-gen`, or `./install.sh` to add it to your application menu |
+| Blender 4.2+ | `planet-gen-blender-*.zip` | See [Blender add-on](#blender-add-on) |
+
+You need a GPU with Vulkan, Metal, or DX12 support (most GPUs from 2018 onward). 8K and 16K exports need a lot of memory; see [Export](#export).
+
+## Your first planet
+
+1. Open the app. It starts on an Earth-like planet.
+2. In the **Planet** tab, pick a preset (MARS, OCEAN, SNOWBALL, …) or move **Distance** and **Mass**: the physics model works out the planet type, atmosphere, and climate.
+3. Press `N` for a new seed until you like the continents, then fine-tune in **Terrain** and **Climate**.
+4. **SAVE AS…** keeps every parameter in a small JSON file you can reload or share.
+5. In the right panel, choose a folder and resolution and press **EXPORT TEXTURES**. Load the folder in Blender with the add-on, or use the maps in any renderer.
+
+Press `F1` or `?` in the app for the full list of controls.
+
+## Build from source
 
 ```
-cargo run --release --bin planet-gen
+cargo run --release
 ```
 
-Requires a GPU with Vulkan, Metal, or DX12 support (most GPUs from 2018+) and OpenEXR for the native EXR writer:
+Requires a recent stable Rust toolchain and OpenEXR for the native EXR writer:
 
 - **Linux:** `apt install libopenexr-dev pkg-config`
 - **macOS:** `brew install openexr`
 - **Windows:** `vcpkg install openexr:x64-windows`, then point `OPENEXR_INCLUDE_DIR` / `OPENEXR_LIB_DIR` at the install (see `.github/workflows/ci.yml`)
+
+Tests: `cargo test --lib`. Releases are built by `.github/workflows/release.yml`; see [docs/RELEASING.md](docs/RELEASING.md).
 
 ## Features
 
@@ -99,7 +124,9 @@ The app opens with a tabbed control rail on the left, the 3D preview in the midd
 
 **Shortcuts:** `N` new seed, `R` reset view, arrow keys rotate, `+`/`-` zoom, `S` save as…, `Ctrl+S` save (overwrite the current file), `Ctrl+Shift+S` save the next version, `L` load, `F1` or `?` help.
 
-**Export:** Pick a folder (Choose…), a resolution, and layers, then press EXPORT TEXTURES. The folder is remembered between sessions.
+### Export
+
+Pick a folder (Choose…), a resolution, and layers, then press EXPORT TEXTURES. The folder is remembered between sessions.
 
 | Layer | Files |
 | --- | --- |
@@ -114,12 +141,16 @@ The app opens with a tabbed control rail on the left, the 3D preview in the midd
 
 Export resolution denotes image height: **16K** writes 32,768 × 16,384 pixels. 8K and 16K run a bounded 2,048px erosion pass whose delta is reconstructed onto the full-resolution terrain. GPU tiles and row workers stay bounded, and 16K PNG layers stream directly to scanlines; 16K allows up to 12 GiB of owned working memory, including the 6 GiB terrain. Weather simulation stays capped at 384px per face.
 
-**Blender add-on:** Install `blender_addon/` in Blender 4.1 or newer:
-1. Zip the addon: `cd blender_addon && zip -r ../planet_gen_blender.zip .`
-2. In Blender: Edit > Preferences > Add-ons > Install from Disk > select `planet_gen_blender.zip`
-3. Enable "Planet Gen Importer"
-4. 3D Viewport sidebar (N panel) > Planet Gen tab: "Import Planet" then "Create Planet"
-5. For clouds, select a shell sphere and press "Drive Clouds"; "Aligned Surface" puts the albedo on the planet in the same frame
+### Blender add-on
+
+Download `planet-gen-blender-*.zip` from the [Releases page](https://github.com/ra100/planet-gen/releases/latest):
+
+1. **Blender 4.2 or newer:** Edit > Preferences > Get Extensions > ⌄ menu > Install from Disk, and pick the zip. **Blender 4.1:** use `planet-gen-blender-*-legacy.zip` under Edit > Preferences > Add-ons > Install.
+2. Enable "Planet Gen Importer" if it is not enabled already.
+3. 3D Viewport sidebar (N panel) > Planet Gen tab: "Import Planet" then "Create Planet".
+4. For clouds, select a shell sphere and press "Drive Clouds"; "Aligned Surface" puts the albedo on the planet in the same frame.
+
+From a source checkout, zip the folder yourself: `cd blender_addon && zip -r ../planet_gen_blender.zip .`
 
 See [blender_addon/README.md](blender_addon/README.md) for the cloud bridge's controls and headless use.
 
@@ -216,6 +247,15 @@ See [Plans.md](Plans.md) for the full implementation plan.
 - [x] Phase 14: Preview cloud detail
 - [x] Phase 15: Cloud synthesis
 
+## Troubleshooting
+
+- **The app does not start or shows a GPU error.** Update your graphics driver. On Linux, install your distribution's Vulkan driver (`mesa-vulkan-drivers` on Debian/Ubuntu). Run from a terminal with `RUST_LOG=info` to see which GPU was picked.
+- **macOS says the app "cannot be opened".** Right-click Planet Gen in Applications and choose Open, or run `xattr -dr com.apple.quarantine "/Applications/Planet Gen.app"`.
+- **Windows SmartScreen warns about an unknown publisher.** The build is not code-signed yet; choose More info > Run anyway.
+- **8K or 16K export runs out of memory.** 16K needs up to 12 GiB of working memory; try 8K or close other GPU-heavy apps.
+
+Bug reports and ideas are welcome in [Issues](https://github.com/ra100/planet-gen/issues); see [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## License
 
-MIT
+[MIT](LICENSE)

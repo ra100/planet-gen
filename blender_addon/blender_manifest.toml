@@ -1,0 +1,17 @@
+schema_version = "1.0.0"
+
+id = "planetgen"
+version = "1.1.0"
+name = "Planet Gen Importer"
+tagline = "Import Planet Gen planet textures and drive its clouds"
+maintainer = "ra100"
+type = "add-on"
+website = "https://github.com/ra100/planet-gen"
+tags = ["Import-Export", "Material"]
+
+blender_version_min = "4.2.0"
+
+license = ["SPDX:MIT"]
+
+[permissions]
+files = "Import exported planet textures from disk"

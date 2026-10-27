@@ -4,6 +4,13 @@ version = "0.2.0"
 edition = "2024"
 description = "GPU-accelerated procedural planet generator for VFX"
 license = "MIT"
+authors = ["ra100"]
+repository = "https://github.com/ra100/planet-gen"
+homepage = "https://github.com/ra100/planet-gen"
+readme = "README.md"
+keywords = ["procedural", "planet", "terrain", "wgpu", "vfx"]
+categories = ["graphics", "rendering", "simulation"]
+default-run = "planet-gen"
 
 [features]
 validation = []

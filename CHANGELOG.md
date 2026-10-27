@@ -7,6 +7,21 @@ behaviour).
 
 ## [Unreleased]
 
+### Added
+
+- Downloadable builds: tagged releases now ship a Windows zip, a macOS app
+  (Apple Silicon `.dmg`), a Linux tarball with an `install.sh` for the
+  application menu, and the Blender add-on as a 4.2+ extension zip (plus a
+  4.1 legacy zip). No Rust or OpenEXR install is needed to run them.
+- `planet-gen --version` and `--help`.
+- README sections for downloading, a first planet, and troubleshooting;
+  CONTRIBUTING.md, issue templates, and the MIT `LICENSE` file.
+
+### Changed
+
+- On Windows, release builds no longer open a console window beside the app.
+- `cargo run --release` starts the app without `--bin planet-gen`.
+
 ### Fixed
 
 - Exported clouds at 8K and 16K no longer fill broken cumulus with one- and
