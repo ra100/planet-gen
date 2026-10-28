@@ -27,7 +27,16 @@ struct AlbedoParams {
     rocky_water_ice: f32,
     rocky_insolation: f32,
     rocky_regolith: f32,
+    rocky_ice: f32,
     radius_km: f32,
+    // Giant-planet cloud deck (giant.wgsl), mirroring the preview uniforms.
+    giant_envelope: f32,
+    giant_ice: f32,
+    giant_temperature: f32,
+    giant_bands: f32,
+    giant_haze: f32,
+    giant_storms: f32,
+    giant_equator: f32,
     _pad0: f32,
     _pad1: f32,
     _pad2: f32,
@@ -138,6 +147,7 @@ fn map_rocky_params() -> RockyParams {
     prm.min_crater_km = 4.0 * 1.5707963 * prm.radius_km / f32(params.full_resolution);
     prm.airless = params.rocky_airless;
     prm.dust = params.rocky_dust;
+    prm.ice = params.rocky_ice;
     return prm;
 }
 
@@ -211,6 +221,21 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         ice_albedo = mix(ice, frost_albedo, params.rocky_regolith);
     }
     surface_color = mix(surface_color, ice_albedo, ice_coverage);
+    if (params.giant_envelope > 0.0) {
+        var prm: GiantParams;
+        prm.seed = params.seed;
+        prm.envelope = params.giant_envelope;
+        prm.ice = params.giant_ice;
+        prm.temperature = params.giant_temperature;
+        prm.bands = params.giant_bands;
+        prm.haze = params.giant_haze;
+        prm.storms = params.giant_storms;
+        prm.equator = params.giant_equator;
+        prm.tilt = params.axial_tilt_rad;
+        prm.season = params.season;
+        let texel = 2.0 / f32(full_res);
+        surface_color = mix(surface_color, gg_albedo(sphere_pos, prm, texel), params.giant_envelope);
+    }
 
     albedo[idx] = vec4<f32>(surface_color, 1.0);
 }

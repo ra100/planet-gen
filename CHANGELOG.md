@@ -7,6 +7,33 @@ behaviour).
 
 ## [Unreleased]
 
+### Added
+
+- Giant planets: above ~3 M⊕ (Mass now reaches 4000 M⊕) a gas envelope
+  replaces the terrain with a banded cloud deck. Band count follows the
+  rotation, size and temperature (Rhines scale); Jupiter-like giants get
+  belts, zones, a great red spot, white ovals, hot spots and polar cyclones,
+  Saturn-like ones muted hazy bands and a polar hexagon, ice giants a
+  greenish-blue methane deck with bright clouds and a dark spot. Hotter
+  giants follow the Sudarsky classes from white water clouds to dark blue
+  and near-black roasters with a thermal glow. Colours are calibrated to
+  measured planet albedos. **Envelope** (AUTO) overrides the mass rule.
+- Icy worlds: dry, airless bodies beyond the frost line get an ice crust
+  whose look follows the crater age: Europa's lineae and chaos, Ganymede's
+  grooved bright terrain, Callisto's dark cratered lag. **Ice crust** (AUTO)
+  under surface history.
+- Presets JUPITER, SATURN, URANUS, NEPTUNE, HOT JUPITER, EUROPA, GANYMEDE
+  and CALLISTO.
+
+### Fixed
+
+- Rings: they now lie in the planet's equatorial plane, cross in front of
+  the planet and hide behind it, with a Saturn-like structure (translucent
+  C ring and Cassini Division, dense B ring, A ring with gaps), thin-layer
+  lighting, the planet's shadow on the rings and the rings' shadow on the
+  planet. **Ring opacity** became **Ring density** (optical depth relative
+  to Saturn's); the separate ring tilt is gone.
+
 ### Changed
 
 - Contributor tooling: the Beautiful Rust skills are vendored for Claude Code,

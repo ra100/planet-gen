@@ -364,6 +364,25 @@ fn capture(
             }
         }
     }
+    // Geometric albedo: the disk-mean reflectance (I/F) at zero phase, from
+    // the first full-phase view with the Reinhard tonemap undone.
+    let mut reflectance = [0.0f64; 3];
+    let mut disk_count = 0.0f64;
+    for y in 0..size as usize {
+        for x in 0..size as usize {
+            let (dx, dy) = (x as f64 + 0.5 - half, y as f64 + 0.5 - half);
+            if dx * dx + dy * dy > (disk * 0.995).powi(2) {
+                continue;
+            }
+            let i = (y * size as usize + x) * 4;
+            for c in 0..3 {
+                let tonemapped = srgb_to_linear(tiles[0][i + c]).min(0.999);
+                reflectance[c] += tonemapped / (1.0 - tonemapped);
+            }
+            disk_count += 1.0;
+        }
+    }
+    let geometric = reflectance.map(|v| v / disk_count.max(1.0));
     let mut heights: Vec<f32> = terrain.faces.iter().flatten().map(|h| h * 5.0).collect();
     heights.sort_by(f32::total_cmp);
     save_height_map(
@@ -391,6 +410,12 @@ fn capture(
         },
         "albedo_linear_rgb": mean,
         "albedo_red_over_blue": mean[0] / mean[2].max(1e-6),
+        "geometric_albedo_rgb": geometric,
+        "geometric_red_over_blue": geometric[0] / geometric[2].max(1e-6),
+        "envelope": derived.envelope,
+        "radius_km": derived.radius_km,
+        "gravity": derived.surface_gravity,
+        "giant_temperature_k": derived.giant_temperature_k,
         "mare_disk_fraction": mare / disk_px.max(1.0),
         "fresh_disk_fraction": fresh / disk_px.max(1.0),
     });
@@ -512,7 +537,10 @@ fn main() {
                     "unknown preset {name}; presets: {:?}",
                     presets::PRESETS
                 );
-                planets.push((name.to_lowercase(), presets::preset_file(&name)));
+                planets.push((
+                    name.to_lowercase().replace(' ', "-"),
+                    presets::preset_file(&name),
+                ));
             }
             "--file" => {
                 let json = std::fs::read_to_string(&pair[1]).expect("read planet file");

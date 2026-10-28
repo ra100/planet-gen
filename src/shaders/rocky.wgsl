@@ -30,6 +30,7 @@ struct RockyParams {
     min_crater_km: f32, // smallest crater the caller resolves
     airless: f32,
     dust: f32,
+    ice: f32,           // water-ice crust instead of silicate regolith
 }
 
 struct RockyCraters {
@@ -756,8 +757,94 @@ fn rk_albedo(
     var oxidized = mix(dark * (1.0 + 0.1 * regional), dust_color, cover);
     oxidized *= 1.0 + 0.15 * steep * (1.0 - cover);
 
-    let color = mix(oxidized, lunar, prm.airless);
+    var color = mix(oxidized, lunar, prm.airless);
+    if (prm.ice > 0.0) {
+        color = mix(color, rk_ice_albedo(p, prm, units, slope, insolation), prm.ice);
+        return clamp(color * (1.0 + 0.03 * grain), vec3<f32>(0.01), vec3<f32>(0.95));
+    }
     return clamp(color * (1.0 + 0.04 * grain), vec3<f32>(0.01), vec3<f32>(0.6));
+}
+
+// ---- Icy crusts (Galilean and Saturnian satellites) ----
+// Water ice darkens with age as sublimation and micrometeorite gardening
+// leave a lag of non-ice material: Europa's ~60 Myr surface is bright
+// (geometric albedo ~0.67), Ganymede's 4 Gyr dark terrain ~0.3 and
+// Callisto, saturated with craters, ~0.2 with bright fresh craters
+// (Zahnle et al. 2003; Schenk 2002). Volcanic resurfacing on ice (`mare`)
+// is tectonic: on young crusts disrupted chaos and reddish lineae from
+// hydrated salts and radiolysed sulphur (Europa; Schmidt et al. 2011), on
+// old crusts bright swaths of parallel grooves cutting the dark terrain
+// (Ganymede; Collins).
+
+// Great-circle lineae: arcs of Europa's ridges and bands, wobbling like
+// cycloids. Returns (line, band) weights.
+fn rk_lineae(p: vec3<f32>, prm: RockyParams, density: f32) -> vec2<f32> {
+    var line = 0.0;
+    var band = 0.0;
+    let count = u32(clamp(64.0 * density, 0.0, 64.0));
+    let km = 1.0 / max(prm.radius_km, 1.0);
+    for (var i = 0u; i < count; i++) {
+        let pole = rk_direction(prm.seed + 7717u, i);
+        let center = rk_direction(prm.seed + 7718u, i);
+        let reach = 0.6 + 1.6 * rk_rand(prm.seed + 7719u, i);
+        if (rk_angle(p, center) > reach) {
+            continue;
+        }
+        let wobble = 0.012 * sin(dot(p, center) * 40.0 + f32(i)) * rk_rand(prm.seed + 7720u, i);
+        let d = abs(dot(p, pole) + wobble);
+        let width = (3.0 + 18.0 * pow(rk_rand(prm.seed + 7721u, i), 3.0)) * km;
+        let fade = rk_ramp(reach, reach * 0.7, rk_angle(p, center));
+        line = max(line, exp(-pow(d / width, 2.0)) * fade);
+        // Wide dark bands (Europa's triple bands and pull-apart bands).
+        band = max(band, exp(-pow(d / (width * 3.0), 2.0)) * fade * step(0.75, rk_rand(prm.seed + 7722u, i)));
+    }
+    return vec2<f32>(line, band);
+}
+
+fn rk_ice_albedo(p: vec3<f32>, prm: RockyParams, units: RockyTerrain, slope: f32, insolation: f32) -> vec3<f32> {
+    let off = noise_seed_offset(prm.seed, 231u);
+    let regional = snoise(p * 2.4 + off) * 0.6 + snoise(p * 7.0 + off * 1.3) * 0.4;
+    let age = rk_ramp(0.2, 4.0, prm.crater_age);
+    // Clean young ice to dark, lagged old ice; nearer the star sublimation
+    // lags it faster.
+    let lag = clamp(age * (1.0 + 0.1 * log2(max(insolation * 27.0, 0.5))), 0.0, 1.0);
+    let clean = vec3<f32>(0.76, 0.72, 0.64);
+    let dark = vec3<f32>(0.24, 0.20, 0.17);
+    var ice = mix(clean, dark, lag) * (1.0 + 0.10 * regional);
+    let resurfaced = units.provinces.mare;
+    let young = 1.0 - rk_ramp(0.5, 2.0, prm.crater_age);
+    // Europa: lineae everywhere on a young crust, chaos where resurfaced,
+    // both stained red-brown, more on the trailing hemisphere.
+    if (young > 0.0) {
+        let trailing = 0.5 + 0.5 * dot(p, rk_direction(prm.seed, 241u));
+        let stain = mix(vec3<f32>(0.60, 0.43, 0.30), vec3<f32>(0.46, 0.31, 0.21), trailing);
+        let lineae = rk_lineae(p, prm, young);
+        ice = mix(ice, stain * 1.1, lineae.y * 0.6 * young);
+        ice = mix(ice, stain, lineae.x * 0.85 * young);
+        // Chaos: a matrix of stained ice around bright rafted blocks.
+        let blocks = snoise(p * 160.0 + off) * 0.6 + snoise(p * 420.0 + off * 1.7) * 0.4;
+        let chaos = resurfaced * young;
+        let matrix = mix(stain, clean, rk_ramp(0.25, 0.6, blocks));
+        ice = mix(ice, matrix, chaos * 0.9);
+        // Fine ridged plains texture.
+        let ridges = abs(snoise(vec3<f32>(p.x * 300.0, p.y * 90.0, p.z * 300.0) + off));
+        ice *= 1.0 - 0.08 * (1.0 - ridges) * young;
+    }
+    // Ganymede: bright grooved terrain on old crusts, swaths of parallel
+    // ridges whose direction changes from domain to domain.
+    let old = 1.0 - young;
+    if (old > 0.0 && resurfaced > 0.0) {
+        let domain = vec3<f32>(snoise(p * 3.0 + off * 0.3), snoise(p * 3.0 + off * 0.6), snoise(p * 3.0 + off * 0.9));
+        let axis = normalize(domain + vec3<f32>(1.0e-3));
+        let grooves = 0.5 + 0.5 * sin(dot(p, axis) * prm.radius_km / 9.0 + 3.0 * snoise(p * 20.0 + off));
+        let bright = mix(clean, dark, lag * 0.45) * (0.9 + 0.2 * grooves);
+        ice = mix(ice, bright, resurfaced * old);
+    }
+    // Fresh craters and rays excavate clean ice; steep scarps shed the lag.
+    let fresh = clamp(units.fresh + units.ray * 0.8, 0.0, 1.0);
+    ice = mix(ice, clean * 1.02, fresh * 0.9);
+    ice = mix(ice, clean, rk_ramp(0.08, 0.4, slope) * lag * 0.4);
+    return ice;
 }
 
 // Polar frost on cold worlds whose atmosphere moves volatiles: a residual
