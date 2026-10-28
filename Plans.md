@@ -469,3 +469,18 @@ Planet Gen could only be run by building it with Rust and OpenEXR. Tagged releas
 | 19.2 | Onboarding: MIT `LICENSE`, README download / first planet / troubleshooting, CONTRIBUTING, issue templates, `--version`/`--help`, no console window on Windows, Cargo metadata and `default-run` | README sections render; CI green on all platforms | - | cc:完了 [254f4f4] |
 | 19.3 | First release v0.3.0 | Draft release with all bundles | 19.1 | cc:TODO |
 | 19.4 | Open: macOS notarization and Windows signing (paid certificates), Intel macOS / Linux ARM builds, `docs/research` artifacts (215 MB) out of the clone, licence for `reference/` images | R's call | - | cc:TODO |
+
+## Phase 20: Giant Planets, Icy Worlds and Rings
+
+Every planet rendered as a terrain and mass stopped at 10 M⊕; icy moons were grey regolith and the rings were drawn only off the disk with their own tilt. Giants now get an envelope and a banded cloud deck, airless worlds beyond the frost line get ice crusts, and the rings lie in the equator in front of and behind the planet.
+
+Plan: [docs/plans/2026-10-28-001-feat-giants-icy-worlds-rings-plan.md](docs/plans/2026-10-28-001-feat-giants-icy-worlds-rings-plan.md) · Research: [docs/research/giant-planets-icy-worlds-rings.md](docs/research/giant-planets-icy-worlds-rings.md)
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 20.1 | Research: experts and sources on giant clouds, jets, vortices, ring radiative transfer and icy surfaces; requirements and plan | Research doc, requirements R1-R9 | - | cc:完了 [78fff04] |
+| 20.2 | Physics: envelope (AUTO 3-5 M⊕, override), Chen & Kipping radius, 1-bar gravity, T_eff with internal heat, H2 scale height, ice-giant fraction, `PlanetType::GasGiant`/`IceGiant`; mass to 4000 M⊕ | `solar_system_giants_match_their_sizes_and_temperatures`, `giant_scale_heights_follow_hydrogen`, `rocky_worlds_have_no_envelope` | 20.1 | cc:完了 [d0896c1] |
+| 20.3 | Cloud deck (`giant.wgsl`, preview and export albedo): Rhines bands, zonal jets, sheared turbulence, vortices and great spot, polar cyclones or hexagon, Sudarsky classes, ice-giant methane palette, Jupiter/Saturn photometry, hot-deck glow | Geometric albedo RGB vs Mallama 2017: Jupiter 0.52/0.50/0.40 (0.50/0.54/0.44), Saturn 0.57/0.49/0.34 (0.57/0.50/0.34), Uranus 0.22/0.49/0.55 (0.20/0.49/0.56), Neptune 0.20/0.47/0.54 (0.18/0.44/0.56) | 20.2 | cc:完了 [d0896c1] |
+| 20.4 | Rings: equatorial plane, composited over the disk, Saturn C/B/Cassini/A optical depth with seeded gaps, thin-layer reflection and transmission, planet shadow on rings and ring shadow on planet; Ring density replaces opacity, ring tilt removed | RINGED and SATURN before/after in project files `giants-icy-rings/` | - | cc:完了 [d0896c1] |
+| 20.5 | Icy crusts: ice crust AUTO beyond 1.2-1.8 frost lines, age-darkened ice, lineae and chaos, grooved terrain, fresh-crater ice, brighter photometry | `icy_moons_get_an_ice_crust`; Europa 0.67, Ganymede 0.43, Callisto 0.22 (green geometric albedo; targets 0.67, 0.43, 0.20) | 20.2 | cc:完了 [d0896c1] |
+| 20.6 | Controls and presets: Envelope and Ice crust overrides, planet-file fields; JUPITER, SATURN, URANUS, NEPTUNE, HOT JUPITER, EUROPA, GANYMEDE, CALLISTO | Earth preview captures and export (albedo, clouds) byte-identical to main at water loss 0.5 and 0.35 | 20.3, 20.5 | cc:完了 [d0896c1] |
