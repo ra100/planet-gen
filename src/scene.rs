@@ -5,7 +5,7 @@
 use crate::planet::{DerivedProperties, PlanetParams, SurfaceOverrides};
 use crate::planet_file::PlanetFile;
 use crate::plates::PlateGenParams;
-use crate::preview::{PreviewUniforms, RockyUniforms};
+use crate::preview::{GiantUniforms, PreviewUniforms, RockyUniforms};
 use crate::terrain_compute::{RockyTerrainParams, TerrainGenerationParams};
 use crate::weather::WeatherSnapshot;
 
@@ -29,6 +29,8 @@ pub fn surface_overrides(file: &PlanetFile) -> SurfaceOverrides {
         shield_volcanism: file.volcanism_override,
         dichotomy: file.dichotomy,
         dust: file.dust_override,
+        envelope: file.envelope_override,
+        ice_crust: file.ice_override,
     }
 }
 
@@ -155,9 +157,16 @@ pub fn derive_terrain_params(
 /// Cloud coverage the atmosphere can carry: below ~0.3 bar the air holds
 /// too little vapour for decks (as the weather field's moisture supply), so
 /// thin-air worlds like Mars stay clear apart from their dust.
+/// Giants carry their clouds in the banded deck (giant.wgsl), not in the
+/// weather layer.
 pub fn cloud_coverage(file: &PlanetFile, derived: &DerivedProperties) -> f32 {
     let t = ((derived.surface_pressure_bar - 0.05) / 0.25).clamp(0.0, 1.0);
-    file.cloud_coverage * (t * t * (3.0 - 2.0 * t))
+    let coverage = file.cloud_coverage * (t * t * (3.0 - 2.0 * t));
+    if derived.envelope > 0.0 {
+        coverage * (1.0 - derived.envelope)
+    } else {
+        coverage
+    }
 }
 
 /// Weather inputs for the current settings; `ocean_level` is the sea level
@@ -226,7 +235,7 @@ pub fn preview_uniforms(
         view_mode: file.view_mode,
         season: file.season,
         atmosphere_density: if file.show_atmosphere {
-            derived.surface_pressure_bar
+            derived.rayleigh_density()
         } else {
             0.0
         },
@@ -258,6 +267,7 @@ pub fn preview_uniforms(
         cloud_detail: file.cloud_detail,
         cloud_thin_lift: file.cloud_thin_lift,
         rocky: RockyUniforms::from_derived(derived, file.star_distance_au),
+        giant: GiantUniforms::from_derived(derived, file.rotation_period_h, file.storm_intensity),
         _pad6: [0.0; 3],
         lava_glow: file.lava_glow,
         ring_inner: file.ring_inner,

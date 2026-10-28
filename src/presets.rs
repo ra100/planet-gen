@@ -5,8 +5,24 @@ use crate::cloud_synthesis::DEFAULT_STORM_INTENSITY;
 use crate::planet::PlanetParams;
 use crate::planet_file::PlanetFile;
 
-pub const PRESETS: [&str; 9] = [
-    "EARTH", "MARS", "MOON", "MERCURY", "OCEAN", "SNOWBALL", "HOTHOUSE", "VOLCANIC", "RINGED",
+pub const PRESETS: [&str; 17] = [
+    "EARTH",
+    "MARS",
+    "MOON",
+    "MERCURY",
+    "OCEAN",
+    "SNOWBALL",
+    "HOTHOUSE",
+    "VOLCANIC",
+    "RINGED",
+    "JUPITER",
+    "SATURN",
+    "URANUS",
+    "NEPTUNE",
+    "HOT JUPITER",
+    "EUROPA",
+    "GANYMEDE",
+    "CALLISTO",
 ];
 
 /// Reset the generation settings a preset owns to factory defaults. Layer
@@ -41,6 +57,8 @@ fn preset_base(file: &mut PlanetFile) {
     file.volcanism_override = None;
     file.dichotomy = 0.0;
     file.dust_override = None;
+    file.envelope_override = None;
+    file.ice_override = None;
     file.cloud_coverage = 0.5;
     file.cloud_opacity = 1.0;
     file.cloud_detail = 1.0;
@@ -152,6 +170,71 @@ pub fn apply(file: &mut PlanetFile, name: &str) {
             file.ring_tilt = 18.0;
             file.ring_opacity = 0.75;
             file.cloud_coverage = 0.6;
+        }
+        "JUPITER" => {
+            // Jupiter: 318 M⊕ at 5.2 AU, 9.9 h day, nearly upright.
+            file.star_distance_au = 5.2;
+            file.mass_earth = 317.8;
+            file.axial_tilt_deg = 3.1;
+            file.rotation_period_h = 9.925;
+        }
+        "SATURN" => {
+            // Saturn: 95 M⊕ at 9.5 AU, hazy bands, main rings C to A
+            // (1.24-2.27 Saturn radii) opened by its 26.7° tilt.
+            file.star_distance_au = 9.54;
+            file.mass_earth = 95.2;
+            file.axial_tilt_deg = 26.7;
+            file.rotation_period_h = 10.66;
+            file.ring_inner = 1.24;
+            file.ring_outer = 2.27;
+            file.ring_opacity = 1.0;
+        }
+        "URANUS" => {
+            // Uranus: ice giant on its side (97.8°), 17.2 h day.
+            file.star_distance_au = 19.2;
+            file.mass_earth = 14.5;
+            file.axial_tilt_deg = 97.8;
+            file.rotation_period_h = 17.24;
+        }
+        "NEPTUNE" => {
+            // Neptune: ice giant at 30 AU, 16.1 h day.
+            file.star_distance_au = 30.1;
+            file.mass_earth = 17.1;
+            file.axial_tilt_deg = 28.3;
+            file.rotation_period_h = 16.11;
+        }
+        "HOT JUPITER" => {
+            // A warm-to-hot Jupiter at 0.1 AU (~790 K): clear, dark blue
+            // skies over a deep deck, tidally locked.
+            file.star_distance_au = 0.1;
+            file.mass_earth = 300.0;
+            file.axial_tilt_deg = 0.0;
+            file.rotation_period_h = 276.0;
+        }
+        "EUROPA" | "GANYMEDE" | "CALLISTO" => {
+            // Galilean ice moons at Jupiter's distance, tidally locked.
+            // Their crusts differ by age: Europa's ~60 Myr surface keeps
+            // few craters under lineae and chaos, Ganymede's grooved bright
+            // terrain cuts ~4 Gyr dark terrain, Callisto is saturated.
+            file.star_distance_au = 5.2;
+            file.axial_tilt_deg = 0.2;
+            file.water_loss = 1.0;
+            file.climate_moisture = 0.0;
+            file.cloud_coverage = 0.0;
+            file.erosion_iterations = 0;
+            file.height_scale = 4.0;
+            let (mass, day_h, crater_age, resurfaced) = match name {
+                "EUROPA" => (0.008, 85.2, 0.06, 0.3),
+                "GANYMEDE" => (0.0248, 171.7, 3.6, 0.65),
+                _ => (0.018, 400.5, 4.4, 0.0),
+            };
+            file.mass_earth = mass;
+            file.rotation_period_h = day_h;
+            file.crater_age_override = Some(crater_age);
+            file.mare_override = Some(resurfaced);
+            // Ganymede and Callisto sit on the cosmic shoreline, where the
+            // fit leaves a few mbar; their real O₂ exospheres are ~1e-12 bar.
+            file.pressure_override = Some(0.0);
         }
         _ => {} // EARTH: factory defaults.
     }

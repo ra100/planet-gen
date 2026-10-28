@@ -80,6 +80,10 @@ pub struct PlanetFile {
     pub dichotomy: f32,
     /// Oxidized surface dust (0-1).
     pub dust_override: Option<f32>,
+    /// Gas envelope (0 = rocky, 1 = giant); None follows the mass.
+    pub envelope_override: Option<f32>,
+    /// Water-ice crust of a dry world (0-1); None follows the frost line.
+    pub ice_override: Option<f32>,
     // Clouds / weather
     pub cloud_coverage: f32,
     pub cloud_seed: u32,
@@ -164,6 +168,8 @@ impl Default for PlanetFile {
             volcanism_override: None,
             dichotomy: 0.0,
             dust_override: None,
+            envelope_override: None,
+            ice_override: None,
             cloud_coverage: 0.5,
             cloud_seed: params.seed.wrapping_add(1000),
             cloud_opacity: 1.0,
@@ -254,6 +260,8 @@ pub fn checked_load(json: &str) -> Result<PlanetFile, String> {
         ("mare_override", file.mare_override),
         ("volcanism_override", file.volcanism_override),
         ("dust_override", file.dust_override),
+        ("envelope_override", file.envelope_override),
+        ("ice_override", file.ice_override),
     ] {
         if let Some(value) = value {
             finite(name, value)?;
@@ -577,7 +585,7 @@ mod tests {
         let json = r#"{
             "format": "planet-gen",
             "version": 1,
-            "mass_earth": 50.0,
+            "mass_earth": 5000.0,
             "rotation_period_h": -1.0
         }"#;
         let err = checked_load(json).unwrap_err();

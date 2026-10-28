@@ -48,14 +48,79 @@ pub struct PreviewUniforms {
     pub lava_glow: f32,     // tectonic emission intensity (0.0-1.0)
     pub ring_inner: f32,    // ring system inner radius (planet radii, 0 = no rings)
     pub ring_outer: f32,    // ring system outer radius
-    pub ring_tilt: f32,     // ring plane tilt angle (radians)
-    pub ring_opacity: f32,  // ring opacity (0-1)
+    pub ring_tilt: f32,     // unused: rings lie in the equatorial plane
+    pub ring_opacity: f32,  // ring optical depth relative to Saturn's (0-2)
     pub planet_radius_km: f32,
     pub show_cloud_shadows: f32,
     pub surface_seed: u32,
     pub cloud_thin_lift: f32, // raises thin cloud optical depth (0 = solver field)
     pub rocky: RockyUniforms,
+    pub giant: GiantUniforms,
     pub _pad6: [f32; 3],
+}
+
+/// Giant-planet cloud deck (giant.wgsl) for the preview and texture
+/// export; a zero envelope renders the solid surface only. Flattened into
+/// the WGSL uniform struct as `giant_*` fields.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable)]
+pub struct GiantUniforms {
+    /// Gas envelope [0, 1]: 1 hides the surface under the cloud deck.
+    pub envelope: f32,
+    /// Ice giant [0, 1]: shallow jets, retrograde equator, methane colour.
+    pub ice: f32,
+    /// Effective temperature in K: picks the visible cloud deck.
+    pub temperature_k: f32,
+    /// Belt-zone pairs per hemisphere from the Rhines scale.
+    pub bands: f32,
+    /// Upper-tropospheric haze [0, 1] that mutes the bands (Saturn ~1).
+    pub haze: f32,
+    /// Vortex activity [0, 1].
+    pub storms: f32,
+    /// Prograde equatorial superrotation (+1, deep jets) or retrograde
+    /// equator (-1, shallow jets).
+    pub equator: f32,
+}
+
+/// Jupiter's rotation (9.925 h) and radius (69,911 km), the band-count
+/// reference.
+const JUPITER_ROTATION_H: f32 = 9.925;
+const JUPITER_RADIUS_KM: f32 = 69_911.0;
+const JUPITER_BANDS: f32 = 5.5;
+
+impl GiantUniforms {
+    /// Band count from the Rhines scale L = π (2U/β)^½, β = 2Ω cos φ / R:
+    /// bands ∝ √(ΩR/U). Colder giants dissipate less and carry faster
+    /// winds, U ∝ T_eff^-1.5 (Jupiter 1, Saturn ~1.5, Uranus and Neptune 3,
+    /// as observed), so they have fewer, broader bands. Shallow ice-giant
+    /// jets turn the equator retrograde (Zeng et al. 2025).
+    pub fn from_derived(
+        derived: &crate::planet::DerivedProperties,
+        rotation_period_h: f32,
+        storm_intensity: f32,
+    ) -> Self {
+        if derived.envelope <= 0.0 {
+            return Self::default();
+        }
+        let spin = JUPITER_ROTATION_H / rotation_period_h.max(0.1);
+        let size = derived.radius_km / JUPITER_RADIUS_KM;
+        let wind = (derived.giant_temperature_k / 124.0)
+            .powf(-1.5)
+            .clamp(0.5, 3.0);
+        let bands = (JUPITER_BANDS * (spin * size / wind).sqrt()).clamp(0.8, 14.0);
+        // Haze scale height relative to Jupiter's 23 km mutes the bands:
+        // Saturn's is twice Jupiter's.
+        let haze = ((derived.rayleigh_scale_height_km() / 23.0 - 1.0) / 1.2).clamp(0.0, 1.0);
+        Self {
+            envelope: derived.envelope,
+            ice: derived.ice_giant,
+            temperature_k: derived.giant_temperature_k,
+            bands,
+            haze,
+            storms: storm_intensity.clamp(0.0, 1.0),
+            equator: 1.0 - 2.0 * derived.ice_giant,
+        }
+    }
 }
 
 /// Rocky-world surface terms (rocky.wgsl) for the preview and texture
@@ -78,6 +143,8 @@ pub struct RockyUniforms {
     pub insolation: f32,
     /// Bare regolith instead of climate biomes: worlds without liquid water.
     pub regolith: f32,
+    /// Water-ice crust in place of silicate regolith (icy moons).
+    pub ice: f32,
 }
 
 impl RockyUniforms {
@@ -94,7 +161,9 @@ impl RockyUniforms {
             dust: derived.dust,
             water_ice: derived.water_ice,
             insolation: 1.0 / (star_distance_au * star_distance_au).max(1.0e-4),
-            regolith: 1.0 - derived.liquid_water,
+            // A giant's deck covers the dry surface below it.
+            regolith: (1.0 - derived.liquid_water) * (1.0 - derived.envelope),
+            ice: derived.ice_crust,
         }
     }
 }
@@ -190,7 +259,11 @@ impl PreviewRenderer {
             include_str!("shaders/noise.wgsl"),
             include_str!("shaders/climate.wgsl"),
             include_str!("shaders/surface_material.wgsl"),
-            include_str!("shaders/rocky.wgsl"),
+            concat!(
+                include_str!("shaders/rocky.wgsl"),
+                "\n",
+                include_str!("shaders/giant.wgsl")
+            ),
             cloud_density,
             include_str!("shaders/cloud_wind_fallback.wgsl"),
             synthesis_source,
@@ -948,6 +1021,7 @@ mod tests {
             surface_seed: 42,
             cloud_thin_lift: 0.0,
             rocky: RockyUniforms::default(),
+            giant: GiantUniforms::default(),
             _pad6: [0.0; 3],
         }
     }
@@ -2298,7 +2372,11 @@ mod tests {
             include_str!("shaders/noise.wgsl"),
             include_str!("shaders/climate.wgsl"),
             include_str!("shaders/surface_material.wgsl"),
-            include_str!("shaders/rocky.wgsl"),
+            concat!(
+                include_str!("shaders/rocky.wgsl"),
+                "\n",
+                include_str!("shaders/giant.wgsl")
+            ),
             include_str!("shaders/cloud_density.wgsl"),
             include_str!("shaders/cloud_wind_fallback.wgsl"),
             include_str!("shaders/cloud_synthesis.wgsl"),
@@ -2442,7 +2520,11 @@ fn layer_profile_oracle() {
             include_str!("shaders/noise.wgsl"),
             include_str!("shaders/climate.wgsl"),
             include_str!("shaders/surface_material.wgsl"),
-            include_str!("shaders/rocky.wgsl"),
+            concat!(
+                include_str!("shaders/rocky.wgsl"),
+                "\n",
+                include_str!("shaders/giant.wgsl")
+            ),
             include_str!("shaders/cloud_density.wgsl"),
             include_str!("shaders/cloud_wind_fallback.wgsl"),
             include_str!("shaders/cloud_synthesis.wgsl"),
@@ -2647,7 +2729,11 @@ fn layer_profile_oracle() {
             include_str!("shaders/noise.wgsl"),
             include_str!("shaders/climate.wgsl"),
             include_str!("shaders/surface_material.wgsl"),
-            include_str!("shaders/rocky.wgsl"),
+            concat!(
+                include_str!("shaders/rocky.wgsl"),
+                "\n",
+                include_str!("shaders/giant.wgsl")
+            ),
             include_str!("shaders/cloud_density.wgsl"),
             include_str!("shaders/cloud_wind_fallback.wgsl"),
             include_str!("shaders/cloud_synthesis.wgsl"),
@@ -3610,7 +3696,11 @@ fn layer_profile_oracle() {
             include_str!("shaders/noise.wgsl"),
             include_str!("shaders/climate.wgsl"),
             include_str!("shaders/surface_material.wgsl"),
-            include_str!("shaders/rocky.wgsl"),
+            concat!(
+                include_str!("shaders/rocky.wgsl"),
+                "\n",
+                include_str!("shaders/giant.wgsl")
+            ),
             include_str!("shaders/cloud_density.wgsl"),
             include_str!("shaders/cloud_wind_fallback.wgsl"),
             include_str!("shaders/cloud_synthesis.wgsl"),

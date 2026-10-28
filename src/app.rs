@@ -1227,6 +1227,8 @@ impl PlanetGenApp {
             volcanism_override: self.surface.shield_volcanism,
             dichotomy: self.surface.dichotomy,
             dust_override: self.surface.dust,
+            envelope_override: self.surface.envelope,
+            ice_override: self.surface.ice_crust,
             cloud_coverage: self.cloud_coverage,
             cloud_seed: self.cloud_seed,
             cloud_opacity: self.cloud_opacity,
@@ -1715,15 +1717,30 @@ impl PlanetGenApp {
         changed |= widgets::slider_row(
             ui,
             &mut self.params.mass_earth,
-            0.01..=10.0,
+            0.01..=crate::planet::MAX_MASS_EARTH,
             Param::new(
                 "Mass",
-                "Planet mass. Affects gravity, terrain relief, plate count",
+                "Planet mass. Affects gravity, terrain relief, plate count. Above ~3 M⊕ a gas envelope takes over: ice giants (Uranus 14.5, Neptune 17), gas giants (Saturn 95, Jupiter 318)",
                 1.0,
             )
             .with(2, " M⊕")
             .log_scale(),
         );
+        let auto = DerivedProperties::from_params(&self.params);
+        if widgets::override_row(
+            ui,
+            &mut self.surface.envelope,
+            auto.envelope,
+            0.0..=1.0,
+            Param::new(
+                "Envelope",
+                "Hydrogen-helium envelope. 0 = rocky surface, 1 = giant: banded cloud decks instead of terrain. AUTO follows the mass (most planets above ~1.6 R⊕ are not rocky)",
+                auto.envelope,
+            )
+            .with(2, ""),
+        ) {
+            changed = true;
+        }
         changed |= widgets::slider_row(
             ui,
             &mut self.params.metallicity,
@@ -2033,6 +2050,18 @@ impl PlanetGenApp {
                 "Volcanoes",
                 "Volcanic rise with giant shield volcanoes and a rift canyon (Tharsis, Olympus Mons, Valles Marineris)",
                 self.derived.shield_volcanism,
+            )
+            .with(2, ""),
+        );
+        history |= widgets::override_row(
+            ui,
+            &mut self.surface.ice_crust,
+            self.derived.ice_crust,
+            0.0..=1.0,
+            Param::new(
+                "Ice crust",
+                "Water-ice crust on dry, airless worlds beyond the frost line: bright young ice with reddish lineae and chaos (Europa), grooved bright terrain between dark cratered plains (Ganymede), dark lag on old ice (Callisto). Crater age sets which. AUTO follows the distance from the frost line",
+                self.derived.ice_crust,
             )
             .with(2, ""),
         );
@@ -2379,7 +2408,7 @@ impl PlanetGenApp {
             0.0..=3.0,
             Param::new(
                 "Inner radius",
-                "Ring inner radius in planet radii. 0 = rings disabled",
+                "Ring inner radius in planet radii. 0 = rings disabled. Dense rings sit inside the Roche limit, ~2.4 radii for ice (Saturn 1.24-2.27)",
                 0.0,
             )
             .with(2, " R"),
@@ -2399,17 +2428,14 @@ impl PlanetGenApp {
         }
         if widgets::slider_row(
             ui,
-            &mut self.ring_tilt,
-            0.0..=90.0,
-            Param::new("Ring tilt", "Ring inclination in degrees", 15.0).with(0, "°"),
-        ) {
-            self.needs_render = true;
-        }
-        if widgets::slider_row(
-            ui,
             &mut self.ring_opacity,
-            0.0..=1.0,
-            Param::new("Ring opacity", "Ring band opacity", 0.7).with(2, ""),
+            0.0..=2.0,
+            Param::new(
+                "Ring density",
+                "Optical depth of the rings relative to Saturn's (1 = dense B ring, translucent C ring and Cassini Division). Rings lie in the equatorial plane, so the axial tilt opens them",
+                0.7,
+            )
+            .with(2, ""),
         ) {
             self.needs_render = true;
         }

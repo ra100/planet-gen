@@ -40,8 +40,8 @@ struct Uniforms {
     lava_glow: f32,        // tectonic emission intensity (0.0-1.0)
     ring_inner: f32,       // ring inner radius (planet radii, 0 = disabled)
     ring_outer: f32,       // ring outer radius
-    ring_tilt: f32,        // ring plane tilt (radians)
-    ring_opacity: f32,     // ring opacity (0-1)
+    ring_tilt: f32,        // unused: rings lie in the equatorial plane
+    ring_opacity: f32,     // ring optical depth relative to Saturn's
     planet_radius_km: f32,
     show_cloud_shadows: f32,
     surface_seed: u32,
@@ -59,6 +59,15 @@ struct Uniforms {
     rocky_water_ice: f32,
     rocky_insolation: f32, // relative to Earth
     rocky_regolith: f32,   // bare regolith instead of climate biomes
+    rocky_ice: f32,        // water-ice crust instead of silicate regolith
+    // Giant-planet cloud deck (giant.wgsl); zero envelope renders the surface.
+    giant_envelope: f32,
+    giant_ice: f32,
+    giant_temperature: f32, // T_eff, K
+    giant_bands: f32,
+    giant_haze: f32,
+    giant_storms: f32,
+    giant_equator: f32,
     _pad6: f32,
     _pad7: f32,
     _pad8: f32,
@@ -1448,6 +1457,7 @@ fn rocky_params() -> RockyParams {
     prm.min_crater_km = 4.0 * 1.5707963 * prm.radius_km / f32(textureDimensions(height_tex).x);
     prm.airless = uniforms.rocky_airless;
     prm.dust = uniforms.rocky_dust;
+    prm.ice = uniforms.rocky_ice;
     return prm;
 }
 
@@ -1525,7 +1535,181 @@ fn rocky_geology(p: vec3<f32>, height: f32) -> vec3<f32> {
     return color * (0.7 + 0.3 * clamp(height * 0.5 + 0.5, 0.0, 1.0));
 }
 
+// ---- Giant planets (giant.wgsl) ----
+fn giant_params() -> GiantParams {
+    var prm: GiantParams;
+    prm.seed = uniforms.surface_seed;
+    prm.envelope = uniforms.giant_envelope;
+    prm.ice = uniforms.giant_ice;
+    prm.temperature = uniforms.giant_temperature;
+    prm.bands = uniforms.giant_bands;
+    prm.haze = uniforms.giant_haze;
+    prm.storms = uniforms.giant_storms;
+    prm.equator = uniforms.giant_equator;
+    prm.tilt = uniforms.axial_tilt_rad;
+    prm.season = uniforms.season;
+    return prm;
+}
+
+// ---- Rings ----
+// A thin ring of icy particles in the equatorial plane (Saturn's main
+// rings: C 1.24-1.53, B 1.53-1.95, Cassini Division 1.96-2.03, A 2.03-2.27
+// planet radii; Miller et al. 2024). The normal optical depth follows that
+// template stretched over the inner-outer span, with seeded ringlets and
+// gaps; dense rings are reddish (organics in the ice), sparse ones darker
+// and greyer. Single scattering in a thin layer (Chandrasekhar; Cuzzi et
+// al. 1984) with a Lambert-sphere particle phase function, an opposition
+// surge and a multiple-scattering gain for dense rings.
+
+// Spin axis in view space: the planet frame's tilted pole (climate.wgsl)
+// carried through the view rotation.
+fn ring_normal() -> vec3<f32> {
+    let pole = vec3<f32>(0.0, cos(uniforms.axial_tilt_rad), sin(uniforms.axial_tilt_rad));
+    return normalize(pole * mat3x3<f32>(uniforms.rotation[0].xyz, uniforms.rotation[1].xyz,
+        uniforms.rotation[2].xyz));
+}
+
+fn ring_hash(x: f32) -> f32 {
+    return fract(sin(x * 127.1 + f32(uniforms.surface_seed % 4096u) * 0.731) * 43758.5453);
+}
+
+// Normal optical depth at radius r (planet radii).
+fn ring_optical_depth(r: f32) -> f32 {
+    let span = uniforms.ring_outer - uniforms.ring_inner;
+    if (r < uniforms.ring_inner || r > uniforms.ring_outer || span <= 0.0) {
+        return 0.0;
+    }
+    let f = (r - uniforms.ring_inner) / span;
+    // Seeded boundaries around Saturn's: C/B at 0.28, B/Cassini at 0.70,
+    // Cassini/A at 0.77.
+    let cb = 0.28 + (ring_hash(1.0) - 0.5) * 0.10;
+    let bd = 0.70 + (ring_hash(2.0) - 0.5) * 0.08;
+    let da = bd + 0.05 + ring_hash(3.0) * 0.04;
+    let c_ring = 0.07 + 0.35 * smoothstep(0.55, 0.6, fract(f * 23.0 + ring_hash(4.0)))
+        * smoothstep(0.75, 0.7, fract(f * 23.0 + ring_hash(4.0))) * step(0.45, ring_hash(floor(f * 23.0)));
+    let b_core = 1.0 + 2.6 * smoothstep(cb, mix(cb, bd, 0.45), f);
+    let a_ring = 0.55 - 0.15 * smoothstep(da, 1.0, f);
+    var tau = c_ring;
+    tau = mix(tau, b_core, smoothstep(cb - 0.004, cb + 0.004, f));
+    tau = mix(tau, 0.12, smoothstep(bd - 0.003, bd + 0.003, f));
+    tau = mix(tau, a_ring, smoothstep(da - 0.004, da + 0.004, f));
+    // Ringlets and plateaux on every scale.
+    let fine = snoise(vec3<f32>(f * 180.0, f32(uniforms.surface_seed % 1024u), 0.5)) * 0.5
+        + snoise(vec3<f32>(f * 900.0, 3.1, f32(uniforms.surface_seed % 1024u))) * 0.3;
+    tau *= max(1.0 + 0.45 * fine, 0.1);
+    // Narrow gaps cleared by embedded moons and resonances (Encke, Keeler).
+    for (var i = 0u; i < 4u; i++) {
+        let center = mix(da + 0.02, 0.995, ring_hash(10.0 + f32(i)));
+        let width = 0.002 + 0.004 * ring_hash(20.0 + f32(i));
+        tau *= 1.0 - 0.95 * exp(-pow((f - center) / width, 2.0));
+    }
+    // Soft outer and inner edges at the pixel scale.
+    tau *= smoothstep(0.0, 0.004, f) * smoothstep(1.0, 0.996, f);
+    return tau * uniforms.ring_opacity;
+}
+
+struct RingSample {
+    color: vec3<f32>, // radiance (I/F times the star colour), linear
+    alpha: f32,       // coverage of what lies behind
+    depth: f32,       // view-space z of the hit
+    hit: bool,
+}
+
+// Particle phase function of a Lambertian sphere, normalised to 4π.
+fn ring_particle_phase(phase: f32) -> f32 {
+    return 0.8488 * (sin(phase) + (3.14159 - phase) * cos(phase));
+}
+
+fn ring_sample(ndc: vec2<f32>, sun_dir: vec3<f32>, s_color: vec3<f32>) -> RingSample {
+    var out = RingSample(vec3<f32>(0.0), 0.0, 0.0, false);
+    let n = ring_normal();
+    if (abs(n.z) < 1.0e-4) {
+        return out; // edge-on: a ~10 m thick sheet vanishes
+    }
+    let z = -(ndc.x * n.x + ndc.y * n.y) / n.z;
+    let hit = vec3<f32>(ndc, z);
+    let r = length(hit);
+    let tau = ring_optical_depth(r);
+    if (tau <= 0.0 || r < 1.0) {
+        return out;
+    }
+    let mu = abs(n.z);
+    let mu0 = abs(dot(n, sun_dir));
+    let lit_face = dot(n, sun_dir) * n.z > 0.0;
+    let phase = acos(clamp(sun_dir.z, -1.0, 1.0));
+    // Dense rings are reddish ice (A, B), sparse ones darker and greyer (C,
+    // Cassini Division).
+    let dense = smoothstep(0.15, 1.2, tau);
+    let albedo = mix(vec3<f32>(0.34, 0.31, 0.27), vec3<f32>(0.62, 0.54, 0.42), dense);
+    let p = ring_particle_phase(phase);
+    let surge = 1.0 + 0.6 * exp(-phase / 0.08);
+    var reflectance: vec3<f32>;
+    if (mu0 < 1.0e-4) {
+        reflectance = vec3<f32>(0.0);
+    } else if (lit_face) {
+        reflectance = albedo * p / 4.0 * mu0 / (mu + mu0)
+            * (1.0 - exp(-tau * (1.0 / mu + 1.0 / mu0)));
+    } else {
+        // Diffuse transmission through the layer to the unlit face.
+        var through: f32;
+        if (abs(mu0 - mu) < 1.0e-3) {
+            through = tau / mu * exp(-tau / mu);
+        } else {
+            through = mu0 / (mu0 - mu) * (exp(-tau / mu0) - exp(-tau / mu));
+        }
+        reflectance = albedo * p / 4.0 * through;
+    }
+    // Multiple scattering between particles brightens dense rings.
+    reflectance *= surge * (1.0 + albedo * (1.0 - exp(-tau)));
+    // The planet's shadow: a cylinder along the sun direction.
+    let along = dot(hit, sun_dir);
+    let across = length(hit - sun_dir * along);
+    let shadow = select(1.0, smoothstep(0.985, 1.015, across), along < 0.0);
+    out.color = reflectance * shadow * s_color * SUN_IRRADIANCE / 3.14159;
+    out.alpha = 1.0 - exp(-tau / mu);
+    out.depth = z;
+    out.hit = true;
+    return out;
+}
+
+// Sunlight reaching view-space point `pos` through the ring plane.
+fn ring_sun_transmittance(pos: vec3<f32>, sun_dir: vec3<f32>) -> f32 {
+    let n = ring_normal();
+    let sun_n = dot(sun_dir, n);
+    if (abs(sun_n) < 1.0e-4) {
+        return 1.0;
+    }
+    let s = -dot(pos, n) / sun_n;
+    if (s <= 0.0) {
+        return 1.0;
+    }
+    let tau = ring_optical_depth(length(pos + sun_dir * s));
+    return exp(-tau / abs(sun_n));
+}
+
 fn shade_planet(in: VertexOutput) -> vec4<f32> {
+    let body = shade_body(in);
+    if (uniforms.view_mode != 0u || uniforms.ring_inner <= 0.01
+        || uniforms.ring_outer <= uniforms.ring_inner) {
+        return body;
+    }
+    let pan = vec2<f32>(uniforms.pan_x, uniforms.pan_y);
+    let ndc = ((in.uv - 0.5) * 2.0 / 0.85 - pan) / uniforms.zoom;
+    let ring = ring_sample(ndc, normalize(uniforms.light_dir), star_color(uniforms.star_color_temp));
+    if (!ring.hit) {
+        return body;
+    }
+    let r2 = dot(ndc, ndc);
+    // Hidden where the planet lies in front of the ring.
+    if (r2 < 1.0 && ring.depth < sqrt(1.0 - r2)) {
+        return body;
+    }
+    // Over the tonemapped body, as the starfield and atmosphere are.
+    let ring_tm = ring.color / (ring.color + vec3<f32>(1.0));
+    return vec4<f32>(body.rgb * (1.0 - ring.alpha) + ring_tm, body.a);
+}
+
+fn shade_body(in: VertexOutput) -> vec4<f32> {
     let pan = vec2<f32>(uniforms.pan_x, uniforms.pan_y);
     let ndc = ((in.uv - 0.5) * 2.0 / 0.85 - pan) / uniforms.zoom;
     // Compute derivatives before branch divergence; shared density receives this explicitly.
@@ -1548,68 +1732,10 @@ fn shade_planet(in: VertexOutput) -> vec4<f32> {
     let visible_cloud_top = select(1.0, cloud_top_radius, cloud_display_scale() > 0.0);
     let outer_r = max(select(1.005, atm_radius + 0.015, has_atm), visible_cloud_top);
 
-    // ---- Ring system: flat disc intersected by view ray ----
-    // Ring sits in a tilted plane through the planet center.
-    // View ray: origin (ndc.x, ndc.y, z_far) direction (0, 0, -1) in view space.
-    // Ring plane: y * cos(tilt) + z * sin(tilt) = 0 (tilted around X-axis)
-    var ring_color_accum = vec3<f32>(0.0);
-    var ring_alpha_accum = 0.0;
-    let has_rings = uniforms.ring_inner > 0.01 && uniforms.ring_outer > uniforms.ring_inner;
-    if (has_rings) {
-        let rt = uniforms.ring_tilt;
-        let ct = cos(rt);
-        let st = sin(rt);
-        // Ray: P = (ndc.x, ndc.y, t) for t along view. Plane: y*ct + t*st = 0
-        // Solve: t = -ndc.y * ct / st (if st != 0)
-        if (abs(st) > 0.001) {
-            let t_hit = -ndc.y * ct / st;
-            let hit_x = ndc.x;
-            let hit_y = ndc.y;
-            let ring_r = sqrt(hit_x * hit_x + t_hit * t_hit);
-
-            if (ring_r >= uniforms.ring_inner && ring_r <= uniforms.ring_outer) {
-                // Ring hit! Check if it's behind the planet
-                let behind_planet = r2 < 1.0 && t_hit < 0.0;
-                if (!behind_planet) {
-                    // Radial position within ring (0=inner, 1=outer)
-                    let ring_frac = (ring_r - uniforms.ring_inner) / (uniforms.ring_outer - uniforms.ring_inner);
-                    // Color gradient: inner bright, gaps in middle, outer faint
-                    let ring_density = (1.0 - ring_frac) * 0.8 + 0.2;
-                    // Procedural ring gaps (Cassini-division-like)
-                    let gap1 = 1.0 - smooth_step(0.35, 0.38, ring_frac) * smooth_step(0.42, 0.39, ring_frac) * 0.7;
-                    let gap2 = 1.0 - smooth_step(0.65, 0.67, ring_frac) * smooth_step(0.70, 0.68, ring_frac) * 0.5;
-                    let ring_band = ring_density * gap1 * gap2;
-                    // Lighting: ring is lit by sun on front, shadowed on back
-                    let ring_normal = vec3<f32>(0.0, ct, st);
-                    let ring_lit = max(dot(ring_normal, sun_dir), 0.0) * 0.7 + 0.3;
-                    // Ring color: warm ice/dust tones
-                    let base_ring = mix(vec3<f32>(0.75, 0.68, 0.55), vec3<f32>(0.9, 0.85, 0.75), ring_frac);
-                    ring_color_accum = base_ring * ring_lit * ring_band * s_color;
-                    ring_alpha_accum = ring_band * uniforms.ring_opacity;
-
-                    // Planet shadow on ring: check if ring point is in planet's shadow
-                    let shadow_proj = hit_x * sun_dir.x + t_hit * sun_dir.z;
-                    if (shadow_proj < 0.0) { // on shadow side
-                        let perp_dist = abs(hit_y * ct + t_hit * st - (hit_x * sun_dir.x + hit_y * sun_dir.y + t_hit * sun_dir.z) * sun_dir.y);
-                        // Approximate: in shadow if perpendicular distance to sun ray < 1 (planet radius)
-                        let shadow_r = sqrt(hit_x * hit_x * (1.0 - sun_dir.x * sun_dir.x) + t_hit * t_hit * (1.0 - sun_dir.z * sun_dir.z));
-                        if (shadow_r < 1.05) {
-                            ring_color_accum *= 0.15; // deep shadow
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Miss everything — outside both planet and atmosphere → show starfield (+ rings)
+    // Miss everything — outside both planet and atmosphere → show starfield
     if (r2 > outer_r * outer_r) {
         var bg = starfield(ndc, sun_dir, s_color);
         let bg_tm = bg / (bg + vec3<f32>(1.0)); // tonemap sun HDR
-        if (ring_alpha_accum > 0.01) {
-            let ring_tm = ring_color_accum / (ring_color_accum + vec3<f32>(1.0));
-            return vec4<f32>(mix(bg_tm, ring_tm, ring_alpha_accum), 1.0);
-        }
         return vec4<f32>(bg_tm, 1.0);
     }
 
@@ -1720,8 +1846,15 @@ fn shade_planet(in: VertexOutput) -> vec4<f32> {
         surface_color = mix(surface_color, polar_ice_albedo, polar_ice);
     }
 
+    // A giant's cloud deck hides the surface below it.
+    let giant = select(0.0, uniforms.giant_envelope, !pure_elevation);
+    if (giant > 0.0) {
+        let deck = gg_albedo(rotated, giant_params(), terrain_pixel_footprint / max(sqrt(1.0 - r2), 0.15));
+        surface_color = mix(surface_color, deck, giant);
+    }
+
     // Day-side urban grey patches (gated by show_cities)
-    if (uniforms.show_cities > 0.5 && uniforms.night_lights > 0.0 && !is_ocean) {
+    if (uniforms.show_cities > 0.5 && uniforms.night_lights > 0.0 && !is_ocean && giant < 1.0) {
         let urban = compute_urban_density(rotated, height);
         if (urban > 0.01) {
             let concrete = vec3<f32>(0.30, 0.30, 0.31); // cool dark grey
@@ -1982,6 +2115,9 @@ fn shade_planet(in: VertexOutput) -> vec4<f32> {
     } else {
         shading_normal = compute_terrain_normal(rotated, normal, terrain_pixel_footprint / max(normal.z, 0.15));
     }
+    if (giant > 0.0) {
+        shading_normal = normalize(mix(shading_normal, normal, giant));
+    }
 
     // PBR inputs
     let n_dot_l = max(dot(shading_normal, light), 0.0) * smooth_step(0.0, 0.002, dot(normal, light));
@@ -2023,7 +2159,7 @@ fn shade_planet(in: VertexOutput) -> vec4<f32> {
     let diffuse = surface_color * (1.0 - f) / 3.14159;
 
     // Ambient (subtle, directional — slightly brighter on the lit hemisphere)
-    let ao = select(1.0, compute_ao(rotated), !is_ocean && uniforms.show_ao > 0.5);
+    let ao = select(1.0, compute_ao(rotated), !is_ocean && uniforms.show_ao > 0.5 && giant < 1.0);
     var ambient = surface_color * (0.002 + 0.04 * max(dot(normal, light), 0.0)) * ao;
 
     var direct = (diffuse + specular) * n_dot_l;
@@ -2037,9 +2173,26 @@ fn shade_planet(in: VertexOutput) -> vec4<f32> {
         let mu0 = max(dot(limb_normal, light), 0.0) * smooth_step(0.0, 0.002, dot(normal, light));
         let mu = max(dot(limb_normal, view_dir), 0.001);
         let phase = degrees(acos(clamp(dot(light, view_dir), -1.0, 1.0)));
-        let photometric = mix(n_dot_l, rk_lunar_lambert(mu0, mu, phase), uniforms.rocky_airless);
+        var regolith_law = rk_lunar_lambert(mu0, mu, phase);
+        if (uniforms.rocky_ice > 0.0) {
+            // Bright ice scatters many times: closer to Lambert than the
+            // Moon's dark regolith (Europa, Belgacem et al. 2020).
+            regolith_law = mix(regolith_law, mu0, 0.4 * uniforms.rocky_ice);
+        }
+        let photometric = mix(n_dot_l, regolith_law, uniforms.rocky_airless);
         direct = diffuse * photometric + specular * n_dot_l;
         ambient *= 1.0 - 0.95 * uniforms.rocky_airless;
+    }
+    if (giant > 0.0) {
+        // Cloud-deck limb darkening instead of Lambert; no glossy highlight.
+        let mu0 = max(dot(normal, light), 0.0);
+        let phase = degrees(acos(clamp(dot(light, view_dir), -1.0, 1.0)));
+        let deck = gg_photometry(mu0, max(normal.z, 0.0), phase, uniforms.giant_haze);
+        direct = mix(direct, diffuse * deck, giant);
+    }
+    if (uniforms.ring_inner > 0.01 && uniforms.ring_outer > uniforms.ring_inner) {
+        // The rings' shadow.
+        direct *= ring_sun_transmittance(normal, light);
     }
     if (uniforms.rocky_regolith > 0.0 && !pure_elevation) {
         let sun_world = normalize((uniforms.rotation * vec4<f32>(light, 0.0)).xyz);
@@ -2058,8 +2211,13 @@ fn shade_planet(in: VertexOutput) -> vec4<f32> {
         lit_color *= mix(1.0, surface_shadow, 0.85);
     }
 
+    // Thermal glow of a hot giant's deck, strongest on the night side.
+    if (giant > 0.0) {
+        lit_color += gg_emission(giant_params()) * giant;
+    }
+
     // ---- Lava glow at tectonic boundaries ----
-    if (uniforms.lava_glow > 0.0 && !is_ocean) {
+    if (uniforms.lava_glow > 0.0 && !is_ocean && giant < 1.0) {
         // Detect plate boundaries via height gradient (same logic as debug view 11)
         let lstep = 0.006;
         let lh_r = textureSample(height_tex, height_sampler, rotated + vec3<f32>(lstep, 0.0, 0.0)).r;
@@ -2081,7 +2239,7 @@ fn shade_planet(in: VertexOutput) -> vec4<f32> {
     // ---- Night-side city lights (gated by show_cities) ----
     var city_glow_through = vec3<f32>(0.0);
     var city_glow_amount = 0.0;
-    if (uniforms.show_cities > 0.5 && uniforms.night_lights > 0.0 && !is_ocean) {
+    if (uniforms.show_cities > 0.5 && uniforms.night_lights > 0.0 && !is_ocean && giant < 1.0) {
         let night_factor = smooth_step(0.05, -0.1, dot(normal, light));
         if (night_factor > 0.01) {
             let urban = compute_urban_density(rotated, height);

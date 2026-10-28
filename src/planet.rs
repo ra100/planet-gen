@@ -3,7 +3,7 @@
 pub struct PlanetParams {
     /// Distance from the star in AU (0.1 - 50.0)
     pub star_distance_au: f32,
-    /// Planet mass in Earth masses (0.01 - 10.0)
+    /// Planet mass in Earth masses (0.01 - 4000, giants above a few)
     pub mass_earth: f32,
     /// Stellar metallicity [Fe/H] in dex (-1.0 to 1.0)
     pub metallicity: f32,
@@ -46,10 +46,13 @@ impl PlanetParams {
             });
         }
 
-        if self.mass_earth <= 0.0 || self.mass_earth > 20.0 {
+        if self.mass_earth <= 0.0 || self.mass_earth > MAX_MASS_EARTH {
             errors.push(ValidationError {
                 field: "mass_earth",
-                message: format!("must be in (0, 20] Earth masses, got {}", self.mass_earth),
+                message: format!(
+                    "must be in (0, {MAX_MASS_EARTH}] Earth masses, got {}",
+                    self.mass_earth
+                ),
             });
         }
 
@@ -103,6 +106,11 @@ pub struct SurfaceOverrides {
     pub dichotomy: f32,
     /// Wind-blown oxidized dust on the surface and in the air [0, 1].
     pub dust: Option<f32>,
+    /// Hydrogen-helium envelope over the core [0, 1]: 1 is a giant whose
+    /// cloud deck hides any surface.
+    pub envelope: Option<f32>,
+    /// Water-ice crust [0, 1] over the rock of a dry world (icy moons).
+    pub ice_crust: Option<f32>,
 }
 
 /// Derived planet type from distance and mass.
@@ -111,6 +119,10 @@ pub enum PlanetType {
     HotRocky,
     Terrestrial,
     IcyRocky,
+    /// Hydrogen-helium envelope dominates (Jupiter, Saturn).
+    GasGiant,
+    /// Envelope over a large water-ammonia-methane mantle (Uranus, Neptune).
+    IceGiant,
 }
 
 /// Tectonic regime based on Rayleigh number and water content.
@@ -185,15 +197,50 @@ pub struct DerivedProperties {
     pub dust: f32,
     /// Airless surface [0, 1]: space-weathered regolith and its photometry.
     pub airless: f32,
+    /// Gas envelope [0, 1]; 0 for every rocky world, 1 for a giant.
+    pub envelope: f32,
+    /// Ice giant [0, 1] (Uranus, Neptune) as opposed to a gas giant
+    /// (Jupiter, Saturn): shallow jets, a retrograde equator, methane colour.
+    pub ice_giant: f32,
+    /// Giant effective temperature in K, absorbed starlight plus internal
+    /// heat; picks the visible cloud deck (Sudarsky et al. 2000).
+    pub giant_temperature_k: f32,
+    /// Water-ice crust [0, 1]: a dry world formed beyond the frost line
+    /// shows ice instead of silicate regolith (Europa, Ganymede, Callisto).
+    pub ice_crust: f32,
 }
 
 impl DerivedProperties {
     /// Isothermal molecular scale height, calibrated to terrestrial air.
     /// Composition is not simulated; this is a bounded temperature/gravity model.
     pub fn rayleigh_scale_height_km(&self) -> f32 {
-        (8.0 * ((self.base_temperature_c + 273.15).max(80.0) / 288.15)
+        let rocky = (8.0
+            * ((self.base_temperature_c + 273.15).max(80.0) / 288.15)
             * (9.81 / self.surface_gravity.max(0.1)))
-        .clamp(1.0, 80.0)
+        .clamp(1.0, 80.0);
+        if self.envelope <= 0.0 {
+            return rocky;
+        }
+        // H = RT / (mu g) for hydrogen-helium (mu 2.3) or methane-richer
+        // ice-giant air (mu 2.6) at the 1 bar level.
+        let molar_mass = 2.3 + 0.3 * self.ice_giant;
+        let giant = (8.314 * (self.base_temperature_c + 273.15).max(30.0)
+            / (molar_mass * self.surface_gravity.max(0.1)))
+        .clamp(1.0, 400.0);
+        rocky + (giant - rocky) * self.envelope
+    }
+
+    /// Rayleigh density for the preview's Earth-calibrated sky, in bar of
+    /// Earth air. Rocky worlds use their surface pressure. A giant's deck
+    /// colours are calibrated to measured disk albedos, which already hold
+    /// the gas above the deck, so its sky only adds a thin limb haze:
+    /// vertical optical depth ~0.05 in blue over its scale height.
+    pub fn rayleigh_density(&self) -> f32 {
+        if self.envelope <= 0.0 {
+            return self.surface_pressure_bar;
+        }
+        let giant = GIANT_LIMB_TAU / (RAYLEIGH_BLUE_PER_KM * self.rayleigh_scale_height_km());
+        self.surface_pressure_bar + (giant - self.surface_pressure_bar) * self.envelope
     }
 
     /// Shell cutoff after twelve e-foldings (not the density scale height).
@@ -212,8 +259,18 @@ impl DerivedProperties {
         let distance = params.star_distance_au;
         let frost_line_au = compute_frost_line(params.metallicity);
         let planet_type = classify_planet(distance, frost_line_au);
-        let surface_gravity = compute_surface_gravity(mass);
-        let radius_km = 6371.0 * mass.powf(0.27);
+        let envelope = overrides
+            .envelope
+            .map(|e| e.clamp(0.0, 1.0))
+            .unwrap_or_else(|| smoothstep(GIANT_ONSET_MASS, GIANT_FULL_MASS, mass));
+        let mut surface_gravity = compute_surface_gravity(mass);
+        let mut radius_km = 6371.0 * mass.powf(0.27);
+        if envelope > 0.0 {
+            // Log-blend toward the giant mass-radius relation, gravity at 1 bar.
+            radius_km *= (giant_radius_earth(mass) / mass.powf(0.27)).powf(envelope);
+            let radius_earth = radius_km / 6371.0;
+            surface_gravity = 9.81 * mass / (radius_earth * radius_earth);
+        }
         let rotation_rate_rad_s = std::f32::consts::TAU / (params.rotation_period_h * 3600.0);
         let tectonics_factor = overrides
             .tectonics
@@ -247,8 +304,16 @@ impl DerivedProperties {
         } else {
             classify_atmosphere(atmosphere_strength, planet_type)
         };
-        let base_temperature_c =
+        let ice_giant = 1.0 - smoothstep(ICE_GIANT_MASS, GAS_GIANT_MASS, mass);
+        let giant_temperature_k = giant_effective_temperature(distance, mass);
+        let mut base_temperature_c =
             compute_base_temperature(distance, atmosphere_strength, greenhouse_scale);
+        if envelope > 0.0 {
+            // The 1 bar level sits ~1.3 T_eff below the radiating layer
+            // (165 K on Jupiter, 134 K Saturn, 76 K Uranus).
+            let giant = 1.3 * giant_temperature_k - 273.15;
+            base_temperature_c += (giant - base_temperature_c) * envelope;
+        }
         let water_inventory =
             compute_ocean_fraction(distance, mass, base_temperature_c, frost_line_au);
         let liquid_water = smoothstep(
@@ -301,7 +366,19 @@ impl DerivedProperties {
                 surface_pressure_bar,
             );
 
-        Self {
+        // Bodies that formed well beyond the frost line are ice-rich; where
+        // no liquid water or air hides it, the crust is ice.
+        let ice_crust = overrides
+            .ice_crust
+            .map(|i| i.clamp(0.0, 1.0))
+            .unwrap_or_else(|| smoothstep(1.2, 1.8, distance / frost_line_au) * (1.0 - envelope));
+        // Oxidized silicate dust needs a silicate surface.
+        let dust = if ice_crust > 0.0 && overrides.dust.is_none() {
+            dust * (1.0 - ice_crust)
+        } else {
+            dust
+        };
+        let mut derived = Self {
             planet_type,
             tectonic_regime,
             tectonics_factor,
@@ -328,7 +405,42 @@ impl DerivedProperties {
             dichotomy: overrides.dichotomy.clamp(0.0, 1.0),
             dust,
             airless,
+            envelope,
+            ice_giant,
+            giant_temperature_k,
+            ice_crust,
+        };
+        if envelope > 0.0 {
+            derived.cover_with_envelope(overrides);
         }
+        if envelope >= 0.5 {
+            derived.planet_type = if ice_giant >= 0.5 {
+                PlanetType::IceGiant
+            } else {
+                PlanetType::GasGiant
+            };
+        }
+        derived
+    }
+
+    /// A giant's envelope hides the solid surface: no oceans, ice, craters
+    /// or regolith show through it, and the pressure becomes the 1 bar
+    /// reference level unless overridden. Partial envelopes fade them.
+    fn cover_with_envelope(&mut self, overrides: &SurfaceOverrides) {
+        let keep = 1.0 - self.envelope;
+        if overrides.pressure_bar.is_none() {
+            self.surface_pressure_bar += (1.0 - self.surface_pressure_bar) * self.envelope;
+        }
+        self.ocean_fraction *= keep;
+        self.liquid_water *= keep;
+        self.water_ice *= keep;
+        self.stagnant_lid *= keep;
+        self.crater_age_gyr *= keep;
+        self.mare_flooding *= keep;
+        self.shield_volcanism *= keep;
+        self.dichotomy *= keep;
+        self.dust *= keep;
+        self.airless *= keep;
     }
 }
 
@@ -339,6 +451,41 @@ pub const AIRLESS_PRESSURE_BAR: f32 = 0.001;
 pub const MAX_PRESSURE_BAR: f32 = 100.0;
 /// Oldest crater record: the end of the heavy bombardment, as on lunar highlands.
 pub const MAX_CRATER_AGE_GYR: f32 = 4.4;
+/// Heaviest planet: about 12.6 Jupiter masses, where deuterium burning
+/// makes a brown dwarf.
+pub const MAX_MASS_EARTH: f32 = 4000.0;
+/// Envelope onset and completion: most planets above ~1.6 R⊕ (4-6 M⊕)
+/// are not rocky (Rogers 2015); Chen & Kipping (2017) place the
+/// Terran-Neptunian break at 2 M⊕.
+pub const GIANT_ONSET_MASS: f32 = 3.0;
+pub const GIANT_FULL_MASS: f32 = 5.0;
+/// Ice giants (Uranus 14.5, Neptune 17 M⊕) give way to gas giants (Saturn
+/// 95 M⊕) as the hydrogen-helium share of the mass grows.
+pub const ICE_GIANT_MASS: f32 = 30.0;
+pub const GAS_GIANT_MASS: f32 = 90.0;
+/// Blue Rayleigh extinction of Earth air at 1 bar per km, as the preview
+/// sky uses it, and the giants' limb-haze optical depth.
+const RAYLEIGH_BLUE_PER_KM: f32 = 0.0331;
+const GIANT_LIMB_TAU: f32 = 0.05;
+
+/// Giant radius in Earth radii: Chen & Kipping's (2017) Neptunian branch
+/// R ∝ M^0.59 and Jovian branch R ∝ M^-0.04, joined by a smooth minimum.
+/// Uranus 3.9 (4.0), Neptune 4.3 (3.9), Saturn 9.9 (9.45), Jupiter 11.1 (11.2).
+fn giant_radius_earth(mass_earth: f32) -> f32 {
+    let neptunian = 1.21 * (mass_earth / 2.0).powf(0.589);
+    let jovian = 11.2 * (mass_earth / 318.0).powf(-0.04);
+    (neptunian.powi(-4) + jovian.powi(-4)).powf(-0.25)
+}
+
+/// Effective temperature of a giant: T_eff⁴ = T_eq⁴ + T_int⁴ with a Bond
+/// albedo of 0.34 and internal heat T_int ≈ 100 K (M / M_J)^0.3, which
+/// gives Jupiter 125 K (124), Saturn 88 K (95), Uranus 60 K (59) and
+/// Neptune 52 K (59) (Guillot 2005).
+fn giant_effective_temperature(distance_au: f32, mass_earth: f32) -> f32 {
+    let equilibrium = 251.0 / distance_au.sqrt();
+    let internal = 100.0 * (mass_earth / 318.0).powf(0.3);
+    (equilibrium.powi(4) + internal.powi(4)).powf(0.25)
+}
 
 fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
@@ -592,10 +739,18 @@ mod tests {
 
     #[test]
     fn pressure_is_not_capped_by_retention_score() {
-        let derived = DerivedProperties::from_params(&PlanetParams {
-            mass_earth: 10.0,
-            ..Default::default()
-        });
+        // A rocky super-Earth: without the envelope a 10 M⊕ world would be
+        // a sub-Neptune.
+        let derived = DerivedProperties::from_params_with(
+            &PlanetParams {
+                mass_earth: 10.0,
+                ..Default::default()
+            },
+            &SurfaceOverrides {
+                envelope: Some(0.0),
+                ..Default::default()
+            },
+        );
         assert_eq!(derived.atmosphere_strength, 1.0);
         assert!(derived.surface_pressure_bar > 1.0);
     }
@@ -921,5 +1076,108 @@ mod tests {
         assert!((earth.rayleigh_scale_height_km() - reference * 0.5).abs() < 0.001);
         earth.base_temperature_c += 50.0;
         assert!(earth.rayleigh_scale_height_km() > reference * 0.5);
+    }
+
+    fn giant(distance: f32, mass: f32, rotation_h: f32) -> DerivedProperties {
+        DerivedProperties::from_params(&PlanetParams {
+            star_distance_au: distance,
+            mass_earth: mass,
+            rotation_period_h: rotation_h,
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn rocky_worlds_have_no_envelope() {
+        for mass in [0.0123, 0.107, 1.0, 1.6, 2.9] {
+            let derived = body(1.0, mass);
+            assert_eq!(derived.envelope, 0.0, "{mass}");
+            assert_eq!(derived.rayleigh_density(), derived.surface_pressure_bar);
+        }
+        assert_eq!(body(1.0, 1.0).ice_crust, 0.0);
+        assert_eq!(
+            body(2.7, 0.9).ice_crust,
+            0.0,
+            "SNOWBALL stays a climate world"
+        );
+    }
+
+    #[test]
+    fn solar_system_giants_match_their_sizes_and_temperatures() {
+        // (distance AU, mass M⊕, day h, radius km, 1 bar gravity, T_eff K)
+        let giants = [
+            ("Jupiter", 5.2, 317.8, 9.925, 69_911.0, 24.8, 124.0),
+            ("Saturn", 9.54, 95.2, 10.66, 58_232.0, 10.4, 95.0),
+            ("Uranus", 19.2, 14.5, 17.24, 25_362.0, 8.7, 59.0),
+            ("Neptune", 30.1, 17.1, 16.11, 24_622.0, 11.2, 59.0),
+        ];
+        for (name, distance, mass, day, radius, gravity, t_eff) in giants {
+            let derived = giant(distance, mass, day);
+            assert_eq!(derived.envelope, 1.0, "{name}");
+            let expected = if mass < 30.0 {
+                PlanetType::IceGiant
+            } else {
+                PlanetType::GasGiant
+            };
+            assert_eq!(derived.planet_type, expected, "{name}");
+            assert!(
+                (derived.radius_km / radius - 1.0).abs() < 0.12,
+                "{name} radius {}",
+                derived.radius_km
+            );
+            assert!(
+                (derived.surface_gravity / gravity - 1.0).abs() < 0.2,
+                "{name} gravity {}",
+                derived.surface_gravity
+            );
+            assert!(
+                (derived.giant_temperature_k - t_eff).abs() < 10.0,
+                "{name} T_eff {}",
+                derived.giant_temperature_k
+            );
+            // No surface shows through: no oceans, ice or regolith.
+            assert_eq!(derived.ocean_fraction, 0.0, "{name}");
+            assert_eq!(derived.water_ice, 0.0, "{name}");
+            assert_eq!(derived.airless, 0.0, "{name}");
+            assert_eq!(derived.crater_age_gyr, 0.0, "{name}");
+            assert_eq!(derived.ice_crust, 0.0, "{name}");
+        }
+        assert!(giant(19.2, 14.5, 17.24).ice_giant > 0.99);
+        assert!(giant(5.2, 317.8, 9.925).ice_giant < 0.01);
+    }
+
+    #[test]
+    fn giant_scale_heights_follow_hydrogen() {
+        // Jupiter ~24 km, Saturn ~45 km at 1 bar (H = RT / mu g).
+        let jupiter = giant(5.2, 317.8, 9.925).rayleigh_scale_height_km();
+        let saturn = giant(9.54, 95.2, 10.66).rayleigh_scale_height_km();
+        assert!((20.0..28.0).contains(&jupiter), "{jupiter}");
+        assert!((35.0..55.0).contains(&saturn), "{saturn}");
+    }
+
+    #[test]
+    fn envelope_override_makes_a_rocky_super_earth() {
+        let derived = DerivedProperties::from_params_with(
+            &PlanetParams {
+                mass_earth: 8.0,
+                ..Default::default()
+            },
+            &SurfaceOverrides {
+                envelope: Some(0.0),
+                ..Default::default()
+            },
+        );
+        assert_eq!(derived.envelope, 0.0);
+        assert!((derived.radius_km - 6371.0 * 8.0_f32.powf(0.27)).abs() < 1.0);
+        assert!(derived.ocean_fraction > 0.0);
+    }
+
+    #[test]
+    fn icy_moons_get_an_ice_crust() {
+        // Europa-mass body at Jupiter's distance.
+        let europa = body(5.2, 0.008);
+        assert_eq!(europa.ice_crust, 1.0);
+        assert_eq!(europa.airless, 1.0);
+        assert_eq!(europa.envelope, 0.0);
     }
 }

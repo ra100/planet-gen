@@ -20,7 +20,7 @@ use crate::openexr_writer::AtomicScanlineExrWriter;
 use crate::planet::{DerivedProperties, PlanetParams};
 use crate::plates::{PlateGenParams, generate_plates};
 use crate::png_writer::{AtomicScanlinePngWriter, PngRowFormat};
-use crate::preview::{PreviewUniforms, RockyUniforms};
+use crate::preview::{GiantUniforms, PreviewUniforms, RockyUniforms};
 use crate::tectonic_history::{plate_count, plate_records};
 use crate::terrain_ao::{BroadAoField, albedo_bake_factor};
 use crate::terrain_compute::{
@@ -921,6 +921,8 @@ pub struct AlbedoMapParams {
     /// Rocky-world surface (rocky.wgsl), as in the preview.
     pub rocky: RockyUniforms,
     pub radius_km: f32,
+    /// Giant-planet cloud deck (giant.wgsl), as in the preview.
+    pub giant: GiantUniforms,
     pub _pad: [f32; 3],
 }
 
@@ -2037,6 +2039,7 @@ fn cloud_export_uniforms(snapshot: WeatherSnapshot, cloud_thin_lift: f32) -> Pre
         surface_seed: 0,
         cloud_thin_lift,
         rocky: Default::default(),
+        giant: Default::default(),
         _pad6: [0.0; 3],
     }
 }
@@ -4147,6 +4150,8 @@ pub fn run_export_with_timings_and_checkpoints(
 
     let effective_ocean = derived.ocean_fraction * (1.0 - water_loss);
     let rocky = RockyUniforms::from_derived(derived, params.star_distance_au);
+    let giant =
+        GiantUniforms::from_derived(derived, params.rotation_period_h, config.storm_intensity);
     let ocean_level = crate::scene::terrain_sea_level(derived, water_loss);
 
     let layers = &config.layers;
@@ -4308,7 +4313,11 @@ pub fn run_export_with_timings_and_checkpoints(
                 include_str!("shaders/cube_sphere.wgsl"),
                 include_str!("shaders/noise.wgsl"),
                 include_str!("shaders/climate.wgsl"),
-                include_str!("shaders/rocky.wgsl"),
+                concat!(
+                    include_str!("shaders/rocky.wgsl"),
+                    "\n",
+                    include_str!("shaders/giant.wgsl")
+                ),
                 include_str!("shaders/roughness_map.wgsl"),
             ),
             "roughness map",
@@ -4326,7 +4335,11 @@ pub fn run_export_with_timings_and_checkpoints(
                 include_str!("shaders/noise.wgsl"),
                 include_str!("shaders/climate.wgsl"),
                 include_str!("shaders/surface_material.wgsl"),
-                include_str!("shaders/rocky.wgsl"),
+                concat!(
+                    include_str!("shaders/rocky.wgsl"),
+                    "\n",
+                    include_str!("shaders/giant.wgsl")
+                ),
                 include_str!("shaders/albedo_map.wgsl"),
             ),
             "albedo map",
@@ -4538,6 +4551,7 @@ pub fn run_export_with_timings_and_checkpoints(
                 local_height: region.height,
                 rocky,
                 radius_km: derived.radius_km,
+                giant,
                 _pad: [0.0; 3],
             },
             16,
@@ -7551,7 +7565,11 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
                 include_str!("shaders/noise.wgsl"),
                 include_str!("shaders/climate.wgsl"),
                 include_str!("shaders/surface_material.wgsl"),
-                include_str!("shaders/rocky.wgsl"),
+                concat!(
+                    include_str!("shaders/rocky.wgsl"),
+                    "\n",
+                    include_str!("shaders/giant.wgsl")
+                ),
                 map,
             )
         };
@@ -7645,6 +7663,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
                 local_height: region.height,
                 rocky: RockyUniforms::default(),
                 radius_km: 0.0,
+                giant: GiantUniforms::default(),
                 _pad: [0.0; 3],
             },
         );
@@ -7679,6 +7698,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
                 local_height: region.height,
                 rocky: moon,
                 radius_km: 1737.0,
+                giant: GiantUniforms::default(),
                 _pad: [0.0; 3],
             },
         );

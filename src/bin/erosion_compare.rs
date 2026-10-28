@@ -185,6 +185,7 @@ fn main() {
                 surface_seed: 42,
                 cloud_thin_lift: 0.0,
                 rocky: Default::default(),
+                giant: Default::default(),
                 _pad6: [0.0; 3],
             };
 

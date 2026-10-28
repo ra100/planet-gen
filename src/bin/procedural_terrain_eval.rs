@@ -1247,6 +1247,7 @@ fn preview_uniforms(params: &PlanetParams, derived: &DerivedProperties) -> Previ
         surface_seed: params.seed,
         cloud_thin_lift: 0.0,
         rocky: Default::default(),
+        giant: Default::default(),
         _pad6: [0.0; 3],
     }
 }
