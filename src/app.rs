@@ -1705,7 +1705,7 @@ impl PlanetGenApp {
         changed |= widgets::slider_row(
             ui,
             &mut self.params.star_distance_au,
-            0.1..=50.0,
+            0.01..=50.0,
             Param::new(
                 "Distance",
                 "Distance from star. Closer = hotter/smoother, farther = colder/rougher",
