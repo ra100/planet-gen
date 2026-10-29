@@ -6029,8 +6029,8 @@ mod tests {
 
     #[test]
     fn exported_cloud_heights_stay_continuous_where_the_fine_band_resolves() {
-        // Base and thickness mix the low, deep and cirrus layers by optical
-        // weight. Mixed at the pixel, a hole in a resolved low deck showed the
+        // Base and thickness mix the low and deep layers by optical weight and
+        // switch to the cirrus layer's where cirrus dominates. Mixed at the pixel, a hole in a resolved low deck showed the
         // cirrus above it and the heights jumped by up to 12 km between
         // neighbours; height maps interpolated across those jumps fold.
         let gpu = GpuContext::new().expect("GPU init failed");
@@ -6086,9 +6086,17 @@ mod tests {
         // should not either. Towers rising out of thin cloud are left out.
         let mut steps = Vec::new();
         let (mut clear_edges, mut filled_edges) = (0, 0);
+        // Cloudy columns whose base sits between the low and deep layers'
+        // (under 3 km) and the cirrus base (tropopause - 3 km): a slab mixed
+        // from layers kilometres apart, where no layer has cloud.
+        let (mut cloudy, mut between) = (0usize, 0usize);
         for y in 0..rows {
             for x in 0..width {
                 let (a, b) = (column(x, y), column(x + 1, y));
+                if a[0] > 0.05 {
+                    cloudy += 1;
+                    between += usize::from((3.0..7.0).contains(&a[2]));
+                }
                 let (thin, thick) = (a[0].min(b[0]), a[0].max(b[0]));
                 if thin > 0.05 && thick < 2.0 * thin {
                     steps.push((a[2] - b[2]).abs().max((a[2] + a[3] - b[2] - b[3]).abs()));
@@ -6105,7 +6113,8 @@ mod tests {
         // Mixed at the pixel: p99.9 3.65 km, 3783 steps over 3 km in 1.97M.
         println!(
             "height steps over {} pairs: p99.9 {p999:.3} km, {large} over 3 km; \
-             clear edges filled {filled_edges}/{clear_edges}",
+             clear edges filled {filled_edges}/{clear_edges}; \
+             base 3-7 km at {between}/{cloudy} cloudy columns",
             steps.len()
         );
         assert!(steps.len() > 100_000, "cloudy band expected");
@@ -6117,6 +6126,11 @@ mod tests {
             large * 10_000 < steps.len(),
             "cloud heights jump by over 3 km at {large} of {} pairs",
             steps.len()
+        );
+        // A weighted mean across all three layers: 56592 of 2.28M.
+        assert!(
+            between * 100 < cloudy,
+            "cloud bases between the layers: {between}/{cloudy}"
         );
         // Clear texels at a cloud's edge carry its heights, so interpolating
         // the height map there does not pull the edge to the ground.
@@ -7867,7 +7881,11 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             output_dir: tmp_dir.clone(),
             planet_name: "test_planet".into(),
             erosion_iterations: 2,
-            layers: ExportLayers::default(),
+            // clouds.exr is opt-in; turn it on to check its channels.
+            layers: ExportLayers {
+                cloud_reconstruction: true,
+                ..ExportLayers::default()
+            },
             weather: WeatherSnapshot {
                 wind_scale: 0.0,
                 ..WeatherSnapshot::default()

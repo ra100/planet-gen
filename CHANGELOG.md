@@ -60,6 +60,13 @@ behaviour).
 
 ### Fixed
 
+- Exported cloud heights no longer float thin low cloud at 2-5 km under a
+  trace of cirrus. Base and thickness mixed the low, deep and cirrus layers by
+  optical weight, so a little cirrus lifted a low sheet to a slab between the
+  layers where neither had cloud. Low and deep still mix; the cirrus layer's
+  heights take over only where cirrus dominates the optical weight (share
+  0.2-0.8). On a 16K band, columns with a 3-7 km base fell from 2.5 % to
+  0.6 % of the cloud.
 - Exported clouds at 8K and 16K no longer fill broken cumulus with one- and
   two-pixel holes and specks, which Blender close-ups magnified into a carpet
   of equal soft blobs. The export cuts individual clouds and holes only from

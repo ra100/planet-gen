@@ -2583,11 +2583,14 @@ mod tests {
         // repeated deterministic release builds. Cloud-formation correction:
         // remove post-transport noise erosion and use resolved marine lifting;
         // the new model intentionally changes both published-field pins.
+        // Exact seam directions in spin-up (43d21dc) moved both pins;
+        // it was committed without the reference GPU. Re-pinned on the RTX
+        // 4090 / Vulkan stack, identical over two release runs.
         let legacy_mass = legacy.read_mass(&gpu);
         let off_mass = off.read_mass(&gpu);
         if reference_pins_enabled() {
-            assert_eq!(mass_fingerprint(&legacy_mass), 3_391_817_111_555_384_101);
-            assert_eq!(mass_fingerprint(&off_mass), 15_530_981_776_531_301_157);
+            assert_eq!(mass_fingerprint(&legacy_mass), 16_036_785_063_786_996_517);
+            assert_eq!(mass_fingerprint(&off_mass), 10_671_775_321_977_013_029);
         } else {
             // CI: bit-exact pins only hold on the reference GPU stack. Both
             // paths must still produce finite, non-empty fields and remain
@@ -2720,13 +2723,16 @@ mod tests {
         // deterministic release builds. Cloud-formation correction removes
         // diagnosis noise masks and changes marine condensation support, but
         // preserves the compatibility schedule (not the old cloud shapes).
+        // Exact seam directions in spin-up (43d21dc) moved the pin; it was
+        // committed without the reference GPU. Re-pinned on the RTX 4090 /
+        // Vulkan stack, identical over two release runs.
         let mass = selected.read_mass(&gpu);
         let fingerprint = mass_fingerprint(&mass);
 
         assert_eq!(schedule.iterations, 16);
         assert_eq!(schedule.physical_interval_seconds, 1600.0);
         if reference_pins_enabled() {
-            assert_eq!(fingerprint, 17_670_523_320_019_362_597);
+            assert_eq!(fingerprint, 14_884_502_996_535_673_637);
         } else {
             // CI: bit-exact pins only hold on the reference GPU stack; verify
             // the field is finite and non-empty instead.

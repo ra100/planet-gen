@@ -18,6 +18,18 @@ struct CloudColumn {
     y: f32, coverage: f32, base_km: f32, thickness_km: f32, character: f32, cirrus: f32,
 }
 
+// Cirrus share of the optical weight over which base and thickness switch from
+// the low and deep layers' to the cirrus layer's. On the 16K export band 0.4-0.6
+// made 648 neighbour steps over 3 km, 0.2-0.8 107; columns with a 3-7 km base
+// 56592 (weighted mean) -> 14602 of 2.28M.
+const CLOUD_CIRRUS_HEIGHT_SWITCH: vec2<f32> = vec2<f32>(0.2, 0.8);
+
+// Optical weight, base, thickness and deep weight of a column. Low and deep
+// cloud touch (deep starts inside the low layer), so their heights mix by
+// weight. Cirrus sits kilometres above them: base and thickness come from
+// whichever of the two dominates, switching over a narrow band of the cirrus
+// share. A weighted mean across the gap put thin low cloud under a trace of
+// cirrus at 2-5 km, where neither layer has cloud.
 fn cloud_layer_geometry(geometry: vec4<f32>, layers: CloudLayers) -> vec4<f32> {
     let deep_base = mix(geometry.r, geometry.g, 0.28);
     let deep_top = max(geometry.b, deep_base + 0.5);
@@ -26,10 +38,16 @@ fn cloud_layer_geometry(geometry: vec4<f32>, layers: CloudLayers) -> vec4<f32> {
     let deep_weight = layers.deep * 1.65;
     let high_weight = layers.high * 0.32;
     let weight = low_weight + deep_weight + high_weight;
-    let base = (low_weight * geometry.r + deep_weight * deep_base + high_weight * high_base) / max(weight, 1.0e-12);
-    let thickness = (low_weight * max(geometry.g - geometry.r, 0.0)
-        + deep_weight * max(deep_top - deep_base, 0.0)
-        + high_weight * max(geometry.a - high_base, 0.0)) / max(weight, 1.0e-12);
+    let lower_weight = low_weight + deep_weight;
+    let lower_base = select(geometry.r,
+        (low_weight * geometry.r + deep_weight * deep_base) / lower_weight, lower_weight > 0.0);
+    let lower_thickness = select(max(geometry.g - geometry.r, 0.0),
+        (low_weight * max(geometry.g - geometry.r, 0.0) + deep_weight * max(deep_top - deep_base, 0.0))
+            / lower_weight, lower_weight > 0.0);
+    let cirrus = smooth_step(CLOUD_CIRRUS_HEIGHT_SWITCH.x, CLOUD_CIRRUS_HEIGHT_SWITCH.y,
+        high_weight / max(weight, 1.0e-12));
+    let base = mix(lower_base, high_base, cirrus);
+    let thickness = mix(lower_thickness, max(geometry.a - high_base, 0.0), cirrus);
     return vec4<f32>(weight, base, thickness, deep_weight);
 }
 
