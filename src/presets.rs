@@ -5,7 +5,7 @@ use crate::cloud_synthesis::DEFAULT_STORM_INTENSITY;
 use crate::planet::PlanetParams;
 use crate::planet_file::PlanetFile;
 
-pub const PRESETS: [&str; 17] = [
+pub const PRESETS: [&str; 18] = [
     "EARTH",
     "MARS",
     "MOON",
@@ -19,6 +19,7 @@ pub const PRESETS: [&str; 17] = [
     "SATURN",
     "URANUS",
     "NEPTUNE",
+    "WARM JUPITER",
     "HOT JUPITER",
     "EUROPA",
     "GANYMEDE",
@@ -202,6 +203,14 @@ pub fn apply(file: &mut PlanetFile, name: &str) {
             file.mass_earth = 17.1;
             file.axial_tilt_deg = 28.3;
             file.rotation_period_h = 16.11;
+        }
+        "WARM JUPITER" => {
+            // A Jupiter at 1 AU (~330 K at 1 bar): Sudarsky class II, bright
+            // water clouds over muted bands.
+            file.star_distance_au = 1.0;
+            file.mass_earth = 300.0;
+            file.axial_tilt_deg = 3.0;
+            file.rotation_period_h = 10.0;
         }
         "HOT JUPITER" => {
             // A warm-to-hot Jupiter at 0.1 AU (~790 K): clear, dark blue

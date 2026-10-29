@@ -7,6 +7,18 @@ behaviour).
 
 ## [Unreleased]
 
+### Added
+
+- WARM JUPITER preset: a Jupiter at 1 AU with bright water clouds.
+
+### Changed
+
+- Distance now reaches down to 0.01 AU, close enough for the hottest giants.
+
+### Fixed
+
+- Straight seams in giant cloud decks around storms.
+
 ## [0.4.0] - 2026-10-29
 
 ### Added

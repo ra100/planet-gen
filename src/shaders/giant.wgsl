@@ -207,7 +207,10 @@ fn gg_swirl(q: vec3<f32>, prm: GiantParams) -> GiantSample {
         let c = cos(angle);
         let s = sin(angle);
         let e2 = vec2<f32>(c * e.x - s * e.y, s * e.x + c * e.y);
-        out.q = normalize(v.center + east * (e2.x * v.a) + north * (e2.y * v.b));
+        // Move by the twist's offset only: rebuilding the point from its
+        // tangent-plane coordinates moves it even where the twist is zero,
+        // which left straight seams at the vortex's cut-off.
+        out.q = normalize(out.q + east * ((e2.x - e.x) * v.a) + north * ((e2.y - e.y) * v.b));
         let r = sqrt(r2);
         let inside = 1.0 - smoothstep(0.55, 0.95, r);
         if (inside > out.inside) {
@@ -237,8 +240,9 @@ fn gg_zone_belt(prm: GiantParams) -> array<vec3<f32>, 2> {
     zone = mix(zone, vec3<f32>(0.29, 0.75, 0.93), methane);
     belt = mix(belt, vec3<f32>(0.27, 0.70, 0.88), methane);
     // Class II: water clouds, the brightest giants.
-    zone = mix(zone, vec3<f32>(0.86, 0.87, 0.88), w2);
-    belt = mix(belt, vec3<f32>(0.78, 0.79, 0.81), w2);
+    // Thin photochemical haze still tints the belts.
+    zone = mix(zone, vec3<f32>(0.88, 0.88, 0.87), w2);
+    belt = mix(belt, vec3<f32>(0.68, 0.66, 0.60), w2);
     // Class III: clear, Rayleigh blue over alkali absorption (HD 189733b).
     zone = mix(zone, vec3<f32>(0.05, 0.12, 0.34), w3);
     belt = mix(belt, vec3<f32>(0.04, 0.10, 0.29), w3);
@@ -256,7 +260,7 @@ fn gg_zone_belt(prm: GiantParams) -> array<vec3<f32>, 2> {
 fn gg_contrast(prm: GiantParams) -> f32 {
     let methane = prm.ice * (1.0 - smoothstep(90.0, 160.0, prm.temperature));
     let warm = smoothstep(150.0, 210.0, prm.temperature);
-    return (1.0 - 0.65 * prm.haze) * (1.0 - 0.8 * methane) * (1.0 - 0.6 * warm);
+    return (1.0 - 0.65 * prm.haze) * (1.0 - 0.8 * methane) * (1.0 - 0.35 * warm);
 }
 
 // Cloud-deck albedo (linear RGB) at planet-frame direction p.
