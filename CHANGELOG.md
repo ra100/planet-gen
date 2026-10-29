@@ -7,6 +7,8 @@ behaviour).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-29
+
 ### Added
 
 - Giant planets: above ~3 M⊕ (Mass now reaches 4000 M⊕) a gas envelope
